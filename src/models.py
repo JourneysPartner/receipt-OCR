@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
 
 
 class ProcessStatus(str, Enum):
@@ -19,15 +18,16 @@ class ProcessStatus(str, Enum):
 @dataclass
 class CustomerRow:
     """マスターシートの1顧客行"""
-    row_number: int          # マスターシート上の行番号 (1-indexed)
+
+    row_number: int  # マスターシート上の行番号 (1-indexed)
     customer_name: str
     staff: str = ""
-    entry_type: str = ""     # 記帳区分
-    folder_url: str = ""     # D列: Drive フォルダURL
-    status: str = ""         # F列: 状態
-    sheet_url: str = ""      # G列: 出納帳URL
-    category: str = ""       # H列: 種別（個人/法人）
-    last_processed: str = "" # I列: 最終処理日時
+    entry_type: str = ""  # 記帳区分
+    folder_url: str = ""  # D列: Drive フォルダURL
+    status: str = ""  # F列: 状態
+    sheet_url: str = ""  # G列: 出納帳URL
+    category: str = ""  # H列: 種別（個人/法人）
+    last_processed: str = ""  # I列: 最終処理日時
 
     @property
     def folder_id(self) -> str:
@@ -93,36 +93,36 @@ class OcrResult:
     engine: str
     confidence: float
     page_count: int = 1
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @dataclass
 class ReceiptItem:
-    date: Optional[str] = None
-    amount: Optional[int] = None
-    vendor: Optional[str] = None
-    description: Optional[str] = None
-    account: Optional[str] = None
-    tax_category: Optional[str] = None
+    date: str | None = None
+    amount: int | None = None
+    vendor: str | None = None
+    description: str | None = None
+    account: str | None = None
+    tax_category: str | None = None
     confidence: float = 0.0
     is_expense: bool = True
-    memo: Optional[str] = None
+    memo: str | None = None
 
 
 @dataclass
 class CorrectedItem:
     original: ReceiptItem
-    date: Optional[str] = None
-    amount: Optional[int] = None
-    vendor: Optional[str] = None
-    description: Optional[str] = None
-    account: Optional[str] = None
-    tax_category: Optional[str] = None
+    date: str | None = None
+    amount: int | None = None
+    vendor: str | None = None
+    description: str | None = None
+    account: str | None = None
+    tax_category: str | None = None
     confidence: float = 0.0
     is_expense: bool = True
     corrections_applied: list[str] = field(default_factory=list)
     needs_review: bool = False
-    memo: Optional[str] = None
+    memo: str | None = None
 
 
 @dataclass
@@ -143,6 +143,7 @@ class ProcessRecord:
 @dataclass
 class CustomerResult:
     """1顧客の処理結果集計"""
+
     success: int = 0
     low_confidence: int = 0
     manual_entry: int = 0

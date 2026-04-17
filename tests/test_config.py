@@ -1,6 +1,6 @@
 """設定読み込みのテスト"""
 
-from src.config import load_config, _parse_int_tuple
+from src.config import _parse_int_tuple, load_config
 
 
 class TestParseIntTuple:
@@ -16,10 +16,15 @@ class TestParseIntTuple:
 
 class TestLoadConfig:
     def test_defaults(self, monkeypatch):
-        for k in ["MASTER_SPREADSHEET_ID", "INDIVIDUAL_TEMPLATE_SPREADSHEET_ID",
-                   "CORPORATE_TEMPLATE_SPREADSHEET_ID", "CASHBOOK_OUTPUT_FOLDER_ID",
-                   "GEMINI_API_KEY", "CASHBOOK_COLUMN_MAP",
-                   "CASHBOOK_OCCUPIED_CHECK_COLUMNS"]:
+        for k in [
+            "MASTER_SPREADSHEET_ID",
+            "INDIVIDUAL_TEMPLATE_SPREADSHEET_ID",
+            "CORPORATE_TEMPLATE_SPREADSHEET_ID",
+            "CASHBOOK_OUTPUT_FOLDER_ID",
+            "GEMINI_API_KEY",
+            "CASHBOOK_COLUMN_MAP",
+            "CASHBOOK_OCCUPIED_CHECK_COLUMNS",
+        ]:
             monkeypatch.delenv(k, raising=False)
         c = load_config()
         assert c.master.spreadsheet_id == ""

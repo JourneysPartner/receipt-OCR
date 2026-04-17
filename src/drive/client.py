@@ -3,15 +3,14 @@
 """
 
 import io
-from typing import Optional
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
 from src.config import DriveConfig
-from src.models import DriveFile
 from src.logging.logger import setup_logger
+from src.models import DriveFile
 
 logger = setup_logger()
 
@@ -21,13 +20,15 @@ class DriveClient:
         "https://www.googleapis.com/auth/drive",  # コピー・移動に必要
     ]
 
-    def __init__(self, config: DriveConfig, credentials_path: Optional[str] = None):
+    def __init__(self, config: DriveConfig, credentials_path: str | None = None):
         self._config = config
         if credentials_path:
             creds = service_account.Credentials.from_service_account_file(
-                credentials_path, scopes=self.SCOPES)
+                credentials_path, scopes=self.SCOPES
+            )
         else:
             import google.auth
+
             creds, _ = google.auth.default(scopes=self.SCOPES)
         self._service = build("drive", "v3", credentials=creds)
 
@@ -35,27 +36,34 @@ class DriveClient:
         """指定フォルダ内の対象ファイル一覧を取得する"""
         if not folder_id:
             raise ValueError("folder_id が空です")
-        mime_filter = " or ".join(
-            f"mimeType='{m}'" for m in self._config.supported_mime_types
-        )
+        mime_filter = " or ".join(f"mimeType='{m}'" for m in self._config.supported_mime_types)
         query = f"'{folder_id}' in parents and ({mime_filter}) and trashed=false"
         files: list[DriveFile] = []
-        page_token: Optional[str] = None
+        page_token: str | None = None
         while True:
-            resp = self._service.files().list(
-                q=query, fields="nextPageToken, files(id, name, mimeType)",
-                pageSize=100, pageToken=page_token,
-            ).execute()
+            resp = (
+                self._service.files()
+                .list(
+                    q=query,
+                    fields="nextPageToken, files(id, name, mimeType)",
+                    pageSize=100,
+                    pageToken=page_token,
+                )
+                .execute()
+            )
             for f in resp.get("files", []):
-                files.append(DriveFile(
-                    file_id=f["id"], file_name=f["name"],
-                    mime_type=f["mimeType"], folder_id=folder_id,
-                ))
+                files.append(
+                    DriveFile(
+                        file_id=f["id"],
+                        file_name=f["name"],
+                        mime_type=f["mimeType"],
+                        folder_id=folder_id,
+                    )
+                )
             page_token = resp.get("nextPageToken")
             if not page_token:
                 break
-        logger.info(f"Drive: {folder_id} から {len(files)} 件検出",
-                     extra={"step": "drive_list"})
+        logger.info(f"Drive: {folder_id} から {len(files)} 件検出", extra={"step": "drive_list"})
         return files
 
     def download_file(self, file: DriveFile) -> DriveFile:
@@ -67,13 +75,13 @@ class DriveClient:
         while not done:
             _, done = dl.next_chunk()
         file.content = buf.getvalue()
-        logger.info(f"DL: {file.file_name} ({len(file.content)} bytes)",
-                     extra={"step": "drive_download", "file_id": file.file_id})
+        logger.info(
+            f"DL: {file.file_name} ({len(file.content)} bytes)",
+            extra={"step": "drive_download", "file_id": file.file_id},
+        )
         return file
 
-    def copy_spreadsheet(
-        self, template_id: str, title: str, dest_folder_id: str
-    ) -> str:
+    def copy_spreadsheet(self, template_id: str, title: str, dest_folder_id: str) -> str:
         """
         スプレッドシートテンプレートをコピーし、指定フォルダに配置する。
         戻り値: 新しいスプレッドシートのID
@@ -82,10 +90,14 @@ class DriveClient:
             "name": title,
             "parents": [dest_folder_id],
         }
-        copied = self._service.files().copy(
-            fileId=template_id, body=body,
-        ).execute()
+        copied = (
+            self._service.files()
+            .copy(
+                fileId=template_id,
+                body=body,
+            )
+            .execute()
+        )
         new_id = copied["id"]
-        logger.info(f"テンプレートコピー: {title} (id={new_id})",
-                     extra={"step": "drive_copy"})
+        logger.info(f"テンプレートコピー: {title} (id={new_id})", extra={"step": "drive_copy"})
         return new_id

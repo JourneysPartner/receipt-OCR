@@ -1,15 +1,14 @@
 """Gemini API による AI 解析エンジン"""
 
 import json
-from typing import Optional
 
 from google import genai
 from google.genai import types
 
-from src.config import AiConfig
-from src.models import OcrResult, ReceiptItem
 from src.ai.base import AiExtractor
+from src.config import AiConfig
 from src.logging.logger import setup_logger
+from src.models import OcrResult, ReceiptItem
 
 logger = setup_logger()
 
@@ -36,13 +35,11 @@ JSON配列のみを返してください。マークダウンのコードブロ�
 
 
 class GeminiExtractor(AiExtractor):
-    def __init__(self, config: AiConfig, api_key: Optional[str] = None):
+    def __init__(self, config: AiConfig, api_key: str | None = None):
         self._config = config
         self._client = genai.Client(api_key=api_key)
 
-    def extract_receipt_data(
-        self, ocr_result: OcrResult, file_name: str
-    ) -> list[ReceiptItem]:
+    def extract_receipt_data(self, ocr_result: OcrResult, file_name: str) -> list[ReceiptItem]:
         if not ocr_result.raw_text.strip():
             logger.warning(f"OCRテキスト空: {file_name}", extra={"step": "ai_extract"})
             return []
@@ -63,12 +60,12 @@ class GeminiExtractor(AiExtractor):
                 ),
             )
             items = self._parse_response(resp.text.strip(), file_name)
-            logger.info(f"AI抽出: {file_name} → {len(items)} 明細",
-                         extra={"step": "ai_extract"})
+            logger.info(f"AI抽出: {file_name} → {len(items)} 明細", extra={"step": "ai_extract"})
             return items
         except Exception as e:
-            logger.error(f"AI抽出失敗: {file_name}: {e}",
-                          extra={"step": "ai_extract", "error": str(e)})
+            logger.error(
+                f"AI抽出失敗: {file_name}: {e}", extra={"step": "ai_extract", "error": str(e)}
+            )
             return []
 
     def _parse_response(self, raw: str, file_name: str) -> list[ReceiptItem]:
@@ -83,8 +80,7 @@ class GeminiExtractor(AiExtractor):
         try:
             data = json.loads(text)
         except json.JSONDecodeError as e:
-            logger.warning(f"JSONパース失敗: {file_name}: {e}",
-                            extra={"step": "ai_parse"})
+            logger.warning(f"JSONパース失敗: {file_name}: {e}", extra={"step": "ai_parse"})
             return []
 
         if isinstance(data, dict):
@@ -93,24 +89,25 @@ class GeminiExtractor(AiExtractor):
         items = []
         for entry in data:
             try:
-                items.append(ReceiptItem(
-                    date=entry.get("date"),
-                    amount=_safe_int(entry.get("amount")),
-                    vendor=entry.get("vendor"),
-                    description=entry.get("description"),
-                    account=entry.get("account"),
-                    tax_category=entry.get("tax_category"),
-                    confidence=float(entry.get("confidence", 0.0)),
-                    is_expense=entry.get("is_expense", True),
-                    memo=entry.get("memo"),
-                ))
+                items.append(
+                    ReceiptItem(
+                        date=entry.get("date"),
+                        amount=_safe_int(entry.get("amount")),
+                        vendor=entry.get("vendor"),
+                        description=entry.get("description"),
+                        account=entry.get("account"),
+                        tax_category=entry.get("tax_category"),
+                        confidence=float(entry.get("confidence", 0.0)),
+                        is_expense=entry.get("is_expense", True),
+                        memo=entry.get("memo"),
+                    )
+                )
             except (ValueError, TypeError) as e:
-                logger.warning(f"明細パース失敗: {file_name}: {e}",
-                                extra={"step": "ai_parse"})
+                logger.warning(f"明細パース失敗: {file_name}: {e}", extra={"step": "ai_parse"})
         return items
 
 
-def _safe_int(value) -> Optional[int]:
+def _safe_int(value) -> int | None:
     if value is None:
         return None
     try:

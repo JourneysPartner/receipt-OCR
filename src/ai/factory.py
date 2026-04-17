@@ -1,14 +1,11 @@
 """AI エンジンのファクトリ"""
 
-from typing import Optional
-from src.config import AiConfig
 from src.ai.base import AiExtractor
 from src.ai.gemini import GeminiExtractor
+from src.config import AiConfig
 
 
-def create_ai_extractor(
-    config: AiConfig, api_key: Optional[str] = None
-) -> AiExtractor:
+def create_ai_extractor(config: AiConfig, api_key: str | None = None) -> AiExtractor:
     engines = {"gemini": GeminiExtractor}
     cls = engines.get(config.engine)
     if not cls:

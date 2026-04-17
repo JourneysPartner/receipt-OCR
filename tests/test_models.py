@@ -1,8 +1,12 @@
 """データモデルのテスト"""
 
 from src.models import (
-    ProcessStatus, ReceiptItem, CorrectedItem, DriveFile,
-    ProcessRecord, CustomerRow, CustomerResult, extract_id_from_url,
+    CustomerResult,
+    CustomerRow,
+    DriveFile,
+    ProcessRecord,
+    ProcessStatus,
+    extract_id_from_url,
 )
 
 
@@ -29,14 +33,16 @@ class TestExtractIdFromUrl:
 class TestCustomerRow:
     def test_folder_id(self):
         c = CustomerRow(
-            row_number=2, customer_name="テスト",
+            row_number=2,
+            customer_name="テスト",
             folder_url="https://drive.google.com/drive/folders/abc123",
         )
         assert c.folder_id == "abc123"
 
     def test_spreadsheet_id(self):
         c = CustomerRow(
-            row_number=2, customer_name="テスト",
+            row_number=2,
+            customer_name="テスト",
             sheet_url="https://docs.google.com/spreadsheets/d/xyz789/edit",
         )
         assert c.spreadsheet_id == "xyz789"

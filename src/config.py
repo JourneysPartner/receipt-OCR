@@ -5,29 +5,30 @@
 
 import os
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 # ── マスターシートの列インデックス (0-indexed) ─────────────
 @dataclass(frozen=True)
 class MasterColumns:
     """現金自動記帳マスターの列定義"""
-    customer_name: int = 0   # A列: 顧客名
-    staff: int = 1           # B列: 担当者
-    entry_type: int = 2      # C列: 記帳区分
-    folder_url: int = 3      # D列: フォルダURL
-    status: int = 5          # F列: 状態
-    sheet_url: int = 6       # G列: シートリンク
-    category: int = 7        # H列: 種別（個人/法人）
+
+    customer_name: int = 0  # A列: 顧客名
+    staff: int = 1  # B列: 担当者
+    entry_type: int = 2  # C列: 記帳区分
+    folder_url: int = 3  # D列: フォルダURL
+    status: int = 5  # F列: 状態
+    sheet_url: int = 6  # G列: シートリンク
+    category: int = 7  # H列: 種別（個人/法人）
     last_processed: int = 8  # I列: 最終処理日時
 
 
 @dataclass(frozen=True)
 class MasterConfig:
     """マスターシート関連設定"""
+
     spreadsheet_id: str = ""
     sheet_name: str = "シート1"
-    data_start_row: int = 2          # ヘッダー行の次
+    data_start_row: int = 2  # ヘッダー行の次
     target_entry_type: str = "当方記帳"  # 処理対象の記帳区分
     columns: MasterColumns = field(default_factory=MasterColumns)
 
@@ -35,9 +36,10 @@ class MasterConfig:
 @dataclass(frozen=True)
 class TemplateConfig:
     """テンプレート・出力先設定"""
-    individual_template_id: str = ""   # 個人用テンプレート
-    corporate_template_id: str = ""    # 法人用テンプレート
-    output_folder_id: str = ""         # 出納帳の保存先フォルダ
+
+    individual_template_id: str = ""  # 個人用テンプレート
+    corporate_template_id: str = ""  # 法人用テンプレート
+    output_folder_id: str = ""  # 出納帳の保存先フォルダ
 
 
 @dataclass(frozen=True)
@@ -52,20 +54,23 @@ class DriveConfig:
 @dataclass(frozen=True)
 class SheetsConfig:
     """各顧客の現金出納帳への書き込み設定"""
+
     cashbook_sheet_name: str = "現金出納帳"
     process_log_sheet_name: str = "処理管理"
     ai_log_sheet_name: str = "AI詳細ログ"
 
-    cashbook_column_map: dict[str, int] = field(default_factory=lambda: {
-        "ファイルリンク": 0,  # A列
-        "日付": 1,            # B列
-        "摘要": 2,            # C列
-        "取引先": 4,          # E列
-        "勘定科目": 5,        # F列
-        "税区分": 6,          # G列
-        "収入金額": 7,        # H列
-        "支出金額": 8,        # I列
-    })
+    cashbook_column_map: dict[str, int] = field(
+        default_factory=lambda: {
+            "ファイルリンク": 0,  # A列
+            "日付": 1,  # B列
+            "摘要": 2,  # C列
+            "取引先": 4,  # E列
+            "勘定科目": 5,  # F列
+            "税区分": 6,  # G列
+            "収入金額": 7,  # H列
+            "支出金額": 8,  # I列
+        }
+    )
 
     occupied_check_columns: tuple[int, ...] = (0, 1, 2)
     cashbook_data_start_row: int = 5
@@ -95,16 +100,14 @@ class AppConfig:
     sheets: SheetsConfig
     ocr: OcrConfig
     ai: AiConfig
-    google_credentials_path: Optional[str] = None
-    gemini_api_key: Optional[str] = None
+    google_credentials_path: str | None = None
+    gemini_api_key: str | None = None
     dry_run: bool = False
     log_level: str = "INFO"
     reservation_ttl_minutes: int = 30
 
 
-def _parse_int_tuple(
-    env_value: Optional[str], default: tuple[int, ...]
-) -> tuple[int, ...]:
+def _parse_int_tuple(env_value: str | None, default: tuple[int, ...]) -> tuple[int, ...]:
     if not env_value:
         return default
     return tuple(int(x.strip()) for x in env_value.split(","))
@@ -115,6 +118,7 @@ def load_config() -> AppConfig:
     column_map_env = os.environ.get("CASHBOOK_COLUMN_MAP")
     if column_map_env:
         import json
+
         column_map_default = json.loads(column_map_env)
 
     return AppConfig(

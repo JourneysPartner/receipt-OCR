@@ -2,14 +2,14 @@
 
 import sys
 
+from src.ai.factory import create_ai_extractor
 from src.config import load_config
 from src.drive.client import DriveClient
-from src.sheets.client import MasterSheetClient
-from src.ocr.factory import create_ocr_engine
-from src.ai.factory import create_ai_extractor
-from src.rules.corrections import RuleCorrector
-from src.processing.manager import ProcessingManager
 from src.logging.logger import setup_logger
+from src.ocr.factory import create_ocr_engine
+from src.processing.manager import ProcessingManager
+from src.rules.corrections import RuleCorrector
+from src.sheets.client import MasterSheetClient
 
 
 def main() -> int:
@@ -21,16 +21,13 @@ def main() -> int:
         logger.error("MASTER_SPREADSHEET_ID 未設定", extra={"step": "validation"})
         return 1
     if not config.template.individual_template_id:
-        logger.error("INDIVIDUAL_TEMPLATE_SPREADSHEET_ID 未設定",
-                      extra={"step": "validation"})
+        logger.error("INDIVIDUAL_TEMPLATE_SPREADSHEET_ID 未設定", extra={"step": "validation"})
         return 1
     if not config.template.corporate_template_id:
-        logger.error("CORPORATE_TEMPLATE_SPREADSHEET_ID 未設定",
-                      extra={"step": "validation"})
+        logger.error("CORPORATE_TEMPLATE_SPREADSHEET_ID 未設定", extra={"step": "validation"})
         return 1
     if not config.template.output_folder_id:
-        logger.error("CASHBOOK_OUTPUT_FOLDER_ID 未設定",
-                      extra={"step": "validation"})
+        logger.error("CASHBOOK_OUTPUT_FOLDER_ID 未設定", extra={"step": "validation"})
         return 1
 
     try:

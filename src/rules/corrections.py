@@ -3,8 +3,8 @@
 import re
 from dataclasses import dataclass
 
-from src.models import ReceiptItem, CorrectedItem
 from src.logging.logger import setup_logger
+from src.models import CorrectedItem, ReceiptItem
 
 logger = setup_logger()
 
@@ -20,8 +20,16 @@ class CorrectionRule:
 CORRECTION_RULES: list[CorrectionRule] = [
     CorrectionRule(
         name="燃料費→車両費",
-        patterns=[r"ガソリン", r"給油", r"燃料", r"ENEOS", r"出光", r"コスモ",
-                  r"apollostation", r"キグナス"],
+        patterns=[
+            r"ガソリン",
+            r"給油",
+            r"燃料",
+            r"ENEOS",
+            r"出光",
+            r"コスモ",
+            r"apollostation",
+            r"キグナス",
+        ],
         account="車両費",
     ),
     CorrectionRule(
@@ -85,24 +93,25 @@ class RuleCorrector:
     def apply(self, item: ReceiptItem) -> CorrectedItem:
         corrected = CorrectedItem(
             original=item,
-            date=item.date, amount=item.amount, vendor=item.vendor,
-            description=item.description, account=item.account,
-            tax_category=item.tax_category, confidence=item.confidence,
-            is_expense=item.is_expense, memo=item.memo,
+            date=item.date,
+            amount=item.amount,
+            vendor=item.vendor,
+            description=item.description,
+            account=item.account,
+            tax_category=item.tax_category,
+            confidence=item.confidence,
+            is_expense=item.is_expense,
+            memo=item.memo,
         )
         text = " ".join(filter(None, [item.description, item.vendor]))
         for rule in self._rules:
             if self._matches(text, rule.patterns):
                 if rule.account and rule.account != corrected.account:
                     corrected.account = rule.account
-                    corrected.corrections_applied.append(
-                        f"{rule.name}: 勘定科目→{rule.account}"
-                    )
+                    corrected.corrections_applied.append(f"{rule.name}: 勘定科目→{rule.account}")
                 if rule.tax_category and rule.tax_category != corrected.tax_category:
                     corrected.tax_category = rule.tax_category
-                    corrected.corrections_applied.append(
-                        f"{rule.name}: 税区分→{rule.tax_category}"
-                    )
+                    corrected.corrections_applied.append(f"{rule.name}: 税区分→{rule.tax_category}")
         if corrected.confidence < self._threshold:
             corrected.needs_review = True
         return corrected

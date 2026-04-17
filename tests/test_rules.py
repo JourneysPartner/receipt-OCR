@@ -5,9 +5,15 @@ from src.rules.corrections import RuleCorrector
 
 
 def _item(**kw) -> ReceiptItem:
-    d = {"date": "2026-01-15", "amount": 1000, "vendor": "テスト",
-         "description": "テスト", "account": "雑費",
-         "tax_category": "課税仕入10%", "confidence": 0.9}
+    d = {
+        "date": "2026-01-15",
+        "amount": 1000,
+        "vendor": "テスト",
+        "description": "テスト",
+        "account": "雑費",
+        "tax_category": "課税仕入10%",
+        "confidence": 0.9,
+    }
     d.update(kw)
     return ReceiptItem(**d)
 
