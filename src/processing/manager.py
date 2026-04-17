@@ -1,19 +1,19 @@
 """
 処理オーケストレーター
-
-1明細のフロー: reserved → 数式コピー → 出納帳書き込み → written → AIログ → success
-クラッシュ復旧: ジョブ開始時に stale reserved → expired / stale written → success or expired
+マスターシート起点で全顧客を順次処理する。
+顧客ごとの処理結果を集計し、マスターF列に詳細な状態を書き戻す。
 """
 
 from datetime import datetime, timezone, timedelta
 
 from src.config import AppConfig
 from src.models import (
-    DriveFile, OcrResult, ReceiptItem, CorrectedItem,
+    CustomerRow, CustomerResult, DriveFile, OcrResult,
+    ReceiptItem, CorrectedItem,
     ProcessRecord, AiLogRecord, ProcessStatus,
 )
 from src.drive.client import DriveClient
-from src.sheets.client import SheetsClient
+from src.sheets.client import MasterSheetClient, CashbookClient
 from src.ocr.base import OcrEngine
 from src.ai.base import AiExtractor
 from src.rules.corrections import RuleCorrector
@@ -25,129 +25,241 @@ JST = timezone(timedelta(hours=9))
 
 class ProcessingManager:
     def __init__(
-        self, config: AppConfig, drive: DriveClient, sheets: SheetsClient,
-        ocr: OcrEngine, ai: AiExtractor, corrector: RuleCorrector,
+        self, config: AppConfig, drive: DriveClient,
+        master: MasterSheetClient, ocr: OcrEngine,
+        ai: AiExtractor, corrector: RuleCorrector,
     ):
         self._config = config
         self._drive = drive
-        self._sheets = sheets
+        self._master = master
         self._ocr = ocr
         self._ai = ai
         self._corrector = corrector
 
+    # ── 全顧客処理 ─────────────────────────────────
     def run(self) -> dict:
         summary = {
-            "total_files": 0, "processed_items": 0, "skipped_items": 0,
-            "manual_entries": 0, "error_items": 0, "skipped_files": 0,
+            "total_customers": 0, "processed_customers": 0,
+            "skipped_customers": 0, "error_customers": 0,
+            "total_items": 0,
         }
 
-        self._sheets.ensure_log_sheets_exist()
-        ttl = self._config.reservation_ttl_minutes
-        self._sheets.cleanup_stale_reservations(ttl_minutes=ttl)
-        self._sheets.recover_stale_written(ttl_minutes=ttl)
+        customers = self._master.read_customer_rows()
+        target = self._config.master.target_entry_type
 
-        files = self._drive.list_files()
-        summary["total_files"] = len(files)
+        for cust in customers:
+            summary["total_customers"] += 1
 
-        processed_keys = self._sheets.get_processed_keys()
-        logger.info(f"処理済みキー: {len(processed_keys)}", extra={"step": "dedup"})
+            if cust.entry_type != target:
+                logger.info(f"スキップ（記帳区分={cust.entry_type}）: {cust.customer_name}",
+                             extra={"step": "customer_skip"})
+                summary["skipped_customers"] += 1
+                continue
 
-        for file in files:
-            r = self._process_file(file, processed_keys)
-            summary["processed_items"] += r["processed"]
-            summary["skipped_items"] += r["skipped"]
-            summary["manual_entries"] += r["manual"]
-            summary["error_items"] += r["errors"]
-            if r["processed"] == 0 and r["skipped"] > 0 and r["manual"] == 0:
-                summary["skipped_files"] += 1
+            if not cust.folder_url.strip():
+                logger.warning(f"フォルダURL未設定: {cust.customer_name}",
+                                extra={"step": "customer_skip"})
+                summary["skipped_customers"] += 1
+                continue
 
-        logger.info(f"ジョブ完了: {summary}", extra={"step": "summary"})
+            try:
+                result = self._process_customer(cust)
+                summary["processed_customers"] += 1
+                summary["total_items"] += result.total_processed
+            except Exception as e:
+                summary["error_customers"] += 1
+                now = datetime.now(JST).isoformat()
+                logger.error(f"顧客処理失敗: {cust.customer_name}: {e}",
+                              extra={"step": "customer_error"}, exc_info=True)
+                try:
+                    self._master.update_customer_status(
+                        cust.row_number,
+                        f"エラー: {str(e)[:50]}",
+                        now,
+                    )
+                except Exception:
+                    pass
+
+        logger.info(f"全顧客処理完了: {summary}", extra={"step": "summary"})
         return summary
 
-    def _process_file(self, file: DriveFile, processed_keys: set[str]) -> dict:
-        r = {"processed": 0, "skipped": 0, "manual": 0, "errors": 0}
-        now = datetime.now(JST).isoformat()
+    # ── 1顧客の処理 ────────────────────────────────
+    def _process_customer(self, cust: CustomerRow) -> CustomerResult:
+        now_str = datetime.now(JST).isoformat()
         today = datetime.now(JST).strftime("%Y-%m-%d")
 
+        logger.info(f"顧客処理開始: {cust.customer_name}",
+                     extra={"step": "customer_start"})
+
+        self._master.update_customer_status(cust.row_number, "処理中", now_str)
+
+        # 出納帳がなければ自動作成
+        if not cust.has_cashbook:
+            cust = self._ensure_cashbook(cust)
+
+        cashbook_id = cust.spreadsheet_id
+        if not cashbook_id:
+            raise RuntimeError("出納帳スプレッドシートIDを取得できません")
+
+        folder_id = cust.folder_id
+        if not folder_id:
+            raise RuntimeError("フォルダIDを取得できません")
+
+        cb = CashbookClient(
+            config=self._config.sheets,
+            spreadsheet_id=cashbook_id,
+            credentials_path=self._config.google_credentials_path,
+        )
+
+        cb.ensure_log_sheets_exist()
+        ttl = self._config.reservation_ttl_minutes
+        cb.cleanup_stale_reservations(ttl_minutes=ttl)
+        cb.recover_stale_written(ttl_minutes=ttl)
+
+        # レシートファイル取得
+        files = self._drive.list_files(folder_id)
+        if not files:
+            logger.info(f"レシートなし: {cust.customer_name}",
+                         extra={"step": "customer_no_files"})
+            self._master.update_customer_status(
+                cust.row_number, "完了（対象なし）", now_str)
+            return CustomerResult()
+
+        processed_keys = cb.get_processed_keys()
+
+        # 全ファイルを処理し、結果を集計
+        total = CustomerResult()
+        for file in files:
+            file_result = self._process_file(file, cb, processed_keys, today, now_str)
+            total.success += file_result.success
+            total.low_confidence += file_result.low_confidence
+            total.manual_entry += file_result.manual_entry
+            total.skipped += file_result.skipped
+            total.errors += file_result.errors
+
+        # 集計結果からF列の状態文字列を生成
+        status_str = total.to_status_string()
+        now_final = datetime.now(JST).isoformat()
+        self._master.update_customer_status(cust.row_number, status_str, now_final)
+
+        logger.info(
+            f"顧客処理完了: {cust.customer_name} → {status_str}",
+            extra={"step": "customer_complete"},
+        )
+        return total
+
+    # ── 出納帳の自動作成 ───────────────────────────────
+    def _ensure_cashbook(self, cust: CustomerRow) -> CustomerRow:
+        tmpl = self._config.template
+        template_id = (tmpl.individual_template_id if cust.is_individual
+                       else tmpl.corporate_template_id)
+        if not template_id:
+            raise RuntimeError(f"テンプレートID未設定 (種別={cust.category})")
+
+        title = f"【{cust.customer_name}】現金出納帳"
+        new_id = self._drive.copy_spreadsheet(
+            template_id=template_id, title=title,
+            dest_folder_id=tmpl.output_folder_id,
+        )
+        new_url = f"https://docs.google.com/spreadsheets/d/{new_id}/edit"
+        self._master.write_sheet_url(cust.row_number, new_url)
+
+        logger.info(f"出納帳作成: {title} (id={new_id})",
+                     extra={"step": "cashbook_create"})
+        cust.sheet_url = new_url
+        return cust
+
+    # ── 1ファイルの処理 ────────────────────────────────
+    def _process_file(
+        self, file: DriveFile, cb: CashbookClient,
+        processed_keys: set[str], today: str, now: str,
+    ) -> CustomerResult:
+        result = CustomerResult()
+
+        # ファイル単位スキップ
         if f"{file.file_id}:-1" in processed_keys:
-            r["skipped"] = 1
-            return r
+            result.skipped = 1
+            return result
 
         # ダウンロード
         try:
             file = self._drive.download_file(file)
         except Exception as e:
-            r["manual"] += 1
-            self._manual_entry(file, f"ダウンロード失敗: {e}", today, now)
-            return r
+            self._manual_entry(file, cb, f"DL失敗: {e}", today, now)
+            result.manual_entry = 1
+            return result
 
         # OCR
         ocr = self._ocr.extract_text(file)
         if ocr.error or not ocr.raw_text.strip():
-            r["manual"] += 1
-            self._manual_entry(file, f"OCR失敗: {ocr.error or 'テキスト空'}", today, now)
-            return r
+            self._manual_entry(file, cb, f"OCR失敗: {ocr.error or 'テキスト空'}", today, now)
+            result.manual_entry = 1
+            return result
 
         # AI
         items = self._ai.extract_receipt_data(ocr, file.file_name)
         if not items:
-            r["manual"] += 1
-            self._manual_entry(file, "AI解析で明細抽出不可", today, now)
-            return r
+            self._manual_entry(file, cb, "AI解析で明細抽出不可", today, now)
+            result.manual_entry = 1
+            return result
 
         corrected = [self._corrector.apply(it) for it in items]
 
         if self._config.dry_run:
             logger.info(f"DRY RUN: {file.file_name} → {len(corrected)} 明細",
                          extra={"step": "dry_run"})
-            return r
+            return result
 
         # 未処理明細
         pending = [i for i in range(len(corrected))
                    if f"{file.file_id}:{i}" not in processed_keys]
-        r["skipped"] = len(corrected) - len(pending)
+        result.skipped = len(corrected) - len(pending)
         if not pending:
-            return r
+            return result
 
         # 行予約
-        reservations = self._sheets.reserve_rows(
+        reservations = cb.reserve_rows(
             count=len(pending), file_id=file.file_id,
             file_name=file.file_name, receipt_indices=pending,
         )
 
         for (row, rid), idx in zip(reservations, pending):
             try:
-                self._write_item(
-                    file, items[idx], corrected[idx], idx, row, rid, ocr, now, today,
+                is_low = self._write_item(
+                    file, items[idx], corrected[idx],
+                    idx, row, rid, cb, ocr, now, today,
                 )
-                r["processed"] += 1
+                if is_low:
+                    result.low_confidence += 1
+                else:
+                    result.success += 1
             except Exception as e:
                 logger.error(f"明細失敗: {file.file_name}[{idx}]: {e}",
-                              extra={"step": "item_error", "file_id": file.file_id})
+                              extra={"step": "item_error"})
                 try:
-                    self._sheets.write_manual_entry_row(
+                    cb.write_manual_entry_row(
                         row, file.drive_link, corrected[idx].date or today,
-                        f"明細[{idx}]書き込み失敗: {e}")
-                    self._sheets.update_reservation_status(
-                        rid, ProcessStatus.MANUAL_ENTRY.value)
-                    r["manual"] += 1
-                except Exception as ie:
-                    logger.error(f"要手入力も失敗: {ie}")
-                    self._sheets.update_reservation_status(
-                        rid, ProcessStatus.ERROR.value)
-                    r["errors"] += 1
-        return r
+                        f"明細[{idx}]失敗: {e}")
+                    cb.update_reservation_status(rid, ProcessStatus.MANUAL_ENTRY.value)
+                    result.manual_entry += 1
+                except Exception:
+                    cb.update_reservation_status(rid, ProcessStatus.ERROR.value)
+                    result.errors += 1
 
+        return result
+
+    # ── 1明細の書き込み ────────────────────────────────
     def _write_item(
         self, file: DriveFile, item: ReceiptItem, corrected: CorrectedItem,
-        idx: int, row: int, rid: str, ocr: OcrResult, now: str, today: str,
-    ) -> None:
-        # 数式コピー → 出納帳書き込み → written → AIログ → success
-        self._sheets.copy_formulas_to_row(row)
-        self._sheets.write_cashbook_row(row, corrected, file.drive_link)
-        self._sheets.update_reservation_status(rid, ProcessStatus.WRITTEN.value)
+        idx: int, row: int, rid: str, cb: CashbookClient,
+        ocr: OcrResult, now: str, today: str,
+    ) -> bool:
+        """戻り値: True なら低信頼"""
+        cb.copy_formulas_to_row(row)
+        cb.write_cashbook_row(row, corrected, file.drive_link)
+        cb.update_reservation_status(rid, ProcessStatus.WRITTEN.value)
 
-        self._sheets.append_ai_log(AiLogRecord(
+        cb.append_ai_log(AiLogRecord(
             timestamp=now, file_id=file.file_id, file_name=file.file_name,
             receipt_index=idx, ocr_engine=ocr.engine, ocr_confidence=ocr.confidence,
             date=item.date or "", amount=str(item.amount) if item.amount else "",
@@ -161,31 +273,32 @@ class ProcessingManager:
 
         final = (ProcessStatus.LOW_CONFIDENCE if corrected.needs_review
                  else ProcessStatus.SUCCESS)
-        self._sheets.update_reservation_status(rid, final.value)
+        cb.update_reservation_status(rid, final.value)
+        return corrected.needs_review
 
+    # ── 要手入力行 ─────────────────────────────────
     def _manual_entry(
-        self, file: DriveFile, msg: str, date: str, now: str
+        self, file: DriveFile, cb: CashbookClient,
+        msg: str, date: str, now: str,
     ) -> None:
         logger.warning(f"要手入力: {file.file_name}: {msg}",
-                        extra={"step": "manual_entry", "file_id": file.file_id})
+                        extra={"step": "manual_entry"})
         if self._config.dry_run:
             return
         try:
-            res = self._sheets.reserve_rows(
+            res = cb.reserve_rows(
                 count=1, file_id=file.file_id,
-                file_name=file.file_name, receipt_indices=[-1],
-            )
+                file_name=file.file_name, receipt_indices=[-1])
             row, rid = res[0]
-            self._sheets.copy_formulas_to_row(row)
-            self._sheets.write_manual_entry_row(
+            cb.copy_formulas_to_row(row)
+            cb.write_manual_entry_row(
                 row, file.drive_link, date, f"{file.file_name}: {msg}")
-            self._sheets.update_reservation_status(rid, ProcessStatus.WRITTEN.value)
-            self._sheets.update_reservation_status(rid, ProcessStatus.MANUAL_ENTRY.value)
+            cb.update_reservation_status(rid, ProcessStatus.WRITTEN.value)
+            cb.update_reservation_status(rid, ProcessStatus.MANUAL_ENTRY.value)
         except Exception as e:
-            logger.error(f"要手入力行作成失敗: {e}",
-                          extra={"step": "manual_entry_error"})
+            logger.error(f"要手入力行作成失敗: {e}", extra={"step": "manual_entry_error"})
             try:
-                self._sheets.append_process_record(ProcessRecord(
+                cb.append_process_record(ProcessRecord(
                     file_id=file.file_id, file_name=file.file_name,
                     receipt_index=-1, mime_type=file.mime_type,
                     processed_at=now, status=ProcessStatus.ERROR.value,

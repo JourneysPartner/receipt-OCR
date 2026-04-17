@@ -48,7 +48,7 @@ jobs:
           docker push "${IMG}:${GITHUB_SHA::7}"
           docker push "${IMG}:latest"
 
-      - name: Deploy Cloud Run Job
+      - name: Deploy
         run: |
           IMG="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${JOB_NAME}:${GITHUB_SHA::7}"
           CMD="update"
@@ -57,6 +57,10 @@ jobs:
             --region=${REGION} \
             --image="${IMG}" \
             --service-account="${JOB_SERVICE_ACCOUNT}" \
-            --set-env-vars="DRIVE_FOLDER_ID=${{ secrets.DRIVE_FOLDER_ID }},SPREADSHEET_ID=${{ secrets.SPREADSHEET_ID }}" \
+            --set-env-vars="\
+          MASTER_SPREADSHEET_ID=${{ secrets.MASTER_SPREADSHEET_ID }},\
+          INDIVIDUAL_TEMPLATE_SPREADSHEET_ID=${{ secrets.INDIVIDUAL_TEMPLATE_SPREADSHEET_ID }},\
+          CORPORATE_TEMPLATE_SPREADSHEET_ID=${{ secrets.CORPORATE_TEMPLATE_SPREADSHEET_ID }},\
+          CASHBOOK_OUTPUT_FOLDER_ID=${{ secrets.CASHBOOK_OUTPUT_FOLDER_ID }}" \
             --set-secrets="GEMINI_API_KEY=gemini-api-key:latest" \
             --max-retries=1 --task-timeout=600s --memory=512Mi

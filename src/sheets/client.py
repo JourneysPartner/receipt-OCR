@@ -1,15 +1,9 @@
 """
 Google Sheets API クライアント
 
-責務:
-- 出納帳の使用済み行判定（A/B/C複数列、occupied_check_columns）
-- 行予約（reservation_id ベースの排他制御）
-- 数式コピー（D列/N列等）
-- 出納帳書き込み（通常行 / 要手入力行）
-- 処理管理シート（重複防止 / ステータス管理）
-- AI詳細ログシート
-- stale reserved の回収 / stale written の復旧
-- ログシートの自動作成
+2つの役割:
+1. マスターシートの読み書き（MasterSheetClient）
+2. 各顧客の現金出納帳への書き込み（CashbookClient）
 """
 
 import uuid
@@ -21,15 +15,16 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from src.config import SheetsConfig
-from src.models import CorrectedItem, ProcessRecord, AiLogRecord, ProcessStatus
+from src.config import SheetsConfig, MasterConfig
+from src.models import (
+    CustomerRow, CorrectedItem, ProcessRecord, AiLogRecord, ProcessStatus,
+)
 from src.logging.logger import setup_logger
 
 logger = setup_logger()
-
 JST = timezone(timedelta(hours=9))
 
-# ── 処理管理シート ヘッダー・列インデックス ──────────────────
+# ── 処理管理シート ─────────────────────────────────
 PROCESS_LOG_HEADERS = [
     "fileId", "fileName", "receiptIndex", "mimeType", "processedAt",
     "status", "cashbookRow", "errorMessage", "retryable", "sourceFolderId",
@@ -49,55 +44,144 @@ AI_LOG_HEADERS = [
     "適用補正", "要確認", "メモ",
 ]
 
-# 行を塞ぐステータス（空き行判定で除外する）
 _BLOCKING_STATUSES = {
-    ProcessStatus.RESERVED.value,
-    ProcessStatus.WRITTEN.value,
-    ProcessStatus.SUCCESS.value,
-    ProcessStatus.LOW_CONFIDENCE.value,
+    ProcessStatus.RESERVED.value, ProcessStatus.WRITTEN.value,
+    ProcessStatus.SUCCESS.value, ProcessStatus.LOW_CONFIDENCE.value,
     ProcessStatus.MANUAL_ENTRY.value,
+}
+_DONE_STATUSES = {
+    ProcessStatus.SUCCESS.value, ProcessStatus.LOW_CONFIDENCE.value,
+    ProcessStatus.MANUAL_ENTRY.value, ProcessStatus.WRITTEN.value,
 }
 
-# 再記入防止対象（get_processed_keys に含める）
-_DONE_STATUSES = {
-    ProcessStatus.SUCCESS.value,
-    ProcessStatus.LOW_CONFIDENCE.value,
-    ProcessStatus.MANUAL_ENTRY.value,
-    ProcessStatus.WRITTEN.value,
-}
+
+def _build_sheets_service(credentials_path: Optional[str] = None):
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    if credentials_path:
+        creds = service_account.Credentials.from_service_account_file(
+            credentials_path, scopes=scopes)
+    else:
+        import google.auth
+        creds, _ = google.auth.default(scopes=scopes)
+    return build("sheets", "v4", credentials=creds)
 
 
 @dataclass
 class ActiveReservation:
-    """処理管理シート上の有効な予約"""
-    sheet_row: int          # 処理管理シートの行 (1-indexed)
-    cashbook_row: int       # 出納帳の行
+    sheet_row: int
+    cashbook_row: int
     reservation_id: str
     status: str
     processed_at: str
 
 
-class SheetsClient:
-    SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+# ================================================================
+# マスターシート操作
+# ================================================================
 
-    def __init__(self, config: SheetsConfig, credentials_path: Optional[str] = None):
+class MasterSheetClient:
+    """現金自動記帳マスターの読み書き"""
+
+    def __init__(self, config: MasterConfig, credentials_path: Optional[str] = None):
         self._config = config
-        if credentials_path:
-            creds = service_account.Credentials.from_service_account_file(
-                credentials_path, scopes=self.SCOPES)
-        else:
-            import google.auth
-            creds, _ = google.auth.default(scopes=self.SCOPES)
-        self._service = build("sheets", "v4", credentials=creds)
+        self._service = _build_sheets_service(credentials_path)
+        self._sheets = self._service.spreadsheets()
+
+    def read_customer_rows(self) -> list[CustomerRow]:
+        """マスターシートから全顧客行を読み込む"""
+        sheet = self._config.sheet_name
+        start = self._config.data_start_row
+        cols = self._config.columns
+        max_col_index = max(
+            cols.customer_name, cols.staff, cols.entry_type, cols.folder_url,
+            cols.status, cols.sheet_url, cols.category, cols.last_processed,
+        )
+        rng = f"'{sheet}'!A{start}:{_col_letter(max_col_index)}"
+        result = self._sheets.values().get(
+            spreadsheetId=self._config.spreadsheet_id, range=rng,
+        ).execute()
+        values = result.get("values", [])
+
+        rows: list[CustomerRow] = []
+        for i, row in enumerate(values):
+            def _get(idx: int) -> str:
+                return row[idx].strip() if idx < len(row) and row[idx] else ""
+
+            name = _get(cols.customer_name)
+            if not name:
+                continue
+
+            rows.append(CustomerRow(
+                row_number=start + i,
+                customer_name=name,
+                staff=_get(cols.staff),
+                entry_type=_get(cols.entry_type),
+                folder_url=_get(cols.folder_url),
+                status=_get(cols.status),
+                sheet_url=_get(cols.sheet_url),
+                category=_get(cols.category),
+                last_processed=_get(cols.last_processed),
+            ))
+
+        logger.info(f"マスター: {len(rows)} 顧客行を読み込み",
+                     extra={"step": "master_read"})
+        return rows
+
+    def update_customer_status(
+        self, row_number: int, status: str, last_processed: str
+    ) -> None:
+        """マスターの F列(状態) と I列(最終処理日時) を更新する"""
+        sheet = self._config.sheet_name
+        cols = self._config.columns
+        data = [
+            {"range": f"'{sheet}'!{_col_letter(cols.status)}{row_number}",
+             "values": [[status]]},
+            {"range": f"'{sheet}'!{_col_letter(cols.last_processed)}{row_number}",
+             "values": [[last_processed]]},
+        ]
+        self._sheets.values().batchUpdate(
+            spreadsheetId=self._config.spreadsheet_id,
+            body={"valueInputOption": "USER_ENTERED", "data": data},
+        ).execute()
+
+    def write_sheet_url(self, row_number: int, url: str) -> None:
+        """マスターの G列にシートURLを書き戻す"""
+        sheet = self._config.sheet_name
+        col = self._config.columns.sheet_url
+        self._sheets.values().update(
+            spreadsheetId=self._config.spreadsheet_id,
+            range=f"'{sheet}'!{_col_letter(col)}{row_number}",
+            valueInputOption="USER_ENTERED",
+            body={"values": [[url]]},
+        ).execute()
+        logger.info(f"マスター行{row_number}: G列にURL書き戻し",
+                     extra={"step": "master_write_url"})
+
+
+# ================================================================
+# 顧客ごとの現金出納帳操作
+# ================================================================
+
+class CashbookClient:
+    """1顧客の現金出納帳への読み書き。
+    spreadsheet_id を顧客ごとに受け取る。"""
+
+    def __init__(
+        self, config: SheetsConfig, spreadsheet_id: str,
+        credentials_path: Optional[str] = None,
+    ):
+        self._config = config
+        self._spreadsheet_id = spreadsheet_id
+        self._service = _build_sheets_service(credentials_path)
         self._sheets = self._service.spreadsheets()
         self._sheet_id_cache: dict[str, int] = {}
 
-    # ── シート ID ─────────────────────────────────────
+    # ── シート ID ──────────────────────────────────
     def _get_sheet_id(self, sheet_name: str) -> int:
         if sheet_name in self._sheet_id_cache:
             return self._sheet_id_cache[sheet_name]
         meta = self._sheets.get(
-            spreadsheetId=self._config.spreadsheet_id,
+            spreadsheetId=self._spreadsheet_id,
             fields="sheets.properties",
         ).execute()
         for s in meta.get("sheets", []):
@@ -105,70 +189,64 @@ class SheetsClient:
             self._sheet_id_cache[p["title"]] = p["sheetId"]
         return self._sheet_id_cache[sheet_name]
 
-    # ── 処理管理シート 全行読み取り ───────────────────────
+    # ── 処理管理シート全行 ─────────────────────────────
     def _read_process_log_all(self) -> list[list[str]]:
         sheet = self._config.process_log_sheet_name
         try:
             r = self._sheets.values().get(
-                spreadsheetId=self._config.spreadsheet_id,
+                spreadsheetId=self._spreadsheet_id,
                 range=f"'{sheet}'!A:K",
             ).execute()
         except HttpError:
             return []
         return r.get("values", [])
 
-    # ── 有効予約の取得 ────────────────────────────────
+    # ── 有効予約 ───────────────────────────────────
     def get_active_reservations(self) -> dict[int, list[ActiveReservation]]:
-        """cashbookRow → [ActiveReservation, ...] を返す。
-        reserved / written が対象。"""
         values = self._read_process_log_all()
         result: dict[int, list[ActiveReservation]] = {}
         for i, row in enumerate(values[1:], start=2):
             if len(row) <= _PL_CASHBOOK_ROW:
                 continue
-            status = row[_PL_STATUS] if len(row) > _PL_STATUS else ""
-            if status not in (ProcessStatus.RESERVED.value, ProcessStatus.WRITTEN.value):
+            st = row[_PL_STATUS] if len(row) > _PL_STATUS else ""
+            if st not in (ProcessStatus.RESERVED.value, ProcessStatus.WRITTEN.value):
                 continue
             try:
                 cb = int(row[_PL_CASHBOOK_ROW])
             except (ValueError, TypeError):
                 continue
             rid = row[_PL_RESERVATION_ID] if len(row) > _PL_RESERVATION_ID else ""
-            pat = row[_PL_PROCESSED_AT] if len(row) > _PL_PROCESSED_AT else ""
+            pa = row[_PL_PROCESSED_AT] if len(row) > _PL_PROCESSED_AT else ""
             result.setdefault(cb, []).append(ActiveReservation(
                 sheet_row=i, cashbook_row=cb,
-                reservation_id=rid, status=status, processed_at=pat,
+                reservation_id=rid, status=st, processed_at=pa,
             ))
         return result
 
-    # ── 出納帳: 使用済み行 ───────────────────────────────
-    def _get_occupied_rows_from_cashbook(self) -> set[int]:
-        """occupied_check_columns のいずれかに値がある行を返す。"""
+    # ── 使用済み行 ─────────────────────────────────
+    def _get_occupied_rows(self) -> set[int]:
         sheet = self._config.cashbook_sheet_name
         cols = self._config.occupied_check_columns
         start = self._config.cashbook_data_start_row
         if not cols:
             return set()
-
         lo, hi = min(cols), max(cols)
         rng = f"'{sheet}'!{_col_letter(lo)}{start}:{_col_letter(hi)}"
         r = self._sheets.values().get(
-            spreadsheetId=self._config.spreadsheet_id, range=rng,
+            spreadsheetId=self._spreadsheet_id, range=rng,
         ).execute()
-        values = r.get("values", [])
         offsets = [c - lo for c in cols]
-
         occupied: set[int] = set()
-        for i, row in enumerate(values):
+        for i, row in enumerate(r.get("values", [])):
             for off in offsets:
                 if off < len(row) and row[off] and str(row[off]).strip():
                     occupied.add(start + i)
                     break
         return occupied
 
-    # ── 出納帳: 空き行検索 ──────────────────────────────
+    # ── 空き行 ──────────────────────────────────
     def find_available_rows(self, count: int) -> list[int]:
-        occupied = self._get_occupied_rows_from_cashbook()
+        occupied = self._get_occupied_rows()
         active = self.get_active_reservations()
         blocked = occupied | set(active.keys())
         start = self._config.cashbook_data_start_row
@@ -182,12 +260,11 @@ class SheetsClient:
                 raise RuntimeError(f"空き行なし ({start}〜{c})")
         return avail
 
-    # ── 行予約 ──────────────────────────────────────
+    # ── 行予約 ──────────────────────────────────
     def reserve_rows(
         self, count: int, file_id: str, file_name: str,
         receipt_indices: list[int],
     ) -> list[tuple[int, str]]:
-        """行予約 + 競合検知。戻り値: [(行番号, reservation_id), ...]"""
         now = datetime.now(JST).isoformat()
         for attempt in range(3):
             rows = self.find_available_rows(count)
@@ -201,31 +278,23 @@ class SheetsClient:
                 ))
                 reservations.append((row, rid))
 
-            # 競合チェック
             my_rids = {r for _, r in reservations}
             active = self.get_active_reservations()
-            occupied = self._get_occupied_rows_from_cashbook()
+            occupied = self._get_occupied_rows()
             conflict = False
             for row, _ in reservations:
                 if row in occupied:
                     conflict = True
                     break
-                others = [a for a in active.get(row, []) if a.reservation_id not in my_rids]
-                if others:
+                if any(a.reservation_id not in my_rids for a in active.get(row, [])):
                     conflict = True
                     break
-
             if not conflict:
-                logger.info(f"行予約成功: {rows} (attempt {attempt + 1})",
-                             extra={"step": "row_reserve", "file_id": file_id})
+                logger.info(f"行予約成功: {rows}", extra={"step": "row_reserve"})
                 return reservations
-
-            logger.warning(f"行予約競合 (attempt {attempt + 1}): {rows}",
-                            extra={"step": "row_reserve_conflict"})
             for _, rid in reservations:
                 self.update_reservation_status(rid, ProcessStatus.EXPIRED.value)
 
-        # フォールバック
         rows = self.find_available_rows(count)
         res: list[tuple[int, str]] = []
         for row, idx in zip(rows, receipt_indices):
@@ -236,29 +305,23 @@ class SheetsClient:
                 cashbook_row=row, reservation_id=rid,
             ))
             res.append((row, rid))
-        logger.warning(f"行予約フォールバック: {rows}",
-                        extra={"step": "row_reserve_fallback"})
         return res
 
-    # ── 予約ステータス更新 ──────────────────────────────
+    # ── 予約ステータス更新 ─────────────────────────────
     def update_reservation_status(self, reservation_id: str, new_status: str) -> bool:
         sheet = self._config.process_log_sheet_name
         values = self._read_process_log_all()
         for i, row in enumerate(values[1:], start=2):
             if len(row) > _PL_RESERVATION_ID and row[_PL_RESERVATION_ID] == reservation_id:
                 self._sheets.values().update(
-                    spreadsheetId=self._config.spreadsheet_id,
+                    spreadsheetId=self._spreadsheet_id,
                     range=f"'{sheet}'!F{i}", valueInputOption="RAW",
                     body={"values": [[new_status]]},
                 ).execute()
-                logger.info(f"予約更新: rid={reservation_id[:8]}… → {new_status}",
-                             extra={"step": "update_reservation"})
                 return True
-        logger.warning(f"予約未検出: rid={reservation_id[:8]}…",
-                        extra={"step": "update_reservation"})
         return False
 
-    # ── stale reserved の回収 ────────────────────────────
+    # ── stale reserved 回収 ────────────────────────────
     def cleanup_stale_reservations(self, ttl_minutes: int = 30) -> int:
         values = self._read_process_log_all()
         sheet = self._config.process_log_sheet_name
@@ -268,8 +331,6 @@ class SheetsClient:
             if len(row) <= _PL_STATUS or row[_PL_STATUS] != ProcessStatus.RESERVED.value:
                 continue
             pa = row[_PL_PROCESSED_AT] if len(row) > _PL_PROCESSED_AT else ""
-            if not pa:
-                continue
             try:
                 t = datetime.fromisoformat(pa)
                 if t.tzinfo is None:
@@ -278,7 +339,7 @@ class SheetsClient:
                 continue
             if t < cutoff:
                 self._sheets.values().update(
-                    spreadsheetId=self._config.spreadsheet_id,
+                    spreadsheetId=self._spreadsheet_id,
                     range=f"'{sheet}'!F{i}", valueInputOption="RAW",
                     body={"values": [[ProcessStatus.EXPIRED.value]]},
                 ).execute()
@@ -287,19 +348,17 @@ class SheetsClient:
             logger.info(f"stale reserved {count} 件回収", extra={"step": "cleanup"})
         return count
 
-    # ── stale written の復旧 ─────────────────────────────
+    # ── stale written 復旧 ─────────────────────────────
     def recover_stale_written(self, ttl_minutes: int = 30) -> int:
         values = self._read_process_log_all()
         sheet = self._config.process_log_sheet_name
         cutoff = datetime.now(JST) - timedelta(minutes=ttl_minutes)
-        occupied = self._get_occupied_rows_from_cashbook()
+        occupied = self._get_occupied_rows()
         count = 0
         for i, row in enumerate(values[1:], start=2):
             if len(row) <= _PL_STATUS or row[_PL_STATUS] != ProcessStatus.WRITTEN.value:
                 continue
             pa = row[_PL_PROCESSED_AT] if len(row) > _PL_PROCESSED_AT else ""
-            if not pa:
-                continue
             try:
                 t = datetime.fromisoformat(pa)
                 if t.tzinfo is None:
@@ -312,27 +371,23 @@ class SheetsClient:
                 cb = int(row[_PL_CASHBOOK_ROW])
             except (ValueError, TypeError):
                 continue
-            new_st = (ProcessStatus.SUCCESS.value if cb in occupied
-                      else ProcessStatus.EXPIRED.value)
+            new_st = ProcessStatus.SUCCESS.value if cb in occupied else ProcessStatus.EXPIRED.value
             self._sheets.values().update(
-                spreadsheetId=self._config.spreadsheet_id,
+                spreadsheetId=self._spreadsheet_id,
                 range=f"'{sheet}'!F{i}", valueInputOption="RAW",
                 body={"values": [[new_st]]},
             ).execute()
             count += 1
-            logger.info(f"written復旧: 行{cb} → {new_st}",
-                         extra={"step": "recover_written"})
         if count:
-            logger.info(f"stale written {count} 件復旧", extra={"step": "recover_written"})
+            logger.info(f"stale written {count} 件復旧", extra={"step": "recover"})
         return count
 
-    # ── 数式コピー ──────────────────────────────────
+    # ── 数式コピー ─────────────────────────────────
     def copy_formulas_to_row(self, target_row: int) -> None:
         cols = self._config.formula_copy_columns
         if not cols:
             return
-        sheet_name = self._config.cashbook_sheet_name
-        sid = self._get_sheet_id(sheet_name)
+        sid = self._get_sheet_id(self._config.cashbook_sheet_name)
         src = max(target_row - 1, self._config.cashbook_data_start_row)
         if src == target_row:
             return
@@ -347,14 +402,10 @@ class SheetsClient:
             }
         } for c in cols]
         self._sheets.batchUpdate(
-            spreadsheetId=self._config.spreadsheet_id,
-            body={"requests": reqs},
+            spreadsheetId=self._spreadsheet_id, body={"requests": reqs},
         ).execute()
-        names = ",".join(_col_letter(c) for c in cols)
-        logger.info(f"数式コピー: 行{src}→{target_row} ({names}列)",
-                     extra={"step": "formula_copy"})
 
-    # ── 出納帳: 通常行 ──────────────────────────────────
+    # ── 出納帳: 通常行 ─────────────────────────────────
     def write_cashbook_row(
         self, row: int, item: CorrectedItem, file_link: str
     ) -> int:
@@ -372,13 +423,12 @@ class SheetsClient:
                 for fn, ci in col_map.items() if ci not in prot]
         if data:
             self._sheets.values().batchUpdate(
-                spreadsheetId=self._config.spreadsheet_id,
+                spreadsheetId=self._spreadsheet_id,
                 body={"valueInputOption": "USER_ENTERED", "data": data},
             ).execute()
-        logger.info(f"出納帳 行{row} 書き込み完了", extra={"step": "cashbook_write"})
         return row
 
-    # ── 出納帳: 要手入力行 ──────────────────────────────
+    # ── 出納帳: 要手入力行 ─────────────────────────────
     def write_manual_entry_row(
         self, row: int, file_link: str, date_hint: str, error_hint: str
     ) -> int:
@@ -395,15 +445,13 @@ class SheetsClient:
                              "values": [[vals.get(fn, "")]]})
         if data:
             self._sheets.values().batchUpdate(
-                spreadsheetId=self._config.spreadsheet_id,
+                spreadsheetId=self._spreadsheet_id,
                 body={"valueInputOption": "USER_ENTERED", "data": data},
             ).execute()
-        logger.info(f"出納帳 行{row} 要手入力行作成", extra={"step": "manual_entry"})
         return row
 
-    # ── 処理管理: 重複防止 ──────────────────────────────
+    # ── 重複防止 ───────────────────────────────────
     def get_processed_keys(self) -> set[str]:
-        """written も含む再記入防止キー集合 "fileId:receiptIndex" """
         values = self._read_process_log_all()
         keys: set[str] = set()
         for row in values[1:]:
@@ -423,12 +471,12 @@ class SheetsClient:
             record.reservation_id,
         ]
         self._sheets.values().append(
-            spreadsheetId=self._config.spreadsheet_id,
+            spreadsheetId=self._spreadsheet_id,
             range=f"'{sheet}'!A:K", valueInputOption="USER_ENTERED",
             insertDataOption="INSERT_ROWS", body={"values": [row]},
         ).execute()
 
-    # ── AI詳細ログ ──────────────────────────────────
+    # ── AI詳細ログ ─────────────────────────────────
     def append_ai_log(self, record: AiLogRecord) -> None:
         sheet = self._config.ai_log_sheet_name
         row = [
@@ -440,12 +488,12 @@ class SheetsClient:
             record.corrections_applied, str(record.needs_review), record.memo,
         ]
         self._sheets.values().append(
-            spreadsheetId=self._config.spreadsheet_id,
+            spreadsheetId=self._spreadsheet_id,
             range=f"'{sheet}'!A:Q", valueInputOption="USER_ENTERED",
             insertDataOption="INSERT_ROWS", body={"values": [row]},
         ).execute()
 
-    # ── シート初期化 ─────────────────────────────────
+    # ── シート初期化 ───────────────────────────────
     def ensure_log_sheets_exist(self) -> None:
         existing = self._get_existing_sheet_names()
         self._ensure_sheet(self._config.process_log_sheet_name,
@@ -455,32 +503,28 @@ class SheetsClient:
 
     def _get_existing_sheet_names(self) -> set[str]:
         meta = self._sheets.get(
-            spreadsheetId=self._config.spreadsheet_id,
+            spreadsheetId=self._spreadsheet_id,
             fields="sheets.properties.title",
         ).execute()
         return {s["properties"]["title"] for s in meta.get("sheets", [])}
 
-    def _ensure_sheet(
-        self, name: str, headers: list[str], existing: set[str]
-    ) -> None:
+    def _ensure_sheet(self, name: str, headers: list[str], existing: set[str]) -> None:
         if name not in existing:
             self._sheets.batchUpdate(
-                spreadsheetId=self._config.spreadsheet_id,
+                spreadsheetId=self._spreadsheet_id,
                 body={"requests": [{"addSheet": {"properties": {"title": name}}}]},
             ).execute()
-            logger.info(f"シート '{name}' 作成")
             self._sheet_id_cache.clear()
         rng = f"'{name}'!A1:{_col_letter(len(headers) - 1)}1"
         r = self._sheets.values().get(
-            spreadsheetId=self._config.spreadsheet_id, range=rng,
+            spreadsheetId=self._spreadsheet_id, range=rng,
         ).execute()
         if r.get("values"):
             return
         self._sheets.values().update(
-            spreadsheetId=self._config.spreadsheet_id, range=rng,
+            spreadsheetId=self._spreadsheet_id, range=rng,
             valueInputOption="RAW", body={"values": [headers]},
         ).execute()
-        logger.info(f"シート '{name}' ヘッダー作成")
 
 
 def _col_letter(index: int) -> str:
