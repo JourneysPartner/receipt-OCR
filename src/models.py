@@ -1,10 +1,10 @@
 """データモデル定義"""
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 
-class ProcessStatus(str, Enum):
+class ProcessStatus(StrEnum):
     SUCCESS = "success"
     ERROR = "error"
     SKIPPED = "skipped"
