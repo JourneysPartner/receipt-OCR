@@ -48,6 +48,13 @@ class CustomerRow:
         return self.category.strip() != "法人"
 
 
+def build_cashbook_sheet_name(customer_name: str) -> str:
+    """顧客名から記帳対象シートタブ名を生成する。
+    実運用仕様: `【顧客名】現金出納帳`
+    """
+    return f"【{customer_name}】現金出納帳"
+
+
 def extract_id_from_url(url: str) -> str:
     """Google Drive/Sheets の URL から ID を抽出する。
     対応形式:

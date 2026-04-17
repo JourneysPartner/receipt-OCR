@@ -125,8 +125,13 @@ class ProcessingManager:
         cb = CashbookClient(
             config=self._config.sheets,
             spreadsheet_id=cashbook_id,
+            customer_name=cust.customer_name,
             credentials_path=self._config.google_credentials_path,
         )
+
+        # 記帳対象タブを `【顧客名】現金出納帳` に揃える
+        # （旧仕様 `現金出納帳` のまま残っている場合は rename される）
+        cb.ensure_cashbook_tab_renamed()
 
         cb.ensure_log_sheets_exist()
         ttl = self._config.reservation_ttl_minutes

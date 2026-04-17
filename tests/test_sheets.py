@@ -1,5 +1,6 @@
 """Sheets クライアントのテスト"""
 
+from src.config import SheetsConfig
 from src.models import ProcessStatus
 from src.sheets.client import (
     _BLOCKING_STATUSES,
@@ -10,6 +11,7 @@ from src.sheets.client import (
     _PL_RESERVATION_ID,
     _PL_STATUS,
     PROCESS_LOG_HEADERS,
+    CashbookClient,
     _col_letter,
 )
 
@@ -41,3 +43,38 @@ class TestStatuses:
     def test_written_is_done(self):
         assert ProcessStatus.WRITTEN.value in _DONE_STATUSES
         assert ProcessStatus.RESERVED.value not in _DONE_STATUSES
+
+
+def _make_client_with_sheets(sheet_titles: list[str]) -> CashbookClient:
+    """APIを呼ばずに _sheet_id_cache だけセットしたインスタンスを生成"""
+    c = CashbookClient.__new__(CashbookClient)
+    c._config = SheetsConfig()
+    c._spreadsheet_id = "dummy"
+    c._customer_name = "テスト"
+    c._sheet_id_cache = {name: i for i, name in enumerate(sheet_titles)}
+    c._resolved_sheet_name = None
+    return c
+
+
+class TestResolveSheetName:
+    def test_primary_preferred(self):
+        """【顧客名】現金出納帳 が存在すればそれを採用"""
+        c = _make_client_with_sheets(["【テスト】現金出納帳", "現金出納帳", "その他"])
+        assert c._resolve_sheet_name() == "【テスト】現金出納帳"
+
+    def test_fallback_to_legacy(self):
+        """【顧客名】現金出納帳 がなければ `現金出納帳` にフォールバック"""
+        c = _make_client_with_sheets(["現金出納帳", "その他"])
+        assert c._resolve_sheet_name() == "現金出納帳"
+
+    def test_no_tab_uses_primary(self):
+        """どちらも無ければ第一候補（rename前提）"""
+        c = _make_client_with_sheets(["その他"])
+        assert c._resolve_sheet_name() == "【テスト】現金出納帳"
+
+    def test_cached(self):
+        """1度解決したらキャッシュされる"""
+        c = _make_client_with_sheets(["【テスト】現金出納帳"])
+        first = c._resolve_sheet_name()
+        c._sheet_id_cache.clear()  # キャッシュをクリアしても
+        assert c._resolve_sheet_name() == first  # 解決結果は保持される

@@ -6,8 +6,24 @@ from src.models import (
     DriveFile,
     ProcessRecord,
     ProcessStatus,
+    build_cashbook_sheet_name,
     extract_id_from_url,
 )
+
+
+class TestBuildCashbookSheetName:
+    def test_basic(self):
+        assert build_cashbook_sheet_name("テスト") == "【テスト】現金出納帳"
+
+    def test_japanese_name(self):
+        assert build_cashbook_sheet_name("清水沙季") == "【清水沙季】現金出納帳"
+
+    def test_alphabet(self):
+        assert build_cashbook_sheet_name("Acme") == "【Acme】現金出納帳"
+
+    def test_empty(self):
+        # 空文字でも形式は保つ（実際には発生しない想定だが堅牢性確認）
+        assert build_cashbook_sheet_name("") == "【】現金出納帳"
 
 
 class TestExtractIdFromUrl:
