@@ -1,0 +1,16 @@
+[project]
+name = "receipt-ocr"
+version = "0.1.0"
+description = "レシートOCR・AI仕訳 Cloud Run Job"
+requires-python = ">=3.11"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

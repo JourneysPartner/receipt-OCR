@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# 仮想環境
+.venv/
+venv/
+
+# 秘密情報（絶対にコミットしない）
+.env
+credentials/
+service-account.json
+*-credentials.json
+*-key.json
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# テスト
+.coverage
+htmlcov/
+.pytest_cache/
