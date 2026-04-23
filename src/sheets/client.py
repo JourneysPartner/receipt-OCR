@@ -231,6 +231,17 @@ class CashbookClient:
         """記帳対象タブ名（固定）"""
         return self._config.cashbook_sheet_name
 
+    # ── 勘定科目名の正規化（表記揺れ吸収） ───────────────
+    def _canonicalize_account(self, name: str | None) -> str:
+        """AI が返した勘定科目名を、R列側の正規名に揃える。
+        account_alias_map にエントリがあればその値を返し、無ければ入力をそのまま返す。
+        例: 「接待交際費」→「交際費」
+        """
+        if not name:
+            return ""
+        key = name.strip()
+        return self._config.account_alias_map.get(key, key)
+
     # ── 勘定科目コード参照表（シート内 Q:R） ─────────────
     def _account_code_lookup(self) -> dict[str, str]:
         """記帳対象タブ内の Q:R 対応表を読み取り、
@@ -571,10 +582,11 @@ class CashbookClient:
             vals["収入金額"] = item.amount
 
         # 勘定科目コードはシート内 Q:R 参照表で引く。
-        # AI 抽出の勘定科目名が R列の値に一致した場合のみ Q列のコードを書く。
+        # AI 抽出の勘定科目名を account_alias_map で正規化してから R列を参照する。
         # 一致しなければ C列は書き込まない（既存値/数式を保護）。
         if item.account:
-            code = self._account_code_lookup().get(item.account)
+            canonical = self._canonicalize_account(item.account)
+            code = self._account_code_lookup().get(canonical)
             if code:
                 vals["勘定科目コード"] = code
 

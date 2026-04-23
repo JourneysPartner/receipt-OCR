@@ -97,6 +97,24 @@ class TestLoadConfig:
         assert c.sheets.account_name_column == 6
         assert c.sheets.account_table_start_row == 2
 
+    def test_account_alias_map_default(self, monkeypatch):
+        """既定で 接待交際費 → 交際費 の別名が登録されている"""
+        monkeypatch.delenv("CASHBOOK_ACCOUNT_ALIAS_MAP", raising=False)
+        c = load_config()
+        assert c.sheets.account_alias_map.get("接待交際費") == "交際費"
+
+    def test_account_alias_map_env_override(self, monkeypatch):
+        """JSON で別名辞書を全置換できる"""
+        monkeypatch.setenv(
+            "CASHBOOK_ACCOUNT_ALIAS_MAP",
+            '{"外注費": "業務委託費", "接待交際費": "交際費"}',
+        )
+        c = load_config()
+        assert c.sheets.account_alias_map == {
+            "外注費": "業務委託費",
+            "接待交際費": "交際費",
+        }
+
     def test_master_override(self, monkeypatch):
         monkeypatch.setenv("MASTER_SPREADSHEET_ID", "master1")
         monkeypatch.setenv("MASTER_TARGET_ENTRY_TYPE", "先方記帳")

@@ -339,6 +339,62 @@ class TestWriteCashbookRow:
         cb, batch = _make_client()
         cb.write_cashbook_row(row=10, item=self._item(amount=500, is_expense=False), file_link="l")
         sent = batch.call_args.kwargs["body"]["data"]
-        # M列に収入金額が誤って入らないこと
         m_writes = [d for d in sent if "!M10" in d["range"]]
         assert m_writes == []
+
+    def test_c_column_resolved_via_alias_map(self):
+        """AI=接待交際費、R列=交際費 でも C列コードが入る（既定 alias_map）"""
+        cb, batch = _make_client(account_code_cache={"交際費": "524"})
+        cb.write_cashbook_row(row=10, item=self._item(account="接待交際費"), file_link="l")
+        sent = batch.call_args.kwargs["body"]["data"]
+        c_writes = [d for d in sent if "!C10" in d["range"]]
+        assert c_writes == [{"range": "'入力用'!C10", "values": [["524"]]}]
+
+    def test_c_column_still_exact_match(self):
+        """alias_map に無いが R列に一致する名前なら従来通り引ける"""
+        cb, batch = _make_client(account_code_cache={"雑費": "999"})
+        cb.write_cashbook_row(row=10, item=self._item(account="雑費"), file_link="l")
+        sent = batch.call_args.kwargs["body"]["data"]
+        c_writes = [d for d in sent if "!C10" in d["range"]]
+        assert c_writes == [{"range": "'入力用'!C10", "values": [["999"]]}]
+
+    def test_c_column_unknown_alias_stays_empty(self):
+        """alias_map にも R列にも無い名前なら C列は書かない"""
+        cb, batch = _make_client(account_code_cache={"交際費": "524"})
+        cb.write_cashbook_row(row=10, item=self._item(account="謎の科目"), file_link="l")
+        ranges = [d["range"] for d in batch.call_args.kwargs["body"]["data"]]
+        assert not any("!C10" in r for r in ranges)
+
+    def test_c_column_custom_alias_map(self):
+        """設定の alias_map を上書きすればその別名が効く"""
+        cfg = SheetsConfig(account_alias_map={"外注費": "業務委託費"})
+        cb, batch = _make_client(cfg, account_code_cache={"業務委託費": "601"})
+        cb.write_cashbook_row(row=10, item=self._item(account="外注費"), file_link="l")
+        sent = batch.call_args.kwargs["body"]["data"]
+        c_writes = [d for d in sent if "!C10" in d["range"]]
+        assert c_writes == [{"range": "'入力用'!C10", "values": [["601"]]}]
+
+
+class TestCanonicalizeAccount:
+    """_canonicalize_account の単体動作確認"""
+
+    def test_aliases_converted(self):
+        cb = CashbookClient.__new__(CashbookClient)
+        cb._config = SheetsConfig()
+        assert cb._canonicalize_account("接待交際費") == "交際費"
+
+    def test_unknown_passthrough(self):
+        cb = CashbookClient.__new__(CashbookClient)
+        cb._config = SheetsConfig()
+        assert cb._canonicalize_account("雑費") == "雑費"
+
+    def test_empty_and_none(self):
+        cb = CashbookClient.__new__(CashbookClient)
+        cb._config = SheetsConfig()
+        assert cb._canonicalize_account("") == ""
+        assert cb._canonicalize_account(None) == ""
+
+    def test_strips_whitespace(self):
+        cb = CashbookClient.__new__(CashbookClient)
+        cb._config = SheetsConfig()
+        assert cb._canonicalize_account("  接待交際費  ") == "交際費"

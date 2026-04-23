@@ -94,6 +94,15 @@ class SheetsConfig:
     account_name_column: int = 17  # R列
     account_table_start_row: int = 1  # 1-indexed
 
+    # 勘定科目名の別名辞書（AI出力→R列の正規名）。
+    # Q:R 参照の前に正規化し、表記揺れを吸収する。
+    # 例: AI が「接待交際費」を返し、R列は「交際費」しかない → 「交際費」で引ける
+    account_alias_map: dict[str, str] = field(
+        default_factory=lambda: {
+            "接待交際費": "交際費",
+        }
+    )
+
     occupied_check_columns: tuple[int, ...] = (0, 1, 2)
     cashbook_data_start_row: int = 5
     protected_columns: tuple[int, ...] = (3, 13)
@@ -153,6 +162,11 @@ def load_config() -> AppConfig:
     if column_map_env:
         column_map_default = json.loads(column_map_env)
 
+    alias_map_default = SheetsConfig().account_alias_map
+    alias_map_env = os.environ.get("CASHBOOK_ACCOUNT_ALIAS_MAP")
+    if alias_map_env:
+        alias_map_default = json.loads(alias_map_env)
+
     return AppConfig(
         master=MasterConfig(
             spreadsheet_id=os.environ.get("MASTER_SPREADSHEET_ID", ""),
@@ -194,6 +208,7 @@ def load_config() -> AppConfig:
                     str(SheetsConfig().account_table_start_row),
                 )
             ),
+            account_alias_map=alias_map_default,
             occupied_check_columns=_parse_int_tuple(
                 os.environ.get("CASHBOOK_OCCUPIED_CHECK_COLUMNS"),
                 SheetsConfig().occupied_check_columns,
