@@ -5,7 +5,15 @@ ProcessingManager のスキップ判定ロジックのテスト
 
 from unittest.mock import MagicMock
 
-from src.config import AppConfig, MasterConfig, TemplateConfig, DriveConfig, SheetsConfig, OcrConfig, AiConfig
+from src.config import (
+    AiConfig,
+    AppConfig,
+    DriveConfig,
+    MasterConfig,
+    OcrConfig,
+    SheetsConfig,
+    TemplateConfig,
+)
 from src.models import CustomerRow
 from src.processing.manager import ProcessingManager
 
@@ -37,7 +45,9 @@ class TestCustomerSkipLogic:
     def test_skip_when_entry_type_mismatch(self):
         """記帳区分が対象外ならスキップ"""
         cust = CustomerRow(
-            row_number=2, customer_name="A", entry_type="先方記帳",
+            row_number=2,
+            customer_name="A",
+            entry_type="先方記帳",
             folder_url="https://drive.google.com/drive/folders/x",
             sheet_url="https://docs.google.com/spreadsheets/d/y/edit",
         )
@@ -51,7 +61,9 @@ class TestCustomerSkipLogic:
     def test_skip_when_folder_url_empty(self):
         """D列（フォルダURL）が空ならスキップ、F列に「フォルダURL未設定」"""
         cust = CustomerRow(
-            row_number=3, customer_name="B", entry_type="当方記帳",
+            row_number=3,
+            customer_name="B",
+            entry_type="当方記帳",
             folder_url="",
             sheet_url="https://docs.google.com/spreadsheets/d/y/edit",
         )
@@ -68,7 +80,9 @@ class TestCustomerSkipLogic:
         → 自動作成しないことを確認
         """
         cust = CustomerRow(
-            row_number=4, customer_name="C", entry_type="当方記帳",
+            row_number=4,
+            customer_name="C",
+            entry_type="当方記帳",
             folder_url="https://drive.google.com/drive/folders/x",
             sheet_url="",
         )
@@ -89,12 +103,20 @@ class TestCustomerSkipLogic:
     def test_multiple_customers_mixed(self):
         """複数顧客が混在するケース: G列ありだけが処理対象候補になる"""
         customers = [
-            CustomerRow(row_number=2, customer_name="A", entry_type="当方記帳",
-                        folder_url="https://drive.google.com/drive/folders/x",
-                        sheet_url=""),  # G列空 → スキップ
-            CustomerRow(row_number=3, customer_name="B", entry_type="先方記帳",
-                        folder_url="https://drive.google.com/drive/folders/x",
-                        sheet_url="https://docs.google.com/spreadsheets/d/y/edit"),
+            CustomerRow(
+                row_number=2,
+                customer_name="A",
+                entry_type="当方記帳",
+                folder_url="https://drive.google.com/drive/folders/x",
+                sheet_url="",
+            ),  # G列空 → スキップ
+            CustomerRow(
+                row_number=3,
+                customer_name="B",
+                entry_type="先方記帳",
+                folder_url="https://drive.google.com/drive/folders/x",
+                sheet_url="https://docs.google.com/spreadsheets/d/y/edit",
+            ),
             # ↑ 記帳区分ミスマッチ → スキップ
         ]
         m, master = _make_manager(customers)

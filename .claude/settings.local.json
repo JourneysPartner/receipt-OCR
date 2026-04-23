@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m ruff --version)",
+      "Bash(python -m ruff check src tests)",
+      "Bash(python -m ruff format --check src tests)",
+      "Bash(python -m ruff format --diff src/sheets/client.py)",
+      "Bash(python -m ruff format src/sheets/client.py)",
+      "Bash(python -m pytest -v)"
+    ]
+  }
+}

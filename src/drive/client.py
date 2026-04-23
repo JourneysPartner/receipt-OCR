@@ -81,4 +81,3 @@ class DriveClient:
             extra={"step": "drive_download", "file_id": file.file_id},
         )
         return file
-

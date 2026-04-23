@@ -296,12 +296,14 @@ class CashbookClient:
         self._sheets.batchUpdate(
             spreadsheetId=self._spreadsheet_id,
             body={
-                "requests": [{
-                    "updateSheetProperties": {
-                        "properties": {"sheetId": sheet_id, "title": new_name},
-                        "fields": "title",
+                "requests": [
+                    {
+                        "updateSheetProperties": {
+                            "properties": {"sheetId": sheet_id, "title": new_name},
+                            "fields": "title",
+                        }
                     }
-                }]
+                ]
             },
         ).execute()
         self._refresh_sheet_id_cache()

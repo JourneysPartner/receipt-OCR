@@ -88,7 +88,8 @@ class ProcessingManager:
             # 新規作成はせず、マスターに明確な状態を書き戻して人間対応に委ねる。
             if not cust.has_cashbook:
                 logger.warning(
-                    f"シートURL未設定: {cust.customer_name} (手動で出納帳作成しG列に記入してください)",
+                    f"シートURL未設定: {cust.customer_name} "
+                    "(手動で出納帳作成しG列に記入してください)",
                     extra={"step": "customer_skip_no_sheet"},
                 )
                 now = datetime.now(JST).isoformat()
