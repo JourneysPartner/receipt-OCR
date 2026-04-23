@@ -49,6 +49,9 @@ class DriveConfig:
         "image/png",
         "application/pdf",
     )
+    # このプレフィックスで始まるファイル名は list_files で除外する
+    # （既に処理済みで人手で印をつけたファイル等を再処理しない）
+    excluded_file_name_prefixes: tuple[str, ...] = ("[済]", "【済】")
 
 
 @dataclass(frozen=True)
@@ -60,18 +63,32 @@ class SheetsConfig:
     process_log_sheet_name: str = "処理管理"
     ai_log_sheet_name: str = "AI詳細ログ"
 
+    # 実シートの列構成に合わせたマッピング (0-indexed)
+    #   A(0) = ファイルリンク
+    #   B(1) = 日付
+    #   C(2) = 勘定科目コード（account_code_map で変換可能な時だけ書く）
+    #   D(3) = 既存数式列 → protected
+    #   F(5) = 取引先
+    #   G(6) = 税区分
+    #   K(10) = 摘要
+    #   M(12) = 支出金額（= 支払い）
+    #   N(13) = 既存数式列 → protected
+    #   O(14) = エラー詳細（manual_entry 時のみ、error_detail_column 参照）
     cashbook_column_map: dict[str, int] = field(
         default_factory=lambda: {
             "ファイルリンク": 0,  # A列
             "日付": 1,  # B列
-            "摘要": 2,  # C列
-            "取引先": 4,  # E列
-            "勘定科目": 5,  # F列
+            "勘定科目コード": 2,  # C列（条件付き書き込み）
+            "取引先": 5,  # F列
             "税区分": 6,  # G列
-            "収入金額": 7,  # H列
-            "支出金額": 8,  # I列
+            "摘要": 10,  # K列
+            "支出金額": 12,  # M列（= 支払い）
         }
     )
+
+    # 勘定科目名 → 勘定科目コード の変換表。未登録の勘定科目は C列に書き込まない。
+    # JSON形式で環境変数 CASHBOOK_ACCOUNT_CODE_MAP で上書き可能。
+    account_code_map: dict[str, str] = field(default_factory=dict)
 
     occupied_check_columns: tuple[int, ...] = (0, 1, 2)
     cashbook_data_start_row: int = 5
@@ -79,7 +96,7 @@ class SheetsConfig:
     formula_copy_columns: tuple[int, ...] = (3, 13)
 
     # 要手入力行のエラー詳細を書き込む列 (0-indexed、既定: O列=14)
-    # C列（摘要）には短い固定文のみを入れ、長文エラーはこの列に入れる
+    # 短文ラベル「※要手入力」は K列（摘要）に入れ、長文エラーはこの列に入れる
     error_detail_column: int = 14
 
 
@@ -118,13 +135,24 @@ def _parse_int_tuple(env_value: str | None, default: tuple[int, ...]) -> tuple[i
     return tuple(int(x.strip()) for x in env_value.split(","))
 
 
+def _parse_str_tuple(env_value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
+    if not env_value:
+        return default
+    return tuple(s.strip() for s in env_value.split(",") if s.strip())
+
+
 def load_config() -> AppConfig:
+    import json
+
     column_map_default = SheetsConfig().cashbook_column_map
     column_map_env = os.environ.get("CASHBOOK_COLUMN_MAP")
     if column_map_env:
-        import json
-
         column_map_default = json.loads(column_map_env)
+
+    account_code_map_default: dict[str, str] = {}
+    account_code_map_env = os.environ.get("CASHBOOK_ACCOUNT_CODE_MAP")
+    if account_code_map_env:
+        account_code_map_default = json.loads(account_code_map_env)
 
     return AppConfig(
         master=MasterConfig(
@@ -138,12 +166,18 @@ def load_config() -> AppConfig:
             corporate_template_id=os.environ.get("CORPORATE_TEMPLATE_SPREADSHEET_ID", ""),
             output_folder_id=os.environ.get("CASHBOOK_OUTPUT_FOLDER_ID", ""),
         ),
-        drive=DriveConfig(),
+        drive=DriveConfig(
+            excluded_file_name_prefixes=_parse_str_tuple(
+                os.environ.get("EXCLUDED_FILE_NAME_PREFIXES"),
+                DriveConfig().excluded_file_name_prefixes,
+            ),
+        ),
         sheets=SheetsConfig(
             cashbook_sheet_name=os.environ.get("CASHBOOK_SHEET_NAME", "入力用"),
             process_log_sheet_name=os.environ.get("PROCESS_LOG_SHEET_NAME", "処理管理"),
             ai_log_sheet_name=os.environ.get("AI_LOG_SHEET_NAME", "AI詳細ログ"),
             cashbook_column_map=column_map_default,
+            account_code_map=account_code_map_default,
             occupied_check_columns=_parse_int_tuple(
                 os.environ.get("CASHBOOK_OCCUPIED_CHECK_COLUMNS"),
                 SheetsConfig().occupied_check_columns,

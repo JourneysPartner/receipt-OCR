@@ -34,12 +34,15 @@ class DriveClient:
         self._service = build("drive", "v3", credentials=creds)
 
     def list_files(self, folder_id: str) -> list[DriveFile]:
-        """指定フォルダ内の対象ファイル一覧を取得する"""
+        """指定フォルダ内の対象ファイル一覧を取得する。
+        excluded_file_name_prefixes で始まるファイルは除外する（例: `[済]` 付き）。
+        """
         if not folder_id:
             raise ValueError("folder_id が空です")
         mime_filter = " or ".join(f"mimeType='{m}'" for m in self._config.supported_mime_types)
         query = f"'{folder_id}' in parents and ({mime_filter}) and trashed=false"
-        files: list[DriveFile] = []
+        excluded_prefixes = self._config.excluded_file_name_prefixes
+        raw_files: list[DriveFile] = []
         page_token: str | None = None
         while True:
             resp = (
@@ -53,7 +56,7 @@ class DriveClient:
                 .execute()
             )
             for f in resp.get("files", []):
-                files.append(
+                raw_files.append(
                     DriveFile(
                         file_id=f["id"],
                         file_name=f["name"],
@@ -64,7 +67,23 @@ class DriveClient:
             page_token = resp.get("nextPageToken")
             if not page_token:
                 break
-        logger.info(f"Drive: {folder_id} から {len(files)} 件検出", extra={"step": "drive_list"})
+
+        files: list[DriveFile] = []
+        excluded_count = 0
+        for f in raw_files:
+            if any(f.file_name.startswith(p) for p in excluded_prefixes):
+                excluded_count += 1
+                logger.info(
+                    f"除外: {f.file_name}（プレフィックスマッチ）",
+                    extra={"step": "drive_list_exclude", "file_id": f.file_id},
+                )
+            else:
+                files.append(f)
+
+        logger.info(
+            f"Drive: {folder_id} から {len(files)} 件検出（除外 {excluded_count} 件）",
+            extra={"step": "drive_list"},
+        )
         return files
 
     def download_file(self, file: DriveFile) -> DriveFile:

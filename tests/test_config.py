@@ -63,6 +63,33 @@ class TestLoadConfig:
         c = load_config()
         assert c.sheets.error_detail_column == 20
 
+    def test_excluded_file_name_prefixes_default(self, monkeypatch):
+        """既定で [済] と 【済】 が除外プレフィックスに含まれる"""
+        monkeypatch.delenv("EXCLUDED_FILE_NAME_PREFIXES", raising=False)
+        c = load_config()
+        assert "[済]" in c.drive.excluded_file_name_prefixes
+        assert "【済】" in c.drive.excluded_file_name_prefixes
+
+    def test_excluded_file_name_prefixes_override(self, monkeypatch):
+        monkeypatch.setenv("EXCLUDED_FILE_NAME_PREFIXES", "DONE:,FINISHED:")
+        c = load_config()
+        assert c.drive.excluded_file_name_prefixes == ("DONE:", "FINISHED:")
+
+    def test_account_code_map_default_empty(self, monkeypatch):
+        """既定の勘定科目コード変換表は空"""
+        monkeypatch.delenv("CASHBOOK_ACCOUNT_CODE_MAP", raising=False)
+        c = load_config()
+        assert c.sheets.account_code_map == {}
+
+    def test_account_code_map_env_override(self, monkeypatch):
+        """JSON で勘定科目コード変換表を上書きできる"""
+        monkeypatch.setenv(
+            "CASHBOOK_ACCOUNT_CODE_MAP",
+            '{"消耗品費": "401", "旅費交通費": "412"}',
+        )
+        c = load_config()
+        assert c.sheets.account_code_map == {"消耗品費": "401", "旅費交通費": "412"}
+
     def test_master_override(self, monkeypatch):
         monkeypatch.setenv("MASTER_SPREADSHEET_ID", "master1")
         monkeypatch.setenv("MASTER_TARGET_ENTRY_TYPE", "先方記帳")

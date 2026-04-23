@@ -507,23 +507,38 @@ class CashbookClient:
 
     # ── 出納帳: 通常行 ─────────────────────────────────
     def write_cashbook_row(self, row: int, item: CorrectedItem, file_link: str) -> int:
+        """実シート構成に合わせた書き込み:
+        A=リンク, B=日付, C=勘定科目コード（変換可能時のみ）,
+        D=保護(数式), F=取引先, G=税区分, K=摘要, M=支出金額, N=保護(数式)。
+        vals に含まれないフィールドは一切書き込まない（既存値/数式を保護する）。
+        """
         sheet = self.cashbook_sheet_name
         col_map = self._config.cashbook_column_map
         prot = set(self._config.protected_columns)
-        vals = {
+
+        vals: dict[str, object] = {
             "ファイルリンク": file_link,
             "日付": item.date or "",
-            "摘要": item.description or "",
             "取引先": item.vendor or "",
-            "勘定科目": item.account or "",
             "税区分": item.tax_category or "",
-            "収入金額": item.amount if not item.is_expense and item.amount else "",
-            "支出金額": item.amount if item.is_expense and item.amount else "",
+            "摘要": item.description or "",
         }
+        # 支出金額は支出時のみ書き込む
+        if item.is_expense and item.amount:
+            vals["支出金額"] = item.amount
+        elif (not item.is_expense) and item.amount:
+            vals["収入金額"] = item.amount
+
+        # 勘定科目コードは account_code_map で変換できた場合のみ
+        code = self._config.account_code_map.get(item.account or "")
+        if code:
+            vals["勘定科目コード"] = code
+
+        # vals に入っているフィールドだけ書く。未登録列は触らない。
         data = [
-            {"range": f"'{sheet}'!{_col_letter(ci)}{row}", "values": [[vals.get(fn, "")]]}
+            {"range": f"'{sheet}'!{_col_letter(ci)}{row}", "values": [[vals[fn]]]}
             for fn, ci in col_map.items()
-            if ci not in prot
+            if ci not in prot and fn in vals
         ]
         if data:
             self._sheets.values().batchUpdate(
@@ -536,9 +551,9 @@ class CashbookClient:
     # 書き込み仕様:
     #   A列: ファイルリンク
     #   B列: 日付（推定 or 処理日）
-    #   C列: 「※要手入力」（短文固定）
+    #   K列 (col_map の "摘要"): 「※要手入力」（短文固定）
     #   O列 (error_detail_column): エラー詳細（長文）
-    #   D/N列: 保護列（触らない、数式は事前にコピー済み）
+    #   C/D/N など他列: 触らない（数式は事前にコピー済み）
     MANUAL_ENTRY_SHORT_LABEL = "※要手入力"
 
     def write_manual_entry_row(
