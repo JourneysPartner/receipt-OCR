@@ -86,9 +86,13 @@ class SheetsConfig:
         }
     )
 
-    # 勘定科目名 → 勘定科目コード の変換表。未登録の勘定科目は C列に書き込まない。
-    # JSON形式で環境変数 CASHBOOK_ACCOUNT_CODE_MAP で上書き可能。
-    account_code_map: dict[str, str] = field(default_factory=dict)
+    # 勘定科目コード参照表（記帳対象タブ内、Q:R 列）。
+    # AI が抽出した勘定科目名が `account_name_column` (R列) の値に一致した行の
+    # `account_code_column` (Q列) の値を C列へ書き込む。
+    # 一致する行がなければ C列は書き込まない（既存値/数式を保護）。
+    account_code_column: int = 16  # Q列
+    account_name_column: int = 17  # R列
+    account_table_start_row: int = 1  # 1-indexed
 
     occupied_check_columns: tuple[int, ...] = (0, 1, 2)
     cashbook_data_start_row: int = 5
@@ -149,11 +153,6 @@ def load_config() -> AppConfig:
     if column_map_env:
         column_map_default = json.loads(column_map_env)
 
-    account_code_map_default: dict[str, str] = {}
-    account_code_map_env = os.environ.get("CASHBOOK_ACCOUNT_CODE_MAP")
-    if account_code_map_env:
-        account_code_map_default = json.loads(account_code_map_env)
-
     return AppConfig(
         master=MasterConfig(
             spreadsheet_id=os.environ.get("MASTER_SPREADSHEET_ID", ""),
@@ -177,7 +176,24 @@ def load_config() -> AppConfig:
             process_log_sheet_name=os.environ.get("PROCESS_LOG_SHEET_NAME", "処理管理"),
             ai_log_sheet_name=os.environ.get("AI_LOG_SHEET_NAME", "AI詳細ログ"),
             cashbook_column_map=column_map_default,
-            account_code_map=account_code_map_default,
+            account_code_column=int(
+                os.environ.get(
+                    "CASHBOOK_ACCOUNT_CODE_COLUMN",
+                    str(SheetsConfig().account_code_column),
+                )
+            ),
+            account_name_column=int(
+                os.environ.get(
+                    "CASHBOOK_ACCOUNT_NAME_COLUMN",
+                    str(SheetsConfig().account_name_column),
+                )
+            ),
+            account_table_start_row=int(
+                os.environ.get(
+                    "CASHBOOK_ACCOUNT_TABLE_START_ROW",
+                    str(SheetsConfig().account_table_start_row),
+                )
+            ),
             occupied_check_columns=_parse_int_tuple(
                 os.environ.get("CASHBOOK_OCCUPIED_CHECK_COLUMNS"),
                 SheetsConfig().occupied_check_columns,

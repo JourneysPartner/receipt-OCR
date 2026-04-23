@@ -75,20 +75,27 @@ class TestLoadConfig:
         c = load_config()
         assert c.drive.excluded_file_name_prefixes == ("DONE:", "FINISHED:")
 
-    def test_account_code_map_default_empty(self, monkeypatch):
-        """既定の勘定科目コード変換表は空"""
-        monkeypatch.delenv("CASHBOOK_ACCOUNT_CODE_MAP", raising=False)
+    def test_account_code_lookup_columns_default(self, monkeypatch):
+        """Q:R 参照表の既定位置は Q列(16) / R列(17)、開始行1"""
+        for k in (
+            "CASHBOOK_ACCOUNT_CODE_COLUMN",
+            "CASHBOOK_ACCOUNT_NAME_COLUMN",
+            "CASHBOOK_ACCOUNT_TABLE_START_ROW",
+        ):
+            monkeypatch.delenv(k, raising=False)
         c = load_config()
-        assert c.sheets.account_code_map == {}
+        assert c.sheets.account_code_column == 16
+        assert c.sheets.account_name_column == 17
+        assert c.sheets.account_table_start_row == 1
 
-    def test_account_code_map_env_override(self, monkeypatch):
-        """JSON で勘定科目コード変換表を上書きできる"""
-        monkeypatch.setenv(
-            "CASHBOOK_ACCOUNT_CODE_MAP",
-            '{"消耗品費": "401", "旅費交通費": "412"}',
-        )
+    def test_account_code_lookup_columns_override(self, monkeypatch):
+        monkeypatch.setenv("CASHBOOK_ACCOUNT_CODE_COLUMN", "5")
+        monkeypatch.setenv("CASHBOOK_ACCOUNT_NAME_COLUMN", "6")
+        monkeypatch.setenv("CASHBOOK_ACCOUNT_TABLE_START_ROW", "2")
         c = load_config()
-        assert c.sheets.account_code_map == {"消耗品費": "401", "旅費交通費": "412"}
+        assert c.sheets.account_code_column == 5
+        assert c.sheets.account_name_column == 6
+        assert c.sheets.account_table_start_row == 2
 
     def test_master_override(self, monkeypatch):
         monkeypatch.setenv("MASTER_SPREADSHEET_ID", "master1")

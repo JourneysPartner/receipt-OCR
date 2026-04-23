@@ -18,14 +18,21 @@ from src.sheets.client import (
 )
 
 
-def _make_client(config: SheetsConfig | None = None) -> tuple[CashbookClient, MagicMock]:
+def _make_client(
+    config: SheetsConfig | None = None,
+    account_code_cache: dict[str, str] | None = None,
+) -> tuple[CashbookClient, MagicMock]:
     """API を叩かないモック化された CashbookClient を作る。
     戻り値: (client, mock_values_batchUpdate)
+
+    account_code_cache を渡すと Q:R ルックアップは API を呼ばずそれを返す。
+    None のままだと `{}` を事前セットし API を呼ばない（=コード未変換扱い）。
     """
     cb = CashbookClient.__new__(CashbookClient)
     cb._config = config or SheetsConfig()
     cb._spreadsheet_id = "dummy"
     cb._sheet_id_cache = {}
+    cb._account_code_cache = account_code_cache if account_code_cache is not None else {}
 
     mock_values = MagicMock()
     mock_sheets = MagicMock()
@@ -86,6 +93,70 @@ class TestErrorDetailColumnConfig:
         """既定のエラー詳細列は O列 (index=14)"""
         assert SheetsConfig().error_detail_column == 14
         assert _col_letter(SheetsConfig().error_detail_column) == "O"
+
+
+class TestAccountCodeLookup:
+    """シート内 Q:R の対応表からコードを引くロジック"""
+
+    def _make_client_with_values_get(
+        self, values_response: list[list[str]], config: SheetsConfig | None = None
+    ) -> CashbookClient:
+        cb = CashbookClient.__new__(CashbookClient)
+        cb._config = config or SheetsConfig()
+        cb._spreadsheet_id = "dummy"
+        cb._sheet_id_cache = {}
+        cb._account_code_cache = None  # 未取得状態
+
+        mock_values = MagicMock()
+        mock_values.get.return_value.execute.return_value = {"values": values_response}
+        mock_sheets = MagicMock()
+        mock_sheets.values.return_value = mock_values
+        cb._sheets = mock_sheets
+        return cb
+
+    def test_build_lookup_from_q_r_rows(self):
+        """Q列にコード、R列に勘定科目名の行から dict を構築"""
+        cb = self._make_client_with_values_get(
+            [
+                ["401", "消耗品費"],
+                ["412", "旅費交通費"],
+                ["425", "車両費"],
+            ]
+        )
+        lookup = cb._account_code_lookup()
+        assert lookup == {"消耗品費": "401", "旅費交通費": "412", "車両費": "425"}
+
+    def test_skip_empty_rows(self):
+        """どちらか片方が空の行はスキップ"""
+        cb = self._make_client_with_values_get(
+            [
+                ["401", "消耗品費"],
+                ["", "存在しないコード"],
+                ["999", ""],
+                ["412", "旅費交通費"],
+            ]
+        )
+        lookup = cb._account_code_lookup()
+        assert lookup == {"消耗品費": "401", "旅費交通費": "412"}
+
+    def test_cache_is_used(self):
+        """2回目は API を呼ばずキャッシュを使う"""
+        cb = self._make_client_with_values_get([["401", "消耗品費"]])
+        first = cb._account_code_lookup()
+        cb._sheets.values.return_value.get.return_value.execute.return_value = {
+            "values": [["999", "別の値"]]
+        }
+        second = cb._account_code_lookup()
+        assert first is second  # 同じインスタンス
+        assert second == {"消耗品費": "401"}
+
+    def test_custom_q_r_columns(self):
+        """account_code_column / account_name_column が上書きされたら
+        そちらの列を読みに行く"""
+        cfg = SheetsConfig(account_code_column=0, account_name_column=1)  # A, B
+        cb = self._make_client_with_values_get([["100", "名前"]], config=cfg)
+        lookup = cb._account_code_lookup()
+        assert lookup == {"名前": "100"}
 
 
 class TestDefaultColumnMap:
@@ -239,20 +310,27 @@ class TestWriteCashbookRow:
         ranges = [d["range"] for d in batch.call_args.kwargs["body"]["data"]]
         assert not any("!C10" in r for r in ranges)
 
-    def test_c_column_written_when_code_mapped(self):
-        """account_code_map にエントリがあるとき C列にコードを書く"""
-        cfg = SheetsConfig(account_code_map={"雑費": "999", "消耗品費": "401"})
-        cb, batch = _make_client(cfg)
+    def test_c_column_written_when_found_in_sheet_lookup(self):
+        """Q:R 参照表に一致する勘定科目名があれば C列にコードを書く"""
+        cb, batch = _make_client(
+            account_code_cache={"雑費": "999", "消耗品費": "401"},
+        )
         cb.write_cashbook_row(row=10, item=self._item(account="雑費"), file_link="l")
         sent = batch.call_args.kwargs["body"]["data"]
         c_writes = [d for d in sent if "!C10" in d["range"]]
         assert c_writes == [{"range": "'入力用'!C10", "values": [["999"]]}]
 
-    def test_c_column_skipped_when_account_not_in_map(self):
-        """map にない勘定科目なら C列は触らない"""
-        cfg = SheetsConfig(account_code_map={"消耗品費": "401"})
-        cb, batch = _make_client(cfg)
+    def test_c_column_skipped_when_account_not_in_sheet_lookup(self):
+        """参照表にない勘定科目なら C列は触らない"""
+        cb, batch = _make_client(account_code_cache={"消耗品費": "401"})
         cb.write_cashbook_row(row=10, item=self._item(account="雑費"), file_link="l")
+        ranges = [d["range"] for d in batch.call_args.kwargs["body"]["data"]]
+        assert not any("!C10" in r for r in ranges)
+
+    def test_c_column_skipped_when_account_is_empty(self):
+        """account が空なら参照もスキップ"""
+        cb, batch = _make_client(account_code_cache={"雑費": "999"})
+        cb.write_cashbook_row(row=10, item=self._item(account=None), file_link="l")
         ranges = [d["range"] for d in batch.call_args.kwargs["body"]["data"]]
         assert not any("!C10" in r for r in ranges)
 

@@ -223,11 +223,52 @@ class CashbookClient:
         self._service = _build_sheets_service(credentials_path)
         self._sheets = self._service.spreadsheets()
         self._sheet_id_cache: dict[str, int] = {}
+        # 勘定科目名 → コード の参照表（シート Q:R から構築）。None 未取得、{} 取得済み空
+        self._account_code_cache: dict[str, str] | None = None
 
     @property
     def cashbook_sheet_name(self) -> str:
         """記帳対象タブ名（固定）"""
         return self._config.cashbook_sheet_name
+
+    # ── 勘定科目コード参照表（シート内 Q:R） ─────────────
+    def _account_code_lookup(self) -> dict[str, str]:
+        """記帳対象タブ内の Q:R 対応表を読み取り、
+        {勘定科目名(R列値): コード(Q列値)} の dict を返す。
+        インスタンス内でキャッシュ。"""
+        if self._account_code_cache is not None:
+            return self._account_code_cache
+
+        cfg = self._config
+        q_col = cfg.account_code_column
+        r_col = cfg.account_name_column
+        lo, hi = min(q_col, r_col), max(q_col, r_col)
+        start = cfg.account_table_start_row
+        rng = f"'{self.cashbook_sheet_name}'!{_col_letter(lo)}{start}:{_col_letter(hi)}"
+
+        try:
+            resp = (
+                self._sheets.values().get(spreadsheetId=self._spreadsheet_id, range=rng).execute()
+            )
+        except HttpError:
+            self._account_code_cache = {}
+            return self._account_code_cache
+
+        code_off = q_col - lo
+        name_off = r_col - lo
+        lookup: dict[str, str] = {}
+        for row in resp.get("values", []):
+            code = str(row[code_off]).strip() if code_off < len(row) and row[code_off] else ""
+            name = str(row[name_off]).strip() if name_off < len(row) and row[name_off] else ""
+            if code and name:
+                lookup[name] = code
+
+        self._account_code_cache = lookup
+        logger.info(
+            f"勘定科目コード参照表: {len(lookup)} 件読み込み",
+            extra={"step": "account_code_lookup"},
+        )
+        return lookup
 
     # ── シート ID ──────────────────────────────────
     def _get_sheet_id(self, sheet_name: str) -> int:
@@ -529,10 +570,13 @@ class CashbookClient:
         elif (not item.is_expense) and item.amount:
             vals["収入金額"] = item.amount
 
-        # 勘定科目コードは account_code_map で変換できた場合のみ
-        code = self._config.account_code_map.get(item.account or "")
-        if code:
-            vals["勘定科目コード"] = code
+        # 勘定科目コードはシート内 Q:R 参照表で引く。
+        # AI 抽出の勘定科目名が R列の値に一致した場合のみ Q列のコードを書く。
+        # 一致しなければ C列は書き込まない（既存値/数式を保護）。
+        if item.account:
+            code = self._account_code_lookup().get(item.account)
+            if code:
+                vals["勘定科目コード"] = code
 
         # vals に入っているフィールドだけ書く。未登録列は触らない。
         data = [
