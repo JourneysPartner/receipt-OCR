@@ -533,20 +533,43 @@ class CashbookClient:
         return row
 
     # ── 出納帳: 要手入力行 ─────────────────────────────
+    # 書き込み仕様:
+    #   A列: ファイルリンク
+    #   B列: 日付（推定 or 処理日）
+    #   C列: 「※要手入力」（短文固定）
+    #   O列 (error_detail_column): エラー詳細（長文）
+    #   D/N列: 保護列（触らない、数式は事前にコピー済み）
+    MANUAL_ENTRY_SHORT_LABEL = "※要手入力"
+
     def write_manual_entry_row(
         self, row: int, file_link: str, date_hint: str, error_hint: str
     ) -> int:
         sheet = self.cashbook_sheet_name
         col_map = self._config.cashbook_column_map
         prot = set(self._config.protected_columns)
-        vals = {"ファイルリンク": file_link, "日付": date_hint, "摘要": f"※要手入力: {error_hint}"}
+        err_col = self._config.error_detail_column
+
+        # A/B/C列は col_map 経由で書き込み（C列は短文固定）
+        vals = {
+            "ファイルリンク": file_link,
+            "日付": date_hint,
+            "摘要": self.MANUAL_ENTRY_SHORT_LABEL,
+        }
         data = []
         for fn in ("ファイルリンク", "日付", "摘要"):
             ci = col_map.get(fn)
             if ci is not None and ci not in prot:
-                data.append(
-                    {"range": f"'{sheet}'!{_col_letter(ci)}{row}", "values": [[vals.get(fn, "")]]}
-                )
+                data.append({"range": f"'{sheet}'!{_col_letter(ci)}{row}", "values": [[vals[fn]]]})
+
+        # O列（エラー詳細）。保護列なら書き込まない。
+        if err_col is not None and err_col not in prot:
+            data.append(
+                {
+                    "range": f"'{sheet}'!{_col_letter(err_col)}{row}",
+                    "values": [[error_hint]],
+                }
+            )
+
         if data:
             self._sheets.values().batchUpdate(
                 spreadsheetId=self._spreadsheet_id,

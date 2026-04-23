@@ -101,7 +101,7 @@ Cloud Run Job は新規の出納帳を作成しません。
 |----|-----------|------|
 | A  | ファイルリンク | |
 | B  | 日付 | |
-| C  | 摘要 | 失敗時「※要手入力」 |
+| C  | 摘要 | 失敗時は `※要手入力`（短文固定） |
 | **D** | **保護+数式コピー** | **既存関数列** |
 | E  | 取引先 | |
 | F  | 勘定科目 | |
@@ -109,6 +109,21 @@ Cloud Run Job は新規の出納帳を作成しません。
 | H  | 収入金額 | |
 | I  | 支出金額 | |
 | **N** | **保護+数式コピー** | **既存関数列** |
+| O  | エラー詳細 | **要手入力行の場合のみ**、失敗理由の詳細を書き込む |
+
+### 要手入力行の書き込み先
+
+OCR失敗 / AI抽出失敗 / 書き込み失敗などで `※要手入力` 行を作成する場合:
+
+| 列 | 内容 | 例 |
+|----|------|----|
+| A | ファイルリンク | `https://drive.google.com/…` |
+| B | 日付（推定 or 処理日） | `2026-04-23` |
+| C | 摘要 | `※要手入力`（短文固定） |
+| O | **エラー詳細** | `OCR失敗: Cloud Vision API has not been used...` |
+
+`CASHBOOK_ERROR_DETAIL_COLUMN` で列位置を変更可能（既定: 14 = O列）。
+通常の正常記帳行では O列は触りません。
 
 ## ステータス遷移
 
@@ -206,6 +221,7 @@ gcloud run jobs execute receipt-ocr-job --region=asia-northeast1
 | `CASHBOOK_DATA_START_ROW` | | 5 | データ開始行 |
 | `CASHBOOK_PROTECTED_COLUMNS` | | 3,13 | 保護列 |
 | `CASHBOOK_FORMULA_COPY_COLUMNS` | | 3,13 | 数式コピー列 |
+| `CASHBOOK_ERROR_DETAIL_COLUMN` | | 14 | 要手入力行のエラー詳細列（既定: O列） |
 | `AI_MODEL` | | gemini-2.5-flash | Gemini モデル |
 | `AI_CONFIDENCE_THRESHOLD` | | 0.7 | 信頼度閾値 |
 | `RESERVATION_TTL_MINUTES` | | 30 | 予約有効期限(分) |

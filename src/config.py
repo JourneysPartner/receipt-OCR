@@ -78,6 +78,10 @@ class SheetsConfig:
     protected_columns: tuple[int, ...] = (3, 13)
     formula_copy_columns: tuple[int, ...] = (3, 13)
 
+    # 要手入力行のエラー詳細を書き込む列 (0-indexed、既定: O列=14)
+    # C列（摘要）には短い固定文のみを入れ、長文エラーはこの列に入れる
+    error_detail_column: int = 14
+
 
 @dataclass(frozen=True)
 class OcrConfig:
@@ -152,6 +156,12 @@ def load_config() -> AppConfig:
             formula_copy_columns=_parse_int_tuple(
                 os.environ.get("CASHBOOK_FORMULA_COPY_COLUMNS"),
                 SheetsConfig().formula_copy_columns,
+            ),
+            error_detail_column=int(
+                os.environ.get(
+                    "CASHBOOK_ERROR_DETAIL_COLUMN",
+                    str(SheetsConfig().error_detail_column),
+                )
             ),
         ),
         ocr=OcrConfig(

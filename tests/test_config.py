@@ -51,6 +51,18 @@ class TestLoadConfig:
         c = load_config()
         assert c.sheets.cashbook_sheet_name == "別タブ"
 
+    def test_error_detail_column_default(self, monkeypatch):
+        """エラー詳細列の既定値は O列 (14)"""
+        monkeypatch.delenv("CASHBOOK_ERROR_DETAIL_COLUMN", raising=False)
+        c = load_config()
+        assert c.sheets.error_detail_column == 14
+
+    def test_error_detail_column_override(self, monkeypatch):
+        """CASHBOOK_ERROR_DETAIL_COLUMN で上書き可能"""
+        monkeypatch.setenv("CASHBOOK_ERROR_DETAIL_COLUMN", "20")
+        c = load_config()
+        assert c.sheets.error_detail_column == 20
+
     def test_master_override(self, monkeypatch):
         monkeypatch.setenv("MASTER_SPREADSHEET_ID", "master1")
         monkeypatch.setenv("MASTER_TARGET_ENTRY_TYPE", "先方記帳")
