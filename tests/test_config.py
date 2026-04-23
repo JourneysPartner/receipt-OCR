@@ -42,7 +42,8 @@ class TestLoadConfig:
         assert c.master.spreadsheet_id == "master1"
         assert c.master.target_entry_type == "先方記帳"
 
-    def test_template_override(self, monkeypatch):
+    def test_template_config_still_loadable(self, monkeypatch):
+        """テンプレート系は現在は未使用だが、設定読み込み自体は壊れていないこと"""
         monkeypatch.setenv("INDIVIDUAL_TEMPLATE_SPREADSHEET_ID", "ind1")
         monkeypatch.setenv("CORPORATE_TEMPLATE_SPREADSHEET_ID", "corp1")
         monkeypatch.setenv("CASHBOOK_OUTPUT_FOLDER_ID", "folder1")

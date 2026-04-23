@@ -20,15 +20,9 @@ def main() -> int:
     if not config.master.spreadsheet_id:
         logger.error("MASTER_SPREADSHEET_ID 未設定", extra={"step": "validation"})
         return 1
-    if not config.template.individual_template_id:
-        logger.error("INDIVIDUAL_TEMPLATE_SPREADSHEET_ID 未設定", extra={"step": "validation"})
-        return 1
-    if not config.template.corporate_template_id:
-        logger.error("CORPORATE_TEMPLATE_SPREADSHEET_ID 未設定", extra={"step": "validation"})
-        return 1
-    if not config.template.output_folder_id:
-        logger.error("CASHBOOK_OUTPUT_FOLDER_ID 未設定", extra={"step": "validation"})
-        return 1
+    # 出納帳は手動作成運用に切り替えたため、
+    # テンプレートID / 出力フォルダID は必須ではない
+    # （設定されていても無視される）
 
     try:
         cp = config.google_credentials_path

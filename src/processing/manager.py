@@ -74,6 +74,30 @@ class ProcessingManager:
                 logger.warning(
                     f"フォルダURL未設定: {cust.customer_name}", extra={"step": "customer_skip"}
                 )
+                now = datetime.now(JST).isoformat()
+                try:
+                    self._master.update_customer_status(
+                        cust.row_number, "スキップ / フォルダURL未設定", now
+                    )
+                except Exception:
+                    pass
+                summary["skipped_customers"] += 1
+                continue
+
+            # G列（シートリンク）未設定ならスキップ。
+            # 新規作成はせず、マスターに明確な状態を書き戻して人間対応に委ねる。
+            if not cust.has_cashbook:
+                logger.warning(
+                    f"シートURL未設定: {cust.customer_name} (手動で出納帳作成しG列に記入してください)",
+                    extra={"step": "customer_skip_no_sheet"},
+                )
+                now = datetime.now(JST).isoformat()
+                try:
+                    self._master.update_customer_status(
+                        cust.row_number, "スキップ / シートURL未設定", now
+                    )
+                except Exception:
+                    pass
                 summary["skipped_customers"] += 1
                 continue
 
@@ -109,10 +133,6 @@ class ProcessingManager:
         logger.info(f"顧客処理開始: {cust.customer_name}", extra={"step": "customer_start"})
 
         self._master.update_customer_status(cust.row_number, "処理中", now_str)
-
-        # 出納帳がなければ自動作成
-        if not cust.has_cashbook:
-            cust = self._ensure_cashbook(cust)
 
         cashbook_id = cust.spreadsheet_id
         if not cashbook_id:
@@ -167,28 +187,6 @@ class ProcessingManager:
             extra={"step": "customer_complete"},
         )
         return total
-
-    # ── 出納帳の自動作成 ───────────────────────────────
-    def _ensure_cashbook(self, cust: CustomerRow) -> CustomerRow:
-        tmpl = self._config.template
-        template_id = (
-            tmpl.individual_template_id if cust.is_individual else tmpl.corporate_template_id
-        )
-        if not template_id:
-            raise RuntimeError(f"テンプレートID未設定 (種別={cust.category})")
-
-        title = f"【{cust.customer_name}】現金出納帳"
-        new_id = self._drive.copy_spreadsheet(
-            template_id=template_id,
-            title=title,
-            dest_folder_id=tmpl.output_folder_id,
-        )
-        new_url = f"https://docs.google.com/spreadsheets/d/{new_id}/edit"
-        self._master.write_sheet_url(cust.row_number, new_url)
-
-        logger.info(f"出納帳作成: {title} (id={new_id})", extra={"step": "cashbook_create"})
-        cust.sheet_url = new_url
-        return cust
 
     # ── 1ファイルの処理 ────────────────────────────────
     def _process_file(

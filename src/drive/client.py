@@ -1,5 +1,5 @@
 """Google Drive API クライアント
-ファイル一覧取得・ダウンロード・テンプレートコピーを担当。
+ファイル一覧取得・ダウンロードを担当。
 """
 
 import io
@@ -16,8 +16,9 @@ logger = setup_logger()
 
 
 class DriveClient:
+    # 出納帳は手動作成運用に切り替えたため、読み取り専用スコープで十分
     SCOPES = [
-        "https://www.googleapis.com/auth/drive",  # コピー・移動に必要
+        "https://www.googleapis.com/auth/drive.readonly",
     ]
 
     def __init__(self, config: DriveConfig, credentials_path: str | None = None):
@@ -81,23 +82,3 @@ class DriveClient:
         )
         return file
 
-    def copy_spreadsheet(self, template_id: str, title: str, dest_folder_id: str) -> str:
-        """
-        スプレッドシートテンプレートをコピーし、指定フォルダに配置する。
-        戻り値: 新しいスプレッドシートのID
-        """
-        body = {
-            "name": title,
-            "parents": [dest_folder_id],
-        }
-        copied = (
-            self._service.files()
-            .copy(
-                fileId=template_id,
-                body=body,
-            )
-            .execute()
-        )
-        new_id = copied["id"]
-        logger.info(f"テンプレートコピー: {title} (id={new_id})", extra={"step": "drive_copy"})
-        return new_id
