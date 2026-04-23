@@ -78,6 +78,12 @@ CORRECTION_RULES: list[CorrectionRule] = [
         patterns=[r"文具", r"ボールペン", r"ノート", r"コクヨ", r"事務用品"],
         account="消耗品費",
     ),
+    # 弁当系は会議費に寄せる。必ず他ルールより後に置くこと（消耗品費等を上書きする）。
+    CorrectionRule(
+        name="弁当→会議費",
+        patterns=[r"弁当", r"お弁当", r"弁当代", r"お弁当代"],
+        account="会議費",
+    ),
 ]
 
 
