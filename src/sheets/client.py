@@ -22,7 +22,6 @@ from src.models import (
     CustomerRow,
     ProcessRecord,
     ProcessStatus,
-    build_cashbook_sheet_name,
 )
 
 logger = setup_logger()
@@ -208,59 +207,32 @@ class MasterSheetClient:
 
 class CashbookClient:
     """1顧客の現金出納帳への読み書き。
-    spreadsheet_id と customer_name を顧客ごとに受け取る。
-    記帳対象タブ名は「【顧客名】現金出納帳」（第二候補: 「現金出納帳」）。
+
+    記帳対象タブ名は `config.cashbook_sheet_name`（既定: `入力用`）で固定。
+    ファイル名（例: `【顧客名】現金出納帳`）とは別概念。
     """
 
     def __init__(
         self,
         config: SheetsConfig,
         spreadsheet_id: str,
-        customer_name: str,
         credentials_path: str | None = None,
     ):
         self._config = config
         self._spreadsheet_id = spreadsheet_id
-        self._customer_name = customer_name
         self._service = _build_sheets_service(credentials_path)
         self._sheets = self._service.spreadsheets()
         self._sheet_id_cache: dict[str, int] = {}
-        self._resolved_sheet_name: str | None = None
 
-    # ── シート名の解決（第一候補/フォールバック） ─────────────
-    def _resolve_sheet_name(self) -> str:
-        """
-        記帳対象タブ名を解決する。
-        1. 【顧客名】現金出納帳 が存在すればそれ
-        2. なければ `現金出納帳` （旧互換）
-        3. どちらもなければ第一候補を返す（まだ rename 前等）
-        結果はキャッシュする。
-        """
-        if self._resolved_sheet_name is not None:
-            return self._resolved_sheet_name
-
-        primary = build_cashbook_sheet_name(self._customer_name)
-        existing = self._get_existing_sheet_names()
-        fallback = self._config.cashbook_sheet_name
-
-        if primary in existing:
-            self._resolved_sheet_name = primary
-        elif fallback in existing:
-            logger.warning(
-                f"フォールバック: タブ '{fallback}' を使用 (期待: '{primary}')",
-                extra={"step": "sheet_resolve"},
-            )
-            self._resolved_sheet_name = fallback
-        else:
-            logger.warning(
-                f"記帳対象タブ未検出、第一候補 '{primary}' で続行",
-                extra={"step": "sheet_resolve"},
-            )
-            self._resolved_sheet_name = primary
-        return self._resolved_sheet_name
+    @property
+    def cashbook_sheet_name(self) -> str:
+        """記帳対象タブ名（固定）"""
+        return self._config.cashbook_sheet_name
 
     # ── シート ID ──────────────────────────────────
-    def _refresh_sheet_id_cache(self) -> None:
+    def _get_sheet_id(self, sheet_name: str) -> int:
+        if sheet_name in self._sheet_id_cache:
+            return self._sheet_id_cache[sheet_name]
         meta = self._sheets.get(
             spreadsheetId=self._spreadsheet_id,
             fields="sheets.properties",
@@ -269,72 +241,7 @@ class CashbookClient:
         for s in meta.get("sheets", []):
             p = s["properties"]
             self._sheet_id_cache[p["title"]] = p["sheetId"]
-
-    def _get_sheet_id(self, sheet_name: str) -> int:
-        if sheet_name in self._sheet_id_cache:
-            return self._sheet_id_cache[sheet_name]
-        self._refresh_sheet_id_cache()
         return self._sheet_id_cache[sheet_name]
-
-    def _get_existing_sheet_names(self) -> set[str]:
-        if not self._sheet_id_cache:
-            self._refresh_sheet_id_cache()
-        return set(self._sheet_id_cache.keys())
-
-    # ── シート rename ──────────────────────────────
-    def rename_sheet(self, old_name: str, new_name: str) -> bool:
-        """
-        シートタブ名を rename する。old_name が無ければ何もしない（False）。
-        new_name が既に存在する場合も何もしない（False）。
-        """
-        self._refresh_sheet_id_cache()
-        if new_name in self._sheet_id_cache:
-            return False
-        if old_name not in self._sheet_id_cache:
-            return False
-        sheet_id = self._sheet_id_cache[old_name]
-        self._sheets.batchUpdate(
-            spreadsheetId=self._spreadsheet_id,
-            body={
-                "requests": [
-                    {
-                        "updateSheetProperties": {
-                            "properties": {"sheetId": sheet_id, "title": new_name},
-                            "fields": "title",
-                        }
-                    }
-                ]
-            },
-        ).execute()
-        self._refresh_sheet_id_cache()
-        self._resolved_sheet_name = None  # 解決結果は無効化
-        logger.info(
-            f"シート名変更: '{old_name}' → '{new_name}'",
-            extra={"step": "sheet_rename"},
-        )
-        return True
-
-    def ensure_cashbook_tab_renamed(self) -> str:
-        """
-        記帳対象タブを `【顧客名】現金出納帳` に揃える。
-        すでに揃っていれば何もしない。必要なら `現金出納帳` から rename する。
-        戻り値: 最終的な記帳対象タブ名
-        """
-        target = build_cashbook_sheet_name(self._customer_name)
-        existing = self._get_existing_sheet_names()
-        if target in existing:
-            self._resolved_sheet_name = target
-            return target
-        fallback = self._config.cashbook_sheet_name
-        if fallback in existing:
-            self.rename_sheet(fallback, target)
-            return target
-        # どちらも無い場合は何もしない（テンプレが特殊構造の可能性）
-        logger.warning(
-            f"記帳対象タブが見つからず rename できません (期待: '{target}')",
-            extra={"step": "ensure_rename"},
-        )
-        return target
 
     # ── 処理管理シート全行 ─────────────────────────────
     def _read_process_log_all(self) -> list[list[str]]:
@@ -381,7 +288,7 @@ class CashbookClient:
 
     # ── 使用済み行 ─────────────────────────────────
     def _get_occupied_rows(self) -> set[int]:
-        sheet = self._resolve_sheet_name()
+        sheet = self.cashbook_sheet_name
         cols = self._config.occupied_check_columns
         start = self._config.cashbook_data_start_row
         if not cols:
@@ -566,7 +473,7 @@ class CashbookClient:
         cols = self._config.formula_copy_columns
         if not cols:
             return
-        sid = self._get_sheet_id(self._resolve_sheet_name())
+        sid = self._get_sheet_id(self.cashbook_sheet_name)
         src = max(target_row - 1, self._config.cashbook_data_start_row)
         if src == target_row:
             return
@@ -600,7 +507,7 @@ class CashbookClient:
 
     # ── 出納帳: 通常行 ─────────────────────────────────
     def write_cashbook_row(self, row: int, item: CorrectedItem, file_link: str) -> int:
-        sheet = self._resolve_sheet_name()
+        sheet = self.cashbook_sheet_name
         col_map = self._config.cashbook_column_map
         prot = set(self._config.protected_columns)
         vals = {
@@ -629,7 +536,7 @@ class CashbookClient:
     def write_manual_entry_row(
         self, row: int, file_link: str, date_hint: str, error_hint: str
     ) -> int:
-        sheet = self._resolve_sheet_name()
+        sheet = self.cashbook_sheet_name
         col_map = self._config.cashbook_column_map
         prot = set(self._config.protected_columns)
         vals = {"ファイルリンク": file_link, "日付": date_hint, "摘要": f"※要手入力: {error_hint}"}
@@ -713,7 +620,11 @@ class CashbookClient:
 
     # ── シート初期化 ───────────────────────────────
     def ensure_log_sheets_exist(self) -> None:
-        existing = self._get_existing_sheet_names()
+        meta = self._sheets.get(
+            spreadsheetId=self._spreadsheet_id,
+            fields="sheets.properties.title",
+        ).execute()
+        existing = {s["properties"]["title"] for s in meta.get("sheets", [])}
         self._ensure_sheet(self._config.process_log_sheet_name, PROCESS_LOG_HEADERS, existing)
         self._ensure_sheet(self._config.ai_log_sheet_name, AI_LOG_HEADERS, existing)
 
@@ -723,7 +634,7 @@ class CashbookClient:
                 spreadsheetId=self._spreadsheet_id,
                 body={"requests": [{"addSheet": {"properties": {"title": name}}}]},
             ).execute()
-            self._refresh_sheet_id_cache()
+            self._sheet_id_cache.clear()
         rng = f"'{name}'!A1:{_col_letter(len(headers) - 1)}1"
         r = (
             self._sheets.values()

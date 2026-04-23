@@ -55,7 +55,8 @@ class DriveConfig:
 class SheetsConfig:
     """各顧客の現金出納帳への書き込み設定"""
 
-    cashbook_sheet_name: str = "現金出納帳"
+    # 記帳対象タブ名（固定）。ファイル名（例: 【顧客名】現金出納帳）とは別。
+    cashbook_sheet_name: str = "入力用"
     process_log_sheet_name: str = "処理管理"
     ai_log_sheet_name: str = "AI詳細ログ"
 
