@@ -9,7 +9,8 @@
       "Bash(python -m pytest -v)",
       "Bash(python -c ' *)",
       "Bash(python -m ruff format tests/test_sheets.py)",
-      "Bash(python -m ruff format src/sheets/client.py tests/test_sheets.py)"
+      "Bash(python -m ruff format src/sheets/client.py tests/test_sheets.py)",
+      "Bash(python -m ruff format src/processing/manager.py tests/test_drive.py tests/test_manager_rename_and_validation.py)"
     ]
   }
 }

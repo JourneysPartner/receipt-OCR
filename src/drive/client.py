@@ -16,10 +16,16 @@ logger = setup_logger()
 
 
 class DriveClient:
-    # 出納帳は手動作成運用に切り替えたため、読み取り専用スコープで十分
+    # 読み取り + ファイル名 rename（files.update のメタデータ変更）に drive スコープが必要。
+    # SA が編集者として共有されているファイルだけが対象。
     SCOPES = [
-        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/drive",
     ]
+
+    # 成功時にファイル名先頭へ付与するプレフィックス
+    DONE_PREFIX = "【済】"
+    # 既にこれらで始まっていれば二重付与しない
+    _ALREADY_DONE_PREFIXES = ("[済]", "【済】")
 
     def __init__(self, config: DriveConfig, credentials_path: str | None = None):
         self._config = config
@@ -85,6 +91,31 @@ class DriveClient:
             extra={"step": "drive_list"},
         )
         return files
+
+    def rename_file_as_done(self, file: DriveFile) -> str | None:
+        """成功したファイルのファイル名先頭に `【済】` を付与する。
+        既に [済] / 【済】 で始まる場合は何もしない。
+        戻り値: 新しいファイル名（付与した場合）、または None（付与しなかった場合）
+        """
+        if any(file.file_name.startswith(p) for p in self._ALREADY_DONE_PREFIXES):
+            logger.info(
+                f"rename スキップ（既に済プレフィックス付き）: {file.file_name}",
+                extra={"step": "drive_rename_skip", "file_id": file.file_id},
+            )
+            return None
+
+        new_name = f"{self.DONE_PREFIX}{file.file_name}"
+        self._service.files().update(
+            fileId=file.file_id,
+            body={"name": new_name},
+        ).execute()
+        logger.info(
+            f"rename: {file.file_name} → {new_name}",
+            extra={"step": "drive_rename", "file_id": file.file_id},
+        )
+        # インメモリのオブジェクトも更新しておく
+        file.file_name = new_name
+        return new_name
 
     def download_file(self, file: DriveFile) -> DriveFile:
         """ファイルをメモリにダウンロードする"""

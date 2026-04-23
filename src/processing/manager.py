@@ -22,6 +22,7 @@ from src.models import (
     ReceiptItem,
 )
 from src.ocr.base import OcrEngine
+from src.rules.amount_validation import AmountValidation, validate_amount
 from src.rules.corrections import RuleCorrector
 from src.sheets.client import CashbookClient, MasterSheetClient
 
@@ -223,6 +224,8 @@ class ProcessingManager:
             return result
 
         corrected = [self._corrector.apply(it) for it in items]
+        # 金額検証（OCR 候補との突合）
+        validations = [validate_amount(it.amount, ocr.raw_text) for it in items]
 
         if self._config.dry_run:
             logger.info(
@@ -245,6 +248,34 @@ class ProcessingManager:
         )
 
         for (row, rid), idx in zip(reservations, pending):
+            validation = validations[idx]
+
+            # 金額検証で明らかに不整合なら強制 manual_entry
+            if validation.should_manual_entry:
+                try:
+                    self._write_amount_invalid_as_manual(
+                        file,
+                        items[idx],
+                        corrected[idx],
+                        validation,
+                        idx,
+                        row,
+                        rid,
+                        cb,
+                        ocr,
+                        now,
+                        today,
+                    )
+                    result.manual_entry += 1
+                except Exception as e:
+                    logger.error(
+                        f"金額検証NG行作成失敗: {file.file_name}[{idx}]: {e}",
+                        extra={"step": "item_error_amount"},
+                    )
+                    cb.update_reservation_status(rid, ProcessStatus.ERROR.value)
+                    result.errors += 1
+                continue
+
             try:
                 is_low = self._write_item(
                     file,
@@ -257,6 +288,7 @@ class ProcessingManager:
                     ocr,
                     now,
                     today,
+                    validation=validation,
                 )
                 if is_low:
                     result.low_confidence += 1
@@ -276,6 +308,22 @@ class ProcessingManager:
                     cb.update_reservation_status(rid, ProcessStatus.ERROR.value)
                     result.errors += 1
 
+        # 全明細が成功（success/low_confidence）で、manual_entry/error が1件もなければ
+        # 元ファイル名に 【済】 を付与する
+        fully_successful = (
+            (result.success + result.low_confidence) > 0
+            and result.manual_entry == 0
+            and result.errors == 0
+        )
+        if fully_successful and not self._config.dry_run:
+            try:
+                self._drive.rename_file_as_done(file)
+            except Exception as e:
+                logger.error(
+                    f"【済】付与失敗: {file.file_name}: {e}",
+                    extra={"step": "rename_failed", "file_id": file.file_id},
+                )
+
         return result
 
     # ── 1明細の書き込み ────────────────────────────────
@@ -291,11 +339,17 @@ class ProcessingManager:
         ocr: OcrResult,
         now: str,
         today: str,
+        validation: AmountValidation | None = None,
     ) -> bool:
         """戻り値: True なら低信頼"""
         cb.copy_formulas_to_row(row)
         cb.write_cashbook_row(row, corrected, file.drive_link)
         cb.update_reservation_status(rid, ProcessStatus.WRITTEN.value)
+
+        memo = corrected.memo or ""
+        if validation and validation.matched_candidates:
+            v_memo = f"金額候補: {validation.matched_candidates} (status={validation.status})"
+            memo = f"{memo} | {v_memo}" if memo else v_memo
 
         cb.append_ai_log(
             AiLogRecord(
@@ -315,13 +369,71 @@ class ProcessingManager:
                 corrected_tax_category=corrected.tax_category or "",
                 corrections_applied=", ".join(corrected.corrections_applied),
                 needs_review=corrected.needs_review,
-                memo=corrected.memo or "",
+                memo=memo,
             )
         )
 
         final = ProcessStatus.LOW_CONFIDENCE if corrected.needs_review else ProcessStatus.SUCCESS
         cb.update_reservation_status(rid, final.value)
         return corrected.needs_review
+
+    # ── 金額検証 NG を manual_entry として書き込む ─────────
+    def _write_amount_invalid_as_manual(
+        self,
+        file: DriveFile,
+        item: ReceiptItem,
+        corrected: CorrectedItem,
+        validation: AmountValidation,
+        idx: int,
+        row: int,
+        rid: str,
+        cb: CashbookClient,
+        ocr: OcrResult,
+        now: str,
+        today: str,
+    ) -> None:
+        """金額検証で NG になった明細を、詳細をO列に残して manual_entry 行にする"""
+        error_msg = (
+            f"金額検証NG ({validation.status}): {validation.reason} / "
+            f"OCR候補: {validation.matched_candidates}"
+        )
+        logger.warning(
+            f"金額検証NG → manual_entry: {file.file_name}[{idx}]: {error_msg}",
+            extra={"step": "amount_invalid", "file_id": file.file_id},
+        )
+        cb.copy_formulas_to_row(row)
+        cb.write_manual_entry_row(
+            row,
+            file.drive_link,
+            corrected.date or today,
+            error_msg,
+        )
+        cb.update_reservation_status(rid, ProcessStatus.WRITTEN.value)
+
+        cb.append_ai_log(
+            AiLogRecord(
+                timestamp=now,
+                file_id=file.file_id,
+                file_name=file.file_name,
+                receipt_index=idx,
+                ocr_engine=ocr.engine,
+                ocr_confidence=ocr.confidence,
+                date=item.date or "",
+                amount=str(item.amount) if item.amount else "",
+                vendor=item.vendor or "",
+                description=item.description or "",
+                account=item.account or "",
+                tax_category=item.tax_category or "",
+                corrected_account=corrected.account or "",
+                corrected_tax_category=corrected.tax_category or "",
+                corrections_applied=", ".join(corrected.corrections_applied),
+                needs_review=True,
+                memo=(
+                    f"金額検証NG: {validation.reason} / OCR候補: {validation.matched_candidates}"
+                ),
+            )
+        )
+        cb.update_reservation_status(rid, ProcessStatus.MANUAL_ENTRY.value)
 
     # ── 要手入力行 ─────────────────────────────────
     def _manual_entry(

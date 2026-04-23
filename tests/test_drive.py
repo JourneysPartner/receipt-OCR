@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 from src.config import DriveConfig
 from src.drive.client import DriveClient
+from src.models import DriveFile
 
 
 def _make_client(config: DriveConfig | None = None) -> tuple[DriveClient, MagicMock]:
@@ -18,6 +19,16 @@ def _make_client(config: DriveConfig | None = None) -> tuple[DriveClient, MagicM
     mock_svc.files.return_value = mock_files
     dc._service = mock_svc
     return dc, mock_files.list
+
+
+def _make_client_with_update() -> tuple[DriveClient, MagicMock]:
+    dc = DriveClient.__new__(DriveClient)
+    dc._config = DriveConfig()
+    mock_files = MagicMock()
+    mock_svc = MagicMock()
+    mock_svc.files.return_value = mock_files
+    dc._service = mock_svc
+    return dc, mock_files.update
 
 
 def _files_response(names: list[str]) -> dict:
@@ -74,3 +85,36 @@ class TestListFilesExclusion:
         )
         result = dc.list_files("folder_X")
         assert len(result) == 3
+
+
+class TestRenameFileAsDone:
+    def _make_file(self, name: str) -> DriveFile:
+        return DriveFile(file_id="abc", file_name=name, mime_type="image/jpeg", folder_id="f1")
+
+    def test_adds_sumi_prefix(self):
+        dc, mock_update = _make_client_with_update()
+        f = self._make_file("receipt_A.jpg")
+        new = dc.rename_file_as_done(f)
+        assert new == "【済】receipt_A.jpg"
+        mock_update.assert_called_once_with(fileId="abc", body={"name": "【済】receipt_A.jpg"})
+        # file オブジェクトも更新される
+        assert f.file_name == "【済】receipt_A.jpg"
+
+    def test_skip_when_already_zenkaku_sumi(self):
+        dc, mock_update = _make_client_with_update()
+        f = self._make_file("【済】receipt.jpg")
+        result = dc.rename_file_as_done(f)
+        assert result is None
+        mock_update.assert_not_called()
+        assert f.file_name == "【済】receipt.jpg"  # 変更されない
+
+    def test_skip_when_already_hankaku_sumi(self):
+        dc, mock_update = _make_client_with_update()
+        f = self._make_file("[済] receipt.jpg")
+        result = dc.rename_file_as_done(f)
+        assert result is None
+        mock_update.assert_not_called()
+
+    def test_drive_scope_includes_write(self):
+        """rename のために drive スコープ（読み書き両方）を要求している"""
+        assert "https://www.googleapis.com/auth/drive" in DriveClient.SCOPES
