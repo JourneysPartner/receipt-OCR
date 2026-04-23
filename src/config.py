@@ -53,9 +53,9 @@ class DriveConfig:
 
 @dataclass(frozen=True)
 class SheetsConfig:
-    """各顧客の現金出納帳への書き込み設定"""
+    """各顧客の出納帳スプレッドシートへの書き込み設定"""
 
-    # 記帳対象タブ名（固定）。ファイル名（例: 【顧客名】現金出納帳）とは別。
+    # 記帳対象タブ名（固定、既定: 入力用）。スプレッドシートのファイル名とは別。
     cashbook_sheet_name: str = "入力用"
     process_log_sheet_name: str = "処理管理"
     ai_log_sheet_name: str = "AI詳細ログ"
@@ -136,7 +136,7 @@ def load_config() -> AppConfig:
         ),
         drive=DriveConfig(),
         sheets=SheetsConfig(
-            cashbook_sheet_name=os.environ.get("CASHBOOK_SHEET_NAME", "現金出納帳"),
+            cashbook_sheet_name=os.environ.get("CASHBOOK_SHEET_NAME", "入力用"),
             process_log_sheet_name=os.environ.get("PROCESS_LOG_SHEET_NAME", "処理管理"),
             ai_log_sheet_name=os.environ.get("AI_LOG_SHEET_NAME", "AI詳細ログ"),
             cashbook_column_map=column_map_default,
