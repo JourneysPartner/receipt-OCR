@@ -153,6 +153,9 @@ class AiConfig:
     # 金額検証 NG（digit_inflation / missing_in_ocr）の時に
     # Gemini multimodal で画像/PDF から再抽出するか
     enable_amount_validation_retry: bool = True
+    # AI 抽出が 0 明細 / parse_error だった時に
+    # Gemini multimodal で画像/PDF から再抽出するか
+    enable_extraction_retry: bool = True
 
 
 @dataclass(frozen=True)
@@ -273,6 +276,8 @@ def load_config() -> AppConfig:
             enable_amount_validation_retry=os.environ.get(
                 "ENABLE_AMOUNT_VALIDATION_RETRY", "true"
             ).lower()
+            == "true",
+            enable_extraction_retry=os.environ.get("ENABLE_EXTRACTION_RETRY", "true").lower()
             == "true",
         ),
         google_credentials_path=os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),

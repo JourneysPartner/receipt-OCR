@@ -216,16 +216,75 @@ class ProcessingManager:
             result.manual_entry = 1
             return result
 
-        # AI
+        # AI 抽出（OCRテキストから）
         items = self._ai.extract_receipt_data(ocr, file.file_name)
+        first_extraction_error = self._ai.last_extraction_error
+        first_extraction_count = len(items)
+
+        # ── 抽出 retry ─────────────────────────────────────────
+        # 初回抽出が 0 明細 / parse_error だった場合、Gemini multimodal で画像から再抽出
+        extraction_retry_attempted = False
+        extraction_retry_error: str | None = None
+        extraction_retry_count = 0
+        adopted_extraction_engine = "primary"
+        if not items and self._config.ai.enable_extraction_retry:
+            extraction_retry_attempted = True
+            try:
+                retry_extracted = self._ai.extract_from_file(file)
+            except Exception as e:
+                logger.error(
+                    f"抽出retry例外: {file.file_name}: {e}",
+                    extra={"step": "extraction_retry_error", "file_id": file.file_id},
+                )
+                retry_extracted = []
+            extraction_retry_error = self._ai.last_extraction_error
+            extraction_retry_count = len(retry_extracted)
+            if retry_extracted:
+                items = retry_extracted
+                adopted_extraction_engine = "retry"
+                logger.info(
+                    f"AI抽出retry採用: {file.file_name} "
+                    f"({first_extraction_error} → {extraction_retry_count}件)",
+                    extra={"step": "extraction_retry_adopt", "file_id": file.file_id},
+                )
+
         if not items:
-            self._manual_entry(file, cb, "AI解析で明細抽出不可", today, now)
+            # 初回も retry もダメ → 抽出失敗 manual_entry
+            ext_summary = self._format_extraction_memo(
+                first_error=first_extraction_error,
+                first_count=first_extraction_count,
+                retry_attempted=extraction_retry_attempted,
+                retry_error=extraction_retry_error,
+                retry_count=extraction_retry_count,
+                adopted=adopted_extraction_engine,
+            )
+            reason_label = self._extraction_failure_label(
+                first_extraction_error, extraction_retry_attempted
+            )
+            self._manual_entry(
+                file,
+                cb,
+                f"AI抽出失敗 ({first_extraction_error or 'unknown'}): {ext_summary}",
+                today,
+                now,
+                short_label=reason_label,
+            )
             result.manual_entry = 1
             return result
 
         corrected = [self._corrector.apply(it) for it in items]
         # 金額検証（OCR 候補との突合）
         validations = [validate_amount(it.amount, ocr.raw_text) for it in items]
+
+        # 通常書き込みパスで AI詳細ログ memo に残す extraction 経路
+        extraction_memo = self._format_extraction_memo(
+            first_error=first_extraction_error,
+            first_count=first_extraction_count,
+            retry_attempted=extraction_retry_attempted,
+            retry_error=extraction_retry_error,
+            retry_count=extraction_retry_count,
+            adopted=adopted_extraction_engine,
+        )
 
         if self._config.dry_run:
             logger.info(
@@ -346,6 +405,7 @@ class ProcessingManager:
                     retry_attempted=retry_attempted,
                     retry_validation=retry_validation,
                     adopted_engine=adopted_engine,
+                    extraction_memo=extraction_memo,
                 )
                 if is_low:
                     result.low_confidence += 1
@@ -406,6 +466,45 @@ class ProcessingManager:
         return None
 
     @staticmethod
+    def _format_extraction_memo(
+        *,
+        first_error: str | None,
+        first_count: int,
+        retry_attempted: bool,
+        retry_error: str | None,
+        retry_count: int,
+        adopted: str,
+    ) -> str:
+        """AI抽出 retry の経路を構造化文字列化する。
+        例:
+        `extraction=retry_used:zero_items→3items | adopted=retry`
+        `extraction=primary_only:3items`
+        `extraction=retry_failed:parse_error→0items | adopted=primary`
+        """
+        if not retry_attempted:
+            return f"extraction=primary_only:{first_count}items (error={first_error or 'none'})"
+        suffix = "retry_used" if adopted == "retry" else "retry_failed"
+        return (
+            f"extraction={suffix}:"
+            f"{first_error or 'none'}→"
+            f"{retry_count}items "
+            f"(retry_error={retry_error or 'none'}, adopted={adopted})"
+        )
+
+    @staticmethod
+    def _extraction_failure_label(first_error: str | None, retry_attempted: bool) -> str:
+        """抽出失敗 manual_entry に付ける短文ラベル。
+        - retry を試みた → `※AI抽出要確認`
+        - そもそも OCR が空など → `※OCR/抽出要確認`
+        - その他 → `※抽出失敗要確認`
+        """
+        if first_error == "ocr_empty":
+            return "※OCR/抽出要確認"
+        if retry_attempted:
+            return "※AI抽出要確認"
+        return "※抽出失敗要確認"
+
+    @staticmethod
     def _format_retry_memo(
         primary: AmountValidation | None,
         retry_attempted: bool,
@@ -447,6 +546,7 @@ class ProcessingManager:
         retry_attempted: bool = False,
         retry_validation: AmountValidation | None = None,
         adopted_engine: str = "primary",
+        extraction_memo: str | None = None,
     ) -> bool:
         """戻り値: True なら低信頼"""
         cb.copy_formulas_to_row(row)
@@ -461,6 +561,8 @@ class ProcessingManager:
             adopted=adopted_engine,
         )
         memo = f"{memo} | {retry_memo}" if memo else retry_memo
+        if extraction_memo:
+            memo = f"{extraction_memo} | {memo}" if memo else extraction_memo
         if validation and validation.matched_candidates:
             v_memo = f"金額候補: {validation.matched_candidates} (status={validation.status})"
             memo = f"{memo} | {v_memo}" if memo else v_memo
@@ -575,8 +677,13 @@ class ProcessingManager:
         msg: str,
         date: str,
         now: str,
+        *,
+        short_label: str | None = None,
     ) -> None:
-        logger.warning(f"要手入力: {file.file_name}: {msg}", extra={"step": "manual_entry"})
+        logger.warning(
+            f"要手入力: {file.file_name}: {msg} (label={short_label or '※要手入力'})",
+            extra={"step": "manual_entry"},
+        )
         if self._config.dry_run:
             return
         try:
@@ -585,7 +692,13 @@ class ProcessingManager:
             )
             row, rid = res[0]
             cb.copy_formulas_to_row(row)
-            cb.write_manual_entry_row(row, file.drive_link, date, f"{file.file_name}: {msg}")
+            cb.write_manual_entry_row(
+                row,
+                file.drive_link,
+                date,
+                f"{file.file_name}: {msg}",
+                short_label=short_label,
+            )
             cb.update_reservation_status(rid, ProcessStatus.WRITTEN.value)
             cb.update_reservation_status(rid, ProcessStatus.MANUAL_ENTRY.value)
         except Exception as e:

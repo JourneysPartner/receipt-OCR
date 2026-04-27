@@ -132,6 +132,16 @@ class TestLoadConfig:
         c = load_config()
         assert c.ai.enable_amount_validation_retry is False
 
+    def test_extraction_retry_default_on(self, monkeypatch):
+        monkeypatch.delenv("ENABLE_EXTRACTION_RETRY", raising=False)
+        c = load_config()
+        assert c.ai.enable_extraction_retry is True
+
+    def test_extraction_retry_can_be_disabled(self, monkeypatch):
+        monkeypatch.setenv("ENABLE_EXTRACTION_RETRY", "false")
+        c = load_config()
+        assert c.ai.enable_extraction_retry is False
+
     def test_account_alias_map_env_override(self, monkeypatch):
         """JSON で別名辞書を全置換できる"""
         monkeypatch.setenv(
