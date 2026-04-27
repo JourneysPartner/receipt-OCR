@@ -109,3 +109,43 @@ def validate_amount(ai_amount: int | None, ocr_text: str) -> AmountValidation:
         matched_candidates=candidates,
         chosen_amount=ai_amount,
     )
+
+
+def build_review_label(
+    *,
+    amount_validation: AmountValidation | None = None,
+    needs_review: bool = False,
+    extra_reasons: list[str] | None = None,
+) -> str:
+    """要確認/要手入力ラベルを文脈に応じて生成する。
+
+    優先順:
+    - amount_validation が digit_inflation / missing_in_ocr → 「金額」を含める
+    - needs_review (低信頼) → 「要確認」を含める
+    - extra_reasons があればそれぞれ追加
+    - 何も該当しなければ既定の「※要手入力」
+
+    例:
+    - 金額NGのみ → `※金額要確認`
+    - 金額NG + 勘定科目疑わしい → `※金額・勘定科目要確認`
+    - OCR/AI 失敗等で何も候補が無い → `※要手入力`
+    """
+    reasons: list[str] = []
+
+    if amount_validation is not None and amount_validation.should_manual_entry:
+        reasons.append("金額")
+
+    if needs_review:
+        # 低信頼で全体が怪しい場合
+        if "金額" not in reasons:
+            reasons.append("内容")
+
+    if extra_reasons:
+        for r in extra_reasons:
+            if r and r not in reasons:
+                reasons.append(r)
+
+    if not reasons:
+        return "※要手入力"
+
+    return f"※{'・'.join(reasons)}要確認"

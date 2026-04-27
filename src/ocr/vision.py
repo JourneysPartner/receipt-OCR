@@ -80,3 +80,43 @@ class VisionOcrEngine(OcrEngine):
             return sum(confs) / len(confs) if confs else 0.5
         except AttributeError:
             return 0.5
+
+
+class VisionDocumentOcrEngine(VisionOcrEngine):
+    """Vision API の DOCUMENT_TEXT_DETECTION を使う強化版。
+    手書き文字に対して通常の text_detection より読み取りが強いケースがある。
+    フォールバック OCR の候補として使う。
+    """
+
+    def _from_image(self, file: DriveFile) -> OcrResult:
+        image = vision.Image(content=file.content)
+        resp = self._client.document_text_detection(image=image)
+        if resp.error.message:
+            return OcrResult(
+                raw_text="",
+                engine="vision_document",
+                confidence=0.0,
+                error=resp.error.message,
+            )
+        ft = resp.full_text_annotation
+        text = ft.text if ft and ft.text else ""
+        if not text:
+            anns = resp.text_annotations
+            if anns:
+                text = anns[0].description
+        if not text:
+            return OcrResult(raw_text="", engine="vision_document", confidence=0.0)
+        conf = self._page_confidence(resp)
+        logger.info(
+            f"画像OCR(document): {file.file_name} ({len(text)} chars)",
+            extra={"step": "ocr", "file_id": file.file_id},
+        )
+        return OcrResult(raw_text=text, engine="vision_document", confidence=conf)
+
+    def extract_text(self, file: DriveFile) -> OcrResult:
+        # PDF は親クラスと同じく DOCUMENT_TEXT_DETECTION を使うので
+        # 親実装をそのまま流用する。engine 名だけ差し替える。
+        result = super().extract_text(file)
+        if not result.error:
+            result.engine = "vision_document"
+        return result

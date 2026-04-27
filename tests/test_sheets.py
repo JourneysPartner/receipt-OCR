@@ -242,6 +242,91 @@ class TestWriteManualEntryRow:
         ranges = [d["range"] for d in batch.call_args.kwargs["body"]["data"]]
         assert not any("!O2" in r for r in ranges)
 
+    def test_writes_candidate_fields_when_corrected_given(self):
+        """corrected を渡せば 取引先(F)・税区分(G)・摘要(K) も埋まる"""
+        from src.models import CorrectedItem, ReceiptItem
+
+        cb, batch = _make_client()
+        c = CorrectedItem(
+            original=ReceiptItem(),
+            date="2026-04-27",
+            vendor="ABC商店",
+            tax_category="課税仕入10%",
+            description="ノート購入",
+            account="消耗品費",
+        )
+        cb.write_manual_entry_row(
+            row=20,
+            file_link="link",
+            date_hint="2026-04-27",
+            error_hint="金額NG",
+            corrected=c,
+            short_label="※金額要確認",
+        )
+        sent = {d["range"]: d["values"] for d in batch.call_args.kwargs["body"]["data"]}
+        assert sent.get("'入力用'!F20") == [["ABC商店"]]
+        assert sent.get("'入力用'!G20") == [["課税仕入10%"]]
+        # K列はラベル + 候補
+        assert sent.get("'入力用'!K20") == [["※金額要確認 / ノート購入"]]
+        assert sent.get("'入力用'!B20") == [["2026-04-27"]]
+
+    def test_label_only_when_no_description(self):
+        """摘要候補が無ければ K列はラベルのみ"""
+        from src.models import CorrectedItem, ReceiptItem
+
+        cb, batch = _make_client()
+        c = CorrectedItem(original=ReceiptItem(), vendor="店", description=None)
+        cb.write_manual_entry_row(
+            row=5,
+            file_link="l",
+            date_hint="d",
+            error_hint="e",
+            corrected=c,
+            short_label="※金額要確認",
+        )
+        sent = {d["range"]: d["values"] for d in batch.call_args.kwargs["body"]["data"]}
+        assert sent.get("'入力用'!K5") == [["※金額要確認"]]
+
+    def test_c_column_resolved_in_manual_entry(self):
+        """corrected.account が alias/Q:R で解決できれば C列にもコードが入る"""
+        from src.models import CorrectedItem, ReceiptItem
+
+        cb, batch = _make_client(account_code_cache={"交際費": "524"})
+        c = CorrectedItem(original=ReceiptItem(), account="接待交際費")
+        cb.write_manual_entry_row(
+            row=7,
+            file_link="l",
+            date_hint="d",
+            error_hint="e",
+            corrected=c,
+            short_label="※金額要確認",
+        )
+        sent = {d["range"]: d["values"] for d in batch.call_args.kwargs["body"]["data"]}
+        assert sent.get("'入力用'!C7") == [["524"]]
+
+    def test_money_column_not_written_in_manual_entry(self):
+        """manual_entry では M列に金額を書かない（金額が信用できないため）"""
+        from src.models import CorrectedItem, ReceiptItem
+
+        cb, batch = _make_client()
+        c = CorrectedItem(
+            original=ReceiptItem(),
+            description="x",
+            vendor="v",
+            amount=99999,
+            is_expense=True,
+        )
+        cb.write_manual_entry_row(
+            row=3,
+            file_link="l",
+            date_hint="d",
+            error_hint="e",
+            corrected=c,
+            short_label="※金額要確認",
+        )
+        ranges = [d["range"] for d in batch.call_args.kwargs["body"]["data"]]
+        assert not any("!M3" in r for r in ranges)
+
 
 class TestWriteCashbookRow:
     """正常記帳の列マッピング検証"""

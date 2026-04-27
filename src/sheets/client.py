@@ -607,30 +607,67 @@ class CashbookClient:
     # 書き込み仕様:
     #   A列: ファイルリンク
     #   B列: 日付（推定 or 処理日）
-    #   K列 (col_map の "摘要"): 「※要手入力」（短文固定）
+    #   C列: 勘定科目コード（candidate がコード解決できるなら書く）
+    #   F列: 取引先候補（candidate.vendor）
+    #   G列: 税区分候補（candidate.tax_category）
+    #   K列: ラベル + 摘要候補
+    #   M列: 通常は書かない（金額NGのため）
     #   O列 (error_detail_column): エラー詳細（長文）
-    #   C/D/N など他列: 触らない（数式は事前にコピー済み）
+    #   D/N など保護列: 触らない（数式は事前にコピー済み）
     MANUAL_ENTRY_SHORT_LABEL = "※要手入力"
 
     def write_manual_entry_row(
-        self, row: int, file_link: str, date_hint: str, error_hint: str
+        self,
+        row: int,
+        file_link: str,
+        date_hint: str,
+        error_hint: str,
+        *,
+        corrected: CorrectedItem | None = None,
+        short_label: str | None = None,
     ) -> int:
+        """要手入力行を書き込む。
+
+        candidate (= corrected) があれば、A/B/C/F/G/K に候補を埋める。
+        K列は「{short_label} / 摘要候補」の形式。摘要候補が無ければラベルのみ。
+        金額は signal が壊れている前提で書かない（M列を触らない）。
+        """
         sheet = self.cashbook_sheet_name
         col_map = self._config.cashbook_column_map
         prot = set(self._config.protected_columns)
         err_col = self._config.error_detail_column
+        label = short_label or self.MANUAL_ENTRY_SHORT_LABEL
 
-        # A/B/C列は col_map 経由で書き込み（C列は短文固定）
-        vals = {
+        vals: dict[str, object] = {
             "ファイルリンク": file_link,
             "日付": date_hint,
-            "摘要": self.MANUAL_ENTRY_SHORT_LABEL,
         }
-        data = []
-        for fn in ("ファイルリンク", "日付", "摘要"):
-            ci = col_map.get(fn)
-            if ci is not None and ci not in prot:
-                data.append({"range": f"'{sheet}'!{_col_letter(ci)}{row}", "values": [[vals[fn]]]})
+        if corrected is not None:
+            if corrected.date:
+                vals["日付"] = corrected.date
+            if corrected.vendor:
+                vals["取引先"] = corrected.vendor
+            if corrected.tax_category:
+                vals["税区分"] = corrected.tax_category
+            # 摘要欄は「ラベル / 候補」で残す
+            if corrected.description:
+                vals["摘要"] = f"{label} / {corrected.description}"
+            else:
+                vals["摘要"] = label
+            # C列コードは Q:R で解決できる時だけ
+            if corrected.account:
+                canonical = self._canonicalize_account(corrected.account)
+                code = self._account_code_lookup().get(canonical)
+                if code:
+                    vals["勘定科目コード"] = code
+        else:
+            vals["摘要"] = label
+
+        data = [
+            {"range": f"'{sheet}'!{_col_letter(ci)}{row}", "values": [[vals[fn]]]}
+            for fn, ci in col_map.items()
+            if ci not in prot and fn in vals
+        ]
 
         # O列（エラー詳細）。保護列なら書き込まない。
         if err_col is not None and err_col not in prot:

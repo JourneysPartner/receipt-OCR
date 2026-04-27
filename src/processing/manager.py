@@ -22,7 +22,7 @@ from src.models import (
     ReceiptItem,
 )
 from src.ocr.base import OcrEngine
-from src.rules.amount_validation import AmountValidation, validate_amount
+from src.rules.amount_validation import AmountValidation, build_review_label, validate_amount
 from src.rules.corrections import RuleCorrector
 from src.sheets.client import CashbookClient, MasterSheetClient
 
@@ -392,7 +392,10 @@ class ProcessingManager:
         now: str,
         today: str,
     ) -> None:
-        """金額検証で NG になった明細を、詳細をO列に残して manual_entry 行にする"""
+        """金額検証で NG になった明細を、詳細をO列に残して manual_entry 行にする。
+        candidate（corrected）の取引先・摘要・税区分・勘定科目コード等は
+        書き込んだうえで、K列冒頭に `※金額要確認` 等の具体ラベルを付ける。
+        """
         error_msg = (
             f"金額検証NG ({validation.status}): {validation.reason} / "
             f"OCR候補: {validation.matched_candidates}"
@@ -401,12 +404,15 @@ class ProcessingManager:
             f"金額検証NG → manual_entry: {file.file_name}[{idx}]: {error_msg}",
             extra={"step": "amount_invalid", "file_id": file.file_id},
         )
+        label = build_review_label(amount_validation=validation)
         cb.copy_formulas_to_row(row)
         cb.write_manual_entry_row(
             row,
             file.drive_link,
             corrected.date or today,
             error_msg,
+            corrected=corrected,
+            short_label=label,
         )
         cb.update_reservation_status(rid, ProcessStatus.WRITTEN.value)
 

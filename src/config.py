@@ -99,7 +99,27 @@ class SheetsConfig:
     # 例: AI が「接待交際費」を返し、R列は「交際費」しかない → 「交際費」で引ける
     account_alias_map: dict[str, str] = field(
         default_factory=lambda: {
+            # 交際費系
             "接待交際費": "交際費",
+            "接待費": "交際費",
+            # 交通費系
+            "旅費": "旅費交通費",
+            "交通費": "旅費交通費",
+            # 車両費系
+            "燃料費": "車両費",
+            "ガソリン代": "車両費",
+            "車検費用": "車両費",
+            "車検代": "車両費",
+            # 通信費系
+            "通信運搬費": "通信費",
+            # 消耗品費系
+            "事務用品費": "消耗品費",
+            "事務消耗品費": "消耗品費",
+            # 租税公課系
+            "印紙代": "租税公課",
+            "印紙税": "租税公課",
+            # 会議費系
+            "会議費用": "会議費",
         }
     )
 
@@ -116,6 +136,11 @@ class SheetsConfig:
 @dataclass(frozen=True)
 class OcrConfig:
     engine: str = "vision"
+    # フォールバック OCR エンジン名（None なら無効）。
+    # primary が低 confidence の時に追加で呼ばれる。
+    fallback_engine: str | None = None
+    # primary の confidence がこの値未満なら fallback を試す
+    fallback_confidence_threshold: float = 0.6
     max_pdf_pages: int = 5
 
 
@@ -231,6 +256,10 @@ def load_config() -> AppConfig:
         ),
         ocr=OcrConfig(
             engine=os.environ.get("OCR_ENGINE", "vision"),
+            fallback_engine=os.environ.get("OCR_FALLBACK_ENGINE") or None,
+            fallback_confidence_threshold=float(
+                os.environ.get("OCR_FALLBACK_CONFIDENCE_THRESHOLD", "0.6")
+            ),
             max_pdf_pages=int(os.environ.get("OCR_MAX_PDF_PAGES", "5")),
         ),
         ai=AiConfig(
