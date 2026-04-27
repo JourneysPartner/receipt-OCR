@@ -8,7 +8,10 @@ from google.genai import types
 from src.ai.base import AiExtractor
 from src.config import AiConfig
 from src.logging.logger import setup_logger
-from src.models import OcrResult, ReceiptItem
+from src.models import DriveFile, OcrResult, ReceiptItem
+
+# 再抽出用 (画像/PDF を直接渡す) MIME 許容リスト
+_RETRY_SUPPORTED_MIMES = ("image/jpeg", "image/png", "image/webp", "application/pdf")
 
 logger = setup_logger()
 
@@ -66,6 +69,54 @@ class GeminiExtractor(AiExtractor):
         except Exception as e:
             logger.error(
                 f"AI抽出失敗: {file_name}: {e}", extra={"step": "ai_extract", "error": str(e)}
+            )
+            return []
+
+    def extract_from_file(self, file: DriveFile) -> list[ReceiptItem]:
+        """画像/PDFを Gemini multimodal に直接渡して再抽出する。
+        amount_validation NG 時の再読取（第二段抽出）として使われる。
+        """
+        if file.mime_type not in _RETRY_SUPPORTED_MIMES:
+            logger.warning(
+                f"再抽出: 未対応MIME {file.mime_type}: {file.file_name}",
+                extra={"step": "ai_retry"},
+            )
+            return []
+        if not file.content:
+            logger.warning(
+                f"再抽出: ファイル中身が空: {file.file_name}",
+                extra={"step": "ai_retry"},
+            )
+            return []
+
+        user_msg = (
+            f"以下はレシート/領収書「{file.file_name}」の画像またはPDFです。\n"
+            "OCR結果は使わず、画像から直接、レシートの情報を読み取って\n"
+            "JSON配列で返してください（金額の桁を特に注意して読んでください）。"
+        )
+        try:
+            resp = self._client.models.generate_content(
+                model=self._config.model,
+                contents=[
+                    types.Part.from_bytes(data=file.content, mime_type=file.mime_type),
+                    user_msg,
+                ],
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    max_output_tokens=self._config.max_tokens,
+                    temperature=0.1,
+                ),
+            )
+            items = self._parse_response(resp.text.strip(), file.file_name)
+            logger.info(
+                f"AI再抽出(画像): {file.file_name} → {len(items)} 明細",
+                extra={"step": "ai_retry"},
+            )
+            return items
+        except Exception as e:
+            logger.error(
+                f"AI再抽出失敗: {file.file_name}: {e}",
+                extra={"step": "ai_retry", "error": str(e)},
             )
             return []
 

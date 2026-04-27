@@ -12,7 +12,8 @@
       "Bash(python -m ruff format src/sheets/client.py tests/test_sheets.py)",
       "Bash(python -m ruff format src/processing/manager.py tests/test_drive.py tests/test_manager_rename_and_validation.py)",
       "Bash(python -m ruff check --fix src tests)",
-      "Bash(python -m ruff format src tests)"
+      "Bash(python -m ruff format src tests)",
+      "Bash(python -m ruff format src/processing/manager.py tests/test_ai_parse.py tests/test_amount_validation_retry.py)"
     ]
   }
 }

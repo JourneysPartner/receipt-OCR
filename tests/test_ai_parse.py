@@ -67,3 +67,101 @@ class TestParseResponse:
 
     def test_invalid(self):
         assert _ext()._parse_response("not json", "t.jpg") == []
+
+
+class TestExtractFromFile:
+    """画像/PDFを直接渡す再抽出ルート"""
+
+    def _make(self):
+        from unittest.mock import MagicMock
+
+        from src.ai.gemini import GeminiExtractor
+        from src.config import AiConfig
+
+        ext = GeminiExtractor.__new__(GeminiExtractor)
+        ext._config = AiConfig()
+        ext._client = MagicMock()
+        return ext
+
+    def test_unsupported_mime_returns_empty(self):
+        from src.models import DriveFile
+
+        ext = self._make()
+        f = DriveFile(
+            file_id="x",
+            file_name="a.txt",
+            mime_type="text/plain",
+            folder_id="f",
+            content=b"hello",
+        )
+        assert ext.extract_from_file(f) == []
+
+    def test_empty_content_returns_empty(self):
+        from src.models import DriveFile
+
+        ext = self._make()
+        f = DriveFile(
+            file_id="x",
+            file_name="a.jpg",
+            mime_type="image/jpeg",
+            folder_id="f",
+            content=b"",
+        )
+        assert ext.extract_from_file(f) == []
+
+    def test_supported_mime_calls_api(self):
+        """JPEG が渡されれば API が呼ばれて parse される"""
+        from unittest.mock import MagicMock
+
+        from src.models import DriveFile
+
+        ext = self._make()
+        mock_resp = MagicMock()
+        mock_resp.text = '[{"date":"2026-04-27","amount":1600,"confidence":0.9}]'
+        ext._client.models.generate_content.return_value = mock_resp
+
+        f = DriveFile(
+            file_id="x",
+            file_name="a.jpg",
+            mime_type="image/jpeg",
+            folder_id="f",
+            content=b"\x89PNG fake",
+        )
+        items = ext.extract_from_file(f)
+        assert len(items) == 1
+        assert items[0].amount == 1600
+        ext._client.models.generate_content.assert_called_once()
+
+    def test_pdf_supported(self):
+        from unittest.mock import MagicMock
+
+        from src.models import DriveFile
+
+        ext = self._make()
+        mock_resp = MagicMock()
+        mock_resp.text = '[{"amount":100,"confidence":0.5}]'
+        ext._client.models.generate_content.return_value = mock_resp
+
+        f = DriveFile(
+            file_id="x",
+            file_name="a.pdf",
+            mime_type="application/pdf",
+            folder_id="f",
+            content=b"%PDF-1.4 fake",
+        )
+        items = ext.extract_from_file(f)
+        assert len(items) == 1
+
+    def test_api_exception_returns_empty(self):
+        from src.models import DriveFile
+
+        ext = self._make()
+        ext._client.models.generate_content.side_effect = RuntimeError("rate limit")
+        f = DriveFile(
+            file_id="x",
+            file_name="a.jpg",
+            mime_type="image/jpeg",
+            folder_id="f",
+            content=b"data",
+        )
+        assert ext.extract_from_file(f) == []

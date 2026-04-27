@@ -150,6 +150,9 @@ class AiConfig:
     model: str = "gemini-2.5-flash"
     max_tokens: int = 2048
     confidence_threshold: float = 0.7
+    # 金額検証 NG（digit_inflation / missing_in_ocr）の時に
+    # Gemini multimodal で画像/PDF から再抽出するか
+    enable_amount_validation_retry: bool = True
 
 
 @dataclass(frozen=True)
@@ -267,6 +270,10 @@ def load_config() -> AppConfig:
             model=os.environ.get("AI_MODEL", "gemini-2.5-flash"),
             max_tokens=int(os.environ.get("AI_MAX_TOKENS", "2048")),
             confidence_threshold=float(os.environ.get("AI_CONFIDENCE_THRESHOLD", "0.7")),
+            enable_amount_validation_retry=os.environ.get(
+                "ENABLE_AMOUNT_VALIDATION_RETRY", "true"
+            ).lower()
+            == "true",
         ),
         google_credentials_path=os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
         gemini_api_key=os.environ.get("GEMINI_API_KEY"),

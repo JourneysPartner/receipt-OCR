@@ -122,6 +122,16 @@ class TestLoadConfig:
         assert c.ocr.fallback_engine == "vision_document"
         assert c.ocr.fallback_confidence_threshold == 0.75
 
+    def test_amount_validation_retry_default_on(self, monkeypatch):
+        monkeypatch.delenv("ENABLE_AMOUNT_VALIDATION_RETRY", raising=False)
+        c = load_config()
+        assert c.ai.enable_amount_validation_retry is True
+
+    def test_amount_validation_retry_can_be_disabled(self, monkeypatch):
+        monkeypatch.setenv("ENABLE_AMOUNT_VALIDATION_RETRY", "false")
+        c = load_config()
+        assert c.ai.enable_amount_validation_retry is False
+
     def test_account_alias_map_env_override(self, monkeypatch):
         """JSON で別名辞書を全置換できる"""
         monkeypatch.setenv(

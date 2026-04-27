@@ -239,6 +239,26 @@ class ProcessingManager:
         if not pending:
             return result
 
+        # ── Gemini 再抽出（amount_validation NG 時の第二段） ─────
+        # NG 明細が1件以上あればファイル単位で1回だけ Gemini multimodal に画像/PDFを直接渡す
+        retry_items: list[ReceiptItem] = []
+        retry_attempted = False
+        if self._config.ai.enable_amount_validation_retry and any(
+            validations[i].should_manual_entry for i in pending
+        ):
+            retry_attempted = True
+            try:
+                retry_items = self._ai.extract_from_file(file)
+                logger.info(
+                    f"AI再抽出: {file.file_name} → {len(retry_items)} 明細",
+                    extra={"step": "ai_retry", "file_id": file.file_id},
+                )
+            except Exception as e:
+                logger.error(
+                    f"AI再抽出例外: {file.file_name}: {e}",
+                    extra={"step": "ai_retry_error", "file_id": file.file_id},
+                )
+
         # 行予約
         reservations = cb.reserve_rows(
             count=len(pending),
@@ -248,16 +268,45 @@ class ProcessingManager:
         )
 
         for (row, rid), idx in zip(reservations, pending):
-            validation = validations[idx]
+            primary_validation = validations[idx]
+            cur_item = items[idx]
+            cur_corrected = corrected[idx]
+            cur_validation = primary_validation
+            adopted_engine = "primary"
+            retry_validation: AmountValidation | None = None
 
-            # 金額検証で明らかに不整合なら強制 manual_entry
-            if validation.should_manual_entry:
+            # 再抽出の採用判定: primary で NG だった明細だけ retry を試す
+            if primary_validation.should_manual_entry and retry_items:
+                retry_item = self._select_retry_item(retry_items, idx, len(items))
+                if retry_item is not None:
+                    rv = validate_amount(retry_item.amount, ocr.raw_text)
+                    retry_validation = rv
+                    if rv.is_valid:
+                        # 採用: 再抽出結果で置き換え
+                        cur_item = retry_item
+                        cur_corrected = self._corrector.apply(retry_item)
+                        cur_validation = rv
+                        adopted_engine = "retry"
+                        logger.info(
+                            f"AI再抽出採用: {file.file_name}[{idx}] "
+                            f"({primary_validation.status} → {rv.status})",
+                            extra={"step": "ai_retry_adopt", "file_id": file.file_id},
+                        )
+                    else:
+                        logger.info(
+                            f"AI再抽出却下: {file.file_name}[{idx}] "
+                            f"(primary={primary_validation.status}, retry={rv.status})",
+                            extra={"step": "ai_retry_reject", "file_id": file.file_id},
+                        )
+
+            # 最終判定: それでも NG なら manual_entry
+            if cur_validation.should_manual_entry:
                 try:
                     self._write_amount_invalid_as_manual(
                         file,
-                        items[idx],
-                        corrected[idx],
-                        validation,
+                        cur_item,
+                        cur_corrected,
+                        cur_validation,
                         idx,
                         row,
                         rid,
@@ -265,6 +314,10 @@ class ProcessingManager:
                         ocr,
                         now,
                         today,
+                        primary_validation=primary_validation,
+                        retry_attempted=retry_attempted,
+                        retry_validation=retry_validation,
+                        adopted_engine=adopted_engine,
                     )
                     result.manual_entry += 1
                 except Exception as e:
@@ -279,8 +332,8 @@ class ProcessingManager:
             try:
                 is_low = self._write_item(
                     file,
-                    items[idx],
-                    corrected[idx],
+                    cur_item,
+                    cur_corrected,
                     idx,
                     row,
                     rid,
@@ -288,7 +341,11 @@ class ProcessingManager:
                     ocr,
                     now,
                     today,
-                    validation=validation,
+                    validation=cur_validation,
+                    primary_validation=primary_validation,
+                    retry_attempted=retry_attempted,
+                    retry_validation=retry_validation,
+                    adopted_engine=adopted_engine,
                 )
                 if is_low:
                     result.low_confidence += 1
@@ -300,7 +357,10 @@ class ProcessingManager:
                 )
                 try:
                     cb.write_manual_entry_row(
-                        row, file.drive_link, corrected[idx].date or today, f"明細[{idx}]失敗: {e}"
+                        row,
+                        file.drive_link,
+                        cur_corrected.date or today,
+                        f"明細[{idx}]失敗: {e}",
                     )
                     cb.update_reservation_status(rid, ProcessStatus.MANUAL_ENTRY.value)
                     result.manual_entry += 1
@@ -326,6 +386,49 @@ class ProcessingManager:
 
         return result
 
+    @staticmethod
+    def _select_retry_item(
+        retry_items: list[ReceiptItem],
+        idx: int,
+        original_count: int,
+    ) -> ReceiptItem | None:
+        """再抽出結果から idx 番目に対応する明細を選ぶ。
+        - retry_items 件数 == 元 items 件数 → retry_items[idx]
+        - 1:1 マッピング不能でも 1件 vs 1件なら retry_items[0]
+        - それ以外（明細件数が変わった等）はマッピング不能で None
+        """
+        if not retry_items:
+            return None
+        if len(retry_items) == original_count and idx < len(retry_items):
+            return retry_items[idx]
+        if len(retry_items) == 1 and original_count == 1:
+            return retry_items[0]
+        return None
+
+    @staticmethod
+    def _format_retry_memo(
+        primary: AmountValidation | None,
+        retry_attempted: bool,
+        retry: AmountValidation | None,
+        adopted: str,
+    ) -> str:
+        """AI詳細ログ memo に乗せる retry 関連情報を整形する。
+        例: `retry=gemini_image | amount_status=digit_inflation→ok | adopted=retry`
+        """
+        parts: list[str] = []
+        if retry_attempted:
+            parts.append("retry=gemini_image")
+        else:
+            parts.append("retry=no")
+        primary_st = primary.status if primary else "-"
+        retry_st = retry.status if retry else "-"
+        if retry_attempted:
+            parts.append(f"amount_status={primary_st}→{retry_st}")
+        else:
+            parts.append(f"amount_status={primary_st}")
+        parts.append(f"adopted={adopted}")
+        return " | ".join(parts)
+
     # ── 1明細の書き込み ────────────────────────────────
     def _write_item(
         self,
@@ -340,6 +443,10 @@ class ProcessingManager:
         now: str,
         today: str,
         validation: AmountValidation | None = None,
+        primary_validation: AmountValidation | None = None,
+        retry_attempted: bool = False,
+        retry_validation: AmountValidation | None = None,
+        adopted_engine: str = "primary",
     ) -> bool:
         """戻り値: True なら低信頼"""
         cb.copy_formulas_to_row(row)
@@ -347,6 +454,13 @@ class ProcessingManager:
         cb.update_reservation_status(rid, ProcessStatus.WRITTEN.value)
 
         memo = corrected.memo or ""
+        retry_memo = self._format_retry_memo(
+            primary=primary_validation or validation,
+            retry_attempted=retry_attempted,
+            retry=retry_validation,
+            adopted=adopted_engine,
+        )
+        memo = f"{memo} | {retry_memo}" if memo else retry_memo
         if validation and validation.matched_candidates:
             v_memo = f"金額候補: {validation.matched_candidates} (status={validation.status})"
             memo = f"{memo} | {v_memo}" if memo else v_memo
@@ -391,14 +505,25 @@ class ProcessingManager:
         ocr: OcrResult,
         now: str,
         today: str,
+        primary_validation: AmountValidation | None = None,
+        retry_attempted: bool = False,
+        retry_validation: AmountValidation | None = None,
+        adopted_engine: str = "primary",
     ) -> None:
         """金額検証で NG になった明細を、詳細をO列に残して manual_entry 行にする。
         candidate（corrected）の取引先・摘要・税区分・勘定科目コード等は
         書き込んだうえで、K列冒頭に `※金額要確認` 等の具体ラベルを付ける。
+        AI再抽出の有無と判定遷移は memo / O列に残す。
         """
+        retry_memo = self._format_retry_memo(
+            primary=primary_validation or validation,
+            retry_attempted=retry_attempted,
+            retry=retry_validation,
+            adopted=adopted_engine,
+        )
         error_msg = (
             f"金額検証NG ({validation.status}): {validation.reason} / "
-            f"OCR候補: {validation.matched_candidates}"
+            f"OCR候補: {validation.matched_candidates} | {retry_memo}"
         )
         logger.warning(
             f"金額検証NG → manual_entry: {file.file_name}[{idx}]: {error_msg}",
@@ -435,7 +560,8 @@ class ProcessingManager:
                 corrections_applied=", ".join(corrected.corrections_applied),
                 needs_review=True,
                 memo=(
-                    f"金額検証NG: {validation.reason} / OCR候補: {validation.matched_candidates}"
+                    f"金額検証NG: {validation.reason} / "
+                    f"OCR候補: {validation.matched_candidates} | {retry_memo}"
                 ),
             )
         )
