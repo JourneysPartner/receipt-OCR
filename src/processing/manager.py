@@ -55,9 +55,36 @@ class ProcessingManager:
             "skipped_customers": 0,
             "error_customers": 0,
             "total_items": 0,
+            # validate 用の予定件数
+            "planned_success": 0,
+            "planned_low_confidence": 0,
+            "planned_manual_entry": 0,
+            "planned_errors": 0,
+            "planned_skipped": 0,
+            # 実行モードを残す（後で集計ログに出す）
+            "run_mode": self._config.runtime.run_mode,
+            "target_scope": self._config.runtime.target_scope,
         }
 
         customers = self._master.read_customer_rows()
+
+        # selected の場合は対象1顧客に絞る
+        rt = self._config.runtime
+        if rt.is_selected:
+            customers = [self._select_target_customer(customers, rt.target_row)]
+            logger.info(
+                f"selected mode: 対象顧客 row={customers[0].row_number} "
+                f"name={customers[0].customer_name!r}",
+                extra={"step": "runtime_select"},
+            )
+
+        # ジョブ開始ログ
+        logger.info(
+            f"ジョブ開始: run_mode={rt.run_mode}, target_scope={rt.target_scope}, "
+            f"target_row={rt.target_row}, 対象顧客数={len(customers)}",
+            extra={"step": "job_runtime"},
+        )
+
         target = self._config.master.target_entry_type
 
         for cust in customers:
@@ -75,13 +102,14 @@ class ProcessingManager:
                 logger.warning(
                     f"フォルダURL未設定: {cust.customer_name}", extra={"step": "customer_skip"}
                 )
-                now = datetime.now(JST).isoformat()
-                try:
-                    self._master.update_customer_status(
-                        cust.row_number, "スキップ / フォルダURL未設定", now
-                    )
-                except Exception:
-                    pass
+                if not rt.is_validate:
+                    now = datetime.now(JST).isoformat()
+                    try:
+                        self._master.update_customer_status(
+                            cust.row_number, "スキップ / フォルダURL未設定", now
+                        )
+                    except Exception:
+                        pass
                 summary["skipped_customers"] += 1
                 continue
 
@@ -93,13 +121,14 @@ class ProcessingManager:
                     "(手動で出納帳作成しG列に記入してください)",
                     extra={"step": "customer_skip_no_sheet"},
                 )
-                now = datetime.now(JST).isoformat()
-                try:
-                    self._master.update_customer_status(
-                        cust.row_number, "スキップ / シートURL未設定", now
-                    )
-                except Exception:
-                    pass
+                if not rt.is_validate:
+                    now = datetime.now(JST).isoformat()
+                    try:
+                        self._master.update_customer_status(
+                            cust.row_number, "スキップ / シートURL未設定", now
+                        )
+                    except Exception:
+                        pass
                 summary["skipped_customers"] += 1
                 continue
 
@@ -107,25 +136,60 @@ class ProcessingManager:
                 result = self._process_customer(cust)
                 summary["processed_customers"] += 1
                 summary["total_items"] += result.total_processed
+                # validate 集計（dry_run 時も結果は CustomerResult に詰まっている前提だが、
+                # 現実装では _process_customer 経由の dry_run 経路で 0 件になることもあるので、
+                # ここでは _process_file 単位の計上ではなく "計画件数" を別途取りたい）
+                summary["planned_success"] += result.success
+                summary["planned_low_confidence"] += result.low_confidence
+                summary["planned_manual_entry"] += result.manual_entry
+                summary["planned_errors"] += result.errors
+                summary["planned_skipped"] += result.skipped
             except Exception as e:
                 summary["error_customers"] += 1
-                now = datetime.now(JST).isoformat()
                 logger.error(
                     f"顧客処理失敗: {cust.customer_name}: {e}",
                     extra={"step": "customer_error"},
                     exc_info=True,
                 )
-                try:
-                    self._master.update_customer_status(
-                        cust.row_number,
-                        f"エラー: {str(e)[:50]}",
-                        now,
-                    )
-                except Exception:
-                    pass
+                if not rt.is_validate:
+                    now = datetime.now(JST).isoformat()
+                    try:
+                        self._master.update_customer_status(
+                            cust.row_number,
+                            f"エラー: {str(e)[:50]}",
+                            now,
+                        )
+                    except Exception:
+                        pass
 
+        if rt.is_validate:
+            logger.info(
+                f"VALIDATE 集計: success予定={summary['planned_success']}, "
+                f"low_conf予定={summary['planned_low_confidence']}, "
+                f"manual_entry予定={summary['planned_manual_entry']}, "
+                f"skipped={summary['planned_skipped']}, "
+                f"error予定={summary['planned_errors']}",
+                extra={"step": "validate_summary"},
+            )
         logger.info(f"全顧客処理完了: {summary}", extra={"step": "summary"})
         return summary
+
+    @staticmethod
+    def _select_target_customer(customers, target_row: int | None):
+        """selected モード時に対象 1 顧客を抽出する。
+        - target_row が None / マッチ無し / 顧客行ではない場合は ValueError
+        """
+        if target_row is None:
+            raise ValueError("TARGET_ROW が指定されていません (selected モード)")
+        for c in customers:
+            if c.row_number == target_row:
+                if not c.customer_name.strip():
+                    raise ValueError(f"指定行 {target_row} の顧客名が空欄です")
+                return c
+        raise ValueError(
+            f"指定行 {target_row} に有効な顧客行が見つかりません "
+            f"(マスター読み取り対象は data_start_row 以降)"
+        )
 
     # ── 1顧客の処理 ────────────────────────────────
     def _process_customer(self, cust: CustomerRow) -> CustomerResult:
@@ -134,7 +198,9 @@ class ProcessingManager:
 
         logger.info(f"顧客処理開始: {cust.customer_name}", extra={"step": "customer_start"})
 
-        self._master.update_customer_status(cust.row_number, "処理中", now_str)
+        # validate モードではマスターのF/I列を実書き換えしない（運用混乱防止）
+        if not self._config.runtime.is_validate:
+            self._master.update_customer_status(cust.row_number, "処理中", now_str)
 
         cashbook_id = cust.spreadsheet_id
         if not cashbook_id:
@@ -159,7 +225,8 @@ class ProcessingManager:
         files = self._drive.list_files(folder_id)
         if not files:
             logger.info(f"レシートなし: {cust.customer_name}", extra={"step": "customer_no_files"})
-            self._master.update_customer_status(cust.row_number, "完了（対象なし）", now_str)
+            if not self._config.runtime.is_validate:
+                self._master.update_customer_status(cust.row_number, "完了（対象なし）", now_str)
             return CustomerResult()
 
         processed_keys = cb.get_processed_keys()
@@ -177,7 +244,8 @@ class ProcessingManager:
         # 集計結果からF列の状態文字列を生成
         status_str = total.to_status_string()
         now_final = datetime.now(JST).isoformat()
-        self._master.update_customer_status(cust.row_number, status_str, now_final)
+        if not self._config.runtime.is_validate:
+            self._master.update_customer_status(cust.row_number, status_str, now_final)
 
         logger.info(
             f"顧客処理完了: {cust.customer_name} → {status_str}",
@@ -287,8 +355,29 @@ class ProcessingManager:
         )
 
         if self._config.dry_run:
+            # validate / dry_run: 書き込みは一切せず、判定のみで結果を集計する。
+            # 予定件数を CustomerResult に詰めて返す（success/manual の候補件数が分かるよう）。
+            planned_success = 0
+            planned_low = 0
+            planned_manual = 0
+            for i in range(len(corrected)):
+                v = validations[i]
+                if v.should_manual_entry:
+                    planned_manual += 1
+                elif corrected[i].needs_review:
+                    planned_low += 1
+                else:
+                    planned_success += 1
+            result.success = planned_success
+            result.low_confidence = planned_low
+            result.manual_entry = planned_manual
             logger.info(
-                f"DRY RUN: {file.file_name} → {len(corrected)} 明細", extra={"step": "dry_run"}
+                f"VALIDATE: {file.file_name} → "
+                f"success予定={planned_success}, "
+                f"low_conf予定={planned_low}, "
+                f"manual予定={planned_manual} "
+                f"(total {len(corrected)} 明細, {extraction_memo})",
+                extra={"step": "validate_file", "file_id": file.file_id},
             )
             return result
 

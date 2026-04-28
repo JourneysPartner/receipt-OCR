@@ -13,9 +13,21 @@ from src.sheets.client import MasterSheetClient
 
 
 def main() -> int:
-    config = load_config()
+    try:
+        config = load_config()
+    except ValueError as e:
+        # RUN_MODE / TARGET_SCOPE / TARGET_ROW などの env 不正
+        logger = setup_logger()
+        logger.error(f"起動 env が不正: {e}", extra={"step": "startup_env_error"})
+        return 1
+
     logger = setup_logger(level=config.log_level)
-    logger.info("=== レシート OCR ジョブ開始 ===", extra={"step": "job_start"})
+    rt = config.runtime
+    logger.info(
+        f"=== レシート OCR ジョブ開始 (run_mode={rt.run_mode}, "
+        f"target_scope={rt.target_scope}, target_row={rt.target_row}) ===",
+        extra={"step": "job_start"},
+    )
 
     if not config.master.spreadsheet_id:
         logger.error("MASTER_SPREADSHEET_ID 未設定", extra={"step": "validation"})

@@ -159,6 +159,33 @@ class AiConfig:
 
 
 @dataclass(frozen=True)
+class RuntimeConfig:
+    """Apps Script のメニュー / 手動実行から渡される実行モード。
+
+    run_mode:
+      - "prod": 通常本番（実書き込み + 【済】付与）
+      - "validate": シミュレーション（書き込みなし、結果ログのみ）
+    target_scope:
+      - "all": 全顧客（マスター全行）
+      - "selected": マスター指定行の1顧客のみ
+    target_row:
+      - target_scope = "selected" のとき必須。マスターシート上の行番号 (1-indexed)
+    """
+
+    run_mode: str = "prod"  # "prod" | "validate"
+    target_scope: str = "all"  # "all" | "selected"
+    target_row: int | None = None
+
+    @property
+    def is_validate(self) -> bool:
+        return self.run_mode == "validate"
+
+    @property
+    def is_selected(self) -> bool:
+        return self.target_scope == "selected"
+
+
+@dataclass(frozen=True)
 class AppConfig:
     master: MasterConfig
     template: TemplateConfig
@@ -171,6 +198,7 @@ class AppConfig:
     dry_run: bool = False
     log_level: str = "INFO"
     reservation_ttl_minutes: int = 30
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 
 
 def _parse_int_tuple(env_value: str | None, default: tuple[int, ...]) -> tuple[int, ...]:
@@ -185,6 +213,41 @@ def _parse_str_tuple(env_value: str | None, default: tuple[str, ...]) -> tuple[s
     return tuple(s.strip() for s in env_value.split(",") if s.strip())
 
 
+def _build_runtime_config() -> RuntimeConfig:
+    """Apps Script から override される実行モード env を読み込む。
+    値の妥当性は load_config 末尾でバリデーションする。
+    """
+    raw_mode = os.environ.get("RUN_MODE", "prod").strip().lower() or "prod"
+    raw_scope = os.environ.get("TARGET_SCOPE", "all").strip().lower() or "all"
+    raw_row = os.environ.get("TARGET_ROW", "").strip()
+
+    if raw_mode not in ("prod", "validate"):
+        raise ValueError(f"RUN_MODE は 'prod' か 'validate' のいずれか (received={raw_mode!r})")
+    if raw_scope not in ("all", "selected"):
+        raise ValueError(f"TARGET_SCOPE は 'all' か 'selected' のいずれか (received={raw_scope!r})")
+
+    target_row: int | None = None
+    if raw_row:
+        try:
+            target_row = int(raw_row)
+        except ValueError as e:
+            raise ValueError(
+                f"TARGET_ROW は整数文字列でなければなりません (received={raw_row!r})"
+            ) from e
+
+    if raw_scope == "selected":
+        if target_row is None:
+            raise ValueError("TARGET_SCOPE=selected のとき TARGET_ROW は必須です")
+        if target_row < 1:
+            raise ValueError(f"TARGET_ROW は 1 以上でなければなりません (received={target_row})")
+
+    return RuntimeConfig(
+        run_mode=raw_mode,
+        target_scope=raw_scope,
+        target_row=target_row,
+    )
+
+
 def load_config() -> AppConfig:
     import json
 
@@ -197,6 +260,8 @@ def load_config() -> AppConfig:
     alias_map_env = os.environ.get("CASHBOOK_ACCOUNT_ALIAS_MAP")
     if alias_map_env:
         alias_map_default = json.loads(alias_map_env)
+
+    runtime = _build_runtime_config()
 
     return AppConfig(
         master=MasterConfig(
@@ -282,7 +347,9 @@ def load_config() -> AppConfig:
         ),
         google_credentials_path=os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
         gemini_api_key=os.environ.get("GEMINI_API_KEY"),
-        dry_run=os.environ.get("DRY_RUN", "false").lower() == "true",
+        # validate モードは内部的に dry_run を強制 ON にする
+        dry_run=runtime.is_validate or os.environ.get("DRY_RUN", "false").lower() == "true",
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         reservation_ttl_minutes=int(os.environ.get("RESERVATION_TTL_MINUTES", "30")),
+        runtime=runtime,
     )

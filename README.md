@@ -2,6 +2,63 @@
 
 「現金自動記帳マスター」スプレッドシートを起点に、複数顧客のレシートを一括処理する Cloud Run Job。
 
+## 実行モード（Apps Script 連携）
+
+スプレッドシート側の Apps Script メニューから Cloud Run Job を呼ぶ際、
+以下の環境変数を override で渡すことで動作を切り替えます。
+
+### `RUN_MODE`
+
+| 値 | 動作 |
+|----|------|
+| `prod`（既定） | 実書き込みあり / 【済】 リネームあり / マスター F・I 列更新あり |
+| `validate` | 書き込み一切なし。OCR・AI抽出・補正・amount_validation・retry 判定までは行い、結果件数だけログに出す |
+
+`validate` は内部的に `dry_run=True` を立て、以下を **すべてスキップ** します:
+- 入力用タブへの書き込み
+- 【済】リネーム
+- 処理管理シートへの reservation/written/manual_entry 反映
+- マスター F・I 列の状態更新（「処理中」「完了」「エラー」も書かない）
+
+### `TARGET_SCOPE` / `TARGET_ROW`
+
+| 値 | 動作 |
+|----|------|
+| `TARGET_SCOPE=all`（既定） | マスター全行を対象 |
+| `TARGET_SCOPE=selected` + `TARGET_ROW=N` | マスターの行番号 N の顧客のみ対象 |
+
+`selected` のときの注意:
+- `TARGET_ROW` は必須（数字文字列、1以上）
+- 該当行が見つからない場合 / 顧客名が空欄の場合はエラー終了
+- ヘッダー行（既定では行 1）は処理対象に含まれない
+
+### Apps Script からの呼び出し例
+
+| メニュー | env override |
+|---------|-------------|
+| 検証：選択行だけ | `RUN_MODE=validate, TARGET_SCOPE=selected, TARGET_ROW=13` |
+| 検証：全顧客 | `RUN_MODE=validate, TARGET_SCOPE=all` |
+| 本番：選択行だけ | `RUN_MODE=prod, TARGET_SCOPE=selected, TARGET_ROW=13` |
+| 本番：全顧客 | `RUN_MODE=prod, TARGET_SCOPE=all` |
+
+### ログ出力
+
+ジョブ開始時:
+```
+ジョブ開始: run_mode=validate, target_scope=selected, target_row=13, 対象顧客数=1
+selected mode: 対象顧客 row=13 name='テスト株式会社'
+```
+
+ファイル単位 (validate):
+```
+VALIDATE: receipt.jpg → success予定=1, low_conf予定=0, manual予定=0 (total 1 明細, ...)
+```
+
+ジョブ終了時 (validate):
+```
+VALIDATE 集計: success予定=5, low_conf予定=1, manual_entry予定=2, skipped=0, error予定=0
+```
+
 ## アーキテクチャ
 
 ```
@@ -402,6 +459,9 @@ gcloud run jobs execute receipt-ocr-job --region=asia-northeast1
 | 変数 | 必須 | 既定 | 説明 |
 |------|------|------|------|
 | `MASTER_SPREADSHEET_ID` | Yes | | マスターシートID |
+| `RUN_MODE` | | prod | `prod` / `validate`（Apps Script から override） |
+| `TARGET_SCOPE` | | all | `all` / `selected`（Apps Script から override） |
+| `TARGET_ROW` | selected時 | | マスター行番号（1-indexed） |
 | `GEMINI_API_KEY` | Yes | | Gemini API キー |
 | `INDIVIDUAL_TEMPLATE_SPREADSHEET_ID` | — | | （将来用、現在は未使用） |
 | `CORPORATE_TEMPLATE_SPREADSHEET_ID` | — | | （将来用、現在は未使用） |
