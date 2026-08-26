@@ -345,15 +345,24 @@ function updateTransactionLocation(fullTxId, rowNumber) {
 }
 
 /** 取引ログの予定値と取引ID完全値から書込指示1件を組み立てる。 */
+/**
+ * 書込指示を作る。
+ *
+ * `txLog.columns`を与えると、その列だけを書く。要確認の解決はF列だけ、
+ * あるいはB・M列だけを更新する（4.23の呼出経路表）。全列を書き直すと、
+ * 解決とは無関係な列まで上書きされ、担当者が手で直した値が消える。
+ */
 function buildRowWrite(rowNumber, txLog) {
-  return {
-    rowNumber: rowNumber,
-    fullTxId: txLog.fullTxId,
-    values: {
-      b: txLog.planned.b, f: txLog.planned.f, i: txLog.planned.i,
-      k: txLog.planned.k, m: txLog.planned.m
-    }
+  var all = {
+    b: txLog.planned.b, f: txLog.planned.f, i: txLog.planned.i,
+    k: txLog.planned.k, m: txLog.planned.m
   };
+  var values = all;
+  if (Array.isArray(txLog.columns) && txLog.columns.length) {
+    values = {};
+    txLog.columns.forEach(function(key) { values[key] = all[key]; });
+  }
+  return {rowNumber: rowNumber, fullTxId: txLog.fullTxId, values: values};
 }
 
 /** 4.25のインデックスから読む。取引ごとにシートを読まない（INV-08）。 */
