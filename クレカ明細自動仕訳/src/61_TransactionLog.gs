@@ -129,6 +129,25 @@ function registerPrepared(txs, runId) {
   });
 }
 
+/**
+ * 取引先解決状態（L列）を更新する。
+ *
+ * 取引状態（J列）とは別の軸である。`EXCLUDE`のような操作は取引を終端へ
+ * 送るが解決状態は変えない ── だからこそINV-17の条件2は`COMMITTED`に
+ * 限定される（CR-I）。
+ */
+function updatePartnerResolution(fullTxId, status) {
+  if (!PARTNER_STATUS[String(status)]) {
+    throw new TypeError('Unsupported partner resolution status: ' + status);
+  }
+  return withScriptLock_(function() {
+    var row = getTransaction(fullTxId);
+    if (!row) throw new IntegrityError(null, 'Transaction not found: ' + fullTxId);
+    transactionLogSheet_().getRange(row._rowNumber, 12).setValue(String(status));
+    transactionLogSheet_().getRange(row._rowNumber, 45).setValue(nowIso_());
+  });
+}
+
 function updateTransactionStatus(fullTxId, fromStatus, toStatus) {
   var allowed = ALLOWED_TX_TRANSITIONS[String(fromStatus)] || [];
   if (allowed.indexOf(toStatus) < 0) throw new StateTransitionError('Transaction transition is not allowed');

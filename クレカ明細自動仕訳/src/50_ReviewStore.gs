@@ -8,7 +8,10 @@
  * 未解決のままfreee取込へ進む。
  */
 
-var REVIEW_SHEET_WIDTH_ = 31;   // A〜AE
+// A〜AF。AF列（除外理由）は `EXCLUDED` の行で必須である。
+// これがないと「担当者が判断して対象外にした」のと「システムが根拠消滅で
+// 閉じた」のを区別できず、滞留の監視ができない。
+var REVIEW_SHEET_WIDTH_ = 32;
 
 function reviewSheet_() {
   return requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.REVIEW);
@@ -67,6 +70,7 @@ function reviewFromRecord_(record) {
     destinationRow: v[24] || null, detail: v[25] || null,
     registeredAt: v[26] || null, reviewerEmail: v[27] || null, reviewedAt: v[28] || null,
     resolveOperation: v[29] || null, resolverRole: v[30] || null,
+    excludeReason: v[31] || null,
     _rowNumber: record.rowNumber
   };
 }
@@ -85,6 +89,13 @@ function openReviews(filter) {
     if (filter.reviewType && review.reviewType !== String(filter.reviewType)) return false;
     return true;
   });
+}
+
+/** 要確認を1件引く。状態を問わない（解決済みの内容確認にも使う）。 */
+function getReviewById(reviewId) {
+  return allReviewRecords_().filter(function(review) {
+    return review.reviewId === String(reviewId);
+  })[0] || null;
 }
 
 /** 当該取引に未解決の要確認が残っているか（4.26.2 条件1）。 */
@@ -191,6 +202,15 @@ function updateReviewStatus(reviewId, status, context) {
     }
     if (context.detail !== undefined) {
       sheet.getRange(review._rowNumber, 26).setValue(context.detail === null ? '' : JSON.stringify(context.detail));
+    }
+    // AF列（除外理由）。`EXCLUDED`のときは必須、それ以外では空欄へ戻す。
+    if (String(status) === 'EXCLUDED') {
+      if (!context.excludeReason) {
+        throw new TypeError('An EXCLUDED review requires an exclude reason');
+      }
+      sheet.getRange(review._rowNumber, 32).setValue(String(context.excludeReason));
+    } else {
+      sheet.getRange(review._rowNumber, 32).setValue('');
     }
     return {reviewId: String(reviewId), status: String(status)};
   });

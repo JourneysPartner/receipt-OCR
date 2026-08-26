@@ -180,3 +180,16 @@ function incrementRunTransactionCount(runId, delta) {
   var properties = PropertiesService.getScriptProperties();
   properties.setProperty('RUN_TX_COUNT_' + runId, String(getRunCumulativeTransactionCount(runId) + Number(delta)));
 }
+
+/**
+ * 実行の終了時にカウンタを片付ける。
+ *
+ * Script Properties にはキー数と合計サイズの上限がある。実行ごとに1件作って
+ * 消さないと、日次実行を続けるうちに溜まり、ある日プロパティ書込が失敗して
+ * **実行そのものが止まる**。原因は書込に失敗した処理とは無関係な場所にあり、
+ * 追いにくい。
+ */
+function clearRunTransactionCount(runId) {
+  if (!runId) return;
+  PropertiesService.getScriptProperties().deleteProperty('RUN_TX_COUNT_' + runId);
+}
