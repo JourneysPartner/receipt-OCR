@@ -56,12 +56,24 @@ function appendAuditBatch(entries) {
   });
 }
 
+/**
+ * 直近の連鎖起点（GENESIS）の行を返す。
+ *
+ * **N列だけを1回読んで後方から探す。** 以前は1行につき`getValue()`を
+ * 呼んでおり、起点が無ければ全行を1セルずつ読んでいた。監査ログは年5万行に
+ * 達し得る設計であり、`verifyChain('RECENT')`が直近N行だけを検証する意図で
+ * 呼ばれても、**その前段のアンカー探索が全域を走っていた**（INV-25）。
+ */
 function getLastAnchorRow() {
   var sheet = auditSheet_();
-  var last = sheet.getLastRow();
-  for (var row = last; row >= 2; row -= 1) {
-    if (String(sheet.getRange(row, 14).getValue()) === CONFIG.AUDIT_CHAIN_GENESIS) {
-      return {rowNumber: row, auditId: String(sheet.getRange(row, 1).getValue())};
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return {rowNumber: null, auditId: null};
+
+  var previousHashes = sheet.getRange(2, 14, lastRow - 1, 1).getValues();
+  for (var offset = previousHashes.length - 1; offset >= 0; offset -= 1) {
+    if (String(previousHashes[offset][0]) === CONFIG.AUDIT_CHAIN_GENESIS) {
+      var rowNumber = offset + 2;
+      return {rowNumber: rowNumber, auditId: String(sheet.getRange(rowNumber, 1).getValue())};
     }
   }
   return {rowNumber: null, auditId: null};
