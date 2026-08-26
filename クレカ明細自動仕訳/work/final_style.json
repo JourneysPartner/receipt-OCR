@@ -1,0 +1,171 @@
+{
+  "input": "C:\\Users\\ko-ch\\Desktop\\\u4ed5\u4e8b\\receipt OCR\\\u30af\u30ec\u30ab\u660e\u7d30\u81ea\u52d5\u4ed5\u8a33\\credit_card_import_normalization_system_spec_v2.0.docx",
+  "fonts_by_char_count": {
+    "Yu Gothic": 25449,
+    "Consolas": 3802
+  },
+  "direct_run_formatting_runs": 1235,
+  "direct_paragraph_formatting_paragraphs": 381,
+  "heading_like_paragraphs_not_heading_style": [
+    {
+      "para_index": 1,
+      "text": "SYSTEM SPECIFICATION",
+      "style": "Normal"
+    },
+    {
+      "para_index": 2,
+      "text": "\u30af\u30ec\u30b8\u30c3\u30c8\u30ab\u30fc\u30c9\u660e\u7d30\n\u81ea\u52d5\u53d6\u8fbc\u30fb\u53d6\u5f15\u5148\u6b63\u898f\u5316\u30b7\u30b9\u30c6\u30e0",
+      "style": "Normal"
+    },
+    {
+      "para_index": 3,
+      "text": "\u4ed5\u69d8\u66f8 Ver.2.0",
+      "style": "Normal"
+    },
+    {
+      "para_index": 4,
+      "text": "\u4f5c\u6210\u65e5\uff1a2026\u5e748\u670823\u65e5",
+      "style": "Normal"
+    },
+    {
+      "para_index": 5,
+      "text": "\u5bfe\u8c61\uff1aGoogle Drive\uff0fGoogle\u30b9\u30d7\u30ec\u30c3\u30c9\u30b7\u30fc\u30c8\uff0fGoogle Apps Script",
+      "style": "Normal"
+    },
+    {
+      "para_index": 6,
+      "text": "\u6587\u66f8\u72b6\u614b\uff1a\u8981\u4ef6\u78ba\u5b9a\u7248",
+      "style": "Normal"
+    },
+    {
+      "para_index": 7,
+      "text": "\u5bfe\u8c61\u7bc4\u56f2\uff1a\u9867\u5ba2\u63d0\u51fa\u660e\u7d30\u304b\u3089freee\u30af\u30ec\u30ab\u51fa\u7d0d\u5e33\u300c\u5165\u529b\u7528\u30b7\u30fc\u30c8\u300d\u307e\u3067",
+      "style": "Normal"
+    },
+    {
+      "para_index": 8,
+      "text": "\u672c\u7248\u306f\u3001\u30ec\u30d3\u30e5\u30fc\u3067\u78ba\u5b9a\u3057\u305f\u72b6\u614b\u7ba1\u7406\u3001\u51aa\u7b49\u6027\u3001\u53d6\u5f15\u5148\u5224\u5b9a\u3001\u627f\u8a8d\u3001\u76e3\u67fb\u3001freee\u53d6\u8fbc\u5f8c\u306e\u5909\u66f4\u7ba1\u7406\u3001\u304a\u3088\u3073\u53d7\u5165\u6761\u4ef6\u3092\u7d71\u5408\u3057\u305f\u5b9f\u88c5\u57fa\u6e96\u3067\u3042\u308b\u3002",
+      "style": "Normal"
+    },
+    {
+      "para_index": 565,
+      "text": "\u30b7\u30fc\u30c8\u540d",
+      "style": "Normal"
+    },
+    {
+      "para_index": 566,
+      "text": "\u5f79\u5272",
+      "style": "Normal"
+    },
+    {
+      "para_index": 591,
+      "text": "\u9805\u76ee",
+      "style": "Normal"
+    },
+    {
+      "para_index": 592,
+      "text": "\u5185\u5bb9",
+      "style": "Normal"
+    },
+    {
+      "para_index": 617,
+      "text": "\u72b6\u614b",
+      "style": "Normal"
+    },
+    {
+      "para_index": 618,
+      "text": "\u30d5\u30a1\u30a4\u30eb\u540d\u30fb\u7ba1\u7406",
+      "style": "Normal"
+    },
+    {
+      "para_index": 631,
+      "text": "\u5185\u90e8\u72b6\u614b",
+      "style": "Normal"
+    },
+    {
+      "para_index": 632,
+      "text": "\u610f\u5473",
+      "style": "Normal"
+    },
+    {
+      "para_index": 633,
+      "text": "\u30d5\u30a1\u30a4\u30eb\u540d\u63a5\u982d\u8f9e",
+      "style": "Normal"
+    },
+    {
+      "para_index": 661,
+      "text": "\u9805\u76ee",
+      "style": "Normal"
+    },
+    {
+      "para_index": 662,
+      "text": "\u5143\u30d5\u30a1\u30a4\u30eb",
+      "style": "Normal"
+    },
+    {
+      "para_index": 671,
+      "text": "\u9805\u76ee",
+      "style": "Normal"
+    }
+  ],
+  "examples": {
+    "direct_paragraph_formatting": [
+      {
+        "para_index": 1,
+        "text": "SYSTEM SPECIFICATION",
+        "style": "Normal"
+      },
+      {
+        "para_index": 2,
+        "text": "\u30af\u30ec\u30b8\u30c3\u30c8\u30ab\u30fc\u30c9\u660e\u7d30\n\u81ea\u52d5\u53d6\u8fbc\u30fb\u53d6\u5f15\u5148\u6b63\u898f\u5316\u30b7\u30b9\u30c6\u30e0",
+        "style": "Normal"
+      },
+      {
+        "para_index": 3,
+        "text": "\u4ed5\u69d8\u66f8 Ver.2.0",
+        "style": "Normal"
+      },
+      {
+        "para_index": 4,
+        "text": "\u4f5c\u6210\u65e5\uff1a2026\u5e748\u670823\u65e5",
+        "style": "Normal"
+      },
+      {
+        "para_index": 5,
+        "text": "\u5bfe\u8c61\uff1aGoogle Drive\uff0fGoogle\u30b9\u30d7\u30ec\u30c3\u30c9\u30b7\u30fc\u30c8\uff0fGoogle Apps Script",
+        "style": "Normal"
+      }
+    ],
+    "direct_run_formatting": [
+      {
+        "para_index": 1,
+        "run_text": "SYSTEM SPECIFICATION",
+        "style": "Normal"
+      },
+      {
+        "para_index": 2,
+        "run_text": "\u30af\u30ec\u30b8\u30c3\u30c8\u30ab\u30fc\u30c9\u660e\u7d30\n\u81ea\u52d5\u53d6\u8fbc\u30fb\u53d6\u5f15\u5148\u6b63\u898f\u5316\u30b7\u30b9\u30c6\u30e0",
+        "style": "Normal"
+      },
+      {
+        "para_index": 3,
+        "run_text": "\u4ed5\u69d8\u66f8 Ver.2.0",
+        "style": "Normal"
+      },
+      {
+        "para_index": 4,
+        "run_text": "\u4f5c\u6210\u65e5\uff1a",
+        "style": "Normal"
+      },
+      {
+        "para_index": 4,
+        "run_text": "2026\u5e748\u670823\u65e5",
+        "style": "Normal"
+      }
+    ]
+  },
+  "notes": [
+    "Direct formatting is not always wrong, but it often causes inconsistent output when templates change.",
+    "Heading-like paragraphs not using Heading styles can break TOC and accessibility."
+  ]
+}
