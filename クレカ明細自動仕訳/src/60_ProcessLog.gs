@@ -167,6 +167,22 @@ function hasCategory2Approval(fileId, code, contentHash, hashVersion) {
   }, code);
 }
 
+/**
+ * 恒久ファイルインデックスM列（対象シート名）を保存する。
+ *
+ * 複数シートのXLSXで、どのシートを明細とみなすかを人が選んだ結果である。
+ * ここへ保存しないと、再検査のたびに同じ選択を求められる（M19・INV-31）。
+ */
+function setPermanentIndexTargetSheet(fileId, sheetName) {
+  return withScriptLock_(function() {
+    var record = getPermanentFileIndexRecord_(fileId);
+    if (!record) {
+      throw new IntegrityError(null, 'Permanent file index row not found: ' + fileId);
+    }
+    permanentFileIndexSheet_().getRange(record.rowNumber, 13).setValue(String(sheetName));
+  });
+}
+
 function setEmptyFileConfirmed(fileId, actor) {
   updateProcessLog(fileId, {emptyFileConfirmed: true});
   appendAudit({type: 'REVIEW_RESOLVE', actor: actor, targetType: 'LOG', targetId: fileId, after: {AN: true}});

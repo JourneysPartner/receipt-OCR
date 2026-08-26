@@ -20,6 +20,13 @@ function isAllowedTransition(fromState, toState) {
   return Boolean(ALLOWED_FILE_TRANSITIONS_[key] && ALLOWED_FILE_TRANSITIONS_[key].indexOf(toState) >= 0);
 }
 
+/** 現在のファイル状態（処理ログQ列）。 */
+function getFileState(fileId) {
+  var record = getProcessLogRecord_(fileId);
+  if (!record) throw new IntegrityError(null, 'Process log not found: ' + fileId);
+  return String(record.values[16]);
+}
+
 function transitionFileState(fileId, fromState, toState, runId) {
   if (!isAllowedTransition(fromState, toState)) throw new StateTransitionError('File transition is not allowed: ' + fromState + ' -> ' + toState);
   var record = getProcessLogRecord_(fileId);
