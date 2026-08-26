@@ -200,16 +200,30 @@ function writeTransactionRows(customer, rowWrites, leaseId, fileId) {
   ];
   var sheetName = customer.destinationSheetName;
 
+  // 行番号順に並べてから、列ごとに連続行をまとめる。1セル1レンジだと
+  // 200件で1,200レンジになり、リクエストサイズ上限と実行時間の双方に近づく。
+  var sorted = rowWrites.slice().sort(function(a, b) { return a.rowNumber - b.rowNumber; });
+
   groups.forEach(function(group) {
     var data = [];
-    rowWrites.forEach(function(write) {
-      group.keys.forEach(function(key) {
+    group.keys.forEach(function(key) {
+      // 当該列に書く対象だけを集める。`values`に含まれないキーの列には触れない
+      // ── 要確認の解決はF列だけを更新するので、他列を巻き込むと担当者が
+      // 手で直した値が消える。
+      var targets = sorted.filter(function(write) {
         var value = key === 'txId' ? write.fullTxId : (write.values || {})[key];
-        if (value === undefined) return;   // valuesに含まれないキーの列には触れない
-        var column = writeColumnNumber_(customer, key);
+        return value !== undefined;
+      });
+      if (!targets.length) return;
+
+      var column = writeColumnNumber_(customer, key);
+      groupConsecutiveRows(targets).forEach(function(chunk) {
         data.push({
-          range: a1Range_(sheetName, write.rowNumber, column, column),
-          values: [[value === null ? '' : value]]
+          range: a1ColumnRange_(sheetName, column, chunk.startRow, chunk.endRow),
+          values: chunk.rowWrites.map(function(write) {
+            var value = key === 'txId' ? write.fullTxId : (write.values || {})[key];
+            return [value === null ? '' : value];
+          })
         });
       });
     });

@@ -298,6 +298,12 @@ class MemorySheet {
     this.formats[`${row}:${column}`] = String(format);
   }
   _read(row, column, numRows, numColumns, formulas) {
+    // 走査量を検査できるようにする（INV-25）。スタブ上では全面走査も一瞬で
+    // 終わるため、回数と面積で見るしかない。
+    if (this.parent && this.parent.counters) {
+      this.parent.counters.rangeReads += 1;
+      this.parent.counters.cellsRead += numRows * numColumns;
+    }
     const source = formulas ? this.formulas : this.values;
     return Array.from({length: numRows}, (_, r) => Array.from({length: numColumns}, (_, c) => cloneCellValue(source[row + r - 1][column + c - 1])));
   }
@@ -318,6 +324,7 @@ class MemorySheet {
 class MemorySpreadsheet {
   constructor(id, options = {}) {
     this.id = String(id); this.name = options.name || this.id; this.sheets = [];
+    this.counters = {rangeReads: 0, cellsRead: 0};
     for (const spec of options.sheets || []) this.insertSheet(spec.name, spec);
   }
   getId() { return this.id; }
@@ -363,7 +370,7 @@ function createGasStubs() {
   const Utilities = createUtilitiesStub();
   const spreadsheets = new Map(); const files = new Map(); const folders = new Map(); const properties = new Map();
   let sheetsBatchGetFailures = [];
-  const apiCallCounts = {batchGet: 0, cellsRead: 0};
+  const apiCallCounts = {batchGet: 0, cellsRead: 0, batchUpdate: 0, rangesWritten: 0};
   const scriptLock = new MemoryScriptLock(); let activeSpreadsheetId = null; let activeUserEmail = 'tester@example.com';
   const openSpreadsheet = (id) => { const value = spreadsheets.get(String(id)); if (!value) throw new Error(`Spreadsheet not found: ${id}`); return value; };
   const sheetAndRange = (spreadsheetId, a1) => {
@@ -398,6 +405,10 @@ function createGasStubs() {
         })};
       },
       batchUpdate(request, spreadsheetId) {
+        // 書込レンジ数を検査できるようにする。1セル1レンジだと200件で
+        // 1,200レンジになり、リクエストサイズ上限に近づく。
+        apiCallCounts.batchUpdate += 1;
+        apiCallCounts.rangesWritten += (request.data || []).length;
         let totalUpdatedCells = 0;
         for (const data of request.data || []) {
           const {range} = sheetAndRange(spreadsheetId, data.range); range.setValues(data.values);
@@ -461,8 +472,8 @@ function createGasStubs() {
     // 読取量の計上。INV-08 の違反はスタブ上では速度に現れないため、
     // 回数で見るしかない。
     getApiCallCounts: () => Object.assign({}, apiCallCounts),
-    resetApiCallCounts() { apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; },
-    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptLock.reset(); sheetsBatchGetFailures = []; activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; }
+    resetApiCallCounts() { apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; },
+    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptLock.reset(); sheetsBatchGetFailures = []; activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; }
   };
   return {Utilities, SpreadsheetApp, Sheets, DriveApp, LockService, Session, PropertiesService, control};
 }
