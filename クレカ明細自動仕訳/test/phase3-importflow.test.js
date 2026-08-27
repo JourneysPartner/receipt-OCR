@@ -352,6 +352,56 @@ module.exports = ({test, assert, gas}) => {
       'the emptiness judgement itself must accept the row again');
   });
 
+  // ---- 11.3 Step4 を障害注入で実機どおりに再現する ----
+  //
+  // RAW（取引ID・F/I/K列）だけ成功し USER_ENTERED（B/M列）が失敗する部分
+  // 失敗は、**2リクエストの分割点で止められなければ再現できない**。これが
+  // 障害注入シームの存在理由であり、以前は呼出箇所が0だった。
+  //
+  // 書込途中の例外では行を**消さない**。11.3 Step4 は「同じ行へ書き直す」
+  // 設計であり、取引ID列が残っていることが回復の前提である。
+  test('11.3 Step4: a mid-write failure leaves the row for recovery, which completes it', () => {
+    const customer = setup();
+    const leaseId = gas.call('acquireLease',
+      ['C001', 'file1', 'RUN_1', 'admin@example.com', 'PROCESS']);
+    gas.evaluate(`
+      SETTINGS.FAULT_INJECTION = {SHEET_WRITE_USER_ENTERED_BEFORE: true};
+      resetFaultInjectionCache_();
+    `);
+
+    let thrown = null;
+    try {
+      gas.call('processFile', [{
+        customer, file: {id: 'file1', name: '明細.csv'}, runId: 'RUN_1', leaseId,
+        currentFileRecord: UNCHANGED, transactions: [tx('TX_F4')], validation: {}
+      }]);
+    } catch (error) {
+      thrown = error;
+    } finally {
+      gas.evaluate('SETTINGS.FAULT_INJECTION = null; resetFaultInjectionCache_();');
+    }
+    assert.ok(thrown && (thrown.code === 'FAULT_INJECTED' ||
+      /Injected fault/.test(String(thrown.message || thrown))),
+      `the injected fault must surface, not be swallowed; got ${String(thrown)}`);
+
+    // 部分状態：RAW群は書けている。B/M列はまだ。行は回復のために残る。
+    const sheet = gas.stubs.getSpreadsheet('dest1').getSheetByName('入力用シート');
+    assert.equal(sheet.getRange(2, 30).getValue(), 'TX_F4',
+      'the transaction id must survive - Step 4 rewrites this row in place');
+    assert.equal(sheet.getRange(2, 6).getValue(), '株式会社テスト', 'RAW columns were written');
+    assert.equal(sheet.getRange(2, 2).getValue(), '', 'USER_ENTERED columns were not');
+    assert.equal(sheet.getRange(2, 13).getValue(), '');
+
+    // 回復処理（11.3 Step4）が同じ行を書き直して完了させる
+    const result = gas.call('recoverPartialFailure',
+      ['file1', 'RUN_1', gas.call('buildIndex', [customer]), leaseId, {customer}]);
+    assert.equal(result.recovered[0].step, 4);
+    assert.equal(result.recovered[0].rowNumber, 2, 'the same row, not a new one');
+    assert.equal(sheet.getRange(2, 2).getValue(), '2026-01-02');
+    assert.equal(sheet.getRange(2, 13).getValue(), 1000);
+    assert.equal(gas.call('getTransaction', ['TX_F4']).transactionStatus, 'COMMITTED');
+  });
+
   // ---- 空き行判定は、実物の顧客・インデックスで動かなければならない ----
   //
   // 空き行判定最終列は顧客マスターAH列＝`rowScanLastColumn`である（INV-27）。
@@ -477,6 +527,54 @@ module.exports = ({test, assert, gas}) => {
     assert.notEqual(plain(after).preValidation.category, 2,
       'the approval must be picked up from the process log, or this loops forever');
     assert.equal(plain(after).wroteToDestination, true);
+  });
+
+  // ---- 8-8・8-9：取引検証と入力上限が本番経路で実際に評価される ----
+  //
+  // 以前は `validateTransactions` と `checkRunTransactionLimit` の呼出元が
+  // 無く、テストだけが手で材料を渡していた。**結線されていない検査は
+  // 存在しないのと同じ**で、上限はいくらでも超えられた。
+  test('8-8: a missing merchant is caught by the flow itself, not by test-supplied material', () => {
+    const customer = setup();
+    const broken = tx('TX_NM');
+    broken.merchantOriginal = '';
+    broken.originalMerchant = '';
+
+    const result = gas.call('processFile', [{
+      customer, file: {id: 'file1', name: '明細.csv'}, runId: 'RUN_1', leaseId: null,
+      currentFileRecord: UNCHANGED, transactions: [broken], validation: {}
+    }]);
+
+    assert.equal(plain(result).preValidation.category, 1,
+      'the flow must judge the transactions on its own');
+    assert.equal(destinationIsUntouched(), true);
+  });
+
+  test('8-9: the run limit is enforced against the persisted cumulative count', () => {
+    const customer = setup();
+    gas.evaluate('SETTINGS.MAX_TRANSACTIONS_PER_RUN = 3;');
+    gas.call('incrementRunTransactionCount', ['RUN_1', 3]);   // 前のファイルで既に3件
+
+    const result = gas.call('processFile', [{
+      customer, file: {id: 'file1', name: '明細.csv'}, runId: 'RUN_1', leaseId: null,
+      currentFileRecord: UNCHANGED, transactions: [tx('TX_L1')], validation: {}
+    }]);
+
+    assert.equal(plain(result).preValidation.category, 2,
+      'exceeding the limit is INPUT_LIMIT_EXCEEDED, not a silent overflow');
+    assert.equal(txLogRowCount(), 0, 'the file must not be half-processed');
+  });
+
+  test('8-13: a successful registration adds to the persisted run count', () => {
+    const customer = setup();
+    const leaseId = gas.call('acquireLease',
+      ['C001', 'file1', 'RUN_1', 'admin@example.com', 'PROCESS']);
+    gas.call('processFile', [{
+      customer, file: {id: 'file1', name: '明細.csv'}, runId: 'RUN_1', leaseId,
+      currentFileRecord: UNCHANGED, transactions: [tx('TX_C1'), tx('TX_C2')], validation: {}
+    }]);
+    assert.equal(gas.call('getRunCumulativeTransactionCount', ['RUN_1']), 2,
+      'without this, a continuation trigger restarts the tally at zero');
   });
 
   // ---- 8-10 → 9-8：取引先が判定できなかった取引に PARTNER 要確認が立つ ----

@@ -189,18 +189,20 @@ module.exports = ({test, assert, gas}) => {
 
   test('4.39: fault injection is inert when unconfigured', () => {
     setup();
-    gas.evaluate('SETTINGS.FAULT_INJECTION = null;');
+    gas.evaluate('SETTINGS.FAULT_INJECTION = null; resetFaultInjectionCache_();');
     assert.doesNotThrow(() => gas.call('faultInjectionPoint', ['WRITE_HALF', {}]));
   });
 
   test('4.39: a configured fault point throws where it is placed', () => {
     setup();
-    gas.evaluate("SETTINGS.FAULT_INJECTION = {WRITE_HALF: true};");
+    // 設定は実行開始時のキャッシュを参照する。変更後はリセットが要る ──
+    // それ自体が「途中で読み直さない」仕様の現れである。
+    gas.evaluate("SETTINGS.FAULT_INJECTION = {WRITE_HALF: true}; resetFaultInjectionCache_();");
     assert.throws(() => gas.call('faultInjectionPoint', ['WRITE_HALF', {fileId: 'file1'}]),
       (error) => error && error.code === 'FAULT_INJECTED');
     assert.doesNotThrow(() => gas.call('faultInjectionPoint', ['OTHER_POINT', {}]),
       'only the configured point fires');
-    gas.evaluate('SETTINGS.FAULT_INJECTION = null;');
+    gas.evaluate('SETTINGS.FAULT_INJECTION = null; resetFaultInjectionCache_();');
   });
 
   // ---- 本番では設定が何であっても素通りする ----
@@ -211,10 +213,11 @@ module.exports = ({test, assert, gas}) => {
       PropertiesService.getScriptProperties()
         .setProperty('PRODUCTION_MASTER_SPREADSHEET_ID', 'master');
       SETTINGS.FAULT_INJECTION = {WRITE_HALF: true};
+      resetFaultInjectionCache_();
     `);
     assert.doesNotThrow(() => gas.call('faultInjectionPoint', ['WRITE_HALF', {}]),
       'a misconfigured setting must not be able to halt production data processing');
-    gas.evaluate('SETTINGS.FAULT_INJECTION = null;');
+    gas.evaluate('SETTINGS.FAULT_INJECTION = null; resetFaultInjectionCache_();');
   });
 
   // ================= 期待値の読取経路 =================

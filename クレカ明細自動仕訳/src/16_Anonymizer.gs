@@ -117,8 +117,20 @@ function anonymizeCell(value, context) {
   if ((context.nameColumns || {})[column]) return '';
 
   if (value === null || value === undefined) return value;
-  // 数値セルは値の型を保つ。文字列化すると数値列が文字列列になり、
-  // 型プロファイルによる形式判定の挙動が変わる。
+
+  // 数値型セルに入った番号を素通りさせない。XLSX/CSVの取込では番号列が
+  // 数値化されることが普通にあり、文字列だけを対象にすると数値型の
+  // カード番号・会員番号がそのままコーパスへ入る。型は保つ ── 文字列化
+  // すると数値列が文字列列になり、型プロファイルの形式判定が変わる。
+  // 数値に先頭ゼロは存在しないので、マスク結果は 0 とする（桁幅より
+  // 情報の除去を優先する）。
+  if (typeof value === 'number') {
+    var digitCount = String(Math.abs(Math.trunc(value))).length;
+    if (digitCount >= 12) return 0;                                   // 規則1
+    if ((context.memberIdColumns || {})[column] &&
+        digitCount >= 4 && digitCount <= 11) return 0;                // 規則1b
+    return value;
+  }
   if (typeof value !== 'string') return value;
 
   var text = value;
@@ -146,7 +158,18 @@ function anonymizeRows(rows, options) {
   options = options || {};
   var headerRows = options.headerRows && options.headerRows.length
     ? options.headerRows : [1];
-  var headerCells = rows[Math.max.apply(null, headerRows) - 1] || [];
+  // 2段ヘッダーでは対象列の名前が上段にあることがある。最終行だけを見ると
+  // 「会員番号」が上段にある形式で列判定が漏れ、番号が素通りする。
+  // 全ヘッダー行を縦に連結して分類する（列ごとに文字列を繋ぐ）。
+  var width = rows.reduce(function(max, cells) {
+    return Math.max(max, (cells || []).length);
+  }, 0);
+  var headerCells = [];
+  for (var column = 0; column < width; column += 1) {
+    headerCells.push(headerRows.map(function(rowNumber) {
+      return String((rows[rowNumber - 1] || [])[column] || '');
+    }).join(' '));
+  }
   var columns = classifyAnonymizeColumns(headerCells);
   var maskedCells = 0;
 

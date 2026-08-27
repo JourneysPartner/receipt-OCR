@@ -78,6 +78,48 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(cell('01-234'), '01-234', 'too short to be a phone number');
   });
 
+  // ---- 数値型セルに入った番号を素通りさせない ----
+  //
+  // XLSX/CSVの取込では番号列が数値化されることが普通にある。文字列だけを
+  // 対象にすると、数値型のカード番号・会員番号がそのままコーパスへ入る。
+  // コーパスは全システム管理者が恒久参照する ── 共有された後では遅い。
+  test('CR-1: a card number stored as a number is still masked', () => {
+    setup();
+    const masked = cell(1234567890123456);
+    assert.notEqual(masked, 1234567890123456,
+      'a numeric cell must not carry the card number into the corpus');
+    assert.equal(typeof masked, 'number',
+      'the cell type is kept so the column profile does not flip to text');
+  });
+
+  test('CR-1: a numeric member id in a member-id column is masked', () => {
+    setup();
+    const context = {column: 2, memberIdColumns: {2: true}};
+    assert.notEqual(cell(87654321, context), 87654321);
+    assert.equal(typeof cell(87654321, context), 'number');
+    // 会員番号列でない普通の数値（金額）はそのまま
+    assert.equal(cell(87654321, {column: 3}), 87654321);
+  });
+
+  test('rule 3: ordinary numeric amounts still pass through untouched', () => {
+    setup();
+    assert.equal(cell(1200), 1200);
+    assert.equal(cell(-5400), -5400);
+  });
+
+  // ---- 2段ヘッダーでも対象列を見落とさない ----
+  test('CR-1: a member-id header in the upper of two header rows is honoured', () => {
+    setup();
+    const rows = [
+      ['', '会員番号', ''],              // 1段目に会員番号
+      ['利用日', '', '利用金額'],        // 2段目
+      ['2026/01/05', '12345678', '1200']
+    ];
+    const result = plain(gas.call('anonymizeRows', [rows, {headerRows: [1, 2]}]));
+    assert.equal(result.rows[2][1], '00000000',
+      'classifying only the last header row misses columns named in the row above');
+  });
+
   // ================= 規則2：氏名列 =================
 
   test('rule 2: a name column is blanked rather than digit-masked', () => {

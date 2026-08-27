@@ -51,12 +51,14 @@ module.exports = ({test, assert, gas}) => {
     };
   }
 
-  const okSample = (id, formatId) => ({
+  // AD列（保存ハッシュ）は本物の変換から計算する。作り物のハッシュを
+  // 置くと、改竄検知が実際に再計算しているかどうかを検証できない。
+  const okSample = (id, formatId, expected) => ({
     sampleId: id, formatId: formatId || 'dcard',
     storedBinaryHash: 'a'.repeat(64), currentBinaryHash: 'a'.repeat(64),
-    storedDataHash: 'b'.repeat(64), currentDataHash: 'b'.repeat(64),
+    storedDataHash: gas.call('computeSampleDataHash', [id, expected || EXPECTED]),
     detection: {matched: true}, definitionValidity: {valid: true},
-    expected: EXPECTED
+    expected: expected || EXPECTED
   });
 
   /** 抽出が期待値どおりに動く既定の注入。`mutate` で1点だけ壊せる。 */
@@ -121,7 +123,7 @@ module.exports = ({test, assert, gas}) => {
       billingMonthStatus: 'ABSENT_BY_ANSWER', billingYearMonth: null,
       yearSummary: {yearlessRows: 2, billingMonthStatus: 'ABSENT_BY_ANSWER'}
     });
-    const sample = Object.assign({}, okSample('S1'), {expected});
+    const sample = okSample('S1', null, expected);
     const result = plain(gas.call('runCorpusRegression', [regression({
       samples: [sample],
       extract: extractor((r) => {
@@ -150,7 +152,7 @@ module.exports = ({test, assert, gas}) => {
     setup();
     const expected = Object.assign({}, EXPECTED, {excludedCount: 2});
     const result = plain(gas.call('runCorpusRegression', [regression({
-      samples: [Object.assign({}, okSample('S1'), {expected})]
+      samples: [okSample('S1', null, expected)]
     })]));
     assert.equal(result.result, 'FAIL');
     assert.ok(result.failures.some((f) => f.reason === 'ROUNDTRIP_C5' &&
@@ -164,7 +166,7 @@ module.exports = ({test, assert, gas}) => {
     expected.rows = EXPECTED.rows.map((row, i) =>
       Object.assign({}, row, {dateHashKey: row.derivedDate}));
     const result = plain(gas.call('runCorpusRegression', [regression({
-      samples: [Object.assign({}, okSample('S1'), {expected})],
+      samples: [okSample('S1', null, expected)],
       extract: extractor((r) => {
         r.transactions.forEach((tx) => { tx.dateHashKey = tx.date; });
         r.transactions[0].dateHashKey = '2025-01-05';   // 表示値は同じままキーだけ壊れた
@@ -234,9 +236,13 @@ module.exports = ({test, assert, gas}) => {
   test('4.12.3: tampered expected values are detected (A-20)', () => {
     setup();
     const tampered = okSample('S1');
-    tampered.currentDataHash = 'c'.repeat(64);
+    // 台帳の期待値が保存後に書き換えられた状況：ADは元のまま、行だけ違う
+    tampered.expected = Object.assign({}, EXPECTED, {totalAmount: 9999,
+      rows: EXPECTED.rows.map((r, i) => i === 0
+        ? Object.assign({}, r, {amountBillingJpy: 7999}) : r)});
     const result = plain(gas.call('runCorpusRegression', [regression({samples: [tampered]})]));
-    assert.equal(result.failures[0].reason, 'SAMPLE_EXPECTED_TAMPERED');
+    assert.equal(result.failures[0].reason, 'SAMPLE_EXPECTED_TAMPERED',
+      'the tamper check must recompute from the rows, not trust a caller-supplied hash');
   });
 
   // ---- 抽出手段がなければ「照合なしで合格」にしない ----

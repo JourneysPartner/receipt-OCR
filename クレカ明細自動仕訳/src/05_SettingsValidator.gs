@@ -334,8 +334,19 @@ var faultInjectionCache_ = {loaded: false, value: null};
 
 function getCachedFaultInjectionConfig() {
   if (!faultInjectionCache_.loaded) {
-    var raw = PropertiesService.getScriptProperties().getProperty('FAULT_INJECTION');
-    faultInjectionCache_.value = raw ? jsonCell_(raw, null) : null;
+    var configured = SETTINGS.FAULT_INJECTION;
+    if (typeof configured === 'string' && configured) {
+      // 文字列のまま流れてきた設定は解析する。`typeof === 'string'`で
+      // 黙って無効化すると、「有効にしたつもり」の設定が効かないまま
+      // 試験が走り、止まるはずの箇所で止まらない。
+      configured = jsonCell_(configured, null);
+    }
+    if (configured) {
+      faultInjectionCache_.value = configured;
+    } else {
+      var raw = PropertiesService.getScriptProperties().getProperty('FAULT_INJECTION');
+      faultInjectionCache_.value = raw ? jsonCell_(raw, null) : null;
+    }
     faultInjectionCache_.loaded = true;
   }
   return faultInjectionCache_.value;

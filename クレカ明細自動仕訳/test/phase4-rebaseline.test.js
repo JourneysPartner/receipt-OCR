@@ -253,12 +253,26 @@ module.exports = ({test, assert, gas}) => {
 
   test('4.12.10: the expected-value hash changes when any expectation changes', () => {
     setup();
-    const base = gas.call('computeSampleDataHash', [expectedValues()]);
-    assert.equal(gas.call('computeSampleDataHash', [expectedValues()]), base);
+    const base = gas.call('computeSampleDataHash', ['S1', expectedValues()]);
+    assert.equal(gas.call('computeSampleDataHash', ['S1', expectedValues()]), base);
 
     const changed = expectedValues();
     changed.rows[0].derivedDate = '2025-01-05';
-    assert.notEqual(gas.call('computeSampleDataHash', [changed]), base,
+    assert.notEqual(gas.call('computeSampleDataHash', ['S1', changed]), base,
       'this hash is what detects tampering with the stored expectations');
+  });
+
+  // ---- #16：再ベースラインが書くハッシュを、改竄検知が読めること ----
+  //
+  // 表現が2つあると、期待値を更新した瞬間に全サンプルが
+  // SAMPLE_EXPECTED_TAMPERED になる。同じ変換・同じハッシュ関数を通す。
+  test('4.12.10: the hash a rebaseline writes is the hash the tamper check recomputes', () => {
+    setup();
+    const value = expectedValues();
+    const fromRebaseline = gas.call('computeSampleDataHash', ['S1', value]);
+    const fromLedgerRows = gas.call('computeDataHash',
+      [gas.call('expectedToLedgerRows', ['S1', value])]);
+    assert.equal(fromRebaseline, fromLedgerRows,
+      'two representations of the same hash is how the first review defects were born');
   });
 };
