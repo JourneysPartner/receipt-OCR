@@ -320,5 +320,5 @@ const VERSIONS = Object.freeze({
   TRANSACTION_ID: '2',
   HASH: '3',
   SHEET_SCHEMA: '1.0',
-  CODE: '2.9.0'
+  CODE: '3.0.0'
 });
