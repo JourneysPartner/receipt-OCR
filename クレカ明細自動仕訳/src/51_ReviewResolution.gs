@@ -168,6 +168,17 @@ function reevaluatePriorYearForTransaction_(review, customer, plannedB, actor) {
     customer, []);
   var existing = openReviews({fullTxId: review.fullTxId, reviewType: REVIEW_TYPE.PRIOR_YEAR})[0];
 
+  // 4.26.3 手順4の分岐 (c)：既存の`PRIOR_YEAR`があり、新しい日付でも
+  // 前年に該当する場合は**Z列のusageDateを更新する**。行を作り直さない。
+  // この分岐が無いと、日付を2025-12-28→2024-08-15へ再訂正したときに
+  // Z列が古い日付のまま残り、担当者は違う日付を根拠に判断させられる。
+  if (judgement.issues.length && existing) {
+    updateReviewStatus(existing.reviewId, existing.status, {
+      actor: actor, operation: 'AUTO_REJUDGE',
+      detail: judgement.issues[0].detail
+    });
+    return;
+  }
   if (judgement.issues.length && !existing) {
     registerReview({
       reviewType: REVIEW_TYPE.PRIOR_YEAR, fullTxId: review.fullTxId,
@@ -224,9 +235,13 @@ function excludeTransaction_(review, operation, actor, input) {
   }
 
   var reason = REVIEW_EXCLUDE_REASON.REVIEWER_JUDGEMENT;
+  // Z列（検出詳細）は**上書きせず追記マージ**する。元の検出詳細を消すと、
+  // なぜ要確認が立ったのかを後から追えない。
+  var mergedDetail = Object.assign({}, review.detail ? jsonCell_(review.detail, {}) : {},
+    {previousStatus: from});
   updateReviewStatus(review.reviewId, 'EXCLUDED', {
     actor: actor, operation: operation, role: input.role || null,
-    excludeReason: reason, detail: {previousStatus: from}
+    excludeReason: reason, detail: mergedDetail
   });
   appendAudit({
     type: 'REVIEW_RESOLVE', actor: actor, targetType: 'TRANSACTION',

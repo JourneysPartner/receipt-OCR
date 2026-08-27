@@ -192,6 +192,16 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(tx.verified.f, '株式会社テスト',
       'planned and verified must be written together (INV-01)');
     assert.equal(result.committed, true);
+
+    // 「学習する」と題した以上、**辞書に行が増えたこと**を見る。
+    // learnFromResolution の呼出を削っても緑のテストは、学習を検証していない。
+    const dict = gas.stubs.getSpreadsheet('master').getSheetByName('顧客別取引先辞書');
+    assert.ok(dict.getLastRow() >= 2, 'the customer dictionary must gain a row');
+    const learned = dict.getRange(2, 1, dict.getLastRow() - 1, 18).getValues()
+      .filter((row) => String(row[3]) === '株式会社テスト');
+    assert.equal(learned.length, 1,
+      'next month the same merchant must auto-confirm instead of asking again');
+    assert.equal(learned[0][1], '店舗', 'keyed by the original merchant text');
   });
 
   test('4.26: adopting a partner without a name is refused before any write', () => {
@@ -224,8 +234,10 @@ module.exports = ({test, assert, gas}) => {
     const result = plain(gas.call('resolveReview',
       [id, 'FIX_DATE_AMOUNT', {correctedDate: '2026-01-15'}]));
 
-    assert.equal(gas.stubs.getSpreadsheet('dest1')
-      .getSheetByName('入力用シート').getRange(2, 2).getValue(), '2026-01-15');
+    const written = gas.stubs.getSpreadsheet('dest1')
+      .getSheetByName('入力用シート').getRange(2, 2).getValue();
+    assert.equal(written instanceof Date
+      ? written.toLocaleDateString('sv-SE', {timeZone: 'Asia/Tokyo'}) : written, '2026-01-15');
     assert.equal(gas.call('getTransaction', ['TX_1']).planned.b, '2026-01-15');
     assert.equal(result.committed, true,
       'with B filled and the partner resolved, all three conditions now hold');
@@ -275,6 +287,32 @@ module.exports = ({test, assert, gas}) => {
       'the date did not change, so 5.12 must not be re-evaluated');
     assert.equal(gas.stubs.getSpreadsheet('dest1')
       .getSheetByName('入力用シート').getRange(2, 13).getValue(), 2500);
+  });
+
+  // ---- 4.26.3 (c)：既存の PRIOR_YEAR が残る再訂正では Z列を更新する ----
+  //
+  // この分岐が無いと、日付を 2025-12-28 → 2024-08-15 へ再訂正したとき
+  // Z列が古い日付のまま残り、担当者は違う日付を根拠に判断させられる。
+  test('4.26.3 branch (c): re-correcting to another prior year updates the review in place', () => {
+    setup({customerCategory: 'INDIVIDUAL', fiscalYear: 2026});
+    committedTx('TX_1', {plannedB: '2025-12-28', plannedF: '株式会社テスト',
+                         partnerStatus: 'RESOLVED_WITH_PARTNER'});
+    const priorId = review('PRIOR_YEAR', 'TX_1', {
+      detail: {kind: 'PRIOR_YEAR', customerCategory: 'INDIVIDUAL',
+               fiscalYear: 2026, thresholdYear: 2025, usageDate: '2025-12-28'}
+    });
+    const amountId = review('AMOUNT', 'TX_1');
+
+    gas.call('resolveReview', [amountId, 'FIX_DATE_AMOUNT',
+      {correctedDate: '2024-08-15', correctedAmount: 900}]);
+
+    const prior = plain(gas.call('getReviewById', [priorId]));
+    assert.equal(prior.status, 'OPEN', 'the review stays open - the judgement is still pending');
+    const detail = JSON.parse(prior.detail);
+    assert.equal(detail.usageDate, '2024-08-15',
+      'the reviewer must judge against the date that is actually on the row now');
+    assert.equal(gas.call('openReviews', [{fullTxId: 'TX_1', reviewType: 'PRIOR_YEAR'}]).length, 1,
+      'updated in place - no second row');
   });
 
   // ================= 前年利用分の扱い =================

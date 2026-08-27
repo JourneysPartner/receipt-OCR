@@ -154,7 +154,10 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(result.recovered[0].step, 4);
     assert.equal(result.recovered[0].rowNumber, 2, 'must reuse the reserved row');
     assert.equal(sheet.getMaxRows(), before, 'Step4 must not append a row');
-    assert.equal(sheet.getRange(2, 2).getValue(), '2026-01-02');
+    // 実SheetsではUSER_ENTEREDで書いた日付セルはDateになる
+    const b = sheet.getRange(2, 2).getValue();
+    assert.equal(b instanceof Date
+      ? b.toLocaleDateString('sv-SE', {timeZone: 'Asia/Tokyo'}) : b, '2026-01-02');
     assert.equal(sheet.getRange(2, 13).getValue(), 1000);
     assert.equal(gas.call('getTransaction', ['TX_B']).transactionStatus, 'COMMITTED');
   });

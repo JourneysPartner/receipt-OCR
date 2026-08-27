@@ -127,9 +127,24 @@ function reserveDestinationRows(customer, fullTxIds, fileId, leaseId) {
     var expandedRows = [];
     var spreadsheet = SpreadsheetApp.openById(customer.destinationSpreadsheetId);
     var sheet = requireSheet_(spreadsheet, customer.destinationSheetName);
-    if (candidates.length < fullTxIds.length) {
-      expandedRows = expandTemplateRows(customer, sheet,
-        fullTxIds.length - candidates.length);
+    // 拡張の要否と行数は4.23の`planTemplateExpansion`が決める。ここで
+    // `<`比較を書くと、判断が二重になり片方だけ直す事故が起きる。
+    var plan = planTemplateExpansion({
+      requiredCount: fullTxIds.length, emptyRowCount: candidates.length
+    });
+    if (plan.action === 'STOP') {
+      throw new StateTransitionError(plan.code + ': template expansion cannot proceed');
+    }
+    if (plan.action === 'EXPAND') {
+      // 複製元は**数式を持つ空き行**（＝本物のテンプレート行）のうち最後の
+      // もの。数式の無い空き行を複製しても勘定科目や消費税式は増えない。
+      // 該当が無ければ従来どおり最終行に任せ、手順6の停止条件が守る。
+      var templateHint = null;
+      candidates.forEach(function(rowNumber) {
+        var formulas = getFormulasByRow(index, rowNumber) || [];
+        if (formulas.some(function(f) { return f; })) templateHint = rowNumber;
+      });
+      expandedRows = expandTemplateRows(customer, sheet, plan.rowsToAdd, templateHint);
       expandedRows.forEach(function(rowNumber) { candidates.push(rowNumber); });
       index = buildIndex(customer);   // 拡張後の範囲で読み直す
     }

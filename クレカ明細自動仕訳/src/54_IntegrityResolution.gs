@@ -37,8 +37,10 @@ function acceptManualChange(fullTxId, actor, options) {
       'Manual changes are only accepted on committed transactions, not ' + tx.transactionStatus);
   }
   var customer = options.customer || getCustomerById(tx.customerId);
-  var index = options.index || buildIndex(customer);
-  var current = getValuesByRow(index, Number(tx.destinationRow));
+  // 1行のために全シートを読まない（INV-08）。対象行だけを1リクエストで読む。
+  var current = options.index
+    ? getValuesByRow(options.index, Number(tx.destinationRow))
+    : readDestinationRows_(customer, [Number(tx.destinationRow)])[Number(tx.destinationRow)];
   if (!current) {
     throw new IntegrityError(null, 'Destination row not found for ' + fullTxId);
   }

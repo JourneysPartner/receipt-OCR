@@ -9,8 +9,12 @@
  * 通っていないため、そこで緑でも実機で同じ結果が出るとは限らない。
  * 設計10.3はこれをリリース前の必須ゲートに指定している。
  *
- * ベクトルの定義はここに1つだけ置き、Node 側のテストも同じ定義を参照する。
- * 二重に持つと、片方だけ直した瞬間に両者が別のものを検証し始める。
+ * 直列化・取引先照合・前年判定のベクトルは**ここが正本**である。
+ * 年補完（5.1）だけは例外で、20ケース全件は Node 側
+ * （`test/phase1a-date-inference.test.js`）が持ち、ここには実機で
+ * `Utilities.formatDate`・`computeDigest`を通すための代表3件を置く。
+ * この分担を変えるときは両方を同時に直すこと ── 片方だけ直すと、
+ * 両者が別のものを検証し始める。
  */
 
 /**
@@ -165,41 +169,98 @@ var PARTNER_MATCHING_VECTORS_ = Object.freeze([
  * 「前年」の基準は対象年度であって暦年ではない。処理日を暦年またぎで
  * 変えても判定が動かないことを、同じベクトルの中で確かめる。
  */
+// 5.12の振る舞い表**12ケースをそのまま**ベクトルとする（5.15）。
+// 顧客は固定フィクスチャ（CFIX_I26 / CFIX_C / CFIX_I25 / CFIX_I24）を
+// メモリ上に構築し、顧客マスターを読まず書き換えない。
+// ケース1・6は暦年の異なる2つの処理日（2026-01-20と2025-12-15）で
+// 再実行する ── 同じ暦年の2日付では、暦年基準で誤実装しても閾値年が
+// 一致してしまい、この受入条件は検出力を失う（Ver.2.5・指摘7）。
 var PRIOR_YEAR_VECTORS_ = Object.freeze([
   {
-    id: '5.12-1 個人・対象年度2026・2025年の利用は前年',
-    customerCategory: 'INDIVIDUAL', fiscalYear: 2026,
+    id: '5.12-1 I26・2025-12-28は前年（2025≦2025）',
+    customerCategory: 'INDIVIDUAL', fiscalYear: 2026, customerId: 'CFIX_I26',
     txs: [{transactionId: 'TX1', date: '2025-12-28'}],
     expectedIssueCount: 1,
     recheckProcessingDates: ['2026-01-20', '2025-12-15']
   },
   {
-    id: '5.12-2 個人・対象年度2025・同じ取引は当年',
-    customerCategory: 'INDIVIDUAL', fiscalYear: 2025,
+    id: '5.12-2 I26・2026-01-05は当年（2026>2025）',
+    customerCategory: 'INDIVIDUAL', fiscalYear: 2026, customerId: 'CFIX_I26',
+    txs: [{transactionId: 'TX1', date: '2026-01-05'}],
+    expectedIssueCount: 0
+  },
+  {
+    id: '5.12-3 I26・2024-08-15も前年以前（前々年を含む）',
+    customerCategory: 'INDIVIDUAL', fiscalYear: 2026, customerId: 'CFIX_I26',
+    txs: [{transactionId: 'TX1', date: '2024-08-15'}],
+    expectedIssueCount: 1
+  },
+  {
+    id: '5.12-4 法人は対象外（仕様9.9）',
+    customerCategory: 'CORPORATE', fiscalYear: null, customerId: 'CFIX_C',
+    txs: [{transactionId: 'TX1', date: '2025-12-28'}],
+    expectedIssueCount: 0
+  },
+  {
+    id: '5.12-5 利用日がnullの行には立てない（INV-40）',
+    customerCategory: 'INDIVIDUAL', fiscalYear: 2026, customerId: 'CFIX_I26',
+    txs: [{transactionId: 'TX1', date: null}],
+    expectedIssueCount: 0
+  },
+  {
+    // 対象年度が変わる理由がこのケースである（判断#22）。年度更新を確定
+    // 申告し終えるまでの間、前年度を対象年度として作業してもよい。
+    id: '5.12-6 I25・2025-12-28は当年（2025>2024）',
+    customerCategory: 'INDIVIDUAL', fiscalYear: 2025, customerId: 'CFIX_I25',
     txs: [{transactionId: 'TX1', date: '2025-12-28'}],
     expectedIssueCount: 0,
     recheckProcessingDates: ['2026-01-20', '2025-12-15']
   },
   {
-    // 法人は対象外。対象年度を問わず常に0件。
-    id: '5.12-3 法人は前年判定の対象外',
-    customerCategory: 'CORPORATE', fiscalYear: 2026,
-    txs: [{transactionId: 'TX1', date: '2024-05-01'}],
-    expectedIssueCount: 0
-  },
-  {
-    // B列予定値が空欄の行には立てない（INV-40）。日付が信用できないため。
-    id: '5.12-4 B列予定値が空欄の行には立てない',
-    customerCategory: 'INDIVIDUAL', fiscalYear: 2026,
-    txs: [{transactionId: 'TX1', date: '2025-12-28'}],
+    // 閾値年の比較では該当する（2023≦2025）が、規則6bで要確認DATEが立ち
+    // B列が空欄化された行 ── 判定材料をシステムが信頼していない（INV-40）。
+    id: '5.12-7 健全性窓外でB列空欄の行には立てない',
+    customerCategory: 'INDIVIDUAL', fiscalYear: 2026, customerId: 'CFIX_I26',
+    txs: [{transactionId: 'TX1', date: '2023-05-10'}],
     blankDateTxIds: ['TX1'],
     expectedIssueCount: 0
   },
   {
-    id: '5.12-5 利用日が導出できていない行には立てない',
-    customerCategory: 'INDIVIDUAL', fiscalYear: 2026,
-    txs: [{transactionId: 'TX1', date: null}],
+    // ケース8の判定部分。EXCLUDE_PRIOR_YEARの操作そのものは4.26の
+    // 解決操作テストが検証する（判定関数の性質ではないため）。
+    id: '5.12-8 前年利用は登録され、担当者の判断を待つ',
+    customerCategory: 'INDIVIDUAL', fiscalYear: 2026, customerId: 'CFIX_I26',
+    txs: [{transactionId: 'TX1', date: '2025-12-28'}],
+    expectedIssueCount: 1
+  },
+  {
+    // 4.36 条件23：対象年度の更新漏れは通知するが、処理は止めない。
+    id: '5.12-9 I24・2024-08-15は当年だが年度が古い（更新漏れ通知）',
+    customerCategory: 'INDIVIDUAL', fiscalYear: 2024, customerId: 'CFIX_I24',
+    txs: [{transactionId: 'TX1', date: '2024-08-15'}],
+    expectedIssueCount: 0,
+    expectedStaleNotification: true
+  },
+  {
+    // ケース10〜12は4.26.3の再判定文脈。判定部分だけをここで照合し、
+    // 登録・取下げ・更新の別は runPriorYearRejudgementVectors（R3〜R5）が
+    // 検証する。
+    id: '5.12-10 訂正後2025-12-20は前年',
+    customerCategory: 'INDIVIDUAL', fiscalYear: 2026, customerId: 'CFIX_I26',
+    txs: [{transactionId: 'TX1', date: '2025-12-20'}],
+    expectedIssueCount: 1
+  },
+  {
+    id: '5.12-11 訂正後2026-01-05は当年',
+    customerCategory: 'INDIVIDUAL', fiscalYear: 2026, customerId: 'CFIX_I26',
+    txs: [{transactionId: 'TX1', date: '2026-01-05'}],
     expectedIssueCount: 0
+  },
+  {
+    id: '5.12-12 訂正後2024-08-15も前年以前',
+    customerCategory: 'INDIVIDUAL', fiscalYear: 2026, customerId: 'CFIX_I26',
+    txs: [{transactionId: 'TX1', date: '2024-08-15'}],
+    expectedIssueCount: 1
   }
 ]);
 
@@ -369,6 +430,14 @@ function runPriorYearVectors(vectors) {
       });
       var judgement = checkPriorYearUsage(txs, customer, vector.blankDateTxIds || []);
       var ok = judgement.issues.length === Number(vector.expectedIssueCount);
+      // 4.36 条件23（対象年度の更新漏れ通知）は処理日2026-01-20で評価する。
+      // 通知するが処理は止めない、が仕様9.9の要求である。
+      if (vector.expectedStaleNotification !== undefined) {
+        var evaluated = evaluatePriorYearVector(txs, customer,
+          vector.blankDateTxIds || [], parseDate('2026-01-20', SYSTEM_TIMEZONE));
+        ok = ok && evaluated.staleFiscalYearNotification === vector.expectedStaleNotification &&
+          evaluated.stopProcessing === false;
+      }
       results.push(vectorResult_(vector.id, ok,
         vector.expectedIssueCount, judgement.issues.length));
 

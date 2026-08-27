@@ -138,12 +138,84 @@ module.exports = ({test, assert, gas}) => {
 
   // ================= 前年判定ベクトル =================
 
-  test('4.39: the prior-year vectors pass and cover both customer categories', () => {
+  test('4.39: the prior-year vectors run all twelve cases (fourteen comparisons)', () => {
     setup();
     const result = plain(gas.call('runPriorYearVectors', []));
     assert.equal(result.ok, true,
       result.results.filter((r) => !r.ok).map((r) => r.id).join(', '));
-    assert.ok(result.results.length >= 5);
+    // 12ケース + ケース1・6の暦年またぎ再実行2件 = 14照合（5.15）。
+    // 以前は5件で、件数を「5以上」と主張して不足を保護していた。
+    assert.equal(result.results.length, 14,
+      'the design mandates twelve cases with fourteen comparisons');
+  });
+
+  // ================= 再判定ベクトル R1〜R5 =================
+
+  test('5.15: the rejudgement vectors pass and cover all four branches', () => {
+    setup();
+    const result = plain(gas.call('runPriorYearRejudgementVectors', []));
+    assert.equal(result.ok, true,
+      result.results.filter((r) => !r.ok)
+        .map((r) => `${r.id}:${r.problems.join(',')}`).join('; '));
+    assert.equal(result.results.length, 5);
+    assert.deepEqual(result.coveredBranches.slice().sort(),
+      ['EXCLUDE', 'KEEP', 'REGISTER', 'UPDATE'],
+      'the four 4.26.3 branches must each run at least once');
+  });
+
+  test('5.15: an implementation that always registers fails the branch coverage', () => {
+    setup();
+    // 再判定契機の割当てが壊れて常に「登録」になった実装を模す
+    const result = plain(gas.evaluate(`
+      (function() {
+        var original = rejudgePriorYearUsage;
+        rejudgePriorYearUsage = function(state, correctedDate) {
+          var out = original(state, correctedDate);
+          out.branch = 'REGISTER';
+          return out;
+        };
+        try { return runPriorYearRejudgementVectors(); }
+        finally { rejudgePriorYearUsage = original; }
+      })()
+    `));
+    assert.equal(result.ok, false,
+      'branch coverage is the production gate, not a test-side tally');
+    assert.ok(result.missingBranches.length > 0);
+  });
+
+  // R3 が Ver.2.5 指摘1 の Critical を直接検出する：
+  // 再判定契機を「空欄→非空」に限る実装では、S列が非空から別の非空へ
+  // 変わるケースで登録が起きない。
+  test('5.15 R3: a rejudgement trigger limited to blank-to-filled fails', () => {
+    setup();
+    const result = plain(gas.evaluate(`
+      (function() {
+        var original = rejudgePriorYearUsage;
+        rejudgePriorYearUsage = function(state, correctedDate) {
+          if (state.transaction.plannedDate !== '') {
+            // 「空欄からの変化」でなければ再判定しない誤実装
+            var untouched = cloneReviewState_(state);
+            untouched.transaction.plannedDate = correctedDate;
+            var source = untouched.reviews.filter(function(r) {
+              return r.reviewId === untouched.sourceReviewId;
+            })[0];
+            source.status = 'RESOLVED';
+            untouched.branch = 'KEEP';
+            untouched.audit = null;
+            if (canCommitReviewedTransaction_(untouched.transaction, untouched.reviews)) {
+              untouched.transaction.transactionStatus = TX_STATUS.COMMITTED;
+            }
+            return untouched;
+          }
+          return original(state, correctedDate);
+        };
+        try { return runPriorYearRejudgementVectors(); }
+        finally { rejudgePriorYearUsage = original; }
+      })()
+    `));
+    assert.equal(result.ok, false);
+    assert.ok(result.results.some((r) => r.id === 'R3' && !r.ok),
+      'R3 exists precisely to catch this: the transaction would commit without its review');
   });
 
   // 「前年」の基準が対象年度であって暦年でないことが、ここに表れる。

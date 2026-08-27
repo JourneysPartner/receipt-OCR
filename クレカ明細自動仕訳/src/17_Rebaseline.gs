@@ -72,7 +72,14 @@ function computeRebaselineDiff(samples) {
           item: 'row', oldValue: normalizeDiffValue_(before2), newValue: null});
         continue;
       }
-      Object.keys(before2).forEach(function(item) {
+      // **キーの和集合**を走査する。before側だけを見ると、修正後の出力で
+      // 新たに現れた項目が差分一覧に載らないまま書き込まれ、
+      // 「承認対象は差分そのもの」が崩れる。
+      var itemKeys = Object.keys(before2);
+      Object.keys(after2).forEach(function(item) {
+        if (itemKeys.indexOf(item) < 0) itemKeys.push(item);
+      });
+      itemKeys.forEach(function(item) {
         if (rebaselineValuesEqual_(before2[item], after2[item])) return;
         diffs.push({
           sampleId: sample.sampleId, rowNumber: before2.sourceRow || null, item: item,
@@ -236,6 +243,36 @@ function expectedToLedgerRows(sampleId, expected) {
       String(row.reason), '', '', '', '', '', '', '']);
   });
   return rows.sort(function(a, b) { return Number(a[1]) - Number(b[1]); });
+}
+
+/**
+ * 2.1.20 の行列（A〜L列）を期待値オブジェクトへ戻す逆変換。
+ *
+ * `expectedToLedgerRows`と対になる。**読取経路はこの1本である**（A-29）。
+ * 4.12.2・4.12.3・4.12.10 が同じ変換を通ることで、書いた期待値を読む側が
+ * 別の解釈をする余地を消す。
+ */
+function ledgerRowsToExpected(rows) {
+  var expected = {rows: [], excludedRows: []};
+  (rows || []).forEach(function(row) {
+    if (String(row[3]) === 'EXCLUDED') {
+      expected.excludedRows.push({rowNumber: Number(row[1]), reason: String(row[4])});
+      return;
+    }
+    var tx = {sourceRow: Number(row[1])};
+    if (row[2] !== '' && row[2] !== null && row[2] !== undefined) tx.occurrenceIndex = Number(row[2]);
+    if (row[5] !== '' && row[5] !== null && row[5] !== undefined) tx.plannedB = row[5];
+    if (row[6] !== '' && row[6] !== null && row[6] !== undefined) tx.dateHashKey = row[6];
+    if (row[7] !== '' && row[7] !== null && row[7] !== undefined) tx.amountBillingJpy = Number(row[7]);
+    tx.merchant = row[8] === undefined || row[8] === null ? '' : row[8];
+    tx.purpose = row[9] === undefined || row[9] === null ? '' : row[9];
+    if (row[10] !== '' && row[10] !== null && row[10] !== undefined) tx.reviewTypes = row[10];
+    tx.derivedDate = row[11] === undefined || row[11] === null ? '' : row[11];
+    expected.rows.push(tx);
+  });
+  expected.transactionCount = expected.rows.length;
+  expected.excludedCount = expected.excludedRows.length;
+  return expected;
 }
 
 /** 2.1.19 AD列（期待値dataHash）。5.6.3の`computeDataHash`へ一本化する。 */

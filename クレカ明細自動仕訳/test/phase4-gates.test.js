@@ -253,6 +253,57 @@ module.exports = ({test, assert, gas}) => {
       (error) => error && /extract function/.test(String(error.message)));
   });
 
+  // ---- A-29：期待値の読取経路は loadExpectedValues の1本 ----
+  //
+  // 台帳（2.1.20）へ書いた期待値を、回帰が**その1本の経路で**読んで合格する
+  // こと。往復が通らなければ、書く側と読む側が別の解釈をしている。
+  test('A-29: the regression reads its expectations from the ledger itself', () => {
+    setup();
+    // 期待値を 2.1.20 の形でシートへ書く（正本の変換を使う）
+    const ledgerRows = plain(gas.call('expectedToLedgerRows', ['S9', EXPECTED]));
+    const header = Array(12).fill(''); header[0] = 'サンプルID';
+    gas.stubs.getSpreadsheet('master').insertSheet('形式サンプル期待値',
+      {values: [header].concat(ledgerRows)});
+
+    const sample = {
+      sampleId: 'S9', formatId: 'dcard',
+      storedBinaryHash: 'a'.repeat(64), currentBinaryHash: 'a'.repeat(64),
+      storedDataHash: gas.call('computeSampleDataHash', ['S9', EXPECTED]),
+      detection: {matched: true}, definitionValidity: {valid: true},
+      // expected を渡さない ── 台帳から読ませる
+      fileExpectations: {totalAmount: EXPECTED.totalAmount,
+        billingMonthStatus: EXPECTED.billingMonthStatus,
+        billingYearMonth: EXPECTED.billingYearMonth,
+        yearSummary: EXPECTED.yearSummary}
+    };
+    const result = plain(gas.call('runCorpusRegression', [regression({samples: [sample]})]));
+    assert.equal(result.result, 'PASS', JSON.stringify(result.failures));
+  });
+
+  test('A-29: tampering the ledger rows after storing the hash is caught', () => {
+    setup();
+    const ledgerRows = plain(gas.call('expectedToLedgerRows', ['S9', EXPECTED]));
+    ledgerRows[0][7] = 9999;   // 台帳のH列（期待金額）を後から書き換えた
+    const header = Array(12).fill(''); header[0] = 'サンプルID';
+    gas.stubs.getSpreadsheet('master').insertSheet('形式サンプル期待値',
+      {values: [header].concat(ledgerRows)});
+
+    const sample = {
+      sampleId: 'S9', formatId: 'dcard',
+      storedBinaryHash: 'a'.repeat(64), currentBinaryHash: 'a'.repeat(64),
+      storedDataHash: gas.call('computeSampleDataHash', ['S9', EXPECTED]),
+      detection: {matched: true}, definitionValidity: {valid: true},
+      fileExpectations: {totalAmount: EXPECTED.totalAmount,
+        billingMonthStatus: EXPECTED.billingMonthStatus,
+        billingYearMonth: EXPECTED.billingYearMonth,
+        yearSummary: EXPECTED.yearSummary}
+    };
+    const result = plain(gas.call('runCorpusRegression', [regression({samples: [sample]})]));
+    assert.equal(result.result, 'FAIL');
+    assert.equal(result.failures[0].reason, 'SAMPLE_EXPECTED_TAMPERED',
+      'the AD hash exists to catch exactly this edit');
+  });
+
   // ---- A-13：分割実行。部分結果をPASSにしない ----
   test('A-13/INV-35: an interrupted run is NOT_RUN, never PASS, and records its progress', () => {
     setup();
@@ -274,12 +325,20 @@ module.exports = ({test, assert, gas}) => {
     const first = plain(gas.call('runCorpusRegression', [{
       runId: 'RUN_1', extract: extractor(), samples, maxPerRun: 2
     }]));
+
+    // 「続きから」と「最初からやり直し」は最終結果が同じになる。
+    // 区別できるのは**抽出が何回走ったか**だけである ── ここを見ないと、
+    // progress を無視して毎回全件やり直す実装が両方のテストを通る。
+    let extracted = 0;
+    const counting = (definition, sample) => { extracted += 1; return extractor()(definition, sample); };
     const second = plain(gas.call('runCorpusRegression', [{
-      runId: 'RUN_1', extract: extractor(), samples, maxPerRun: 10, progress: first.progress
+      runId: 'RUN_1', extract: counting, samples, maxPerRun: 10, progress: first.progress
     }]));
 
     assert.equal(second.result, 'PASS');
     assert.equal(second.checkedSampleIds.length, 4, 'all four are recorded after resuming');
+    assert.equal(extracted, 2,
+      'only the remaining two samples may be re-extracted - that is what resuming means');
   });
 
   test('A-13: if the target set changed, the run restarts instead of resuming', () => {
@@ -336,6 +395,46 @@ module.exports = ({test, assert, gas}) => {
     const notUnique = result.failures.filter((f) => f.reason === 'NOT_UNIQUE_ON_NEW_SAMPLE')[0];
     assert.ok(notUnique);
     assert.equal(notUnique.newDefinitionMatches, false);
+  });
+
+  // ---- CR-6：衝突の解決には「どのステップ・どの語で成立したか」が要る ----
+  //
+  // 以前は実在しない `sample.matchedStep` を読んでおり**常に null**だった。
+  // 提示材料が無いと、操作者は質問12・13で何を外せばよいか分からず、
+  // 衝突の解決手順そのものが実行できない。
+  test('CR-6: a collision failure carries the matched step and keywords', () => {
+    setup();
+    const result = plain(gas.call('runDetectionCollisionCheck', [{
+      formatId: 'newcard', newDefinition: def('newcard'), newSampleId: 'S_NEW',
+      activeDefinitions: [def('dcard')],
+      samples: [{sampleId: 'S_D', formatId: 'dcard'}],
+      // 4.11 detectFormatWith の戻り値の形（判定結果オブジェクト）で返す
+      detect: (d, sampleId) => ({
+        matched: d.formatId === 'newcard',
+        matchedStep: 1,
+        matchedKeywords: ['利用日', '利用金額']
+      })
+    }]));
+    assert.equal(result.result, 'FAIL');
+    const failure = result.failures.filter(
+      (f) => f.reason === 'NEW_DEF_MATCHES_OTHER_SAMPLE')[0];
+    assert.equal(failure.matchedStep, 1,
+      'the operator adjusts question 12/13 only if told which step fired');
+    assert.deepEqual(failure.matchedKeywords, ['利用日', '利用金額'],
+      'and which shared words caused the hit');
+  });
+
+  test('CR-6: a boolean-returning detect still works, with null material', () => {
+    setup();
+    const result = plain(gas.call('runDetectionCollisionCheck', [{
+      formatId: 'newcard', newDefinition: def('newcard'), newSampleId: 'S_NEW',
+      activeDefinitions: [], samples: [{sampleId: 'S_D', formatId: 'dcard'}],
+      detect: (d) => d.formatId === 'newcard'
+    }]));
+    const failure = result.failures.filter(
+      (f) => f.reason === 'NEW_DEF_MATCHES_OTHER_SAMPLE')[0];
+    assert.ok(failure);
+    assert.equal(failure.matchedStep, null);
   });
 
   // ---- A-6：改訂版が旧サンプルを判定できなくなったら落とす ----

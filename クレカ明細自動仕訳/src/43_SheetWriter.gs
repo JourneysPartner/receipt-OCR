@@ -92,12 +92,18 @@ function clearTemplateValueCells(row) {
  *
  * @return {!Array<number>} 追加された行番号。
  */
-function expandTemplateRows(customer, sheet, shortage) {
+function expandTemplateRows(customer, sheet, shortage, templateSourceRow) {
   if (!Number.isInteger(shortage) || shortage <= 0) return [];
   var lastColumn = customer.rowScanLastColumn;
 
-  // 手順1：複製元は「検証済みの直前行」である。シートの最終行ではない。
-  var templateRow = sheet.getMaxRows();
+  // 手順1：複製元は「検証済みの直前行」＝**最初の空きテンプレート行**である。
+  // `getMaxRows()`を複製元にすると、実際の顧客シートではグリッドが既定
+  // 1000行等でデータ域より下に**書式も数式も無い空行**が続くため、空行を
+  // 複製してしまい、勘定科目の既定値・消費税式が新しい行に入らない ──
+  // この関数が存在する理由そのものが満たされない。テストのシートは
+  // maxRowsをデータ行ぴったりに作りがちで、その差はスタブでは出ない。
+  var templateRow = Number.isInteger(templateSourceRow) && templateSourceRow >= 1
+    ? templateSourceRow : sheet.getMaxRows();
   // 勘定科目の既定値や消費税の計算式が入っているのが**正しい**テンプレートで
   // ある。複製元として不適なのは、取引が転記済みの行を複製してしまう場合。
   var sourceValues = sheet.getRange(templateRow, 1, 1, lastColumn).getValues();
@@ -107,11 +113,13 @@ function expandTemplateRows(customer, sheet, shortage) {
   }
 
   // 手順2：行ごと複製する。数式は相対参照が移動する。
-  sheet.insertRowsAfter(templateRow, shortage);
+  // 追加は常にシート末尾へ行う（途中挿入は既存の行番号参照を全部ずらす）。
+  var insertAfter = sheet.getMaxRows();
+  sheet.insertRowsAfter(insertAfter, shortage);
   var added = [];
   var source = sheet.getRange(templateRow, 1, 1, lastColumn);
   for (var offset = 1; offset <= shortage; offset += 1) {
-    var addedRow = templateRow + offset;
+    var addedRow = insertAfter + offset;
     source.copyTo(sheet.getRange(addedRow, 1, 1, lastColumn));
     added.push(addedRow);
   }
@@ -505,8 +513,11 @@ function recoverPartialFailure(fileId, runId, index, leaseId, options) {
       } else {
         // Step 4: 不一致（行予約のみ、RAWのみ成功等）。
         // 新しい行を追加せず、その予約済みの同じ行へ書き直す。
-        writeTransactionRows(options.customer, [buildRowWrite(hit.rowNumber, tx)], leaseId, fileId);
+        // 書式は値を書く**前**に適用する（20.3）。後から変えても、既に
+        // 電話番号として解釈された値は戻らない。順序を経路ごとに変えると、
+        // USER_ENTEREDへ列を足した瞬間に片側だけ壊れる。
         applyPlainTextFormat(options.customer, [hit.rowNumber]);
+        writeTransactionRows(options.customer, [buildRowWrite(hit.rowNumber, tx)], leaseId, fileId);
         var verified4 = verifyWrittenValues(options.customer, [buildRowWrite(hit.rowNumber, tx)]);
         if (!verified4[0] || !verified4[0].ok) {
           result.stopped = {code: 'DESTINATION_VALUE_MISMATCH', fullTxId: tx.fullTxId};
@@ -531,8 +542,8 @@ function recoverPartialFailure(fileId, runId, index, leaseId, options) {
       throw new IntegrityError('DESTINATION_SCHEMA_MISMATCH',
         'No empty row could be reserved for ' + tx.fullTxId);
     }
-    writeTransactionRows(options.customer, [buildRowWrite(rowNumber, tx)], leaseId, fileId);
     applyPlainTextFormat(options.customer, [rowNumber]);
+    writeTransactionRows(options.customer, [buildRowWrite(rowNumber, tx)], leaseId, fileId);
     var verified5 = verifyWrittenValues(options.customer, [buildRowWrite(rowNumber, tx)]);
     if (!verified5[0] || !verified5[0].ok) {
       result.stopped = {code: 'DESTINATION_VALUE_MISMATCH', fullTxId: tx.fullTxId};

@@ -268,6 +268,18 @@ function runCorpusRegression(input) {
       return String(s.sampleId) === sampleId;
     })[0];
 
+    // 期待値の読取経路は`loadExpectedValues`の1本に固定する（A-29）。
+    // 呼出側がインラインで渡すのは試験用の注入であり、本番は台帳
+    // （2.1.20）から読む。呼出元の無い読取関数は、実装されないか
+    // 別の実装で二重に書かれる ── まさにその状態だった。
+    if (sample.expected === undefined) {
+      sample = Object.assign({}, sample, {
+        expected: Object.assign(
+          ledgerRowsToExpected(loadExpectedValues(sampleId)),
+          sample.fileExpectations || {})
+      });
+    }
+
     // 手順3：匿名化ファイルの実在とハッシュ、期待値の改竄を確認する。
     // 不在・不一致は「飛ばして PASS」にせず failures へ入れる。
     if (sample.fileMissing === true) {
@@ -333,8 +345,27 @@ function runDetectionCollisionCheck(input) {
   }
   var formatId = String(input.formatId);
   var newSampleId = String(input.newSampleId);
-  var detect = input.detect;
   var failures = [];
+
+  // `detect`は真偽値または`{matched, matchedStep, matchedKeywords}`を返す。
+  // 4.12.4は不合格時に**成立した判定ステップと成立の材料**の提示を必須と
+  // する ── これが無いと、操作者はどの語で衝突したかを知る手段がなく、
+  // CR-6の解決手順（質問12・13で弁別材料を調整する）が実行できない。
+  // 以前は実在しない`sample.matchedStep`を読んでおり、常にnullだった。
+  var detectDetailed = function(definition, sampleId) {
+    var outcome = input.detect(definition, sampleId);
+    if (outcome && typeof outcome === 'object') {
+      return {
+        matched: Boolean(outcome.matched),
+        matchedStep: outcome.matchedStep === undefined ? null : outcome.matchedStep,
+        matchedKeywords: outcome.matchedKeywords || null
+      };
+    }
+    return {matched: Boolean(outcome), matchedStep: null, matchedKeywords: null};
+  };
+  var detect = function(definition, sampleId) {
+    return detectDetailed(definition, sampleId).matched;
+  };
 
   // 「評価対象形式以外」は改訂対象の形式IDを除いた集合を指す。
   var otherSamples = (input.samples || []).filter(function(s) {
@@ -346,20 +377,23 @@ function runDetectionCollisionCheck(input) {
 
   // 検査1：新定義が他形式のサンプルへ成立しないこと。
   otherSamples.forEach(function(sample) {
-    if (detect(input.newDefinition, sample.sampleId)) {
+    var outcome = detectDetailed(input.newDefinition, sample.sampleId);
+    if (outcome.matched) {
       failures.push(gateFailure_('NEW_DEF_MATCHES_OTHER_SAMPLE', {
         sampleId: sample.sampleId, formatId: sample.formatId,
-        matchedStep: sample.matchedStep || null
+        matchedStep: outcome.matchedStep, matchedKeywords: outcome.matchedKeywords
       }));
     }
   });
 
   // 検査2：既存定義が新サンプルへ成立しないこと。
   otherDefinitions.forEach(function(definition) {
-    if (detect(definition, newSampleId)) {
+    var outcome = detectDetailed(definition, newSampleId);
+    if (outcome.matched) {
       failures.push(gateFailure_('EXISTING_DEF_MATCHES_NEW_SAMPLE', {
         sampleId: newSampleId, formatId: definition.formatId,
-        formatVersion: definition.version, matchedStep: definition.matchedStep || null
+        formatVersion: definition.version,
+        matchedStep: outcome.matchedStep, matchedKeywords: outcome.matchedKeywords
       }));
     }
   });
