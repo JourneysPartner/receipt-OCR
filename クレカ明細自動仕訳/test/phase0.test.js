@@ -104,9 +104,9 @@ module.exports = function registerPhase0Tests({test, assert, gas}) {
     assert.equal(gas.evaluate('ERROR_CATALOG.AUDIT_CHAIN_BROKEN.retryable'), false);
   });
 
-  test('version constants match design version 2.9', () => {
+  test('version constants match design version 3.0', () => {
     assert.deepEqual(gas.json('VERSIONS'), {
-      TRANSACTION_ID: '2', HASH: '3', SHEET_SCHEMA: '1.0', CODE: '2.9.0'
+      TRANSACTION_ID: '2', HASH: '3', SHEET_SCHEMA: '1.0', CODE: '3.0.0'
     });
   });
 

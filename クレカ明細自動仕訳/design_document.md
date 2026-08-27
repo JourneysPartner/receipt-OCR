@@ -1,9 +1,10 @@
 # クレジットカード明細 自動取込・取引先正規化システム
 
-## 詳細設計書 Ver.2.9
+## 詳細設計書 Ver.3.0
 
 作成日：2026年8月23日
-改訂日：2026年8月26日（Ver.2.9・フェーズ3〜4実装のレビューで判明した契約不一致とGAS実現性の是正）
+改訂日：2026年8月27日（Ver.3.0・第2回実装レビューの差戻し反映：`WRITE_ONLY`リースの強制解放条件、`FILE_CHANGED`系解決操作の書込経路と状態非遷移、書式適用と値書込の順序統一、予約行解放の3段階、テンプレート複製元の具体化、判定関数の戻り値契約、障害注入contextの必須キー縮小）
+前回改訂：2026年8月26日（Ver.2.9・フェーズ3〜4実装のレビューで判明した契約不一致とGAS実現性の是正）
 対応仕様書：**仕様書 Ver.2.6**（review_history/round_5_after_claude.md）
 対象環境：Google Apps Script / Google Drive / Google Sheets
 
@@ -1660,7 +1661,7 @@ const VERSIONS = {
 | 処理済みファイルの変更を再走査 | `COMPLETED`、`REVIEW_WAIT`、`WRITING`、`FAILED`（さらにINV-25の絞込を適用） | なし | システム管理者 |
 | freee取込済みにする | `COMPLETED`、および`REVIEW_WAIT`のうち4.28の停止条件が存在しないファイル | なし | 確認担当者 |
 | 取消し・復元 | `COMPLETED`、`REVIEW_WAIT`、`WRITING`、`VALIDATING`、`FAILED`、`CUSTOMER_FIX_REQUIRED`、`CANCELED` | `→ CANCELED` ほか | 確認担当者（freee取込済みはシステム管理者以上） |
-| リースの強制解放 | `VALIDATING`／`WRITING`かつハートビート途絶超過 | なし | システム管理者 |
+| リースの強制解放 | `PROCESS`リースは`VALIDATING`／`WRITING`かつハートビート途絶超過。**`WRITE_ONLY`リースはハートビート途絶超過のみ**（内部状態を問わない。Ver.3.0） | なし | システム管理者 |
 | 監査ログの連鎖を検証 | 対象外（ログ全体） | なし | システム管理者 |
 | スナップショットから復元 | 対象外 | なし | **オーナー管理者** |
 | 処理ログを開く | 全内部状態 | なし | 確認担当者 |
@@ -2181,8 +2182,8 @@ Ver.2.2の分離検査は「等しくないこと」しか見ていなかった�
 | `releaseLease(fileId, runId, reason)` | ファイル、実行、理由 | void | **リース行を削除**し、監査ログ`LEASE_RELEASE`へ1行記録する（INV-20・INV-29の排他区間内）。リースを保有していない場合は何もしない |
 | `verifyActiveLease(leaseId, runId)` | リースID、実行ID | 真偽 | 継続トリガーが自らを同一実行IDの所有者と確認する（仕様19.1） |
 | `assertLeaseHeldForWrite(fileId, leaseId)` | ファイル、リース | void | **転記先への書込の直前に呼ぶ**。自らが有効なリース所有者でなければ`LEASE_CONFLICT`（INV-30） |
-| `forceReleaseLease(leaseId, reason, actor)` | リース、理由、実行者 | void | 事前条件を満たす場合のみ削除し、監査ログ`LEASE_FORCE_RELEASE`へ記録して管理者へ通知する |
-| `detectStalledLeases()` | - | `Lease[]` | ハートビート途絶かつ内部状態が`VALIDATING`／`WRITING`の対象のみを返す。**他ユーザーが残した継続トリガーの検出手段でもある**（M16） |
+| `forceReleaseLease(leaseId, reason, actor)` | リース、理由、実行者 | void | 事前条件を満たす場合のみ削除し、監査ログ`LEASE_FORCE_RELEASE`へ記録して管理者へ通知する。**事前条件はリースの用途で異なる**（Ver.3.0・実装差戻し#15）。`PROCESS`：内部状態が`VALIDATING`／`WRITING`であること（それ以外で残っていたら状態の食い違いであり、黙って消さず調査対象にする）。`WRITE_ONLY`：**ハートビート経過のみを条件とし、内部状態を問わない** ── 解決操作・取消し・復元は`REVIEW_WAIT`／`COMPLETED`のファイルに`WRITE_ONLY`リースを取り、GAS実行の強制終了で残った場合、内部状態の条件を課すと**誰も解放できず当該ファイルの全解決操作が`LEASE_CONFLICT`になる**（INV-20の根拠文が予言した状態そのもの） |
+| `detectStalledLeases()` | - | `Lease[]` | ハートビート途絶を検出する。`PROCESS`リースは内部状態が`VALIDATING`／`WRITING`のものに限り、**`WRITE_ONLY`リースは内部状態を問わず対象とする**（Ver.3.0・実装差戻し#15）。**他ユーザーが残した継続トリガーの検出手段でもある**（M16） |
 
 ### 状態遷移許可表
 
@@ -2576,6 +2577,8 @@ cols = min(SETTINGS.MAX_COLUMNS_PER_FILE, sheet.getMaxColumns())
 **形式が増えるほど、判定が2形式に成立する危険が上がる。** 仕様8.1は「複数形式が候補となった場合は自動処理せず要確認とする」と定めるが、それは**本番で顧客のファイルが止まる**ということである。本ゲートはその失敗を登録時へ移す。
 
 判定は4.11 `detectFormatWith`だけを用いる。**本モジュールが判定規則を再実装してはならない**（規則が二重になると、登録時に通って本番で落ちる、またはその逆が起きる）。
+
+**判定関数は真偽値ではなく判定結果オブジェクト`{matched, matchedStep, matchedKeywords}`を返す**（Ver.3.0・実装差戻し#11）。真偽値だけを返す契約では、不合格時の提示要件（成立した判定ステップと成立の材料）を**満たす手段が構造的に存在せず**、`matchedStep`は常に`null`になっていた。提示材料が無いと、操作者はどの語で衝突したかを知る手段がなく、下記の解決手順（質問12・13で弁別材料を調整する）が実行できない。
 
 | # | 検査 | 対象 | 合格条件 | 不合格時の`reason` |
 |---|---|---|---|---|
@@ -3385,7 +3388,7 @@ Ver.2.0はこれらを「期待どおりである」とだけ記していた。�
 
 1. **SpreadsheetApp による変更（複製・書式・入力規則）を行った直後、Sheets API を呼ぶ前に必ず`SpreadsheetApp.flush()`を実行する。** SpreadsheetAppの操作はバッチ化されて遅延適用されるため、flushしないとSheets API側から見えない。
 2. **Sheets API で書いた値を SpreadsheetApp で読み返さない。** 読取確認は必ずSheets APIで行う。SpreadsheetApp側には独自のキャッシュがあり、Sheets APIの書込を即座に反映しない場合がある。
-3. 1回の転記の中でSpreadsheetAppとSheets APIを交互に使わない。順序は「（ロック区間）複製→flush→予約書込→（ロック解放）値書込→書式適用→flush→読取確認」に固定する。
+3. 1回の転記の中でSpreadsheetAppとSheets APIを交互に使わない。順序は「（ロック区間）複製→flush→予約書込→（ロック解放）**書式適用→flush→値書込**→読取確認」に固定する。**書式は値を書く前に適用する**（Ver.3.0）。値を書いてから書式を変えても、`0570-…`が既に電話番号として解釈された後では元に戻らず、`applyPlainTextFormat`の契約（「値を書く前に呼ぶ」）とも矛盾していた。
 
 ### インターフェース
 
@@ -3398,7 +3401,7 @@ Ver.2.0はこれらを「期待どおりである」とだけ記していた。�
 | `reserveRows(customer, txIds, count, leaseId)` | 顧客、取引ID、必要数、リース | `{rowNumbers}` | **空き行判定・テンプレート行拡張・行予約を単一のロック区間で行う**（INV-06） |
 | `findEmptyRows(customer, count, index)` | 顧客、必要数、`buildIndex`が返すインデックス | `number[]` | **5.11の空き行判定に従う（ヘッダー定義範囲の全列が空）**（INV-27）。判定範囲の最終列は顧客マスターAH列（`customer.rowScanLastColumn`）である。**同じ概念に別名を持たせない。** 引数は`buildIndex`の戻り値そのもの（`valuesByRow`／`formulasByRow`を持つ）を取る。**ロック区間の中でのみ呼ばれる** |
 | `expandTemplateRows(customer, requiredCount)` | 顧客、不足行数 | `number[]` | 検証済みの直前行から数式・書式・入力規則を複製し、**複製先の値セルをクリアして`validateExpandedRows`で検証する**（M30）。**ロック区間の中でのみ呼ばれる** |
-| `releaseReservedRows(customer, rowNumbers, leaseId)` | 顧客、行番号、リース | void | **予約後・値書込前に中止する場合に、予約した取引ID列をクリアして空き行へ戻す**（M17） |
+| `releaseReservedRows(customer, rowNumbers, leaseId)` | 顧客、行番号、リース | void | **予約後・値書込前に中止する場合に**、予約した取引ID列をクリアして空き行へ戻す（M17）。**確定に至らなかった予約行の扱いは3段階で異なる**（Ver.3.0・実装差戻し#4）。(1)値書込前の中止＝本関数（取引ID列のみ）。(2)**値書込の途中の例外＝何も消さない** ── 11.3 Step4は「同じ行へ書き直す」設計であり、取引ID列が残っていることが回復の前提。ここで消すと回復がStep5で別の行を確保し、`RAW`だけ書けた行が無名のまま出納帳に残る。(3)読取確認の失敗＝`clearTransactionRows`で**全列**をクリアする ── 値が入ったまま取引IDだけ消すと、空き行判定が使用中を返し続ける誰からも引けない死に行になる |
 | `buildRowWrite(rowNumber, txLog)` | 行番号、取引ログ | `RowWrite` | 取引ログの予定値（S〜W列）と取引ID完全値から1要素を組み立てる |
 | `readRowValues(index, txLog)` | インデックス、取引ログ | `{b,f,i,k,m}` | **4.25のインデックスから読む。取引ごとにシートを読まない**（INV-08） |
 | `recoverPartialFailure(fileId, runId, index, leaseId)` | ファイル、実行、インデックス、リース | void | 仕様11.3の回復。下表に従う |
@@ -3421,7 +3424,7 @@ Ver.2.0はこれらを「期待どおりである」とだけ記していた。�
 
 | # | 手順 |
 |---|---|
-| 1 | `validateTemplateSourceRow`でコピー元行の構成を検証する。不合格なら処理を停止する（推測して複製しない） |
+| 1 | コピー元は**数式を持つ空き行（本物のテンプレート行）のうち最後のもの**とし、`validateTemplateSourceRow`で構成を検証する。不合格なら処理を停止する（推測して複製しない）。**シートの最終行（`getMaxRows()`）を複製元にしない**（Ver.3.0・実装差戻し#25） ── 実際の顧客シートはグリッドが既定1000行等でデータ域より下に**書式も数式も無い空行**が続き、それを複製すると勘定科目の既定値・消費税式が新しい行に入らない。数式を持つ空き行が1行も無い場合に限り最終行へ委ね、手順6の停止条件が守る |
 | 2 | コピー元行から複製先行へ、数式・書式・入力規則を複製する（複数の貼付け種別の組合せ） |
 | 3 | **複製先行のヘッダー定義範囲について、数式を持たないセル（＝値セル）の値をすべてクリアする** |
 | 4 | `SpreadsheetApp.flush()`を実行する |
@@ -3434,12 +3437,12 @@ Ver.2.0はこれらを「期待どおりである」とだけ記していた。�
 
 | 呼出側 | 使用関数の順序 |
 |---|---|
-| 6.1 通常転記 | `guardFileUnchanged`（4.21）→ `reserveRows` →（ロック外）`writeTransactionRows`（全列）→ `applyPlainTextFormat` → `verifyWrittenValues` |
-| 4.26 要確認確定によるF列更新 | `acquireLease(WRITE_ONLY)` → `writeTransactionRows`（`{f}`のみ）→ `applyPlainTextFormat` → `verifyWrittenValues` → `releaseLease` |
+| 6.1 通常転記 | `guardFileUnchanged`（4.21）→ `reserveRows` →（ロック外）**`applyPlainTextFormat` → `writeTransactionRows`（全列）** → `verifyWrittenValues`（書式は値の前。flush規則3・Ver.3.0） |
+| 4.26 要確認確定によるF列更新 | `acquireLease(WRITE_ONLY)` → **`applyPlainTextFormat` → `writeTransactionRows`（`{f}`のみ）** → `verifyWrittenValues` → `releaseLease` |
 | 4.26 日付・金額修正 | `acquireLease(WRITE_ONLY)` → `writeTransactionRows`（`{b}`／`{m}`のみ）→ `verifyWrittenValues` → `releaseLease` |
 | 4.29 取消しによるクリア | `acquireLease(WRITE_ONLY)` → `clearTransactionRows` → `verifyWrittenValues`（全項目が空であることを確認）→ `releaseLease` |
-| 4.29 復元 | `acquireLease(WRITE_ONLY)` → `reserveRows` → `writeTransactionRows`（全列）→ `applyPlainTextFormat` → `verifyWrittenValues` → `releaseLease` |
-| `recoverPartialFailure` Step4・Step5 | `guardFileUnchanged` → `writeTransactionRows`（全列）→ `applyPlainTextFormat` → `verifyWrittenValues` |
+| 4.29 復元 | `acquireLease(WRITE_ONLY)` → `reserveRows` → **`applyPlainTextFormat` → `writeTransactionRows`（全列）** → `verifyWrittenValues` → `releaseLease` |
+| `recoverPartialFailure` Step4・Step5 | `guardFileUnchanged` → **`applyPlainTextFormat` → `writeTransactionRows`（全列）** → `verifyWrittenValues` |
 
 ### 部分失敗からの回復（仕様11.3）
 
@@ -3617,11 +3620,11 @@ Ver.2.0はこれらを「期待どおりである」とだけ記していた。�
 | **`POST_PRIOR_YEAR`** | **前年の利用分を計上する** | **`PRIOR_YEAR`** | 確認担当者 | 変更なし | 要確認を`RESOLVED`にする。**転記行・B列予定値・金額は変更しない**（初回転記で正しい値が入っているため） | **4.26.2** |
 | **`EXCLUDE_PRIOR_YEAR`** | **前年の利用分を対象外にする** | **`PRIOR_YEAR`** | 確認担当者 | **変更なし（完了判定の対象外。INV-17条件2）** | **取引状態を`CANCELED`へ比較更新し、転記行を4.29のクリア手順で解放する。比較更新の遷移元は当該取引の現在の`transactionStatus`とし、`REVIEW_REQUIRED`と`COMMITTED`の双方を許す**（いずれも4.32の遷移表に存在する。Ver.2.5・指摘4）。**それ以外の状態（`PREPARED`／`WRITING`／`CANCELED`／`DELETED_ACCEPTED`）では本操作を提示しない。** 監査ログ`REVIEW_RESOLVE`へ、対象外とした理由（前年利用分）と遷移元の状態を記録する | **確定しない**（`CANCELED`が終端） |
 | `EXCLUDE` | 対象外 | 全取引単位種別 | 確認担当者 | **変更なし（完了判定の対象外。INV-17条件2）** | 取引状態を`CANCELED`へ比較更新。**比較更新の遷移元は当該取引の現在の`transactionStatus`とし、`REVIEW_REQUIRED`と`COMMITTED`の双方を許す**（Ver.2.5・指摘4。下記）。転記行は4.29のクリア手順で解放 | **確定しない**（`CANCELED`が終端） |
-| `ADOPT_AS_NEW_TRANSACTION` | 変更候補を別取引として採用 | `FILE_CHANGED` | 確認担当者 | 変更なし | **再取込世代番号を+1して取引IDを決定的に再導出**（INV-23）。元取引は維持 | 新取引は通常の書込経路で確定する |
+| `ADOPT_AS_NEW_TRANSACTION` | 変更候補を別取引として採用 | `FILE_CHANGED` | 確認担当者 | 変更なし | **再取込世代番号を+1して取引IDを決定的に再導出**（INV-23）。元取引は維持。**書込は他の解決操作と同じ`WRITE_ONLY`リースの経路で行う**（予約→書込→読取確認→INV-01同時更新）。**ファイル内部状態は遷移させない** ── `FILE_CHANGED`は`COMPLETED`のファイルに立つのが典型であり、`COMPLETED → VALIDATING`は遷移表に存在しない（Ver.3.0・実装差戻し#6）。処理ログJ・K・L列をこの時点で更新する（6.5） | 新取引は書込部品の共有により通常経路と同じ規律で確定する |
 | `IMPORT_AS_NEW_FILE` | 修正版候補を別ファイルとして取り込む | `DUPLICATE`（`PURPOSE_REVISION_CANDIDATE`） | 確認担当者 | 変更なし | **処理ログAK列へ`PURPOSE_REVISION_CANDIDATE`の承認を永続化（INV-28）**したうえで`REVIEW_WAIT → VALIDATING` | ファイル単位。取引状態を変えない |
 | `KEEP_ORIGINAL_RESULT` | 元の処理結果を維持 | `DUPLICATE`／`FILE_CHANGED` | 確認担当者 | 変更なし | `DUPLICATE`では新ファイルを`REVIEW_WAIT → EXCLUDED`（取り込まない）。`FILE_CHANGED`では取引状態は不変で要確認のみ`RESOLVED` | ファイル単位。取引状態を変えない |
-| `UPDATE_PURPOSE` | 使用用途を更新 | `DUPLICATE` | 確認担当者 | 変更なし | **既存取引**のI列更新→読取確認→予定値・読取確認値を同時更新。新ファイルは`REVIEW_WAIT → EXCLUDED`。**`freee取込状態 = IMPORTED`の取引は自動更新せず警告のみ**（仕様12.3） | 既存取引は既に`COMMITTED`。状態を変えない |
-| `APPLY_FILE_DIFF` | 差分を反映 | `FILE_CHANGED` | 確認担当者 | 変更なし | **取引同一性ハッシュの多重集合差分**で差分取引を求める。差分比率が`FILE_DIFF_MAX_RATIO`超なら本操作を提示せず`CANCEL_FILE`へ誘導（INV-23） | 差分取引は通常の書込経路で確定する |
+| `UPDATE_PURPOSE` | 使用用途を更新 | `DUPLICATE` | 確認担当者 | 変更なし | **既存取引**のI列更新→読取確認→予定値・読取確認値を同時更新（`WRITE_ONLY`リース。更新対象は**既存ファイル側**の取引であり、リースもそちらのファイルに取る）。新ファイルは`REVIEW_WAIT → EXCLUDED`。**本操作を「再検査へ戻す」経路に流してはならない** ── 重複として止まったファイルが再取込され、全明細が二重転記になる（Ver.3.0・実装差戻し#6）。**`freee取込状態 = IMPORTED`の取引は自動更新せず警告のみ**（仕様12.3） | 既存取引は既に`COMMITTED`。状態を変えない |
+| `APPLY_FILE_DIFF` | 差分を反映 | `FILE_CHANGED` | 確認担当者 | 変更なし | **取引同一性ハッシュの多重集合差分**で差分取引を求める（単純な集合差分では、同日同額同店の正当な2件の2件目が常に「追加」扱いになる）。差分比率が`FILE_DIFF_MAX_RATIO`超なら本操作を拒否して`CANCEL_FILE`へ誘導（INV-23）。**追加分の書込は`WRITE_ONLY`リースの経路で行い、ファイル内部状態は遷移させない**（Ver.3.0・実装差戻し#6）。処理ログJ・K・L列をこの時点で更新する（6.5） | 差分取引は書込部品の共有により通常経路と同じ規律で確定する |
 | `CANCEL_FILE` | 取消し | **全ファイル単位種別**（`FORMAT_UNKNOWN`／`FORMAT_AMBIGUOUS`／`MULTI_SHEET`／`DUPLICATE`／`FILE_CHANGED`／`COUNT_TOTAL_MISMATCH`／`EMPTY_FILE`／`INPUT_LIMIT`／`DESTINATION_FIX`／`SCAN_TRUNCATED`） | 確認担当者 | 変更なし | 4.29の取消しフローへ委譲。すべてのファイル単位種別に必ず1つは終端へ到達する経路がある状態を保証する（INV-31） | 全取引が`CANCELED`（終端） |
 | `ACCEPT_MANUAL_CHANGE` | 手動変更を採用 | `INTEGRITY` | 確認担当者 | 変更なし | 4.29の`acceptManualChange()`（仕様17.2） | 対象は`COMMITTED`。状態を変えない |
 | `REVERT_TO_SYSTEM_VALUE` | システム保存値へ戻す | `INTEGRITY` | 確認担当者 | 変更なし | 4.29の`revertManualChange()`（仕様17.2） | 同上 |
@@ -4391,7 +4394,7 @@ computeBackoffMs(attempt) =
 **2リクエストの分割点で停止できることが必須である。** `RAW`成功／`USER_ENTERED`失敗という部分書込状態を再現し、仕様11.3 Step4で回復することを試験する。
 
 ### 契約
-- 不変：`context`の形式は全停止点で共通とする（`{ runId, customerId, fileId, txIds[], batchIndex }`）。
+- 不変：`context`は`fileId`を必須とし、`runId`・`customerId`・`txIds[]`・`batchIndex`は**呼出箇所で取得できる範囲で付す**（Ver.3.0）。全キーを必須にすると、それらを持たない層（4.23の書込関数など）へ停止点を置けず、最重要の分割点が実装されないまま残る ── 実際にそうなっていた。
 - 不変：呼出のたびにScript Propertiesを読まない。実行開始時のキャッシュを参照する。
 - 不変：本番保護を4.6の起動時検証だけに依存させず、本モジュール自身が自己防衛ガードを持つ。
 - 不変：`runSerializationVectors`は**5.6.1の7ベクトルの16進期待値と完全一致**しなければならない。1件でも不一致なら回帰テストを不合格とする（取引IDと全ハッシュの土台であるため）。
