@@ -395,12 +395,25 @@ function createGasStubs() {
           const error = new Error(failure.message || `Sheets failure ${failure.code || failure}`);
           error.code = Number(failure.code || failure); throw error;
         }
+        // 実 Sheets は UNFORMATTED_VALUE + SERIAL_NUMBER で日付セルを
+        // **シリアル値（数値）**として返す。文字列のまま返すと、
+        // `normalizeReadValue` のシリアル値経路がどのテストでも走らない。
+        const serialize = (value) => {
+          if (value instanceof Date &&
+              request.dateTimeRenderOption === 'SERIAL_NUMBER' &&
+              request.valueRenderOption !== 'FORMULA') {
+            const parts = zonedParts(value, 'Asia/Tokyo');
+            return Math.round((Date.UTC(Number(parts.year), Number(parts.month) - 1,
+              Number(parts.day)) - Date.UTC(1899, 11, 30)) / 86400000);
+          }
+          return value;
+        };
         return {valueRanges: (request.ranges || []).map((a1) => {
           const {range} = sheetAndRange(spreadsheetId, a1); let values;
           if (request.valueRenderOption === 'FORMULA') {
             const formulas = range.getFormulas(); const raw = range.getValues();
             values = formulas.map((row, r) => row.map((formula, c) => formula || raw[r][c]));
-          } else values = range.getValues();
+          } else values = range.getValues().map((row) => row.map(serialize));
           return {range: a1, majorDimension: 'ROWS', values};
         })};
       },
@@ -409,9 +422,22 @@ function createGasStubs() {
         // 1,200レンジになり、リクエストサイズ上限に近づく。
         apiCallCounts.batchUpdate += 1;
         apiCallCounts.rangesWritten += (request.data || []).length;
+        // 実 Sheets の USER_ENTERED は値を**解釈して**格納する。
+        // '2026-01-02' は日付セルに、'1200' は数値になる。素通しにすると、
+        // 読み返しがシリアル値で返る本番の経路をどのテストも通らない。
+        const interpret = (value) => {
+          if (request.valueInputOption !== 'USER_ENTERED') return value;
+          if (typeof value !== 'string') return value;
+          if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+            return new Date(`${value}T00:00:00+09:00`);
+          }
+          if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value);
+          return value;
+        };
         let totalUpdatedCells = 0;
         for (const data of request.data || []) {
-          const {range} = sheetAndRange(spreadsheetId, data.range); range.setValues(data.values);
+          const {range} = sheetAndRange(spreadsheetId, data.range);
+          range.setValues(data.values.map((row) => row.map(interpret)));
           totalUpdatedCells += range.getNumRows() * range.getNumColumns();
         }
         return {totalUpdatedCells};

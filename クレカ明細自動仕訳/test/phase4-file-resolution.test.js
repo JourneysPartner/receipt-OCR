@@ -241,12 +241,15 @@ module.exports = ({test, assert, gas}) => {
 
   test('4.26: keeping the original result on a changed file leaves its state alone', () => {
     setup();
+    const id = fileReview('FILE_CHANGED');
     const result = plain(gas.call('resolveFileReview',
-      [fileReview('FILE_CHANGED'), 'KEEP_ORIGINAL_RESULT', {runId: 'RUN_1'}]));
+      [id, 'KEEP_ORIGINAL_RESULT', {runId: 'RUN_1'}]));
     assert.equal(result.nextState, 'REVIEW_WAIT',
       'the transactions already written stay as they are');
-    assert.equal(plain(gas.call('getReviewById', [gas.call('openReviews', [{fileId: 'file1'}])
-      .length ? 'x' : 'y'])), null);
+    // 以前ここは getReviewById('x'/'y') === null という**恒真**の主張だった。
+    // 検証すべきは「当該要確認が閉じたこと」である。
+    assert.equal(plain(gas.call('getReviewById', [id])).status, 'RESOLVED');
+    assert.equal(gas.call('openReviews', [{fileId: 'file1'}]).length, 0);
   });
 
   // ================= 取消し =================

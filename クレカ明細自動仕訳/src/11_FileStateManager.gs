@@ -137,8 +137,15 @@ function forceReleaseLease(leaseId, reason, actor) {
   return withScriptLock_(function() {
     var lease = activeLeases_().filter(function(item) { return item.leaseId === String(leaseId); })[0];
     if (!lease) return;
-    var process = getProcessLogRecord_(lease.fileId);
-    if (!process || [FILE_STATE.VALIDATING, FILE_STATE.WRITING].indexOf(String(process.values[16])) < 0) throw new StateTransitionError('Lease state is not force-releasable');
+    // `PROCESS`リースは取込の途中でだけ持たれるので、ファイルが
+    // VALIDATING/WRITINGでないのに残っていたら状態の食い違いであり、
+    // 黙って消さず調査対象にする。**`WRITE_ONLY`リースにこの条件を課さない**
+    // ── REVIEW_WAIT/COMPLETEDのファイルに取るのが正常な使い方であり、
+    // 課すと強制終了で残った行を誰も解放できない。
+    if (lease.purpose !== LEASE_PURPOSE.WRITE_ONLY) {
+      var process = getProcessLogRecord_(lease.fileId);
+      if (!process || [FILE_STATE.VALIDATING, FILE_STATE.WRITING].indexOf(String(process.values[16])) < 0) throw new StateTransitionError('Lease state is not force-releasable');
+    }
     var customer = getCustomerById(lease.customerId);
     if (customer.admins.indexOf(String(actor).toLowerCase()) < 0) throw new AuthorizationError('System administrator role is required');
     var elapsed = (Date.now() - new Date(lease.lastHeartbeat).getTime()) / 1000;
@@ -149,12 +156,24 @@ function forceReleaseLease(leaseId, reason, actor) {
   });
 }
 
+/**
+ * 心拍が途絶えたリースを検出する。
+ *
+ * **`WRITE_ONLY`リースはファイル状態を問わず対象にする。** 解決操作・
+ * 取消し・復元は`REVIEW_WAIT`/`COMPLETED`のファイルに`WRITE_ONLY`リースを
+ * 取り、GASの実行が6分上限で強制終了されると`finally`は走らずACTIVE行が
+ * 残る。検出条件を「内部状態がVALIDATING/WRITING」に限ると、この残留は
+ * **検出も解放もできず、以後そのファイルの全解決操作がLEASE_CONFLICTに
+ * なる** ── INV-20の根拠文が予言した状態そのものである。
+ */
 function detectStalledLeases() {
   var now = Date.now();
   return activeLeases_().filter(function(lease) {
+    var elapsed = (now - new Date(lease.lastHeartbeat).getTime()) / 1000;
+    if (!isFinite(elapsed) || elapsed <= SETTINGS.HEARTBEAT_TIMEOUT_SECONDS) return false;
+    if (lease.purpose === LEASE_PURPOSE.WRITE_ONLY) return true;
     var process = getProcessLogRecord_(lease.fileId);
     var state = process ? String(process.values[16]) : '';
-    var elapsed = (now - new Date(lease.lastHeartbeat).getTime()) / 1000;
-    return [FILE_STATE.VALIDATING, FILE_STATE.WRITING].indexOf(state) >= 0 && isFinite(elapsed) && elapsed > SETTINGS.HEARTBEAT_TIMEOUT_SECONDS;
+    return [FILE_STATE.VALIDATING, FILE_STATE.WRITING].indexOf(state) >= 0;
   });
 }

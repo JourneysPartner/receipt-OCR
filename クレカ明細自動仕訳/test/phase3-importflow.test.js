@@ -91,6 +91,16 @@ module.exports = ({test, assert, gas}) => {
     return true;
   }
 
+
+  /** 日付セルの中身をJSTのYYYY-MM-DDへ。実SheetsのgetValue()はDateを返す。 */
+  const cellDate = (sheet, row, col) => {
+    const value = sheet.getRange(row, col).getValue();
+    if (value instanceof Date) {
+      return value.toLocaleDateString('sv-SE', {timeZone: 'Asia/Tokyo'});
+    }
+    return value;
+  };
+
   function txLogRowCount() {
     const sheet = gas.stubs.getSpreadsheet('master').getSheetByName(names.transaction);
     return sheet.getLastRow() - 1;
@@ -163,7 +173,8 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(gas.call('getTransaction', ['TX_E']).transactionStatus, 'COMMITTED');
 
     const sheet = gas.stubs.getSpreadsheet('dest1').getSheetByName('入力用シート');
-    assert.equal(sheet.getRange(2, 2).getValue(), '2026-01-02');
+    // 実Sheetsでは日付セルのgetValue()はDateを返す（USER_ENTERED解釈）。
+    assert.equal(cellDate(sheet, 2, 2), '2026-01-02');
     assert.equal(sheet.getRange(2, 13).getValue(), 1000);
 
     // 9-12：全取引が確定したファイルは完了へ進む（INV-17）。
@@ -397,7 +408,7 @@ module.exports = ({test, assert, gas}) => {
       ['file1', 'RUN_1', gas.call('buildIndex', [customer]), leaseId, {customer}]);
     assert.equal(result.recovered[0].step, 4);
     assert.equal(result.recovered[0].rowNumber, 2, 'the same row, not a new one');
-    assert.equal(sheet.getRange(2, 2).getValue(), '2026-01-02');
+    assert.equal(cellDate(sheet, 2, 2), '2026-01-02');
     assert.equal(sheet.getRange(2, 13).getValue(), 1000);
     assert.equal(gas.call('getTransaction', ['TX_F4']).transactionStatus, 'COMMITTED');
   });
@@ -480,6 +491,30 @@ module.exports = ({test, assert, gas}) => {
     // ここで確認するのは「数式が失われていないこと」である。
     assert.ok(sheet.getRange(expanded, 21).getFormula(),
       'the tax formula must survive the expansion');
+  });
+
+  // ---- #25：実際の顧客シートはグリッド末尾に「何も無い空行」が続く ----
+  //
+  // `getMaxRows()`を複製元にすると空行を複製してしまい、勘定科目・消費税式が
+  // 新しい行に入らない。テストのシートはmaxRowsをデータ行ぴったりに作りがちで、
+  // この差はそこでは出ない。複製元は数式を持つ空き行（本物のテンプレート行）。
+  test('M30: a grid with a blank tail still copies the formula-bearing template row', () => {
+    const customer = setup();
+    const sheet = gas.stubs.getSpreadsheet('dest1').getSheetByName('入力用シート');
+    // 行2にテンプレート数式。行3〜4はグリッド末尾の完全な空行。
+    sheet.getRange(2, 21).setFormula('=M2*0.1');
+
+    const leaseId = gas.call('acquireLease',
+      ['C001', 'file1', 'RUN_1', 'admin@example.com', 'PROCESS']);
+    // 空き3行に対し5件 → 2行の拡張
+    const result = plain(gas.call('reserveDestinationRows',
+      [customer, ['TX_G1', 'TX_G2', 'TX_G3', 'TX_G4', 'TX_G5'], 'file1', leaseId]));
+
+    assert.equal(result.expanded.length, 2);
+    result.expanded.forEach((rowNumber) => {
+      assert.ok(sheet.getRange(rowNumber, 21).getFormula(),
+        `row ${rowNumber} must carry the template formula, not a copy of the blank tail`);
+    });
   });
 
   // ---- M30 手順6：拡張しても空き行が増えないなら、繰り返さずに止まる ----

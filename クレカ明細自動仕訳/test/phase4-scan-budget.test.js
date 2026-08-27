@@ -131,7 +131,9 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(counts.batchUpdate, 2);
 
     const sheet = gas.stubs.getSpreadsheet('dest1').getSheetByName('入力用シート');
-    assert.equal(sheet.getRange(2, 2).getValue(), '2026-01-02');
+    const b2 = sheet.getRange(2, 2).getValue();
+    assert.equal(b2 instanceof Date
+      ? b2.toLocaleDateString('sv-SE', {timeZone: 'Asia/Tokyo'}) : b2, '2026-01-02');
     assert.equal(sheet.getRange(21, 13).getValue(), 1000);
     assert.equal(sheet.getRange(21, 30).getValue(), 'TX_19');
   });

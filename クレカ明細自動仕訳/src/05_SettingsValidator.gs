@@ -32,6 +32,7 @@ var SETTINGS_CHECKS_ = Object.freeze([
   {id: 2, name: 'requiredSheets', scopes: ['IMPORT', 'FORMAT_REGISTRATION', 'CUSTOMER_MASTER', 'ADMIN']},
   {id: 3, name: 'introducedSettings', scopes: ['IMPORT', 'FORMAT_REGISTRATION', 'CUSTOMER_MASTER', 'ADMIN']},
   {id: 4, name: 'timezone', scopes: ['IMPORT', 'FORMAT_REGISTRATION', 'CUSTOMER_MASTER', 'ADMIN']},
+  {id: 5, name: 'apiAvailability', scopes: ['IMPORT', 'FORMAT_REGISTRATION', 'CUSTOMER_MASTER', 'ADMIN']},
   {id: 6, name: 'safetyMargin', scopes: ['IMPORT', 'FORMAT_REGISTRATION', 'CUSTOMER_MASTER', 'ADMIN']},
   {id: 7, name: 'quotaCeilings', scopes: ['IMPORT', 'FORMAT_REGISTRATION', 'CUSTOMER_MASTER', 'ADMIN']},
   {id: 8, name: 'lockSettings', scopes: ['IMPORT', 'FORMAT_REGISTRATION', 'CUSTOMER_MASTER', 'ADMIN']},
@@ -94,6 +95,18 @@ function runSettingsCheck_(check, context) {
       return SETTINGS.EXECUTION_TIMEOUT_SECONDS === null ||
         SETTINGS.EXECUTION_TIMEOUT_SECONDS === undefined
         ? 'EXECUTION_TIMEOUT_SECONDS is not configured' : null;
+
+    case 'apiAvailability':
+      // Sheets Advanced Service と DriveApp が使えることの確認（検査5）。
+      // 未有効のまま処理を始めると、最初の書込で
+      // 「Sheets is not defined」という手掛かりの薄い形で落ちる。
+      if (typeof Sheets === 'undefined' || !Sheets.Spreadsheets) {
+        return 'the Sheets Advanced Service is not enabled';
+      }
+      if (typeof DriveApp === 'undefined') {
+        return 'DriveApp is not available';
+      }
+      return null;
 
     case 'timezone':
       return String(context.timezone || SYSTEM_TIMEZONE) === 'Asia/Tokyo'

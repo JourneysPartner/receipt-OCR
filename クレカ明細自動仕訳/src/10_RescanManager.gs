@@ -109,10 +109,17 @@ function runProcessedFileRescan(input) {
   var registered = [];
 
   detections.filter(function(d) { return d.changed; }).forEach(function(d) {
+    // 2.1.7の必須列（顧客名・元ファイル名）を恒久ファイルインデックスから
+    // 補う。空欄のまま登録すると、要確認一覧が「どの顧客のどのファイルか」を
+    // 表示できない。
+    var permanent = getPermanentFileIndexRecord_(d.fileId);
     var outcome = registerReview({
       reviewType: REVIEW_TYPE.FILE_CHANGED,
       fileId: d.fileId,
       customerId: input.customerId,
+      customerName: input.customerName ||
+        (permanent ? String(permanent.values[1] || '') : ''),
+      fileNameOriginal: permanent ? String(permanent.values[2] || '') : '',
       detail: {
         // キー名は2.1.7.1のとおりにする。4.26の解決操作
         // （`APPLY_FILE_DIFF`等）はここから旧リビジョンを読む。名前が違うと
