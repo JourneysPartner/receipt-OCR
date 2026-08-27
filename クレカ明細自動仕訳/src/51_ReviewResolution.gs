@@ -19,7 +19,10 @@ var TX_REVIEW_OPERATIONS_ = Object.freeze({
   DATE: ['FIX_DATE_AMOUNT', 'EXCLUDE'],
   AMOUNT: ['FIX_DATE_AMOUNT', 'EXCLUDE'],
   ZERO_AMOUNT: ['POST_ZERO_AMOUNT', 'EXCLUDE'],
-  PRIOR_YEAR: ['POST_PRIOR_YEAR', 'EXCLUDE_PRIOR_YEAR', 'EXCLUDE']
+  PRIOR_YEAR: ['POST_PRIOR_YEAR', 'EXCLUDE_PRIOR_YEAR', 'EXCLUDE'],
+  // `INTEGRITY`固有の操作は4.29（54_IntegrityResolution）が扱う。
+  // ここには終端への逃げ道だけを置く（INV-31）。
+  INTEGRITY: ['EXCLUDE']
 });
 
 /** 当該要確認に提示してよい操作を返す。画面はこの一覧だけを出す。 */
