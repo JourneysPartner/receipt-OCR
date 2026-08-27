@@ -28,11 +28,17 @@ function validateTransactions(txs, context) {
 
   txs.forEach(function(tx) {
     var txId = tx.transactionId || tx.fullTxId || null;
+    // 取引DTOは経路によって`merchantOriginal`（解析直後）と`originalMerchant`
+    // （取引ログ）の両方の名前を持つ。片方しか見ないと、もう片方の経路では
+    // 全取引が「利用店名なし」と誤判定され、ファイルが丸ごと顧客へ
+    // 差し戻される。`matchPartner`（4.17）と同じ両対応にする。
+    var merchant = tx.merchantOriginal === undefined ? tx.originalMerchant : tx.merchantOriginal;
+    var amount = tx.amountBillingJpy === undefined ? tx.originalAmount : tx.amountBillingJpy;
 
     // 利用店名。原則として不足は顧客が直す不備（区分1）だが、形式固有の
     // ルール上は空欄が正当な場合がある（年会費行など）。その場合は区分3とし、
     // 行を確保して要確認だけを立てる。
-    if (isBlankValue_(tx.merchantOriginal)) {
+    if (isBlankValue_(merchant)) {
       if (toBool(cardFormat.merchantOptional)) {
         issues.push({
           transactionId: txId, sourceRow: tx.sourceRow,
@@ -54,7 +60,6 @@ function validateTransactions(txs, context) {
     // 0円は不正ではない ── 全額値引きや無料キャンペーンで実際に起きる。
     // 計上するかどうかの業務判断が残るだけなので、行は書いて`ZERO_AMOUNT`の
     // 要確認を立てる。**取引を落とさない。**
-    var amount = tx.amountBillingJpy;
     if (amount === null || amount === undefined || amount === '' ||
         !Number.isFinite(Number(amount))) {
       issues.push({

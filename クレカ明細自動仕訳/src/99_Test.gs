@@ -420,7 +420,10 @@ function runAllVectors() {
  * 停止が顧客のデータに対して起きる。
  */
 function faultInjectionPoint(pointId, context) {
-  var injection = SETTINGS.FAULT_INJECTION;
+  // 設定は**実行開始時に1度だけ読んだキャッシュ**を参照する（4.6）。
+  // 停止点ごとに読み直すと、実行の途中で設定が変わったときに一部の
+  // 停止点だけが有効になり、再現しない挙動になる。
+  var injection = getCachedFaultInjectionConfig();
   if (!injection) return;
 
   // 自己防衛：本番のマスターに対しては、設定が何であっても素通りする。

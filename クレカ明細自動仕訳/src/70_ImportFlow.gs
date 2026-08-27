@@ -50,6 +50,19 @@ function runPreValidationBlock(input) {
   if (validation.validationApprovals === undefined) {
     validation.validationApprovals = getCategory2Approvals(input.file.id);
   }
+  // 8-8：取引単位の妥当性判定。8-9：実行単位の入力上限。
+  //
+  // **呼出側任せにしない。** 材料を呼出側が渡す形だと、渡し忘れたまま
+  // 動く期間ができ、その間は検査が存在しないのと同じになる ── 上限は
+  // いくらでも超えられ、利用店名の無い行がそのまま流れる。
+  if (validation.transactionValidation === undefined) {
+    validation.transactionValidation =
+      validateTransactions(input.transactions || [], {cardFormat: input.cardFormat});
+  }
+  if (validation.inputLimit === undefined && input.runId) {
+    validation.inputLimit =
+      checkRunTransactionLimit(input.runId, (input.transactions || []).length);
+  }
   var classification = classifyValidationResult(validation);
   var category = classification.category;
 
@@ -137,10 +150,13 @@ function runPreValidationBlock(input) {
     });
   });
 
-  // 8-13：取引ログへ`PREPARED`で一括登録する。
+  // 8-13：取引ログへ`PREPARED`で一括登録し、実行単位の累積件数へ加算する。
   // 既存行の扱いは「再合流時の取引再登録」に従う（A-28。61_TransactionLog）。
+  // 加算を永続化しないと、継続トリガーで再開したときに0から数え直し、
+  // 上限がいくらでも超えられる（4.31）。
   if (transactions.length) {
     registerPrepared(transactions, input.runId);
+    if (input.runId) incrementRunTransactionCount(input.runId, transactions.length);
   }
 
   return preValidationResult_(category, classification.code, transactions,
@@ -239,15 +255,17 @@ function runWriteBlock(input) {
       return buildRowWrite(Number(rowNumber), tx);
     });
 
-    // 確定に至らなかった予約行は必ず空き行へ戻す（M17）。
-    // 例外で抜ける経路でも解放するため finally に置く。
-    //
-    // 解放の手段は**値書込の前後で違う**。書込前なら取引ID列だけ消せば
-    // 済む（`releaseReservedRows`）。書込後は B〜M 列にも値が入っているので、
-    // 取引IDだけ消すと**値が残ったまま誰からも引けない行**になる ──
-    // 空き行判定は使用中を返し続け、無名の不正値行が顧客の出納帳に
-    // 恒久的に残る。書込後は全列をクリアする（`clearTransactionRows`）。
+    // 確定に至らなかった予約行の扱いは**3段階で違う**（M17・11.3）。
+    //   1. 値書込の前に中止：取引ID列だけ消して空き行へ戻す
+    //      （`releaseReservedRows`）。
+    //   2. 値書込の**途中**で例外：**何も消さない。** 11.3 Step4 は
+    //      「同じ行へ書き直す」設計であり、取引ID列が残っていることが
+    //      回復の前提である。ここで消すと回復が Step5 で別の行を確保し、
+    //      RAWだけ書けた行が無名のまま出納帳に残る。
+    //   3. 読取確認に失敗：全列をクリアする（`clearTransactionRows`）。
+    //      値が入ったまま取引IDだけ消すと、誰からも引けない死に行になる。
     var settled = {};
+    var writeStarted = false;
     var valuesWritten = false;
     try {
       // 9-4・9-5：プレーンテキスト書式（F/I/K列）→ 値書込。
@@ -256,6 +274,7 @@ function runWriteBlock(input) {
       // 既に電話番号として解釈されてしまった後では元に戻らない。
       // 4.23 flush規則3の順序（複製→flush→書式→値書込→読取確認）に従う。
       applyPlainTextFormat(customer, rowWrites.map(function(w) { return w.rowNumber; }));
+      writeStarted = true;
       writeTransactionRows(customer, rowWrites, leaseId, fileId);
       valuesWritten = true;
       result.wroteToDestination = true;
@@ -285,11 +304,16 @@ function runWriteBlock(input) {
         .filter(function(rowNumber) { return !settled[rowNumber]; });
       if (orphaned.length) {
         if (valuesWritten) {
+          // 段階3：読取確認に失敗した行。全列をクリアして空き行へ戻す。
           clearTransactionRows(customer, orphaned, leaseId, fileId);
-        } else {
+          result.released = (result.released || []).concat(orphaned);
+        } else if (!writeStarted) {
+          // 段階1：値書込前の中止。取引ID列だけ消せば空き行へ戻る。
           releaseReservedRows(customer, orphaned, leaseId, fileId);
+          result.released = (result.released || []).concat(orphaned);
         }
-        result.released = (result.released || []).concat(orphaned);
+        // 段階2（writeStarted && !valuesWritten）：書込途中の例外。
+        // 行を残し、`recoverPartialFailure`（11.3 Step4）に委ねる。
       }
     }
   }

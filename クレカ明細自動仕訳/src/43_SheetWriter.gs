@@ -228,6 +228,12 @@ function writeTransactionRows(customer, rowWrites, leaseId, fileId) {
       });
     });
     if (!data.length) return;
+    // 障害注入の停止点（4.39）。RAWとUSER_ENTEREDの分割点で止められる
+    // ことが、仕様11.3 Step4（RAWだけ成功した部分失敗）を実機で再現する
+    // 唯一の手段である。本番では素通りする。
+    faultInjectionPoint(group.option === 'RAW'
+      ? 'SHEET_WRITE_RAW_BEFORE' : 'SHEET_WRITE_USER_ENTERED_BEFORE',
+      {fileId: fileId});
     Sheets.Spreadsheets.Values.batchUpdate(
       {valueInputOption: group.option, data: data},
       customer.destinationSpreadsheetId

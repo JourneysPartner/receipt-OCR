@@ -164,7 +164,7 @@ function rebaselineSample(input) {
   var updated = [];
   (input.samples || []).forEach(function(sample) {
     if (recomputed.sampleIds.indexOf(String(sample.sampleId)) < 0) return;
-    var dataHash = computeSampleDataHash(sample.current);
+    var dataHash = computeSampleDataHash(sample.sampleId, sample.current);
     var before = {
       expected: sample.expected || null,
       dataHash: sample.expectedDataHash || null,
@@ -205,19 +205,40 @@ function rebaselineSample(input) {
   };
 }
 
-/** 2.1.19 AD列（期待値dataHash）。改竄検知の基準になる。 */
-function computeSampleDataHash(expected) {
+/**
+ * 期待値オブジェクトを 2.1.20 の行列（A〜L列）へ変換する。
+ *
+ * **この変換が正本であり、他の場所で同じ変換を書かない。** AD列のハッシュは
+ * この行列に対する`computeDataHash`（5.6.3）であり、4.12.3の改竄検知は
+ * 同じ行列から再計算して照合する。表現が2つあると、再ベースラインが書いた
+ * ハッシュを改竄検知が読めず、**期待値を更新した瞬間に全サンプルが
+ * `SAMPLE_EXPECTED_TAMPERED`になる**（第2回レビュー #16）。
+ */
+function expectedToLedgerRows(sampleId, expected) {
   var value = expected || {};
-  var elements = [
-    String(VERSIONS.HASH),
-    value.transactionCount, value.totalAmount, value.excludedCount,
-    value.billingYearMonth, JSON.stringify(value.yearSummary || null)
-  ];
+  var rows = [];
   (value.rows || []).forEach(function(row) {
-    ['sourceRow', 'merchant', 'amountBillingJpy', 'purpose', 'occurrenceIndex', 'derivedDate']
-      .forEach(function(item) {
-        elements.push(row[item] === undefined ? null : row[item]);
-      });
+    rows.push([
+      String(sampleId), row.sourceRow,
+      row.occurrenceIndex === undefined ? '' : row.occurrenceIndex,
+      'TRANSACTION', '',
+      row.plannedB === undefined ? '' : row.plannedB,
+      row.dateHashKey === undefined ? '' : row.dateHashKey,
+      row.amountBillingJpy === undefined ? '' : row.amountBillingJpy,
+      row.merchant === undefined ? '' : row.merchant,
+      row.purpose === undefined ? '' : row.purpose,
+      row.reviewTypes === undefined ? '' : row.reviewTypes,
+      row.derivedDate === undefined ? '' : row.derivedDate
+    ]);
   });
-  return sha256Hex(utf8Bytes(serializeDeterministic(elements)));
+  (value.excludedRows || []).forEach(function(row) {
+    rows.push([String(sampleId), row.rowNumber, '', 'EXCLUDED',
+      String(row.reason), '', '', '', '', '', '', '']);
+  });
+  return rows.sort(function(a, b) { return Number(a[1]) - Number(b[1]); });
+}
+
+/** 2.1.19 AD列（期待値dataHash）。5.6.3の`computeDataHash`へ一本化する。 */
+function computeSampleDataHash(sampleId, expected) {
+  return computeDataHash(expectedToLedgerRows(sampleId, expected));
 }

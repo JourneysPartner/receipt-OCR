@@ -276,8 +276,12 @@ function runCorpusRegression(input) {
                String(sample.storedBinaryHash) !== String(sample.currentBinaryHash)) {
       failures.push(gateFailure_('SAMPLE_FILE_MISSING', {sampleId: sampleId,
         expected: sample.storedBinaryHash, actual: sample.currentBinaryHash}));
-    } else if (sample.storedDataHash && sample.currentDataHash &&
-               String(sample.storedDataHash) !== String(sample.currentDataHash)) {
+    } else if (sample.storedDataHash &&
+               String(sample.storedDataHash) !==
+               String(computeSampleDataHash(sampleId, sample.expected))) {
+      // 改竄検知は**同じ変換からの再計算**と比べる（4.12.3 手順3・A-20）。
+      // 呼出側に現在値ハッシュを渡させる形だと、渡し忘れで素通りし、
+      // 別の計算式で渡すと全件が偽陽性になる。
       failures.push(gateFailure_('SAMPLE_EXPECTED_TAMPERED', {sampleId: sampleId}));
     } else {
       // 手順4：照合対象定義を決める。当該サンプルの形式が評価対象と同じなら

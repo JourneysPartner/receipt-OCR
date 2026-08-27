@@ -149,6 +149,8 @@ function reserveDestinationRows(customer, fullTxIds, fileId, leaseId) {
     // Sheets API で同じ行へ書く。ここで flush しないと予約が相手から見えず、
     // 別の実行が同じ行を空きと判定して二重に予約する（4.23 flush規則1）。
     SpreadsheetApp.flush();
+    // 停止点：予約済み・値書込前の状態を作る（11.3 Step4/5 の再現用）。
+    faultInjectionPoint('ROW_RESERVE_AFTER', {fileId: fileId});
     invalidate(index);
     return {reserved: reserved, expanded: expandedRows};
   });
