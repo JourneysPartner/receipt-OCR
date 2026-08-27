@@ -46,7 +46,8 @@ module.exports = ({test, assert, gas}) => {
       {name: names.audit, values: [sheetHeader(15, '監査ID')]},
       {name: names.lease, values: [sheetHeader(10, 'リースID')]},
       {name: names.fileIndex, values: [sheetHeader(13, 'ファイルID')]},
-      {name: names.review, values: [sheetHeader(32, '要確認ID')]}
+      {name: names.review, values: [sheetHeader(32, '要確認ID')]},
+      {name: '承認申請', values: [sheetHeader(13, '申請ID')]}
     ]});
     gas.stubs.setActiveSpreadsheet('master');
 
@@ -115,7 +116,9 @@ module.exports = ({test, assert, gas}) => {
   test('4.26: only the operations listed for the review type are offered', () => {
     setup();
     assert.deepEqual(plain(gas.call('availableResolveOperations', ['PARTNER'])),
-      ['ADOPT_EXISTING_PARTNER', 'RESOLVE_WITHOUT_PARTNER', 'EXCLUDE']);
+      ['ADOPT_EXISTING_PARTNER', 'REQUEST_NEW_PARTNER',
+       'RESOLVE_WITHOUT_PARTNER', 'EXCLUDE'],
+      'without REQUEST_NEW_PARTNER, an unknown merchant has no ordinary resolution');
     // INV-31：どの種別にも終端へ至る経路が必ずある
     ['PARTNER', 'DATE', 'AMOUNT', 'ZERO_AMOUNT', 'PRIOR_YEAR'].forEach((type) => {
       const ops = plain(gas.call('availableResolveOperations', [type]));
@@ -287,6 +290,70 @@ module.exports = ({test, assert, gas}) => {
       'the date did not change, so 5.12 must not be re-evaluated');
     assert.equal(gas.stubs.getSpreadsheet('dest1')
       .getSheetByName('入力用シート').getRange(2, 13).getValue(), 2500);
+  });
+
+  // ================= REQUEST_NEW_PARTNER =================
+
+  test('13.3: requesting a new partner files a PARTNER_CREATE and keeps the review open', () => {
+    setup();
+    committedTx('TX_1');
+    const id = review('PARTNER', 'TX_1');
+
+    const result = plain(gas.call('resolveReview', [id, 'REQUEST_NEW_PARTNER',
+      {partnerName: '株式会社ミナトヤ', similarPartners: ['株式会社ミナト']}]));
+
+    assert.ok(result.requestId, 'the request id is how approval finds this application');
+    assert.equal(result.committed, false,
+      'resolution comes only after approval, sync and the F-column write all succeed');
+
+    const request = plain(gas.call('getRequest', [result.requestId]));
+    assert.equal(request.requestType, 'PARTNER_CREATE');
+    assert.equal(request.status, 'PENDING');
+    assert.equal(request.payload.partnerName, '株式会社ミナトヤ');
+    assert.equal(request.payload.customerId, 'C001');
+
+    // 要確認は承認待ちとして開いたまま。解決済みにすると却下時に宙に浮く。
+    assert.equal(plain(gas.call('getReviewById', [id])).status, 'IN_PROGRESS');
+    assert.equal(gas.call('getTransaction', ['TX_1']).partnerResolutionStatus, 'UNRESOLVED');
+  });
+
+  test('4.30: an approval decision is recorded and a settled request cannot be decided twice', () => {
+    setup();
+    committedTx('TX_1');
+    const id = review('PARTNER', 'TX_1');
+    const {requestId} = plain(gas.call('resolveReview', [id, 'REQUEST_NEW_PARTNER',
+      {partnerName: '株式会社ミナトヤ', similarPartners: []}]));
+
+    const approved = plain(gas.call('approveRequest', [requestId, 'owner@example.com']));
+    assert.equal(approved.status, 'APPROVED');
+    assert.throws(() => gas.call('approveRequest', [requestId, 'owner@example.com']),
+      (error) => error && /not pending/.test(String(error.message)));
+  });
+
+  test('4.30: a rejection requires a reason', () => {
+    setup();
+    committedTx('TX_1');
+    const id = review('PARTNER', 'TX_1');
+    const {requestId} = plain(gas.call('resolveReview', [id, 'REQUEST_NEW_PARTNER',
+      {partnerName: 'X', similarPartners: []}]));
+    assert.throws(() => gas.call('rejectRequest', [requestId, 'owner@example.com', '']),
+      (error) => error && /reason/.test(String(error.message)),
+      'the applicant needs to know why, or they resubmit the same thing');
+  });
+
+  test('2.1.21: a stale pending request expires instead of staying approvable', () => {
+    setup();
+    committedTx('TX_1');
+    const id = review('PARTNER', 'TX_1');
+    const {requestId} = plain(gas.call('resolveReview', [id, 'REQUEST_NEW_PARTNER',
+      {partnerName: 'X', similarPartners: []}]));
+
+    const future = new Date(Date.now() + 40 * 24 * 3600 * 1000).toISOString();
+    const result = plain(gas.call('expireStaleRequests', [future]));
+    assert.ok(result.expired.indexOf(requestId) >= 0,
+      'a 40-day-old request carries stale gate results and hashes');
+    assert.throws(() => gas.call('approveRequest', [requestId, 'owner@example.com']),
+      (error) => error && /not pending/.test(String(error.message)));
   });
 
   // ---- 4.26.3 (c)：既存の PRIOR_YEAR が残る再訂正では Z列を更新する ----

@@ -15,7 +15,8 @@
 
 /** 種別ごとに許される操作（4.26 解決操作の表）。 */
 var TX_REVIEW_OPERATIONS_ = Object.freeze({
-  PARTNER: ['ADOPT_EXISTING_PARTNER', 'RESOLVE_WITHOUT_PARTNER', 'EXCLUDE'],
+  PARTNER: ['ADOPT_EXISTING_PARTNER', 'REQUEST_NEW_PARTNER',
+            'RESOLVE_WITHOUT_PARTNER', 'EXCLUDE'],
   DATE: ['FIX_DATE_AMOUNT', 'EXCLUDE'],
   AMOUNT: ['FIX_DATE_AMOUNT', 'EXCLUDE'],
   ZERO_AMOUNT: ['POST_ZERO_AMOUNT', 'EXCLUDE'],
@@ -57,6 +58,8 @@ function resolveReview(reviewId, operation, input) {
   switch (String(operation)) {
     case 'ADOPT_EXISTING_PARTNER':
       return adoptExistingPartner_(review, input, actor);
+    case 'REQUEST_NEW_PARTNER':
+      return requestNewPartner_(review, input, actor);
     case 'RESOLVE_WITHOUT_PARTNER':
       updatePartnerResolution(fullTxId, PARTNER_STATUS.RESOLVED_WITHOUT_PARTNER);
       return settle_(review, operation, actor);
@@ -73,6 +76,44 @@ function resolveReview(reviewId, operation, input) {
     default:
       throw new StateTransitionError('Unsupported operation: ' + operation);
   }
+}
+
+/**
+ * `REQUEST_NEW_PARTNER`：新規取引先の作成を申請する（仕様13.3）。
+ *
+ * 既存の取引先一覧に相手が居ない取引の、**最も普通の解決**である。
+ * これが無いと、担当者は「取引先なしで確定」か「対象外」しか選べない。
+ *
+ * 申請は`PARTNER_CREATE`として承認申請シートへ永続化する（B-14）。
+ * `partnerResolutionStatus`は**`UNRESOLVED`のまま**であり、要確認も
+ * `IN_PROGRESS`で開いたままにする ── 承認・同期・F列更新の4段階（6.3）が
+ * すべて成功した時点で初めて`RESOLVED_WITH_PARTNER`になる。ここで
+ * 解決済みにすると、承認が却下されたときに宙に浮く。
+ */
+function requestNewPartner_(review, input, actor) {
+  if (!input.partnerName) {
+    throw new TypeError('REQUEST_NEW_PARTNER requires the proposed partner name');
+  }
+  var requestId = submitRequest(REQUEST_TYPE.PARTNER_CREATE, {
+    partnerName: String(input.partnerName),
+    similarPartners: input.similarPartners || [],
+    customerId: review.customerId,
+    targetType: 'PARTNER',
+    fullTxId: review.fullTxId,
+    reviewId: review.reviewId,
+    merchantOriginal: review.merchantOriginal
+  }, actor);
+
+  // 承認待ちであることを要確認の状態で表す。`RESOLVED`にはしない。
+  updateReviewStatus(review.reviewId, 'IN_PROGRESS', {
+    actor: actor, operation: 'REQUEST_NEW_PARTNER',
+    detail: {requestId: requestId, requestedPartner: String(input.partnerName)}
+  });
+  return {
+    reviewId: review.reviewId, operation: 'REQUEST_NEW_PARTNER',
+    requestId: requestId, committed: false,
+    unmetConditions: ['PARTNER_UNRESOLVED'], openReviewTypes: [REVIEW_TYPE.PARTNER]
+  };
 }
 
 function adoptExistingPartner_(review, input, actor) {
