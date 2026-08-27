@@ -203,6 +203,14 @@ function excludeTransaction_(review, operation, actor, input) {
     throw new StateTransitionError(
       'Exclusion is not offered while the transaction is ' + from);
   }
+  // freee取込済みの取引は、取消し（4.29）と同じ管理者判断を要する（仕様17.3）。
+  // シートの行だけ消すと、freee側に仕訳が残ったまま突合が永久に合わなくなる。
+  // このガードを迂回できる経路を1つでも残すと、53のガードは飾りになる。
+  if ((tx.freeeStatus === FREEE_IMPORT_STATUS.IMPORTED ||
+       tx.freeeStatus === FREEE_IMPORT_STATUS.NEEDS_FREEE_FIX) && !input.allowImported) {
+    throw new StateTransitionError(
+      'freee-imported transactions require an administrator decision: ' + review.fullTxId);
+  }
   var customer = getCustomerById(review.customerId);
   var leaseId = acquireLease(review.customerId, review.fileId, input.runId || null,
     actor, LEASE_PURPOSE.WRITE_ONLY);

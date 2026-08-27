@@ -108,6 +108,85 @@ module.exports = ({test, assert, gas}) => {
     });
   });
 
+  // ---- B-M16：請求年月を持たない形式は ABSENT_BY_ANSWER へ読み替える ----
+  //
+  // `extractBillingYearMonth`は RESOLVED / NOT_FOUND / CONFLICT の3値しか
+  // 返さない。読み替えが無いと、`billingMonthAbsent`が真の形式は期待値
+  // `ABSENT_BY_ANSWER`と実測`NOT_FOUND`が**永久に一致せず**、往復検証が
+  // 必ず不合格になる ── 請求年月の表記がない明細を出すカード会社は実在し、
+  // その形式は登録手順を最後まで通れない。
+  test('B-M16: a format declared to have no billing month passes with NOT_FOUND', () => {
+    setup();
+    const expected = Object.assign({}, EXPECTED, {
+      billingMonthStatus: 'ABSENT_BY_ANSWER', billingYearMonth: null,
+      yearSummary: {yearlessRows: 2, billingMonthStatus: 'ABSENT_BY_ANSWER'}
+    });
+    const sample = Object.assign({}, okSample('S1'), {expected});
+    const result = plain(gas.call('runCorpusRegression', [regression({
+      samples: [sample],
+      extract: extractor((r) => {
+        r.billingMonth = {status: 'NOT_FOUND', yearMonth: null};
+        r.yearSummary = {yearlessRows: 2, billingMonthStatus: 'NOT_FOUND'};
+      }),
+      format: {billingMonthAbsent: true, hasBillingSources: false}
+    })]));
+    assert.equal(result.result, 'PASS',
+      JSON.stringify(result.failures));
+  });
+
+  test('B-M16: the same NOT_FOUND without the declaration is still a failure', () => {
+    setup();
+    const result = plain(gas.call('runCorpusRegression', [regression({
+      samples: [okSample('S1')],
+      extract: extractor((r) => { r.billingMonth = {status: 'NOT_FOUND', yearMonth: null}; }),
+      format: {billingMonthAbsent: false, hasBillingSources: true}
+    })]));
+    assert.equal(result.result, 'FAIL',
+      'without the operator declaration, NOT_FOUND is a real mismatch');
+  });
+
+  // ---- C5 は件数「も」照合する（除外行数の 2.1.19 N列） ----
+  test('C5: a wrong excluded-row count fails even when the row pairs match', () => {
+    setup();
+    const expected = Object.assign({}, EXPECTED, {excludedCount: 2});
+    const result = plain(gas.call('runCorpusRegression', [regression({
+      samples: [Object.assign({}, okSample('S1'), {expected})]
+    })]));
+    assert.equal(result.result, 'FAIL');
+    assert.ok(result.failures.some((f) => f.reason === 'ROUNDTRIP_C5' &&
+      f.item === 'excludedCount'));
+  });
+
+  // ---- C9 は導出のハッシュキー（G列）も保存値と照合する ----
+  test('C9: a drifted dateHashKey fails even when the display values match', () => {
+    setup();
+    const expected = Object.assign({}, EXPECTED);
+    expected.rows = EXPECTED.rows.map((row, i) =>
+      Object.assign({}, row, {dateHashKey: row.derivedDate}));
+    const result = plain(gas.call('runCorpusRegression', [regression({
+      samples: [Object.assign({}, okSample('S1'), {expected})],
+      extract: extractor((r) => {
+        r.transactions.forEach((tx) => { tx.dateHashKey = tx.date; });
+        r.transactions[0].dateHashKey = '2025-01-05';   // 表示値は同じままキーだけ壊れた
+      })
+    })]));
+    assert.equal(result.result, 'FAIL',
+      'the hash key feeds the identity hash - drift here means silent duplicate bookings');
+    assert.ok(result.failures.some((f) => f.item === 'dateHashKey'));
+  });
+
+  // ---- C8 の材料が無ければ「評価なしで合格」にしない ----
+  test('C8: an extraction that never ran the truncation check is a failure', () => {
+    setup();
+    const result = plain(gas.call('runCorpusRegression', [regression({
+      samples: [okSample('S1')],
+      extract: extractor((r) => { delete r.truncation; })
+    })]));
+    assert.equal(result.result, 'FAIL',
+      'skipping the check silently is how a truncated read reaches the ledger');
+    assert.ok(result.failures.some((f) => f.reason === 'ROUNDTRIP_C8'));
+  });
+
   // ---- C11 が A-5 の是正である。処理日に依存しないので保存値と比べられる ----
   test('A-5: a broken year-inference rule is caught by the stored derived date', () => {
     setup();

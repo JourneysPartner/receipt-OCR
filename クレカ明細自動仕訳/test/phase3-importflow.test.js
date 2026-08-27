@@ -337,6 +337,19 @@ module.exports = ({test, assert, gas}) => {
     const sheet = gas.stubs.getSpreadsheet('dest1').getSheetByName('入力用シート');
     assert.equal(sheet.getRange(rowNumber, 30).getValue(), '',
       'the transaction id must be cleared so the row can be reused');
+
+    // 取引ID列だけを消すのでは足りない。値は書込済みなので、B〜M列が
+    // 残ったままだと空き行判定は「使用中」を返し続け、しかも取引IDが
+    // 無いのでどの検査からも引けない ── **無名の不正値行が顧客の出納帳に
+    // 恒久的に残る**。行が本当に空き行へ戻ったことを、空き行判定そのもので
+    // 確かめる。
+    [2, 6, 9, 11, 13].forEach((column) => {
+      assert.equal(sheet.getRange(rowNumber, column).getValue(), '',
+        `column ${column} still holds a written value - the row is dead, not released`);
+    });
+    const index = gas.call('buildIndex', [customer]);
+    assert.equal(gas.call('isRowEmpty', [index, rowNumber, customer]), true,
+      'the emptiness judgement itself must accept the row again');
   });
 
   // ---- 空き行判定は、実物の顧客・インデックスで動かなければならない ----
@@ -466,15 +479,148 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(plain(after).wroteToDestination, true);
   });
 
-  // ---- 区分2は取引ログにも要確認にも何も残さない ----
-  test('6.1: a category-2 file leaves no transaction rows behind', () => {
+  // ---- 8-10 → 9-8：取引先が判定できなかった取引に PARTNER 要確認が立つ ----
+  //
+  // 以前はこの経路が存在しなかった。取引は REVIEW_REQUIRED かつ UNRESOLVED に
+  // なるのに解決すべき要確認行が作られず、ADOPT_EXISTING_PARTNER も
+  // RESOLVE_WITHOUT_PARTNER も起動できない ── **取引先不明の明細は永久に
+  // 確定不能**だった。テストが registerReview を手で呼んで行を作っていた
+  // ため、本番経路がこの行を作れないことが見えなかった。
+  test('9-8: an unmatched partner becomes a PARTNER review through the real path', () => {
+    const customer = setup();
+    const leaseId = gas.call('acquireLease',
+      ['C001', 'file1', 'RUN_1', 'admin@example.com', 'PROCESS']);
+
+    const unmatched = tx('TX_PM');
+    unmatched.partnerResolutionStatus = 'UNRESOLVED';
+    unmatched.planned.f = '';
+    unmatched.partnerMatch = {
+      matchedBy: null, autoConfirm: false, conflict: false,
+      candidates: [{ruleId: 'D1', partnerName: '株式会社ドン・キホーテ', priority: 1, conflict: false}]
+    };
+    unmatched.merchantNormalized = gas.call('normalizeMerchant', ['店舗']);
+
+    gas.call('processFile', [{
+      customer, file: {id: 'file1', name: '明細.csv'}, runId: 'RUN_1', leaseId,
+      currentFileRecord: UNCHANGED, transactions: [unmatched], validation: {}
+    }]);
+
+    const reviews = plain(gas.call('openReviews', [{fullTxId: 'TX_PM'}]));
+    assert.equal(reviews.length, 1,
+      'without this review the transaction can never be committed');
+    assert.equal(reviews[0].reviewType, 'PARTNER');
+    assert.equal(reviews[0].merchantOriginal, '店舗',
+      'the resolution operations read this - blank means learnFromResolution fails');
+    assert.ok(reviews[0].candidates,
+      'the reviewer needs the candidates to pick from');
+    assert.equal(gas.call('getTransaction', ['TX_PM']).transactionStatus, 'REVIEW_REQUIRED');
+  });
+
+  // ---- その要確認が ADOPT_EXISTING_PARTNER まで実際に届く ----
+  test('9-8 -> 4.26: the generated PARTNER review resolves end to end', () => {
+    const customer = setup();
+    const leaseId = gas.call('acquireLease',
+      ['C001', 'file1', 'RUN_1', 'admin@example.com', 'PROCESS']);
+    const unmatched = tx('TX_PM2');
+    unmatched.partnerResolutionStatus = 'UNRESOLVED';
+    unmatched.planned.f = '';
+    unmatched.partnerMatch = {matchedBy: null, autoConfirm: false, conflict: false, candidates: []};
+    unmatched.merchantNormalized = gas.call('normalizeMerchant', ['店舗']);
+
+    gas.call('processFile', [{
+      customer, file: {id: 'file1', name: '明細.csv'}, runId: 'RUN_1', leaseId,
+      currentFileRecord: UNCHANGED, transactions: [unmatched], validation: {}
+    }]);
+
+    // 担当者の解決は、取込実行のリースが解放された後に行われる
+    gas.call('releaseLease', ['file1', 'RUN_1', 'RUN_DONE']);
+
+    const review = plain(gas.call('openReviews', [{fullTxId: 'TX_PM2'}]))[0];
+    const result = plain(gas.call('resolveReview',
+      [review.reviewId, 'ADOPT_EXISTING_PARTNER',
+       {partnerName: '株式会社テスト', runId: 'RUN_1'}]));
+
+    assert.equal(result.committed, true,
+      'the whole loop - flag, review, resolve, commit - must close through real paths');
+    assert.equal(gas.call('getTransaction', ['TX_PM2']).partnerResolutionStatus,
+      'RESOLVED_WITH_PARTNER');
+  });
+
+  // ---- 自動確定した取引には PARTNER 要確認を立てない ----
+  test('9-8: an auto-confirmed partner raises no review', () => {
+    const customer = setup();
+    const leaseId = gas.call('acquireLease',
+      ['C001', 'file1', 'RUN_1', 'admin@example.com', 'PROCESS']);
+    gas.call('processFile', [{
+      customer, file: {id: 'file1', name: '明細.csv'}, runId: 'RUN_1', leaseId,
+      currentFileRecord: UNCHANGED, transactions: [tx('TX_OK')], validation: {}
+    }]);
+    assert.equal(gas.call('openReviews', [{fullTxId: 'TX_OK'}]).length, 0,
+      'a settled match needs no human decision');
+    assert.equal(gas.call('getTransaction', ['TX_OK']).transactionStatus, 'COMMITTED');
+  });
+
+  // ---- 区分2：取引ログには何も残さないが、ファイル単位の要確認は登録する ----
+  //
+  // 以前このテストは「要確認も0件」を正解として固定していた。それは誤りで
+  // ある。A-23 が禁じるのは**取引単位**の孤児要確認であって、区分2の
+  // ファイル単位要確認は 6.1 step 8-11 が登録を要求するものだった。
+  // 登録しないと、REVIEW_WAIT に落ちたファイルに要確認行が無く、
+  // `resolveFileReview` は reviewId を必須とするので**誰も動かせない**。
+  test('6.1 step 8-11: a category-2 file registers its file-scoped review', () => {
+    const customer = setup();
+    const result = gas.call('processFile', [{
+      customer, file: {id: 'file1'}, runId: 'RUN_1', leaseId: null, currentFileRecord: UNCHANGED,
+      transactions: [tx('TX_G')],
+      validation: {format: {ok: false, code: 'UNKNOWN_CARD_FORMAT'}}
+    }]);
+
+    assert.equal(txLogRowCount(), 0,
+      'no transaction rows - they would be orphaned');
+
+    const reviews = plain(gas.call('openReviews', [{fileId: 'file1'}]));
+    assert.equal(reviews.length, 1,
+      'without this row, nobody can ever act on the file');
+    assert.equal(reviews[0].reviewType, 'FORMAT_UNKNOWN');
+    assert.equal(reviews[0].customerId, 'C001');
+    assert.equal(reviews[0].customerName, '顧客A',
+      'the review list must show whose file this is');
+    assert.equal(plain(result).nextState, 'REVIEW_WAIT');
+  });
+
+  // ---- 登録された要確認が、実際に解決操作の入口まで届く（INV-31の往復） ----
+  test('INV-31: the registered category-2 review can actually be resolved', () => {
     const customer = setup();
     gas.call('processFile', [{
       customer, file: {id: 'file1'}, runId: 'RUN_1', leaseId: null, currentFileRecord: UNCHANGED,
       transactions: [tx('TX_G')],
       validation: {format: {ok: false, code: 'UNKNOWN_CARD_FORMAT'}}
     }]);
-    assert.equal(txLogRowCount(), 0);
-    assert.equal(gas.call('openReviews', [{fileId: 'file1'}]).length, 0);
+    gas.call('transitionFileState', ['file1', 'VALIDATING', 'REVIEW_WAIT', 'RUN_1']);
+
+    const review = plain(gas.call('openReviews', [{fileId: 'file1'}]))[0];
+    const resolved = plain(gas.call('resolveFileReview',
+      [review.reviewId, 'REGISTER_FORMAT', {runId: 'RUN_1', role: 'SYSTEM_ADMIN'}]));
+
+    assert.equal(resolved.nextState, 'VALIDATING',
+      'the escape route exists only if the review row was actually created');
+  });
+
+  // ---- 区分2でも取引単位の要確認は登録しない（A-23はこちらに適用される） ----
+  test('A-23: a category-2 file registers no transaction-scoped reviews', () => {
+    const customer = setup();
+    gas.call('processFile', [{
+      customer, file: {id: 'file1'}, runId: 'RUN_1', leaseId: null, currentFileRecord: UNCHANGED,
+      transactions: [tx('TX_G')],
+      // 区分2の要因と、取引単位の DATE 材料が同時に存在する状況
+      validation: Object.assign({format: {ok: false, code: 'UNKNOWN_CARD_FORMAT'}},
+        dateTriageValidation('TX_G'))
+    }]);
+
+    const reviews = plain(gas.call('openReviews', [{fileId: 'file1'}]));
+    assert.equal(reviews.filter((r) => r.fullTxId === 'TX_G').length, 0,
+      'a transaction-scoped review without a transaction log row is an orphan');
+    assert.equal(reviews.filter((r) => r.reviewType === 'FORMAT_UNKNOWN').length, 1,
+      'the file-scoped review is still registered');
   });
 };

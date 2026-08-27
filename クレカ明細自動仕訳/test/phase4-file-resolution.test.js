@@ -132,7 +132,7 @@ module.exports = ({test, assert, gas}) => {
     test(`INV-28: ${operation} persists ${code} and returns to validation`, () => {
       setup();
       const result = plain(gas.call('resolveFileReview',
-        [fileReview(type), operation, {runId: 'RUN_1'}]));
+        [fileReview(type), operation, {runId: 'RUN_1', role: 'SYSTEM_ADMIN'}]));
       assert.equal(result.approvalPersisted, code);
       assert.equal(result.nextState, 'VALIDATING');
       assert.equal(gas.call('hasCategory2Approval',
@@ -151,7 +151,7 @@ module.exports = ({test, assert, gas}) => {
     sheet.getRange(2, 27).setValue('');   // hashVersion
 
     assert.throws(() => gas.call('resolveFileReview',
-      [fileReview('COUNT_TOTAL_MISMATCH'), 'APPROVE_COUNT_MISMATCH', {runId: 'RUN_1'}]),
+      [fileReview('COUNT_TOTAL_MISMATCH'), 'APPROVE_COUNT_MISMATCH', {runId: 'RUN_1', role: 'SYSTEM_ADMIN'}]),
       (error) => error && /content hash/.test(String(error.message)));
     assert.equal(plain(gas.call('getCategory2Approvals', ['file1'])).length, 0,
       'nothing may be persisted when the approval is refused');
@@ -196,7 +196,7 @@ module.exports = ({test, assert, gas}) => {
     setup();
     const result = plain(gas.call('resolveFileReview',
       [fileReview('MULTI_SHEET'), 'SELECT_TARGET_SHEET',
-       {runId: 'RUN_1', sheetName: '利用明細'}]));
+       {runId: 'RUN_1', role: 'SYSTEM_ADMIN', sheetName: '利用明細'}]));
 
     assert.equal(result.nextState, 'VALIDATING');
     const record = plain(gas.evaluate("getPermanentFileIndexRecord_('file1')"));
@@ -207,7 +207,7 @@ module.exports = ({test, assert, gas}) => {
   test('M19: selecting a target sheet without naming one is refused', () => {
     setup();
     assert.throws(() => gas.call('resolveFileReview',
-      [fileReview('MULTI_SHEET'), 'SELECT_TARGET_SHEET', {runId: 'RUN_1'}]),
+      [fileReview('MULTI_SHEET'), 'SELECT_TARGET_SHEET', {runId: 'RUN_1', role: 'SYSTEM_ADMIN'}]),
       (error) => error && /sheet name/.test(String(error.message)));
   });
 
@@ -226,7 +226,7 @@ module.exports = ({test, assert, gas}) => {
   test('INV-41: confirming a fixed destination returns the file to validation', () => {
     setup();
     const result = plain(gas.call('resolveFileReview',
-      [fileReview('DESTINATION_FIX'), 'CONFIRM_DESTINATION_FIXED', {runId: 'RUN_1'}]));
+      [fileReview('DESTINATION_FIX'), 'CONFIRM_DESTINATION_FIXED', {runId: 'RUN_1', role: 'SYSTEM_ADMIN'}]));
     assert.equal(result.nextState, 'VALIDATING');
   });
 

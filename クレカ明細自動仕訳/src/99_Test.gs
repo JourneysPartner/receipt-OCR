@@ -35,7 +35,12 @@ var SERIALIZATION_VECTORS_ = Object.freeze([
    hash: '3a0b1affcdf25fdb92529eb3521f53169f86d03f76c09c4d3758835267b4a794'},
   // 要素が区切り文字を含む。長さ接頭辞がなければ A と区別できない。
   {id: 'F', elements: ['1:A', 'B'], serialized: '3:1:A1:B',
-   hash: 'e3cfda58e00459ff3803bca540249836ff96c772ab9acd59b322d3e06107839b'}
+   hash: 'e3cfda58e00459ff3803bca540249836ff96c772ab9acd59b322d3e06107839b'},
+  // 型ごとの正準化。Date の正準化は実 GAS の `Utilities.formatDate` を通る
+  // 唯一のケースであり、「実機で走らせる」という本モジュールの核心である。
+  {id: 'G', elements: [new Date('2026-01-05T00:00:00+09:00'), 5015, true, null, ''],
+   serialized: '10:2026-01-054:50154:TRUE-1:0:',
+   hash: 'ac612ae52264c04e2bc24c3fda3e5996f5d233887ef4eec7be3011aeb11ae927'}
 ]);
 
 /**
@@ -82,11 +87,77 @@ var DATE_INFERENCE_VECTORS_ = Object.freeze([
   }
 ]);
 
-/** 5.14 取引先照合の辞書フィクスチャ。**本番の辞書を使わない。** */
-var PARTNER_MATCHING_FIXTURE_ = null;
+/**
+ * 5.14 取引先照合の辞書フィクスチャ（A-31）。
+ *
+ * **本番の辞書シートを使わない。** メモリ上に構築した`dictIndex`を
+ * `matchPartner`へ直接渡す。辞書の内容が変わっても本ベクトルの結果は
+ * 変わらない ── これが「照合順序の規則そのもの」を検証できる条件である。
+ */
+function partnerFixtureRow_(id, scope, original, normalized, partner, method, priority, options) {
+  options = options || {};
+  return {
+    id: id, scope: scope, original: original, normalized: normalized,
+    partnerName: partner, matchMethod: method, priority: priority,
+    customerId: scope === 'customer' ? 'CFIX' : '',
+    validFrom: options.validFrom || null, validTo: options.validTo || null,
+    approved: options.approved === undefined ? false : options.approved,
+    active: options.active === undefined ? true : options.active,
+    conflict: options.conflict === undefined ? false : options.conflict
+  };
+}
 
-/** 5.14 取引先照合のベクトル。フィクスチャ未設定なら空で合格とする。 */
-var PARTNER_MATCHING_VECTORS_ = Object.freeze([]);
+function buildPartnerMatchingFixture() {
+  var rows = [
+    partnerFixtureRow_('F1', 'customer', 'ﾄﾞﾝｷﾎｰﾃ ﾅｶﾞｵｶ', 'ドンキホ-テ ナガオカ', '株式会社ドン・キホーテ', 'exact_original', 1),
+    partnerFixtureRow_('F2', 'customer', 'ｱﾏｿﾞﾝ ｼﾞｬﾊﾟﾝ', 'アマゾン ジャパン', 'アマゾンジャパン合同会社', 'exact_normalized', 1),
+    partnerFixtureRow_('F3', 'common', 'ｾﾌﾞﾝｲﾚﾌﾞﾝ', 'セブンイレブン', '株式会社セブン-イレブン・ジャパン', 'exact_normalized', 1),
+    partnerFixtureRow_('F4', 'common', 'ﾄﾞﾝｷﾎｰﾃ ﾅｶﾞｵｶ', 'ドンキホ-テ ナガオカ', 'ドンキホーテ長岡店', 'exact_normalized', 5),
+    partnerFixtureRow_('F5', 'customer', 'ｽﾀｰﾊﾞｯｸｽ', 'スタ-バックス', 'スターバックスコーヒージャパン株式会社', 'exact_normalized', 1, {validTo: '2025-12-31'}),
+    partnerFixtureRow_('F6', 'customer', 'ﾏﾂﾓﾄｷﾖｼ', 'マツモトキヨシ', '株式会社マツモトキヨシ', 'exact_normalized', 1, {conflict: true}),
+    partnerFixtureRow_('F7', 'customer', 'ﾏﾂﾓﾄｷﾖｼ', 'マツモトキヨシ', 'マツキヨココカラ&カンパニー', 'exact_normalized', 2, {conflict: true}),
+    partnerFixtureRow_('F8', 'customer', 'ﾖﾄﾞﾊﾞｼ', 'ヨドバシ', '株式会社ヨドバシカメラ', 'prefix', 1, {approved: false}),
+    partnerFixtureRow_('F9', 'customer', 'ﾋﾞｯｸｶﾒﾗ', 'ビックカメラ', '株式会社ビックカメラ', 'prefix', 1, {approved: true}),
+    partnerFixtureRow_('F10', 'customer', 'ﾛｰｿﾝ', 'ロ-ソン', '株式会社ローソン', 'exact_normalized', 1, {active: false}),
+    partnerFixtureRow_('F11', 'customer', 'ｶﾙﾃﾞｨ', 'カルディ', '株式会社キャメル珈琲', 'exact_normalized', 3),
+    partnerFixtureRow_('F12', 'customer', 'KALDI', 'KALDI', '株式会社キャメル珈琲', 'exact_normalized', 7),
+    partnerFixtureRow_('F13', 'customer', 'カルディ', 'カルディ', '株式会社キャメル珈琲', 'exact_normalized', 2),
+    partnerFixtureRow_('F14', 'customer', 'ﾔﾏﾀﾞﾃﾞﾝｷ', 'ヤマダデンキ', '株式会社ヤマダデンキ', 'exact_normalized', 1),
+    partnerFixtureRow_('F15', 'customer', 'ヤマダデンキ', 'ヤマダデンキ', 'ヤマダホールディングス', 'exact_normalized', 5)
+  ];
+  return {
+    customer: rows.filter(function(item) { return item.scope === 'customer'; }),
+    common: rows.filter(function(item) { return item.scope === 'common'; }),
+    commonPartners: [
+      '株式会社ドン・キホーテ', 'アマゾンジャパン合同会社',
+      '株式会社セブン-イレブン・ジャパン', 'ドンキホーテ長岡店',
+      'スターバックスコーヒージャパン株式会社', '株式会社マツモトキヨシ',
+      'マツキヨココカラ&カンパニー', '株式会社ヨドバシカメラ',
+      '株式会社ビックカメラ', '株式会社ローソン', '株式会社キャメル珈琲'
+    ]
+  };
+}
+
+/**
+ * 5.14 のテストベクトル14件。期待値は設計の表から取った外部の値である。
+ * [id, 元利用店名, 利用日, autoConfirm, partnerName, matchedBy, 候補行ID列]
+ */
+var PARTNER_MATCHING_VECTORS_ = Object.freeze([
+  ['V1', 'ﾄﾞﾝｷﾎｰﾃ ﾅｶﾞｵｶ', '2026-01-05', true, '株式会社ドン・キホーテ', 'STEP1', ['F1']],
+  ['V2', 'ドンキホーテ　ナガオカ', '2026-01-05', true, '株式会社ドン・キホーテ', 'STEP2', ['F1']],
+  ['V3', 'ｱﾏｿﾞﾝ ｼﾞｬﾊﾟﾝ', '2026-01-05', true, 'アマゾンジャパン合同会社', 'STEP1', ['F2']],
+  ['V4', 'ｾﾌﾞﾝｲﾚﾌﾞﾝ', '2026-01-05', true, '株式会社セブン-イレブン・ジャパン', 'STEP3', ['F3']],
+  ['V5', 'ｽﾀｰﾊﾞｯｸｽ', '2026-01-05', false, null, null, []],
+  ['V6', 'ｽﾀｰﾊﾞｯｸｽ', '2025-11-20', true, 'スターバックスコーヒージャパン株式会社', 'STEP1', ['F5']],
+  ['V7', 'ｽﾀｰﾊﾞｯｸｽ', null, true, 'スターバックスコーヒージャパン株式会社', 'STEP1', ['F5']],
+  ['V8', 'ﾏﾂﾓﾄｷﾖｼ', '2026-01-05', false, null, 'STEP1', ['F6', 'F7']],
+  ['V9', 'ﾖﾄﾞﾊﾞｼｶﾒﾗ ｼﾝｼﾞｭｸ', '2026-01-05', false, null, null, ['F8']],
+  ['V10', 'ﾋﾞｯｸｶﾒﾗ ｲｹﾌﾞｸﾛ', '2026-01-05', true, '株式会社ビックカメラ', 'STEP5', ['F9']],
+  ['V11', 'ﾛｰｿﾝ', '2026-01-05', false, null, null, []],
+  ['V12', 'ｶﾙﾃﾞｨ', '2026-01-05', true, '株式会社キャメル珈琲', 'STEP1', ['F11']],
+  ['V13', 'ｶﾙﾃﾞｨ　', '2026-01-05', true, '株式会社キャメル珈琲', 'STEP2', ['F13', 'F11']],
+  ['V14', 'ﾔﾏﾀﾞﾃﾞﾝｷ　', '2026-01-05', false, null, 'STEP2', ['F14', 'F15']]
+]);
 
 /**
  * 5.15 前年利用日判定のベクトル（5.12の振る舞い表）。
@@ -230,22 +301,42 @@ function runDateInferenceVectors(vectors) {
  * だけで顧客の照合結果が変わる。
  */
 function runPartnerMatchingVectors(fixture, vectors) {
-  var dictIndex = fixture || PARTNER_MATCHING_FIXTURE_ || null;
-  var cases = vectors || PARTNER_MATCHING_VECTORS_ || [];
+  var dictIndex = fixture || buildPartnerMatchingFixture();
+  var cases = vectors || PARTNER_MATCHING_VECTORS_;
+  // **空の集合を回して「合格」にしない。** 以前この関数はベクトル0件で
+  // 常に合格しており、第1回レビューが指摘した「何も照合しないゲート」を
+  // 別の場所で再現していた。
+  if (!cases || !cases.length) {
+    throw new TypeError('runPartnerMatchingVectors requires a non-empty vector set');
+  }
   var results = [];
 
   cases.forEach(function(vector) {
+    var id = vector[0];
     try {
-      var actual = matchPartner(
-        {merchantOriginal: vector.merchantOriginal, date: vector.date},
-        vector.customerId || 'C1', dictIndex);
-      var ok = String(actual.partnerName || '') === String(vector.expectedPartner || '') &&
-        Boolean(actual.autoConfirm) === Boolean(vector.expectedAutoConfirm);
-      results.push(vectorResult_(vector.id, ok,
-        {partnerName: vector.expectedPartner, autoConfirm: vector.expectedAutoConfirm},
-        {partnerName: actual.partnerName, autoConfirm: actual.autoConfirm}));
+      var usageDate = vector[2];
+      var actual = matchPartner({
+        transactionId: 'TX1',
+        merchantOriginal: vector[1],
+        date: usageDate === null ? null : new Date(usageDate + 'T00:00:00+09:00')
+      }, 'CFIX', dictIndex);
+
+      // 自動確定・取引先名・確定ステップ・候補行の**すべて**を照合する。
+      // 名前だけ見ると、間違ったステップで偶然同じ名前に確定した退行を
+      // 見逃す（V3 が固定しているのはまさにステップの規則である）。
+      var candidateIds = (actual.candidates || []).map(function(candidate) {
+        return candidate.ruleId;
+      });
+      var ok = Boolean(actual.autoConfirm) === Boolean(vector[3]) &&
+        String(actual.partnerName || '') === String(vector[4] || '') &&
+        String(actual.matchedBy || '') === String(vector[5] || '') &&
+        JSON.stringify(candidateIds) === JSON.stringify(vector[6]);
+      results.push(vectorResult_(id, ok,
+        {autoConfirm: vector[3], partnerName: vector[4], matchedBy: vector[5], candidates: vector[6]},
+        {autoConfirm: actual.autoConfirm, partnerName: actual.partnerName,
+         matchedBy: actual.matchedBy, candidates: candidateIds}));
     } catch (error) {
-      results.push(vectorResult_(vector.id, false, null, null, String(error && error.message)));
+      results.push(vectorResult_(id, false, null, null, String(error && error.message)));
     }
   });
 

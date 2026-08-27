@@ -307,7 +307,7 @@ module.exports = ({test, assert, gas}) => {
     committed('TX_1');
     const id = integrityReview('TX_1');
     assert.throws(() => gas.call('resolveIntegrityReview',
-      [id, 'CONFIRM_INTEGRITY_RESOLVED', {recheck: {ok: false}}]),
+      [id, 'CONFIRM_INTEGRITY_RESOLVED', {role: 'SYSTEM_ADMIN', recheck: {ok: false}}]),
       (error) => error && /still present/.test(String(error.message)),
       'closing it while the mismatch stands would hide the problem, not fix it');
   });
