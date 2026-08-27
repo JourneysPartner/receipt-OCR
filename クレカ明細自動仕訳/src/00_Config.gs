@@ -54,7 +54,18 @@ const CONFIG = Object.freeze({
     LINK_CELL: 'B3'
   }),
 
+  // 4.6 検査2の対象。マスタースプレッドシートに必ず存在すべきシート。
   // 値はシート名ではなく SHEET_NAMES のキー名である（INV-05・A-22）。
+  // 1つでも欠けたまま処理を始めると、書込の途中で「シートがない」と
+  // 落ちる ── 半分書けた状態で止まるより、始める前に止めたい。
+  REQUIRED_SHEET_KEYS: Object.freeze([
+    'CUSTOMER_MASTER', 'COMMON_PARTNER_LIST', 'COMMON_PARTNER_DICT',
+    'CUSTOMER_PARTNER_DICT', 'PURPOSE_COMPLEMENT', 'CARD_FORMAT_MASTER',
+    'PROCESS_LOG', 'TRANSACTION_LOG', 'AUDIT_LOG', 'REVIEW',
+    'PROCESS_LEASE', 'PERMANENT_FILE_INDEX', 'APPROVAL_REQUEST',
+    'FORMAT_SAMPLE_INDEX', 'FORMAT_SAMPLE_EXPECTED'
+  ]),
+
   ARCHIVE_EXEMPT_SHEET_KEYS: Object.freeze([
     'PERMANENT_FILE_INDEX',
     'APPROVAL_REQUEST',
