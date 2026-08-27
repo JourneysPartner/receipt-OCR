@@ -28,10 +28,57 @@ module.exports = ({test, assert, gas}) => {
   test('4.39: the serialization run actually checks all seven vectors plus X', () => {
     setup();
     const result = plain(gas.call('runSerializationVectors', []));
-    // 6件 + 非回帰X = 7件のハッシュ照合、加えて F!=X の非衝突検査
-    assert.equal(result.results.length, 8,
-      'an empty or truncated vector set would pass vacuously');
+    // 設計5.6.5のA〜G 7件 + 非回帰X = 8件のハッシュ照合、加えてF!=Xの非衝突検査。
+    // 以前この数を8で固定しており、**Gの欠落を正解として保護していた**。
+    // Gは`Utilities.formatDate`によるDate正準化を実機で検証する唯一のケース。
+    assert.equal(result.results.length, 9,
+      'the design mandates seven vectors - a shorter set passes vacuously');
+    assert.ok(result.results.some((r) => r.id === 'G.hash'),
+    'vector G exercises the Date canonicalisation path');
     assert.ok(result.results.some((r) => r.id === 'F!=X'));
+  });
+
+  // ================= 取引先照合ベクトル =================
+
+  test('5.14: the partner-matching vectors run all fourteen cases and pass', () => {
+    setup();
+    const result = plain(gas.call('runPartnerMatchingVectors', []));
+    assert.equal(result.ok, true,
+      result.results.filter((r) => !r.ok).map((r) => `${r.id}:${JSON.stringify(r.actual)}`).join('; '));
+    assert.equal(result.results.length, 14,
+      'the design mandates fourteen vectors (V1-V14)');
+  });
+
+  test('5.14: an empty vector set is refused, never passed', () => {
+    setup();
+    // 以前この関数はベクトル0件で常に合格しており、第1回レビューが指摘した
+    // 「何も照合しないゲート」を別の場所で再現していた。
+    assert.throws(() => gas.call('runPartnerMatchingVectors', [null, []]),
+      (error) => error && /non-empty vector set/.test(String(error.message)));
+  });
+
+  test('5.14: a broken matching rule fails the vectors', () => {
+    setup();
+    // 有効期間の除外規則を壊す：期限切れの行も候補に含める
+    const result = plain(gas.evaluate(`
+      (function() {
+        var original = matchPartner;
+        matchPartner = function(tx, customerId, dictIndex) {
+          var patched = {
+            customer: dictIndex.customer.map(function(r) {
+              return Object.assign({}, r, {validTo: null});
+            }),
+            common: dictIndex.common, commonPartners: dictIndex.commonPartners
+          };
+          return original(tx, customerId, patched);
+        };
+        try { return runPartnerMatchingVectors(); }
+        finally { matchPartner = original; }
+      })()
+    `));
+    assert.equal(result.ok, false,
+      'V5 exists precisely to catch an expiry rule that stopped working');
+    assert.ok(result.results.some((r) => r.id === 'V5' && !r.ok));
   });
 
   // 期待値は設計書の表から取った外部の値である。実装が変われば落ちる。

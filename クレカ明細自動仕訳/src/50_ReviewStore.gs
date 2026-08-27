@@ -120,7 +120,11 @@ function hasOpenTransactionReview(fullTxId) {
 var REVIEW_DETAIL_REQUIRED_KEYS_ = Object.freeze({
   FILE_CHANGED: ['oldRevision', 'newRevision', 'oldBinaryHash', 'newBinaryHash', 'hashVersion'],
   DATE_INFERENCE: ['status', 'baseYearMonth', 'candidates', 'lookbackMonths', 'forwardMonths'],
-  PRIOR_YEAR: ['customerCategory', 'fiscalYear', 'thresholdYear', 'usageDate']
+  PRIOR_YEAR: ['customerCategory', 'fiscalYear', 'thresholdYear', 'usageDate'],
+  PARTNER: ['matchedBy', 'candidates', 'conflict'],
+  COUNT_TOTAL_MISMATCH: ['item', 'expected', 'actual', 'tolerance', 'formatId', 'formatVersion'],
+  INTEGRITY: ['check', 'expected', 'actual', 'rowNumber'],
+  MULTI_SHEET: ['sheets']
 });
 
 function assertReviewDetailShape_(detail) {

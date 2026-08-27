@@ -40,6 +40,24 @@ function sampleValuesEqual_(expected, actual) {
  *               billingMonthStatus, billingYearMonth, rows[], yearSummary}
  * @return {!Array<!Object>} 不合格の一覧。空なら合格。
  */
+/**
+ * 実測の請求年月`status`を照合用に読み替える（2.1.19.1・B-M16）。
+ *
+ * `extractBillingYearMonth`は RESOLVED / NOT_FOUND / CONFLICT の3値しか
+ * 返さない。**この読み替えが無いと、`billingMonthAbsent`が真の形式は
+ * 期待値`ABSENT_BY_ANSWER`と実測`NOT_FOUND`が永久に一致せず、往復検証が
+ * 必ず不合格になる。** 請求年月の表記がない明細を出すカード会社は実在し、
+ * その形式は登録手順を最後まで通れなかった。
+ */
+function normalizeBillingStatusForComparison_(measuredStatus, format) {
+  if (format && format.billingMonthAbsent === true &&
+      format.hasBillingSources !== true &&
+      String(measuredStatus) === 'NOT_FOUND') {
+    return 'ABSENT_BY_ANSWER';
+  }
+  return measuredStatus;
+}
+
 function verifyDraftAgainstSample(input) {
   if (!input || !input.extraction || !input.expected) {
     throw new TypeError('verifyDraftAgainstSample requires extraction and expected values');
@@ -98,6 +116,13 @@ function verifyDraftAgainstSample(input) {
         expected: null, actual: actualExcluded[rowNumber]}));
     }
   });
+  // 除外行数は2.1.19 N列とも一致すること。組の照合と独立に数を見るのは、
+  // 台帳側のN列だけが改竄・破損した場合を捕まえるためである。
+  if (expected.excludedCount !== undefined && expected.excludedCount !== null &&
+      (extraction.excludedRows || []).length !== Number(expected.excludedCount)) {
+    failures.push(roundTripFailure_(5, {item: 'excludedCount',
+      expected: expected.excludedCount, actual: (extraction.excludedRows || []).length}));
+  }
 
   // 条件6：照合式の評価が ok であること（NOT_APPLICABLE を含む）。
   var reconciliation = extraction.reconciliation || {};
@@ -108,12 +133,13 @@ function verifyDraftAgainstSample(input) {
 
   // 条件7：請求年月。ABSENT_BY_ANSWER は合格、CONFLICT は常に不合格。
   var billing = extraction.billingMonth || {};
+  var measuredStatus = normalizeBillingStatusForComparison_(billing.status, input.format);
   if (String(billing.status) === 'CONFLICT') {
     failures.push(roundTripFailure_(7, {item: 'billingMonthStatus',
       expected: expected.billingMonthStatus, actual: 'CONFLICT'}));
-  } else if (String(billing.status) !== String(expected.billingMonthStatus)) {
+  } else if (String(measuredStatus) !== String(expected.billingMonthStatus)) {
     failures.push(roundTripFailure_(7, {item: 'billingMonthStatus',
-      expected: expected.billingMonthStatus, actual: billing.status}));
+      expected: expected.billingMonthStatus, actual: measuredStatus}));
   } else if (String(billing.status) === 'RESOLVED' &&
              !sampleValuesEqual_(expected.billingYearMonth, billing.yearMonth)) {
     failures.push(roundTripFailure_(7, {item: 'billingYearMonth',
@@ -121,7 +147,12 @@ function verifyDraftAgainstSample(input) {
   }
 
   // 条件8：打切り検査が ok であること。
-  if (extraction.truncation && extraction.truncation.ok === false) {
+  // **材料が無ければ「評価なしで合格」にしない。** 検査を走らせ忘れた
+  // 抽出が黙って通ると、途中で読取を打ち切ったファイルが台帳へ届く。
+  if (!extraction.truncation) {
+    failures.push(roundTripFailure_(8, {item: 'truncation',
+      expected: true, actual: null}));
+  } else if (extraction.truncation.ok === false) {
     failures.push(roundTripFailure_(8, {item: 'truncation', expected: true, actual: false}));
   }
 
@@ -132,7 +163,9 @@ function verifyDraftAgainstSample(input) {
   expectedRows.forEach(function(row, i) {
     var actual = transactions[i] || {};
     // 条件9：処理日に依存しない項目（C・G〜J列）。
-    ['sourceRow', 'merchant', 'amountBillingJpy', 'purpose', 'occurrenceIndex']
+    // `dateHashKey`は同一性ハッシュの材料である。表示値が同じでもキーが
+    // ずれていれば、重複判定が静かに壊れて二重計上へつながる。
+    ['sourceRow', 'merchant', 'amountBillingJpy', 'purpose', 'occurrenceIndex', 'dateHashKey']
       .forEach(function(item) {
         if (row[item] === undefined) return;
         if (!sampleValuesEqual_(row[item], actual[item])) {
@@ -158,11 +191,15 @@ function verifyDraftAgainstSample(input) {
   // 条件10：年補完集計。保存値と完全一致すべきキーだけを比べる。
   var expectedSummary = expected.yearSummary || {};
   var actualSummary = extraction.yearSummary || {};
-  ['yearlessRows', 'billingMonthStatus'].forEach(function(key) {
+  ['yearlessRows', 'billingMonthStatus', 'yearInferredRows', 'dateReviewRows', 'fileLevelBlanked']
+    .forEach(function(key) {
     if (expectedSummary[key] === undefined) return;
-    if (!sampleValuesEqual_(expectedSummary[key], actualSummary[key])) {
+    var actualValue = key === 'billingMonthStatus'
+      ? normalizeBillingStatusForComparison_(actualSummary[key], input.format)
+      : actualSummary[key];
+    if (!sampleValuesEqual_(expectedSummary[key], actualValue)) {
       failures.push(roundTripFailure_(10, {item: 'yearSummary.' + key,
-        expected: expectedSummary[key], actual: actualSummary[key]}));
+        expected: expectedSummary[key], actual: actualValue}));
     }
   });
 
@@ -253,7 +290,8 @@ function runCorpusRegression(input) {
       verifyDraftAgainstSample({
         detection: sample.detection, definition: sample.definitionValidity,
         extraction: extract(definition, sample),
-        expected: sample.expected
+        expected: sample.expected,
+        format: sample.format || input.format || null
       }).forEach(function(failure) {
         failures.push(Object.assign({sampleId: sampleId}, failure));
       });

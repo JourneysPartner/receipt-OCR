@@ -67,6 +67,48 @@ function runPreValidationBlock(input) {
     var txId = entry.transactionId || entry.fullTxId || null;
     return Object.assign({}, entry, {fullTxId: txId});
   });
+
+  // 8-10の結果を要確認`PARTNER`のエントリへ変換する（9-8で登録される）。
+  //
+  // これが無いと、辞書に一致しなかった取引は`REVIEW_REQUIRED`かつ
+  // `UNRESOLVED`のまま、**解決すべき要確認行が存在しない**。担当者は
+  // `ADOPT_EXISTING_PARTNER`も`RESOLVE_WITHOUT_PARTNER`も起動できず、
+  // 取引は永久に確定不能になる。
+  (input.transactions || []).forEach(function(tx) {
+    if (tx.partnerResolutionStatus !== PARTNER_STATUS.UNRESOLVED) return;
+    var match = tx.partnerMatch || {};
+    pendingReviews.push({
+      reviewType: REVIEW_TYPE.PARTNER,
+      fullTxId: String(tx.fullTxId || tx.transactionId),
+      displayTxId: tx.displayTxId || null,
+      sourceRow: tx.sourceRow,
+      merchantOriginal: tx.merchantOriginal || tx.originalMerchant || null,
+      merchantNormalized: tx.merchantNormalized ||
+        normalizeMerchant(String(tx.merchantOriginal || tx.originalMerchant || '')),
+      // Q列の候補は2.1.7の形（partnerName / dictId / matchMethod）へ写す。
+      // `ruleId`のまま流すと、採用操作が`dictId`を取れず辞書学習と結び付かない。
+      candidates: (match.candidates || []).map(function(candidate) {
+        return {
+          partnerName: candidate.partnerName,
+          dictId: candidate.dictId || candidate.ruleId || null,
+          matchMethod: candidate.matchMethod || null
+        };
+      }),
+      // Z列は2.1.7.1の必須キーどおり。解決操作がここから判断材料を読む。
+      detail: {
+        kind: 'PARTNER',
+        matchedBy: match.matchedBy === undefined ? null : match.matchedBy,
+        candidates: (match.candidates || []).map(function(candidate) {
+          return {
+            partnerName: candidate.partnerName,
+            dictId: candidate.dictId || candidate.ruleId || null,
+            matchMethod: candidate.matchMethod || null
+          };
+        }),
+        conflict: Boolean(match.conflict)
+      }
+    });
+  });
   var reviewedTxIds = {};
   pendingReviews.forEach(function(entry) {
     if (entry.fullTxId && isTransactionScopedReviewType(entry.reviewType)) {
@@ -198,9 +240,15 @@ function runWriteBlock(input) {
     });
 
     // 確定に至らなかった予約行は必ず空き行へ戻す（M17）。
-    // 取引ID列だけが残った行は空き行判定で使用中と見なされ、二度と使えない。
     // 例外で抜ける経路でも解放するため finally に置く。
+    //
+    // 解放の手段は**値書込の前後で違う**。書込前なら取引ID列だけ消せば
+    // 済む（`releaseReservedRows`）。書込後は B〜M 列にも値が入っているので、
+    // 取引IDだけ消すと**値が残ったまま誰からも引けない行**になる ──
+    // 空き行判定は使用中を返し続け、無名の不正値行が顧客の出納帳に
+    // 恒久的に残る。書込後は全列をクリアする（`clearTransactionRows`）。
     var settled = {};
+    var valuesWritten = false;
     try {
       // 9-4・9-5：プレーンテキスト書式（F/I/K列）→ 値書込。
       //
@@ -209,6 +257,7 @@ function runWriteBlock(input) {
       // 4.23 flush規則3の順序（複製→flush→書式→値書込→読取確認）に従う。
       applyPlainTextFormat(customer, rowWrites.map(function(w) { return w.rowNumber; }));
       writeTransactionRows(customer, rowWrites, leaseId, fileId);
+      valuesWritten = true;
       result.wroteToDestination = true;
 
       // 9-6：読取確認。取引ごとに個別照合する（仕様11.4）。
@@ -235,7 +284,11 @@ function runWriteBlock(input) {
         .map(function(w) { return w.rowNumber; })
         .filter(function(rowNumber) { return !settled[rowNumber]; });
       if (orphaned.length) {
-        releaseReservedRows(customer, orphaned, leaseId, fileId);
+        if (valuesWritten) {
+          clearTransactionRows(customer, orphaned, leaseId, fileId);
+        } else {
+          releaseReservedRows(customer, orphaned, leaseId, fileId);
+        }
         result.released = (result.released || []).concat(orphaned);
       }
     }
@@ -271,10 +324,34 @@ function processFile(input) {
   var pre = runPreValidationBlock(input);
 
   if (pre.category === 1 || pre.category === 2) {
-    // 無書込で差し戻す。ファイル状態は呼出側が区分に応じて遷移させる。
+    // 無書込で差し戻す。転記先にも取引ログにも触れない。
+    //
+    // ただし区分2は**ファイル単位の要確認を登録してから**`REVIEW_WAIT`へ
+    // 送る（6.1 step 8-11）。登録しないと、落ちたファイルに要確認行が無く、
+    // `resolveFileReview`はreviewIdを必須とするので**誰もそのファイルを
+    // 動かせない** ── INV-31が保証するはずの出口が実在しなくなる。
+    // A-23が禁じるのは取引単位の孤児要確認であって、これではない。
+    // 取引単位種別は取引ログ行を持たないここでは登録しない。
+    var registered = [];
+    if (pre.category === 2) {
+      var fileScoped = (pre.pendingReviews || []).filter(function(entry) {
+        return !isTransactionScopedReviewType(entry.reviewType);
+      });
+      if (fileScoped.length) {
+        registered = registerPendingReviews(fileScoped.map(function(entry) {
+          return Object.assign({
+            fileId: input.file.id,
+            customerId: input.customer.customerId,
+            customerName: input.customer.customerName,
+            fileNameOriginal: input.file.originalFileName || input.file.name || null
+          }, entry);
+        })).registered;
+      }
+    }
     return {
       preValidation: pre, write: null,
       wroteToDestination: false,
+      reviewsRegistered: registered,
       nextState: pre.category === 1 ? FILE_STATE.CUSTOMER_FIX_REQUIRED : FILE_STATE.REVIEW_WAIT
     };
   }

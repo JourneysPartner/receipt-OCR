@@ -162,7 +162,9 @@ function restoreRow(fullTxId, actor, options) {
 
     var verified = verifyWrittenValues(customer, [rowWrite]);
     if (!verified[0] || !verified[0].ok) {
-      releaseReservedRows(customer, [entry.rowNumber], leaseId, tx.fileId);
+      // 値は書込済みなので全列をクリアする。取引ID列だけ消すと、値が
+      // 残ったまま誰からも引けない行になる（70の解放と同じ規律）。
+      clearTransactionRows(customer, [entry.rowNumber], leaseId, tx.fileId);
       throw new IntegrityError('DESTINATION_VALUE_MISMATCH',
         'The row could not be restored for ' + fullTxId);
     }
@@ -252,14 +254,38 @@ function resolveIntegrityReview(reviewId, operation, input) {
       // `DELETED_ACCEPTED`は終端である。確定条件を評価しない。
       return {reviewId: reviewId, operation: op, committed: false,
         unmetConditions: [], openReviewTypes: [], outcome: outcome};
-    case 'CONFIRM_INTEGRITY_RESOLVED':
-      // 是正が済んだことの確認である。整合性チェックを再実行し、当該不整合が
-      // 解消していることを確かめてから閉じる。呼出側が結果を渡す。
-      if (input.recheck && input.recheck.ok === false) {
+    case 'CONFIRM_INTEGRITY_RESOLVED': {
+      // システム管理者の操作である（4.26の表）。
+      if (['SYSTEM_ADMIN', 'OWNER_ADMIN'].indexOf(String(input.role)) < 0) {
+        throw new StateTransitionError(
+          'CONFIRM_INTEGRITY_RESOLVED requires the system administrator role, not ' +
+          (input.role || '(none)'));
+      }
+      // 是正が済んだことの確認である。**材料が無ければ素通りせず、自分で
+      // 整合性チェックを再実行する。** 呼出側が渡し忘れただけで確認なしに
+      // RESOLVED になるなら、この操作は「閉じるボタン」でしかない ──
+      // 不整合が残ったまま閉じると、問題は直らず見えなくなるだけである。
+      var recheck = input.recheck;
+      if (!recheck) {
+        var customer2 = getCustomerById(review.customerId);
+        recheck = runIntegrityCheck({
+          index: buildIndex(customer2),
+          txLogs: getTransactionsByStatus(review.fileId, [TX_STATUS.COMMITTED]),
+          fileState: getFileState(review.fileId)
+        });
+      }
+      if (recheck.ok === false) {
         throw new StateTransitionError(
           'The integrity finding is still present; it cannot be confirmed as resolved');
       }
+      // M18：ファイルが REVIEW_WAIT なら検証へ戻す。
+      var currentState = getFileState(review.fileId);
+      if (currentState === FILE_STATE.REVIEW_WAIT) {
+        transitionFileState(review.fileId, currentState, FILE_STATE.VALIDATING,
+          input.runId || null);
+      }
       break;
+    }
     case 'EXCLUDE':
       return resolveReview(reviewId, 'EXCLUDE', input);
     default:
