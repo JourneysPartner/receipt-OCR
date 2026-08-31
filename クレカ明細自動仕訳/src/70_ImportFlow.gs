@@ -380,6 +380,13 @@ function processFile(input) {
     };
   }
 
+  // 9-1：`VALIDATING → WRITING`の遷移は呼出側（6.1の結線）が担う。
+  // 区分判定の後・書込の前というこの位置でしか正しく起動できないため、
+  // フックとして受け取る。ここに置かないと、呼出側は書込ブロックの
+  // 開始位置を外から知る手段がない。
+  if (typeof input.beforeWriteBlock === 'function') {
+    input.beforeWriteBlock(pre);
+  }
   var write = runWriteBlock(Object.assign({}, input, {preValidation: pre}));
 
   // 9-12：INV-17の3条件で判定する。**要確認の件数では判定しない。**
