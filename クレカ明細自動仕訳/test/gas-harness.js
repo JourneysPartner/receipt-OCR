@@ -19,6 +19,8 @@ class GasHarness {
       SpreadsheetApp: stubs.SpreadsheetApp,
       Sheets: stubs.Sheets,
       DriveApp: stubs.DriveApp,
+      Drive: stubs.Drive,
+      Logger: stubs.Logger,
       LockService: stubs.LockService,
       Session: stubs.Session,
       PropertiesService: stubs.PropertiesService,

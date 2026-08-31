@@ -225,3 +225,124 @@ function parseCsv(text) {
   }
   return {rows: rows, recordStarts: recordStarts};
 }
+
+/**
+ * 入力容量上限の検査（4.10・仕様23.3）。null/undefinedの引数は
+ * 「その値をまだ検査しない」ことを表す ── 読取の段階ごとに分かった値だけを
+ * 検査できるようにするため（サイズ→シート数→行数の順に判明する）。
+ *
+ * @param {string} fileId
+ * @param {?number} blobSize
+ * @param {?number} sheetCount
+ * @param {?number} rowCount 取得済み行数。`MAX_ROWS_PER_FILE`に**達した**時点で
+ *   超過とする（5.3 読取終了条件3：達した＝それ以降が読めていない疑い）
+ */
+function checkInputLimits(fileId, blobSize, sheetCount, rowCount) {
+  if (blobSize !== null && blobSize !== undefined &&
+      Number(blobSize) > SETTINGS.MAX_FILE_BYTES) {
+    throw new InputLimitError('File ' + fileId + ' exceeds MAX_FILE_BYTES: ' + blobSize);
+  }
+  if (sheetCount !== null && sheetCount !== undefined &&
+      Number(sheetCount) > SETTINGS.MAX_SHEETS_PER_FILE) {
+    throw new InputLimitError('File ' + fileId + ' exceeds MAX_SHEETS_PER_FILE: ' + sheetCount);
+  }
+  if (rowCount !== null && rowCount !== undefined &&
+      Number(rowCount) >= SETTINGS.MAX_ROWS_PER_FILE) {
+    throw new InputLimitError('File ' + fileId + ' reaches MAX_ROWS_PER_FILE: ' + rowCount);
+  }
+}
+
+/**
+ * XLSXを一時的なGoogleスプレッドシートへ変換する（4.10）。
+ *
+ * 一時ファイルは作業用フォルダへ作り、顧客フォルダへ作らない。
+ * **一時ファイルIDを取引ID生成に使ってはならない**（変換のたびに変わる）。
+ */
+function convertXlsxToTemp(fileId) {
+  var resource = {
+    mimeType: 'application/vnd.google-apps.spreadsheet',
+    name: 'tmp_import_' + String(fileId)
+  };
+  if (SETTINGS.PARALLEL_WORK_FOLDER_ID) {
+    resource.parents = [SETTINGS.PARALLEL_WORK_FOLDER_ID];
+  }
+  var created = Drive.Files.copy(resource, fileId, {supportsAllDrives: true});
+  return {tempFileId: created.id, spreadsheet: SpreadsheetApp.openById(created.id)};
+}
+
+/**
+ * 一時変換ファイルの削除。例外経路を含め必ず呼ぶ（4.10の契約）。
+ * 削除の失敗は元処理の結果を壊さない ── 記録して続行する（一時ファイルの
+ * 残存は容量監視 4.37 が拾う）。
+ */
+function disposeTemp(tempFileId) {
+  if (!tempFileId) return;
+  try {
+    Drive.Files.remove(tempFileId);
+  } catch (error) {
+    Logger.log('disposeTemp failed for ' + tempFileId + ': ' + (error && error.message));
+  }
+}
+
+/**
+ * CSV／XLSXを論理レコードの配列として読む（4.10）。
+ *
+ * バイト列の生成は1回に限り、戻り値の`bytes`をハッシュ計算・サイズ検査と
+ * 共有する。ファイルバイナリハッシュは**BOMを含む元のバイト列**が対象
+ * なので、ここでは除去後のバイト列を返さない。
+ *
+ * @param {string} fileId
+ * @param {string} fileName 拡張子の判定に用いる（元ファイル名）
+ * @param {!Object=} options {expectedKeywords: 5.2 判定3用のF列キーワード和集合}
+ * @return {{sheets:!Array<{name:?string, rows:!Array<!Array<*>>,
+ *   recordStarts:?Array<number>}>, encoding:?string, bomRemoved:boolean,
+ *   fileType:string, bytes:!Array<number>}}
+ */
+function readFile(fileId, fileName, options) {
+  var opts = options || {};
+  var lower = String(fileName || '').toLowerCase();
+  var fileType = /\.csv$/.test(lower) ? 'csv' : (/\.xlsx$/.test(lower) ? 'xlsx' : null);
+  if (!fileType) {
+    throw new TypeError('readFile supports only .csv/.xlsx: ' + fileName);
+  }
+
+  var bytes = DriveApp.getFileById(fileId).getBlob().getBytes();
+  checkInputLimits(fileId, bytes.length, null, null);
+
+  if (fileType === 'csv') {
+    var detection = detectEncoding(bytes, opts.expectedKeywords || []);
+    var parsed = parseCsv(detection.text);
+    checkInputLimits(fileId, null, 1, parsed.rows.length);
+    return {
+      sheets: [{name: null, rows: parsed.rows, recordStarts: parsed.recordStarts}],
+      encoding: detection.encoding,
+      bomRemoved: detection.bomRemoved,
+      fileType: 'csv',
+      bytes: bytes
+    };
+  }
+
+  var temp = convertXlsxToTemp(fileId);
+  try {
+    var sheetObjects = temp.spreadsheet.getSheets();
+    checkInputLimits(fileId, null, sheetObjects.length, null);
+    var sheets = sheetObjects.map(function(sheet) {
+      // M29：1行目・1列目から固定長で読み、配列インデックス＋1＝物理行番号
+      // を保つ。要求範囲はグリッドを超えない。
+      var rowCount = Math.min(SETTINGS.MAX_ROWS_PER_FILE, sheet.getMaxRows());
+      var columnCount = Math.min(SETTINGS.MAX_COLUMNS_PER_FILE, sheet.getMaxColumns());
+      var values = sheet.getRange(1, 1, rowCount, columnCount).getValues();
+      checkInputLimits(fileId, null, null, values.length);
+      return {name: sheet.getName(), rows: values, recordStarts: null};
+    });
+    return {
+      sheets: sheets,
+      encoding: null,
+      bomRemoved: false,
+      fileType: 'xlsx',
+      bytes: bytes
+    };
+  } finally {
+    disposeTemp(temp.tempFileId);
+  }
+}
