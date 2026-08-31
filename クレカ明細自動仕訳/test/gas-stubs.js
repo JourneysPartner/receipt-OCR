@@ -347,6 +347,8 @@ class MemoryDriveFile {
     // Drive.Files.copy の変換シミュレーション用。XLSXの中身をシート配列で
     // 持たせる（実DriveはバイナリをGoogleシートへ変換する）。
     this.xlsxSheets = options.xlsxSheets || null;
+    this.createdTime = options.createdTime ? new Date(options.createdTime) : this.lastUpdated;
+    this.revisionId = options.revisionId || null;
   }
   getId() { return this.id; }
   getName() { return this.name; }
@@ -480,7 +482,33 @@ function createGasStubs() {
   };
   // Drive Advanced Service（v3）。copy はXLSX→Googleシート変換だけを模す。
   let driveCopyCounter = 0;
+  let driveListFailures = [];
+  const driveFileMeta = (file) => ({
+    id: file.id, name: file.name, mimeType: file.contentType,
+    createdTime: (file.createdTime || file.lastUpdated).toISOString ?
+      (file.createdTime || file.lastUpdated).toISOString() : String(file.createdTime || file.lastUpdated),
+    modifiedTime: file.lastUpdated.toISOString(),
+    size: file.bytes.length, headRevisionId: file.revisionId || 'rev-1'
+  });
   const Drive = {Files: {
+    list(request) {
+      if (driveListFailures.length) {
+        const failure = driveListFailures.shift();
+        const error = new Error(`Drive failure ${failure}`); error.code = Number(failure); throw error;
+      }
+      const match = /^'([^']+)' in parents/.exec(String(request.q || ''));
+      if (!match) throw new Error(`Stub supports only parent queries: ${request.q}`);
+      const folder = folders.get(match[1]);
+      if (!folder || folder.readAllowed === false) throw new Error(`Folder not found or denied: ${match[1]}`);
+      const items = []
+        .concat((folder.subFolderIds || []).map((id) => ({id, name: id, mimeType: 'application/vnd.google-apps.folder'})))
+        .concat(folder.fileIds.map((id) => files.get(id)).filter(Boolean).map(driveFileMeta));
+      const pageSize = Number(request.pageSize || 100);
+      const start = Number(request.pageToken || 0);
+      const page = items.slice(start, start + pageSize);
+      const nextStart = start + pageSize;
+      return {files: page, nextPageToken: nextStart < items.length ? String(nextStart) : undefined};
+    },
     copy(resource, fileId) {
       const file = files.get(String(fileId));
       if (!file) throw new Error(`File not found: ${fileId}`);
@@ -510,7 +538,8 @@ function createGasStubs() {
   const control = {
     createSpreadsheet(id, options = {}) { const ss = new MemorySpreadsheet(id, options); spreadsheets.set(String(id), ss); if (!activeSpreadsheetId) activeSpreadsheetId = String(id); return ss; },
     createFile(id, options = {}) { const file = new MemoryDriveFile(id, options, Utilities); files.set(String(id), file); return file; },
-    createFolder(id, options = {}) { const folder = {id: String(id), fileIds: (options.fileIds || []).slice(), readAllowed: options.readAllowed !== false}; folders.set(String(id), folder); return folder; },
+    createFolder(id, options = {}) { const folder = {id: String(id), fileIds: (options.fileIds || []).slice(), subFolderIds: (options.subFolderIds || []).slice(), readAllowed: options.readAllowed !== false}; folders.set(String(id), folder); return folder; },
+    setDriveListFailures(failures) { driveListFailures = failures.slice(); },
     getSpreadsheet: openSpreadsheet,
     getFile: (id) => files.get(String(id)) || null,
     getSpreadsheetIds: () => Array.from(spreadsheets.keys()),
@@ -523,7 +552,7 @@ function createGasStubs() {
     // 回数で見るしかない。
     getApiCallCounts: () => Object.assign({}, apiCallCounts),
     resetApiCallCounts() { apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; },
-    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptLock.reset(); sheetsBatchGetFailures = []; activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; logLines.length = 0; }
+    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptLock.reset(); sheetsBatchGetFailures = []; activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; logLines.length = 0; driveListFailures = []; }
   };
   return {Utilities, SpreadsheetApp, Sheets, DriveApp, Drive, Logger, LockService, Session, PropertiesService, control};
 }
