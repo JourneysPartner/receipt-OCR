@@ -55,6 +55,20 @@ function validateTransactions(txs, context) {
       }
     }
 
+    // 日付。空欄・列挙外の表記（5.1.0）は年補完の対象にならないため、
+    // ここで要確認`DATE`の材料にしないと、日付なしのまま誰にも捕捉されず
+    // B列空欄で確定不能に留まる取引が生まれる（INV-31）。
+    if (tx.dateUnreadable === true) {
+      issues.push({
+        transactionId: txId, sourceRow: tx.sourceRow,
+        reviewType: REVIEW_TYPE.DATE, code: 'DATE_UNREADABLE',
+        detail: {kind: 'DATE_INFERENCE', status: 'UNREADABLE',
+          baseYearMonth: null, candidates: [],
+          lookbackMonths: null, forwardMonths: null,
+          raw: tx.dateRawText === undefined ? null : tx.dateRawText}
+      });
+    }
+
     // 金額。読み取れない値と0円を区別する。
     //
     // 0円は不正ではない ── 全額値引きや無料キャンペーンで実際に起きる。
