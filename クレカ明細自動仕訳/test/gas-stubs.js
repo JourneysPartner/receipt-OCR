@@ -209,6 +209,7 @@ class MemorySheet {
   }
   getName() { return this.name; }
   setName(name) { this.name = String(name); return this; }
+  getProtections() { return (this.protections || []).slice(); }
   getParent() { return this.parent; }
   getSheetId() { return this.parent.sheets.indexOf(this) + 1; }
   getMaxRows() { return this.maxRows; }
@@ -385,7 +386,7 @@ function createGasStubs() {
     const resolved = parseA1(a1, {sheetName: sheet.getName(), maxRows: sheet.getMaxRows(), maxColumns: sheet.getMaxColumns()});
     return {sheet, range: sheet.getRange(resolved.row, resolved.column, resolved.numRows, resolved.numColumns)};
   };
-  const SpreadsheetApp = {openById: openSpreadsheet, getActiveSpreadsheet: () => activeSpreadsheetId ? openSpreadsheet(activeSpreadsheetId) : null, flush: () => {}};
+  const SpreadsheetApp = {openById: openSpreadsheet, getActiveSpreadsheet: () => activeSpreadsheetId ? openSpreadsheet(activeSpreadsheetId) : null, flush: () => {}, ProtectionType: Object.freeze({RANGE: 'RANGE', SHEET: 'SHEET'})};
   const Sheets = {Spreadsheets: {
     Values: {
       batchGet(spreadsheetId, request) {
@@ -540,6 +541,16 @@ function createGasStubs() {
     createFile(id, options = {}) { const file = new MemoryDriveFile(id, options, Utilities); files.set(String(id), file); return file; },
     createFolder(id, options = {}) { const folder = {id: String(id), fileIds: (options.fileIds || []).slice(), subFolderIds: (options.subFolderIds || []).slice(), readAllowed: options.readAllowed !== false}; folders.set(String(id), folder); return folder; },
     setDriveListFailures(failures) { driveListFailures = failures.slice(); },
+    addProtection(spreadsheetId, sheetName, options = {}) {
+      const sheet = openSpreadsheet(spreadsheetId).getSheetByName(sheetName);
+      if (!sheet) throw new Error(`Sheet not found: ${sheetName}`);
+      if (!sheet.protections) sheet.protections = [];
+      sheet.protections.push({
+        getRange: () => ({getColumn: () => Number(options.startColumn), getLastColumn: () => Number(options.endColumn || options.startColumn)}),
+        isWarningOnly: () => options.warningOnly === true,
+        canEdit: () => options.canEdit !== false
+      });
+    },
     getSpreadsheet: openSpreadsheet,
     getFile: (id) => files.get(String(id)) || null,
     getSpreadsheetIds: () => Array.from(spreadsheets.keys()),
