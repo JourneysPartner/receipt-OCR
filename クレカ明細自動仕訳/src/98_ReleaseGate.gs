@@ -7,6 +7,19 @@
  * 実行ログへ出す。判定そのものは4.39と4.26のベクトル群であり、
  * 本関数は集計と表示だけを行う。
  */
+/**
+ * 6.1 取込実行のエディタ用入口。結果をログへ整形して出す
+ * （エディタは戻り値を表示しないため）。
+ *
+ * 例：`importRunReport()` … 担当顧客の未処理ファイルをすべて処理
+ *     `importRunReport({maxFilesPerCustomer: 1})` … 1件だけ試す
+ */
+function importRunReport(options) {
+  var report = runImport(options || {});
+  Logger.log(JSON.stringify(report, null, 2));
+  return report;
+}
+
 function releaseGateReport() {
   var lines = [];
   var allOk = true;
