@@ -65,12 +65,65 @@ function withScriptLock_(callback) {
   try { return callback(); } finally { lock.releaseLock(); }
 }
 
-function readSheetRows_(sheet, columns) {
-  var lastRow = sheet.getLastRow();
-  if (lastRow < 2) return [];
-  return sheet.getRange(2, 1, lastRow - 1, columns).getValues().map(function(values, offset) {
-    return {rowNumber: offset + 2, values: values};
+/**
+ * マスター系シートの読取はSheets APIで行う（4.23 flush規則2）。
+ *
+ * 処理ログ・恒久ファイルインデックス等はSheets APIで**書く**が、
+ * SpreadsheetApp の読取キャッシュはその書込を即座に反映しない ── 実機で
+ * 「直前に作った行が見えない」「古い状態を読んで書き戻す」が実際に起きた。
+ * Sheets APIの読取は自らの書込を必ず見る。読取前の`flush()`は、逆方向
+ * （appendRow等のSpreadsheetApp書込）をAPIから見える状態にするためにある。
+ */
+function sheetsReadRanges_(sheet, ranges) {
+  SpreadsheetApp.flush();
+  var response = Sheets.Spreadsheets.Values.batchGet(sheet.getParent().getId(), {
+    ranges: ranges,
+    valueRenderOption: 'UNFORMATTED_VALUE',
+    dateTimeRenderOption: 'SERIAL_NUMBER',
+    majorDimension: 'ROWS'
   });
+  return (response.valueRanges || []).map(function(range) { return range.values || []; });
+}
+
+function padRowValues_(row, width) {
+  var values = [];
+  for (var column = 0; column < width; column += 1) {
+    values.push(row && row[column] !== undefined ? row[column] : '');
+  }
+  return values;
+}
+
+function rowHasAnyValue_(row) {
+  return Array.isArray(row) && row.some(function(value) {
+    return value !== '' && value !== null && value !== undefined;
+  });
+}
+
+function readSheetRows_(sheet, columns) {
+  var range = quoteSheetName_(sheet.getName()) + '!A2:' + columnLetter_(columns);
+  var rows = sheetsReadRanges_(sheet, [range])[0];
+  // 実APIは末尾の空行を返さないが、スタブはグリッド全体を返し得る。
+  // 末尾の全空行を落として両者の挙動を揃える。
+  var last = rows.length;
+  while (last > 0 && !rowHasAnyValue_(rows[last - 1])) last -= 1;
+  var result = [];
+  for (var offset = 0; offset < last; offset += 1) {
+    result.push({rowNumber: offset + 2, values: padRowValues_(rows[offset], columns)});
+  }
+  return result;
+}
+
+/**
+ * 追記先の行番号をSheets APIの読取で決める。`getLastRow()`は
+ * SpreadsheetAppのキャッシュ越しであり、Sheets APIで足したばかりの行を
+ * 数え落として**既存行を上書きする**行番号を返し得る。
+ */
+function apiLastDataRow_(sheet, columns) {
+  var range = quoteSheetName_(sheet.getName()) + '!A1:' + columnLetter_(columns);
+  var rows = sheetsReadRanges_(sheet, [range])[0];
+  var last = rows.length;
+  while (last > 0 && !rowHasAnyValue_(rows[last - 1])) last -= 1;
+  return last;
 }
 
 /**
@@ -83,28 +136,34 @@ function readSheetRows_(sheet, columns) {
  * 一致しないという問題もある ── 取引IDのような文字列でしか正しく動かない。
  */
 function findRowsByColumnValue_(sheet, column, value, width) {
-  var lastRow = sheet.getLastRow();
-  if (lastRow < 2) return [];
+  var name = quoteSheetName_(sheet.getName());
+  var letter = columnLetter_(column);
+  var columnRows = sheetsReadRanges_(sheet, [name + '!' + letter + '2:' + letter])[0];
 
   var target = String(value);
-  var columnValues = sheet.getRange(2, column, lastRow - 1, 1).getValues();
   var matches = [];
-  for (var offset = 0; offset < columnValues.length; offset += 1) {
-    if (String(columnValues[offset][0]) === target) matches.push(offset + 2);
+  for (var offset = 0; offset < columnRows.length; offset += 1) {
+    var cell = columnRows[offset] ? columnRows[offset][0] : '';
+    if (String(cell === undefined ? '' : cell) === target) matches.push(offset + 2);
   }
   if (!matches.length) return [];
 
   // 一致行だけを読む。連続していればまとめて1回で取る。
-  return groupConsecutiveRows(matches.map(function(rowNumber) {
+  var groups = groupConsecutiveRows(matches.map(function(rowNumber) {
     return {rowNumber: rowNumber};
-  })).reduce(function(rows, group) {
-    var count = group.endRow - group.startRow + 1;
-    sheet.getRange(group.startRow, 1, count, width).getValues()
-      .forEach(function(values, index) {
-        rows.push({rowNumber: group.startRow + index, values: values});
-      });
-    return rows;
-  }, []);
+  }));
+  var ranges = groups.map(function(group) {
+    return name + '!A' + group.startRow + ':' + columnLetter_(width) + group.endRow;
+  });
+  var fetched = sheetsReadRanges_(sheet, ranges);
+  var rows = [];
+  groups.forEach(function(group, index) {
+    var values = fetched[index] || [];
+    for (var row = group.startRow; row <= group.endRow; row += 1) {
+      rows.push({rowNumber: row, values: padRowValues_(values[row - group.startRow], width)});
+    }
+  });
+  return rows;
 }
 
 /**

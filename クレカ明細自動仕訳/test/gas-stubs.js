@@ -400,10 +400,19 @@ function createGasStubs() {
       batchGet(spreadsheetId, request) {
         // INV-08（転記先を取引ごとに読まない）を検査できるようにする。
         apiCallCounts.batchGet += 1;
-        apiCallCounts.cellsRead += (request.ranges || []).reduce((sum, a1) => {
-          const {range} = sheetAndRange(spreadsheetId, a1);
-          return sum + range.getNumRows() * range.getNumColumns();
-        }, 0);
+        // 実APIは末尾の空行・空セルを返さない（トリムする）。読取量の計上も
+        // 返した実体で数える ── B2:B のような開放レンジをグリッド全高で
+        // 数えると、鍵列1本の読取がINV-25違反に見えてしまう。
+        const trimTrailing = (rows) => {
+          const trimmed = rows.map((row) => {
+            let width = row.length;
+            while (width > 0 && (row[width - 1] === '' || row[width - 1] === null)) width -= 1;
+            return row.slice(0, width);
+          });
+          let height = trimmed.length;
+          while (height > 0 && trimmed[height - 1].length === 0) height -= 1;
+          return trimmed.slice(0, height);
+        };
         if (sheetsBatchGetFailures.length) {
           const failure = sheetsBatchGetFailures.shift();
           const error = new Error(failure.message || `Sheets failure ${failure.code || failure}`);
@@ -423,11 +432,21 @@ function createGasStubs() {
           return value;
         };
         return {valueRanges: (request.ranges || []).map((a1) => {
-          const {range} = sheetAndRange(spreadsheetId, a1); let values;
+          const {sheet, range} = sheetAndRange(spreadsheetId, a1); let values;
           if (request.valueRenderOption === 'FORMULA') {
             const formulas = range.getFormulas(); const raw = range.getValues();
             values = formulas.map((row, r) => row.map((formula, c) => formula || raw[r][c]));
           } else values = range.getValues().map((row) => row.map(serialize));
+          const fullCells = range.getNumRows() * range.getNumColumns();
+          values = trimTrailing(values);
+          const trimmedCells = values.reduce((sum, row) => sum + row.length, 0);
+          apiCallCounts.cellsRead += trimmedCells;
+          // シート側の走査量カウンタも「実APIが読んだ実体」で数え直す。
+          // 開放レンジ（B2:B）をグリッド全高で数えると、鍵列1本の読取が
+          // INV-25違反に見える。
+          if (sheet.parent && sheet.parent.counters) {
+            sheet.parent.counters.cellsRead -= (fullCells - trimmedCells);
+          }
           return {range: a1, majorDimension: 'ROWS', values};
         })};
       },

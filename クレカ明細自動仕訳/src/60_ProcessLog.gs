@@ -75,8 +75,10 @@ function createOrUpdateProcessLog(runId, customer, file) {
     if (!permanent) indexRow[10] = now;
     indexRow[11] = now;
 
-    var processRowNumber = process ? process.rowNumber : processSheet.getLastRow() + 1;
-    var indexRowNumber = permanent ? permanent.rowNumber : indexSheet.getLastRow() + 1;
+    // 追記行はSheets APIの読取で数える。getLastRow()はSheets APIで足した
+    // 行を数え落とし、2ファイル目が1ファイル目の行を上書きし得る。
+    var processRowNumber = process ? process.rowNumber : apiLastDataRow_(processSheet, PROCESS_LOG_WIDTH_) + 1;
+    var indexRowNumber = permanent ? permanent.rowNumber : apiLastDataRow_(indexSheet, FILE_INDEX_WIDTH_) + 1;
     ensureRowExists_(processSheet, processRowNumber); ensureRowExists_(indexSheet, indexRowNumber);
     Sheets.Spreadsheets.Values.batchUpdate({valueInputOption: 'RAW', data: [
       {range: a1Range_(processSheet.getName(), processRowNumber, 1, PROCESS_LOG_WIDTH_), values: [processRow]},
