@@ -345,6 +345,48 @@ function installSmbcCsvFormat() {
 }
 
 /**
+ * 三井住友系のxlsx変種（8列：G=備考・H=使用用途）を投入する。
+ * VisaLINEPay・Amazonマスター・三井住友NL等のExcel版がこの形。
+ *
+ * 注意：dカード系（9列・用途はI列）もこの判定に一致し得る。dカード用の
+ * 変種を登録する時点で判定衝突（AMBIGUOUS）となり人の選択に回る ──
+ * それまでの間、dカードのxlsxを流すと用途が全行空欄＝区分1で顧客へ
+ * 差し戻される（黙って誤読はしない）。
+ */
+function installSmbcXlsxFormat() {
+  return installCardFormat({
+    formatId: 'smbc_family_x8',
+    formatName: '三井住友系Excel（氏名行つき8列）',
+    fileTypes: ['xlsx'],
+    keywordRule: {allOf: [{maxRow: 1, keywords: ['様'], minMatch: 1}]},
+    headerRow: 1,
+    dataStartRow: 2,
+    dateColumn: 'A', merchantColumn: 'B', amountColumn: 'C', purposeColumn: 'H',
+    columnProfile: {minColumns: 8, sampleRows: 5, columns: [
+      {index: 0, type: 'date', required: true},
+      {index: 1, type: 'text', required: true},
+      {index: 2, type: 'number', required: true}
+    ]},
+    exclusionRule: {
+      excludeRowRanges: [{from: 1, to: 1}],
+      excludeWhenDateAndAmountEmpty: true,
+      rules: [
+        {id: 'smbc_deposit', target: 'cell', column: 'B', match: 'contains', value: 'ご入金'},
+        {id: 'smbc_total', target: 'row', match: 'contains', value: '合計', onlyWhenDateEmpty: true}
+      ]
+    },
+    countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    billingRule: {sources: [
+      {id: 'fn_ym', kind: 'fileName', pattern: '(20\\d{2})[-_年/]?(0[1-9]|1[0-2])月?',
+        groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
+    ]},
+    parserKind: 'generic',
+    version: 1,
+    revisionReason: 'NEW'
+  });
+}
+
+/**
  * 導入時の設定を Script Properties へまとめて保存する（10.4）。
  *
  * エディタから1回呼ぶための入口。**値の妥当性はここで検証しない** ──

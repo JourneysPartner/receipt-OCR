@@ -157,6 +157,67 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(gas.stubs.getFile('csv1').getName(), '【済】三井住友カード202601.csv');
   });
 
+  test('the SMBC xlsx variant flows: detection, purpose column H, blank purpose bounces', () => {
+    setup();
+    gas.call('registerTestCustomer', [CUSTOMER]);
+    gas.call('installSmbcXlsxFormat', []);
+
+    // VisaLINEPay型の8列xlsx：氏名行＋明細（G=備考・H=使用用途）。
+    // 2行目（返品）はHが空 ── 補完ルールに一致しないファイル名なので
+    // 区分1（顧客が用途を書いて再提出）へ落ちるのが正しい。
+    const xlsxRows = (withPurposeOnRefund) => [
+      ['〇〇　〇〇　様', '4537-25**-****-****', 'ＶｉｓａＬＩＮＥＰａｙカード', '', '', '', '', ''],
+      ['2025/01/01', '利用キャンペーンキャッシュバック', -500, '１', '１', -500, '返品',
+        withPurposeOnRefund ? '返金' : ''],
+      ['2025/01/04', 'ｆｒｅｅｅ（ＢtoＢ）', 3278, '１', '１', 3278, '', 'ツール月額使用料'],
+      ['', '', '', '', '', 24606, '', '']
+    ];
+
+    gas.stubs.createFile('x1', {name: '202502.xlsx', bytes: Buffer.from('xlsx'),
+      lastUpdated: new Date(Date.now() - 3600 * 1000), createdTime: '2026-08-01T00:00:00Z',
+      xlsxSheets: [{name: '202502', values: xlsxRows(false), maxRows: 4, maxColumns: 8}]});
+    gas.stubs.createFolder('folder1', {fileIds: ['x1']});
+
+    const bounced = plain(gas.call('runImport', [{}]));
+    assert.equal(bounced.customers[0].files[0].category, 1,
+      JSON.stringify(bounced.customers[0].files[0]));
+    assert.equal(bounced.customers[0].files[0].nextState, 'CUSTOMER_FIX_REQUIRED');
+
+    // 顧客が用途を書いた版を新ファイルとして再提出 → 書込まで通る
+    gas.stubs.createFile('x2', {name: '202502修正.xlsx', bytes: Buffer.from('xlsx2'),
+      lastUpdated: new Date(Date.now() - 3600 * 1000), createdTime: '2026-08-02T00:00:00Z',
+      xlsxSheets: [{name: '202502', values: xlsxRows(true), maxRows: 4, maxColumns: 8}]});
+    gas.stubs.createFolder('folder1', {fileIds: ['x1', 'x2']});
+
+    const written = plain(gas.call('runImport', [{}]));
+    const fileReport = written.customers[0].files.filter((f) => f.fileId === 'x2')[0];
+    assert.equal(fileReport.outcome, 'WRITTEN', JSON.stringify(fileReport));
+    assert.equal(fileReport.written, 2);
+
+    const sheet = gas.stubs.getSpreadsheet('dest1').getSheetByName('入力用シート');
+    assert.equal(sheet.getRange(5, 9).getValue(), '返金', 'H列の用途がI(メモタグ)へ入る');
+    assert.equal(sheet.getRange(5, 13).getValue(), -500, '返品の負数は符号を保って貸方へ');
+    // 締め年月：ファイル名202502=支払2025-02→締め2025-01。年あり日付なので補完対象外。
+  });
+
+  test('opsRetryUnknownFormats settles the review and rewinds for rediscovery', () => {
+    setup();
+    gas.call('registerTestCustomer', [CUSTOMER]);
+    const customer = gas.call('getCustomerById', ['C001']);
+    gas.call('createOrUpdateProcessLog', ['RUN_U', customer, {
+      id: 'fileU', name: 'u.xlsx', binaryHash: 'b'.repeat(64), state: 'REVIEW_WAIT'
+    }]);
+    gas.call('registerReview', [{
+      reviewType: 'FORMAT_UNKNOWN', fileId: 'fileU',
+      customerId: 'C001', customerName: 'テスト顧客', fileNameOriginal: 'u.xlsx'
+    }]);
+    const results = plain(gas.call('opsRetryUnknownFormats', []));
+    assert.equal(results.length, 1);
+    assert.equal(plain(gas.call('openReviews', [{}]))
+      .filter((r) => r.reviewType === 'FORMAT_UNKNOWN').length, 0);
+    assert.equal(String(gas.call('getProcessLogRecord_', ['fileU']).values[16]), 'DISCOVERED');
+  });
+
   test('an import lands on row 5 and leaves the template J/N cells intact', () => {
     setup();
     gas.call('registerTestCustomer', [CUSTOMER]);
