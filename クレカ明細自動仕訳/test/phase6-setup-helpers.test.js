@@ -92,6 +92,28 @@ module.exports = ({test, assert, gas}) => {
       'an invalid definition must be refused at the door, not stored');
   });
 
+  test('runImport reloads Script Properties itself (a fresh GAS execution has default SETTINGS)', () => {
+    setup();
+    gas.call('registerTestCustomer', [CUSTOMER]);
+    // GASの実行はグローバルを保持しない。保存済みプロパティだけがある状態を作る。
+    gas.call('saveInstallationProperties', [{
+      EXECUTION_TIMEOUT_SECONDS: '300',
+      TX_INDEX_SPREADSHEET_ID: 'txidx',
+      SNAPSHOT_SPREADSHEET_ID: 'snap',
+      SAMPLE_CORPUS_FOLDER_ID: 'corpus'
+    }]);
+    gas.evaluate(`
+      SETTINGS.EXECUTION_TIMEOUT_SECONDS = null;
+      SETTINGS.TX_INDEX_SPREADSHEET_ID = '';
+      SETTINGS.SNAPSHOT_SPREADSHEET_ID = '';
+      SETTINGS.SAMPLE_CORPUS_FOLDER_ID = '';
+    `);
+    gas.stubs.createFolder('folder1', {fileIds: []});
+    const report = plain(gas.call('runImport', [{}]));
+    assert.notEqual(report.stoppedBy, 'SETTINGS_INVALID',
+      'the run must reload stored properties before validating settings');
+  });
+
   test('the real setup sequence carries a SMBC-family CSV end to end', () => {
     setup();
     gas.call('registerTestCustomer', [CUSTOMER]);

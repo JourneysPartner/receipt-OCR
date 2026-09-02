@@ -118,6 +118,11 @@ function runImport(options) {
   var startedAt = Date.now();
   var report = {runId: runId, customers: [], stoppedBy: null};
 
+  // Script Propertiesの導入設定を読む。GASの実行はグローバルを保持しない
+  // ため、**毎実行の最初に読み直さないと`SETTINGS`は既定値のまま**であり、
+  // 設定検証（step 2）が「未設定」で必ず落ちる。
+  loadSettingsFromProperties();
+
   // step 1：認可。メニュー実行者が担当する顧客だけを対象にする。
   var user = activeUserEmail_();
   var customers = getAuthorizedCustomers(user);
