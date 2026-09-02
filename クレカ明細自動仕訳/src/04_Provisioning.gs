@@ -256,12 +256,27 @@ function registerTestCustomer(config) {
 function installCardFormat(spec) {
   if (!spec || !spec.formatId) throw new TypeError('installCardFormat requires a formatId');
   var sheet = requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.CARD_FORMAT_MASTER);
-  var version = Number(spec.version || 1);
-  var existing = loadFormatDefinitions({formatId: spec.formatId, version: version});
-  if (existing.length) {
-    return {installed: false, reason: 'ALREADY_EXISTS', formatId: spec.formatId, version: version};
-  }
   var now = nowIso_();
+  var version = Number(spec.version || 1);
+
+  if (spec.supersede === true) {
+    // 仕様18.5：旧行は`有効=FALSE`で残し、新バージョン行を追加する。
+    var allVersions = loadFormatDefinitions({formatId: spec.formatId});
+    version = allVersions.reduce(function(max, row) {
+      return Math.max(max, Number(row.version) || 0);
+    }, 0) + 1;
+    allVersions.filter(function(row) { return row.enabled; }).forEach(function(row) {
+      sheet.getRange(row._rowNumber, 4).setValue(false);          // D 有効
+      sheet.getRange(row._rowNumber, 23).setValue(now);           // W 無効化日時
+      sheet.getRange(row._rowNumber, 24).setValue('SUPERSEDED');  // X 理由
+      sheet.getRange(row._rowNumber, 34).setValue(now);           // AH 最終更新
+    });
+  } else {
+    var existing = loadFormatDefinitions({formatId: spec.formatId, version: version});
+    if (existing.length) {
+      return {installed: false, reason: 'ALREADY_EXISTS', formatId: spec.formatId, version: version};
+    }
+  }
   var row = Array(CARD_FORMAT_COLUMNS_).fill('');
   row[0] = String(spec.formatId);
   row[1] = String(spec.formatName || spec.formatId);
@@ -384,6 +399,278 @@ function installSmbcXlsxFormat() {
     version: 1,
     revisionReason: 'NEW'
   });
+}
+
+/**
+ * 顧客追記済み明細（使用用途列つき）の形式群・第1弾。
+ *
+ * samplesの実ファイル構造から導出した初期投入データ（2.1.2.1と同じ位置づけ。
+ * データであって設計ではない）。同一発行元の幅違い変種は
+ * `columnProfile.maxColumns`（実装差戻し#27）で判別する。
+ *
+ * まだ含めない（理由つき）：イオン系・UCS・コメリ（日付が数値のYYYYMMDD/
+ * YYMMDDで、5.1.0の列挙では数値＝Excelシリアルとなり誤読するため、解釈の
+ * 設計追加が先）、dカード内訳明細（複数セクション）、AMEXの用途を
+ * 海外通貨列へ記入した変則ファイル（列の役割が定義と食い違う）。
+ */
+var ANNOTATED_FORMAT_SPECS_ = [
+  {
+    formatId: 'smbc_family_x7', formatName: '三井住友系Excel（7列・用途G）',
+    fileTypes: ['xlsx'],
+    keywordRule: {allOf: [{maxRow: 1, keywords: ['様'], minMatch: 1}]},
+    headerRow: 1, dataStartRow: 2,
+    dateColumn: 'A', merchantColumn: 'B', amountColumn: 'C', purposeColumn: 'G',
+    columnProfile: {minColumns: 7, maxColumns: 7, sampleRows: 5, columns: [
+      {index: 0, type: 'date', required: true},
+      {index: 1, type: 'text', required: true},
+      {index: 2, type: 'number', required: true}
+    ]},
+    exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true,
+      rules: [{id: 'deposit', target: 'cell', column: 'B', match: 'contains', value: 'ご入金'},
+              {id: 'total', target: 'row', match: 'contains', value: '合計', onlyWhenDateEmpty: true}]},
+    countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    billingRule: {sources: [
+      {id: 'fn_ym', kind: 'fileName', pattern: '(20\\d{2})[-_年/]?(0[1-9]|1[0-2])月?',
+        groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
+    ]}
+  },
+  {
+    formatId: 'smbc_family_x9', formatName: '三井住友系Excel（9列・用途I）',
+    fileTypes: ['xlsx'],
+    keywordRule: {allOf: [{maxRow: 1, keywords: ['様'], minMatch: 1}]},
+    headerRow: 1, dataStartRow: 2,
+    dateColumn: 'A', merchantColumn: 'B', amountColumn: 'C', purposeColumn: 'I',
+    columnProfile: {minColumns: 9, maxColumns: 9, sampleRows: 5, columns: [
+      {index: 0, type: 'date', required: true},
+      {index: 1, type: 'text', required: true},
+      {index: 2, type: 'number', required: true}
+    ]},
+    exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true,
+      rules: [{id: 'deposit', target: 'cell', column: 'B', match: 'contains', value: 'ご入金'},
+              {id: 'total', target: 'row', match: 'contains', value: '合計', onlyWhenDateEmpty: true}]},
+    countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    billingRule: {sources: [
+      {id: 'fn_ym', kind: 'fileName', pattern: '(20\\d{2})[-_年/]?(0[1-9]|1[0-2])月?',
+        groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
+    ]}
+  },
+  {
+    formatId: 'jcb_family', formatName: 'JCB系Excel（13列・用途M）',
+    fileTypes: ['xlsx'],
+    keywordRule: {allOf: [{maxRow: 6,
+      keywords: ['ご利用者', 'カテゴリ', 'ご利用日', 'ご利用先など', '使用用途'], minMatch: 5}]},
+    headerRow: 6, dataStartRow: 7,
+    dateColumn: 'C', merchantColumn: 'D', amountColumn: 'E', purposeColumn: 'M',
+    columnProfile: {minColumns: 13, maxColumns: 13, sampleRows: 5, columns: [
+      {index: 2, type: 'date', required: true},
+      {index: 3, type: 'text', required: true},
+      {index: 4, type: 'number', required: true}
+    ]},
+    exclusionRule: {excludeRowRanges: [{from: 1, to: 6}], excludeWhenDateAndAmountEmpty: true,
+      rules: [{id: 'total', target: 'row', match: 'contains', value: '合計', onlyWhenDateEmpty: true}]},
+    countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    billingRule: {sources: [
+      {id: 'hdr_pay', kind: 'scanRows', scanMaxRows: 6,
+        pattern: '今回のお支払日\\s+(20\\d{2})-(0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])',
+        groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
+    ]}
+  },
+  {
+    formatId: 'jal_family', formatName: 'JALカード系Excel（9列・日付シリアル・用途I）',
+    fileTypes: ['xlsx'],
+    keywordRule: {allOf: [{maxRow: 1,
+      keywords: ['確定情報', 'お支払日', 'ご利用店名', 'ご利用日', '使用用途'], minMatch: 5}]},
+    headerRow: 1, dataStartRow: 3,
+    dateColumn: 'D', merchantColumn: 'C', amountColumn: 'G', purposeColumn: 'I',
+    columnProfile: {minColumns: 9, maxColumns: 9, sampleRows: 5, columns: [
+      {index: 3, type: 'date', required: true},
+      {index: 2, type: 'text', required: true},
+      {index: 6, type: 'number', required: true}
+    ]},
+    exclusionRule: {excludeRowRanges: [{from: 1, to: 2}], excludeWhenDateAndAmountEmpty: true,
+      rules: [{id: 'tax_total', target: 'row', match: 'contains', value: '消費税課税対象合計',
+        onlyWhenDateEmpty: true}]},
+    countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    billingRule: null
+  },
+  {
+    formatId: 'amex_6', formatName: 'AMEX系Excel（6列・用途F）',
+    fileTypes: ['xlsx'],
+    keywordRule: {allOf: [{maxRow: 1,
+      keywords: ['ご利用日', 'データ処理日', 'ご利用内容', '金額', '使用用途'], minMatch: 5}]},
+    headerRow: 1, dataStartRow: 2,
+    dateColumn: 'A', merchantColumn: 'C', amountColumn: 'D', purposeColumn: 'F',
+    columnProfile: {minColumns: 6, maxColumns: 6, sampleRows: 5, columns: [
+      {index: 0, type: 'date', required: true},
+      {index: 2, type: 'text', required: true},
+      {index: 3, type: 'number', required: true}
+    ]},
+    exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
+    countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    billingRule: null
+  },
+  {
+    formatId: 'amex_7', formatName: 'AMEX系Excel（7列・用途G）',
+    fileTypes: ['xlsx'],
+    keywordRule: {allOf: [{maxRow: 1,
+      keywords: ['ご利用日', 'データ処理日', 'ご利用内容', '金額', '換算レート'], minMatch: 5}]},
+    headerRow: 1, dataStartRow: 2,
+    dateColumn: 'A', merchantColumn: 'C', amountColumn: 'D', purposeColumn: 'G',
+    columnProfile: {minColumns: 7, maxColumns: 7, sampleRows: 5, columns: [
+      {index: 0, type: 'date', required: true},
+      {index: 2, type: 'text', required: true},
+      {index: 3, type: 'number', required: true}
+    ]},
+    exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
+    countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    billingRule: null
+  },
+  {
+    formatId: 'amex_9', formatName: 'AMEX系Excel（9列・会員番号つき・用途I）',
+    fileTypes: ['xlsx'],
+    keywordRule: {allOf: [{maxRow: 1,
+      keywords: ['ご利用日', 'ご利用内容', 'カード会員様名', '会員番号', '金額'], minMatch: 5}]},
+    headerRow: 1, dataStartRow: 2,
+    dateColumn: 'A', merchantColumn: 'C', amountColumn: 'F', purposeColumn: 'I',
+    columnProfile: {minColumns: 9, maxColumns: 9, sampleRows: 5, columns: [
+      {index: 0, type: 'date', required: true},
+      {index: 2, type: 'text', required: true},
+      {index: 5, type: 'number', required: true}
+    ]},
+    exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
+    countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    billingRule: null
+  },
+  {
+    formatId: 'rakuten_x11', formatName: '楽天カード系Excel（11列・用途K）',
+    fileTypes: ['xlsx'],
+    keywordRule: {allOf: [{maxRow: 1,
+      keywords: ['利用日', '利用店名・商品名', '利用金額', '新規サイン', '使用用途'], minMatch: 5}]},
+    headerRow: 1, dataStartRow: 2,
+    dateColumn: 'A', merchantColumn: 'B', amountColumn: 'E', purposeColumn: 'K',
+    columnProfile: {minColumns: 11, maxColumns: 11, sampleRows: 5, columns: [
+      {index: 0, type: 'date', required: true},
+      {index: 1, type: 'text', required: true},
+      {index: 4, type: 'number', required: true}
+    ]},
+    exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true,
+      rules: [{id: 'deposit', target: 'row', match: 'contains', value: 'ご入金', onlyWhenDateEmpty: true}]},
+    countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    billingRule: {sources: [
+      {id: 'fn_enavi', kind: 'fileName', pattern: 'enavi(20\\d{2})(0[1-9]|1[0-2])',
+        groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
+    ]}
+  },
+  {
+    formatId: 'rakuten_x12', formatName: '楽天カード系Excel（12列・支払月・用途L）',
+    fileTypes: ['xlsx'],
+    keywordRule: {allOf: [{maxRow: 1,
+      keywords: ['利用日', '利用店名・商品名', '利用金額', '支払月'], minMatch: 4}]},
+    headerRow: 1, dataStartRow: 2,
+    dateColumn: 'A', merchantColumn: 'B', amountColumn: 'E', purposeColumn: 'L',
+    columnProfile: {minColumns: 12, maxColumns: 12, sampleRows: 5, columns: [
+      {index: 0, type: 'date', required: true},
+      {index: 1, type: 'text', required: true},
+      {index: 4, type: 'number', required: true}
+    ]},
+    exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true,
+      rules: [{id: 'deposit', target: 'row', match: 'contains', value: 'ご入金', onlyWhenDateEmpty: true}]},
+    countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    billingRule: null
+  },
+  {
+    formatId: 'saison_x8', formatName: 'セゾン系Excel（8列・用途H）',
+    fileTypes: ['xlsx'],
+    keywordRule: {allOf: [
+      {maxRow: 5, keywords: ['利用日', 'ご利用店名及び商品名', '利用金額', '使用用途'], minMatch: 4},
+      {maxRow: 5, keywords: ['カード名称'], minMatch: 1}
+    ]},
+    headerRow: 5, dataStartRow: 7,
+    dateColumn: 'A', merchantColumn: 'B', amountColumn: 'F', purposeColumn: 'H',
+    // 日付を必須にしない：明細候補行のサンプリングは金額だけの【小計】
+    // 【合計】行も拾うため（2.1.2.3の評価規則）、日付必須だと自ファイルで
+    // 不成立になる。判別は列数8＋見出しキーワードが担う。
+    columnProfile: {minColumns: 8, maxColumns: 8, sampleRows: 5, columns: [
+      {index: 1, type: 'text', required: true},
+      {index: 5, type: 'number', required: true}
+    ]},
+    exclusionRule: {excludeRowRanges: [{from: 1, to: 6}], excludeWhenDateAndAmountEmpty: true,
+      rules: [
+        {id: 'subtotal', target: 'row', match: 'contains', value: '小計', onlyWhenDateEmpty: true},
+        {id: 'total', target: 'row', match: 'contains', value: '合計', onlyWhenDateEmpty: true},
+        {id: 'deposit', target: 'cell', column: 'B', match: 'contains', value: 'ご入金'}
+      ]},
+    countTotalRule: {count: {source: 'none'},
+      total: {source: 'labeledRow', labelColumn: 'B', valueColumn: 'F', label: '【合計】', tolerance: 0},
+      totalScope: 'all'},
+    billingRule: {sources: [
+      {id: 'hdr_pay', kind: 'scanRows', scanMaxRows: 4,
+        pattern: 'お支払日\\s+(20\\d{2})-(0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])',
+        groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
+    ]}
+  },
+  {
+    formatId: 'paypay_family', formatName: 'PayPayカード系Excel（13列・用途M）',
+    fileTypes: ['xlsx'],
+    keywordRule: {allOf: [{maxRow: 1,
+      keywords: ['利用日/キャンセル日', '利用店名・商品名', '決済方法', '支払区分', '利用金額'], minMatch: 5}]},
+    headerRow: 1, dataStartRow: 2,
+    dateColumn: 'A', merchantColumn: 'B', amountColumn: 'F', purposeColumn: 'M',
+    columnProfile: {minColumns: 13, maxColumns: 13, sampleRows: 5, columns: [
+      {index: 0, type: 'date', required: true},
+      {index: 1, type: 'text', required: true},
+      {index: 5, type: 'number', required: true}
+    ]},
+    exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
+    countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    billingRule: null
+  },
+  {
+    formatId: 'aupay_family', formatName: 'au PAYカード系Excel（7列・用途G）',
+    fileTypes: ['xlsx'],
+    keywordRule: {allOf: [{maxRow: 1,
+      keywords: ['ご利用者', '支払区分', '利用日', '利用店名', '利用金額'], minMatch: 5}]},
+    headerRow: 1, dataStartRow: 2,
+    dateColumn: 'C', merchantColumn: 'D', amountColumn: 'E', purposeColumn: 'G',
+    columnProfile: {minColumns: 7, maxColumns: 7, sampleRows: 5, columns: [
+      {index: 2, type: 'date', required: true},
+      {index: 3, type: 'text', required: true},
+      {index: 4, type: 'number', required: true}
+    ]},
+    exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
+    countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    billingRule: null
+  }
+];
+
+/**
+ * 第1弾の形式群を一括投入する。冪等 ── 既にある(形式ID, 版)は書かない。
+ * あわせて`smbc_family_x8`へ列数上限（maxColumns=8）が無ければ、
+ * 上限つきの新バージョンで置き換える（旧版は`有効=FALSE`で残る）。
+ */
+function installAnnotatedFormatsBatch1() {
+  var results = ANNOTATED_FORMAT_SPECS_.map(function(spec) {
+    return installCardFormat(Object.assign({parserKind: 'generic', version: 1,
+      revisionReason: 'NEW'}, spec));
+  });
+
+  var x8 = loadFormatDefinitions({formatId: 'smbc_family_x8', enabled: true})[0];
+  if (x8 && x8.valid && (!x8.columnProfile || x8.columnProfile.maxColumns === undefined)) {
+    var upgraded = Object.assign({}, {
+      formatId: 'smbc_family_x8', formatName: x8.formatName,
+      fileTypes: x8.fileTypes, keywordRule: x8.keywordRule,
+      headerRow: x8.headerRow, dataStartRow: x8.dataStartRow,
+      dateColumn: x8.dateColumn, merchantColumn: x8.merchantColumn,
+      amountColumn: x8.amountColumn, purposeColumn: x8.purposeColumn,
+      columnProfile: Object.assign({}, x8.columnProfile || {minColumns: 8}, {maxColumns: 8}),
+      exclusionRule: x8.exclusionRule, countTotalRule: x8.countTotalRule,
+      billingRule: x8.billingRule, parserKind: x8.parserKind,
+      revisionReason: 'DEFECT_FIX', supersede: true
+    });
+    results.push(installCardFormat(upgraded));
+  }
+  Logger.log(JSON.stringify(results, null, 2));
+  return results;
 }
 
 /**

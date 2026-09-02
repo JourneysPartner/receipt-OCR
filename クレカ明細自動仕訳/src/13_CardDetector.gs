@@ -114,6 +114,11 @@ function detectorColumnProfile_(raw, problems) {
     problems.push('N.sampleRows must be a positive integer');
     return null;
   }
+  if (parsed.maxColumns !== undefined &&
+      (!Number.isInteger(parsed.maxColumns) || parsed.maxColumns < parsed.minColumns)) {
+    problems.push('N.maxColumns must be an integer >= minColumns');
+    return null;
+  }
   var typesOk = parsed.columns.every(function(column) {
     return column && Number.isInteger(column.index) && column.index >= 0 &&
       ['date', 'text', 'number', 'any'].indexOf(column.type) >= 0 &&
@@ -468,6 +473,9 @@ function matchesColumnProfile(sheet, formatRow) {
   if (!samples.length) return false;
   return samples.every(function(row) {
     if (row.length < profile.minColumns) return false;
+    // 実装差戻し#27：列数の上限。同一発行元の幅違い変種（7/8/9列）を
+    // 分けるための唯一の安定した材料である。
+    if (profile.maxColumns !== undefined && row.length > profile.maxColumns) return false;
     return profile.columns.every(function(column) {
       if (!column.required) return true;
       return parserCellMatchesType_(row[column.index], column.type);
