@@ -97,6 +97,66 @@ module.exports = ({test, assert, gas}) => {
       'excluding a column the system writes would let a used row look empty');
   });
 
+  test('the pilot loop closes: dictionary import, bulk adoption, file completion', () => {
+    setup();
+    gas.call('registerTestCustomer', [CUSTOMER]);
+    gas.call('installSmbcCsvFormat', []);
+    // 顧客側の取引先一覧タブ（A=元表記・B=freee取引先名。1行目は見出し）
+    const partnerRows = [
+      ['元表記', '取引先名'],
+      ['ローソン', '株式会社ローソン'],
+      ['ソフトバンクＭ（１２月分）', 'ソフトバンクM'],
+      ['アイマイ商店', '取引先A'],
+      ['ｱｲﾏｲ商店', '取引先A'],           // 正規化（NFKC）で同一・同一取引先 → 1件に畳む
+      ['マギラワシ屋', '取引先B'],
+      ['ﾏｷﾞﾗﾜｼ屋', '取引先C']            // 正規化が衝突し取引先が違う → 競合
+    ];
+    gas.stubs.getSpreadsheet('dest1').getSheetByName('取引先一覧')
+      .getRange(1, 1, partnerRows.length, 2).setValues(partnerRows);
+
+    const csv = '〇〇　〇〇　様,4980-00**-****-****,三井住友ゴールドＶＩＳＡ（ＮＬ）,,,,\n' +
+      '2025/12/16,ローソン,10800,1,1,10800,仕入れ\n' +
+      '2025/12/17,マギラワシ屋,500,1,1,500,仕入れ\n';
+    gas.stubs.createFile('csv1', {name: '三井住友カード202601.csv',
+      bytes: Buffer.from(csv, 'utf8'), lastUpdated: new Date(Date.now() - 3600 * 1000),
+      createdTime: '2026-08-01T00:00:00Z'});
+    gas.stubs.createFolder('folder1', {fileIds: ['csv1']});
+
+    const run = plain(gas.call('runImport', [{}]));
+    assert.equal(run.customers[0].files[0].nextState, 'REVIEW_WAIT');
+
+    // 辞書取込：正規化重複の同名は畳まれ、競合はフラグ付きで入る。冪等。
+    const imported = plain(gas.call('opsImportPartnerListToDictionary', []))[0];
+    assert.equal(imported.imported, 5, JSON.stringify(imported));
+    assert.equal(imported.conflictedEntries, 2);
+    const again = plain(gas.call('opsImportPartnerListToDictionary', []))[0];
+    assert.equal(again.imported, 0, 'the import must be idempotent');
+
+    // 一括採用：一意に確定するローソンだけ採用。競合の店は人に残す。
+    const adopted = plain(gas.call('opsAutoAdoptPartners', []));
+    assert.equal(adopted.adopted, 1, JSON.stringify(adopted.results));
+    assert.equal(adopted.skipped, 1);
+    assert.equal(adopted.errors, 0);
+    assert.deepEqual(adopted.completedFiles, [],
+      'a file with an unresolved review must not complete');
+
+    const sheet = gas.stubs.getSpreadsheet('dest1').getSheetByName('入力用シート');
+    assert.equal(sheet.getRange(5, 6).getValue(), '株式会社ローソン',
+      'the adopted partner lands in F');
+    const lawsonTxId = String(sheet.getRange(5, 16).getValue());
+    assert.equal(gas.call('getTransaction', [lawsonTxId]).transactionStatus, 'COMMITTED');
+
+    // 残りを人が解決したらファイルは完了する：競合の1件を取引先なしで確定
+    const remaining = plain(gas.call('openReviews', [{}]))
+      .filter((r) => r.reviewType === 'PARTNER');
+    assert.equal(remaining.length, 1);
+    gas.call('resolveReview', [remaining[0].reviewId, 'RESOLVE_WITHOUT_PARTNER', {}]);
+    const second = plain(gas.call('opsAutoAdoptPartners', []));
+    assert.deepEqual(second.completedFiles, ['csv1'],
+      'once every review is settled the file completes (INV-17)');
+    assert.equal(gas.stubs.getFile('csv1').getName(), '【済】三井住友カード202601.csv');
+  });
+
   test('an import lands on row 5 and leaves the template J/N cells intact', () => {
     setup();
     gas.call('registerTestCustomer', [CUSTOMER]);
