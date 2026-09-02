@@ -414,11 +414,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
         // 恒久ファイルインデックスF列（明細内容ハッシュ・提出時点で不変）を
         // 同期する。ここが空のままだと、同一内容の再提出が重複として
         // 検出できない（仕様12.2は本シートだけで完結する。INV-05）。
-        createOrUpdateProcessLog(runId, customer, {
-          id: fileId, originalFileName: fileName, binaryHash: binaryHash,
-          hashVersion: VERSIONS.HASH, state: FILE_STATE.VALIDATING,
-          revision: candidate.revisionId || '', updatedAt: candidate.modifiedTime || ''
-        });
+        syncPermanentContentHash(fileId, contentHash);
 
         // 8-7：転記先構成検証（`WRITING`遷移前）。
         var destinationIndex = buildIndex(customer, {});

@@ -85,26 +85,58 @@ function createOrUpdateProcessLog(runId, customer, file) {
   });
 }
 
+/**
+ * **指名された列だけを書く。** 以前は行全体を読んで全40列を書き戻して
+ * いたが、SpreadsheetApp の読取キャッシュは Sheets API の直前の書込を
+ * 反映しないことがあり（4.23 flush規則2）、**古い読取値で無関係な列を
+ * 巻き戻す**（実機で処理ログの内部状態だけが古い値へ戻り、恒久ファイル
+ * インデックスと食い違って`PERMANENT_INDEX_DESYNC`になった）。
+ * 列単位の書込なら、読取が古くても壊れるのは書こうとした列だけである。
+ */
 function updateProcessLogUnlocked_(fileId, fields) {
     var record = getProcessLogRecord_(fileId);
     if (!record) throw makeCatalogError_('REQUIRED_LOG_WRITE_FAILED', 'Process log not found: ' + fileId);
-    var row = record.values.slice();
+    var sheetName = processLogSheet_().getName();
+    var data = [];
     Object.keys(fields || {}).forEach(function(name) {
       var column = PROCESS_FIELD_COLUMNS_[name];
       if (!column) throw new TypeError('Unknown process log field: ' + name);
-      if (name === 'submittedContentHash' && row[column - 1] && row[column - 1] !== fields[name]) {
+      if (name === 'submittedContentHash' && record.values[column - 1] &&
+          record.values[column - 1] !== fields[name]) {
         throw new IntegrityError(null, 'Submitted content hash is immutable');
       }
-      row[column - 1] = fields[name];
+      data.push({range: a1Range_(sheetName, record.rowNumber, column, column),
+        values: [[fields[name]]]});
     });
-    var data = [{range: a1Range_(processLogSheet_().getName(), record.rowNumber, 1, PROCESS_LOG_WIDTH_), values: [row]}];
     if (fields.internalState !== undefined) {
       var permanent = getPermanentFileIndexRecord_(fileId);
       if (!permanent) throw makeCatalogError_('REQUIRED_LOG_WRITE_FAILED', 'Permanent file index not found: ' + fileId);
-      var indexRow = permanent.values.slice(); indexRow[3] = fields.internalState; indexRow[11] = nowIso_();
-      data.push({range: a1Range_(permanentFileIndexSheet_().getName(), permanent.rowNumber, 1, FILE_INDEX_WIDTH_), values: [indexRow]});
+      var indexName = permanentFileIndexSheet_().getName();
+      data.push({range: a1Range_(indexName, permanent.rowNumber, 4, 4), values: [[fields.internalState]]});
+      data.push({range: a1Range_(indexName, permanent.rowNumber, 12, 12), values: [[nowIso_()]]});
     }
+    if (!data.length) return;
     Sheets.Spreadsheets.Values.batchUpdate({valueInputOption: 'RAW', data: data}, masterSpreadsheet_().getId());
+}
+
+/**
+ * 恒久ファイルインデックスF列（明細内容ハッシュ・提出時点で不変）を書く。
+ * 行全体を書き戻さない（上記と同じ理由）。
+ */
+function syncPermanentContentHash(fileId, contentHash) {
+  return withScriptLock_(function() {
+    var permanent = getPermanentFileIndexRecord_(fileId);
+    if (!permanent) throw makeCatalogError_('REQUIRED_LOG_WRITE_FAILED', 'Permanent file index not found: ' + fileId);
+    var current = String(permanent.values[5] || '');
+    if (current !== '' && current !== String(contentHash)) {
+      throw new IntegrityError(null, 'Submitted content hash is immutable (INV-07)');
+    }
+    var indexName = permanentFileIndexSheet_().getName();
+    Sheets.Spreadsheets.Values.batchUpdate({valueInputOption: 'RAW', data: [
+      {range: a1Range_(indexName, permanent.rowNumber, 6, 6), values: [[String(contentHash)]]},
+      {range: a1Range_(indexName, permanent.rowNumber, 12, 12), values: [[nowIso_()]]}
+    ]}, masterSpreadsheet_().getId());
+  });
 }
 
 function updateProcessLog(fileId, fields) {

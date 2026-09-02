@@ -114,6 +114,25 @@ module.exports = ({test, assert, gas}) => {
       'the run must reload stored properties before validating settings');
   });
 
+  test('A-30: a process-log field update writes only the named cells', () => {
+    setup();
+    gas.call('registerTestCustomer', [CUSTOMER]);
+    const customer = gas.call('getCustomerById', ['C001']);
+    gas.call('createOrUpdateProcessLog', ['RUN_X', customer, {
+      id: 'fileX', name: 'x.csv', binaryHash: 'b'.repeat(64), state: 'VALIDATING'
+    }]);
+    gas.stubs.resetApiCallCounts();
+    gas.call('updateProcessLog', ['fileX', {endedAt: '2026-09-02T00:00:00+09:00'}]);
+    assert.equal(gas.stubs.getApiCallCounts().cellsWritten, 1,
+      'a whole-row write-back would restore stale values into unrelated columns ' +
+      '(the SpreadsheetApp read cache lags Sheets API writes on the real machine)');
+
+    // 状態遷移は処理ログ1セル＋恒久インデックスの状態・更新日時の計3セル
+    gas.stubs.resetApiCallCounts();
+    gas.call('updateProcessLog', ['fileX', {internalState: 'REVIEW_WAIT'}]);
+    assert.equal(gas.stubs.getApiCallCounts().cellsWritten, 3);
+  });
+
   test('the real setup sequence carries a SMBC-family CSV end to end', () => {
     setup();
     gas.call('registerTestCustomer', [CUSTOMER]);
