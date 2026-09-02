@@ -214,6 +214,14 @@ class MemorySheet {
   getSheetId() { return this.parent.sheets.indexOf(this) + 1; }
   getMaxRows() { return this.maxRows; }
   getMaxColumns() { return this.maxColumns; }
+  insertColumnsAfter(afterPosition, howMany) {
+    const count = Number(howMany);
+    if (!Number.isInteger(count) || count < 1) throw new Error('insertColumnsAfter requires a positive count');
+    this.maxColumns += count;
+    this.values.forEach((row) => { for (let i = 0; i < count; i += 1) row.push(''); });
+    this.formulas.forEach((row) => { for (let i = 0; i < count; i += 1) row.push(''); });
+    return this;
+  }
   getLastRow() {
     for (let row = this.maxRows - 1; row >= 0; row -= 1) {
       if (this.values[row].some((v) => v !== '' && v !== null) || this.formulas[row].some((v) => v !== '')) return row + 1;

@@ -41,30 +41,46 @@ var MASTER_SHEET_SPECS_ = Object.freeze([
   {key: 'SNAPSHOT_INDEX', width: 12, label: 'スナップショットID'}   // ※
 ]);
 
+/** グリッドの列数を仕様幅まで広げる。値・数式には触れない。 */
+function ensureSheetWidth_(sheet, width) {
+  var current = sheet.getMaxColumns();
+  if (current < width) {
+    sheet.insertColumnsAfter(current, width - current);
+    return true;
+  }
+  return false;
+}
+
 /**
- * 必須シートを作る。冪等 ── 既存シートには触れず、無いものだけ作る。
+ * 必須シートを作る。冪等 ── 既存シートの**値・数式には触れず**、無いものだけ
+ * 作る。ただしグリッドの**列数**は仕様幅まで広げる（右端への空列追加のみ。
+ * 縮めない）。実機の`insertSheet`は既定26列であり、広げないと取引ログ
+ * （45列）や顧客マスター（38列）への書込が実機でだけ範囲外になる。
  *
  * @param {string=} spreadsheetId 省略時はマスター（4.6の解決順）
- * @return {{created: !Array<string>, existing: !Array<string>}}
+ * @return {{created: !Array<string>, existing: !Array<string>, widened: !Array<string>}}
  */
 function provisionMasterSheets(spreadsheetId) {
   var spreadsheet = spreadsheetId
     ? SpreadsheetApp.openById(spreadsheetId) : masterSpreadsheet_();
   var created = [];
   var existing = [];
+  var widened = [];
 
   MASTER_SHEET_SPECS_.forEach(function(spec) {
     var name = CONFIG.SHEET_NAMES[spec.key];
-    if (spreadsheet.getSheetByName(name)) {
+    var sheet = spreadsheet.getSheetByName(name);
+    if (sheet) {
       existing.push(name);
-      return;
+    } else {
+      sheet = spreadsheet.insertSheet(name);
+      sheet.getRange(1, 1).setValue(spec.label);
+      created.push(name);
     }
-    var sheet = spreadsheet.insertSheet(name);
-    sheet.getRange(1, 1).setValue(spec.label);
-    created.push(name);
+    if (ensureSheetWidth_(sheet, spec.width)) widened.push(name);
   });
 
-  return {created: created, existing: existing};
+  return {created: created, existing: existing, widened: widened};
 }
 
 /**
@@ -208,6 +224,7 @@ function registerTestCustomer(config) {
     JSON.stringify(config.rowScanExcludedColumns) : '';
 
   var masterSheet = requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.CUSTOMER_MASTER);
+  ensureSheetWidth_(masterSheet, 38);
   var existing = findRowsByColumnValue_(masterSheet, 1, config.customerId, 38);
   var rowNumber = existing.length ? existing[0].rowNumber : masterSheet.getLastRow() + 1;
   ensureRowExists_(masterSheet, rowNumber);

@@ -46,6 +46,22 @@ module.exports = ({test, assert, gas}) => {
       're-running the installer must never be able to destroy data');
   });
 
+  test('10.4: narrow grids are widened to the spec width without touching values', () => {
+    setup();
+    // 実機のinsertSheetは既定26列。45列の取引ログへ書けるようになること。
+    const first = plain(gas.call('provisionMasterSheets', []));
+    const txLog = gas.stubs.getSpreadsheet('master').getSheetByName('クレカ取引ログ');
+    assert.ok(txLog.getMaxColumns() >= 45,
+      'a default 26-column grid would reject the 45-column transaction log write');
+    assert.ok(first.widened.indexOf('クレカ取引ログ') >= 0);
+
+    // 既存の狭いシート＋既存データも、値を変えずに広がる
+    txLog.getRange(2, 1).setValue('TX_KEEP');
+    const again = plain(gas.call('provisionMasterSheets', []));
+    assert.equal(again.created.length, 0);
+    assert.equal(txLog.getRange(2, 1).getValue(), 'TX_KEEP');
+  });
+
   test('check 11: the auxiliary spreadsheet gains its capacity probe', () => {
     setup();
     gas.stubs.createSpreadsheet('txidx', {sheets: [{name: '仮', values: [['x']]}]});
