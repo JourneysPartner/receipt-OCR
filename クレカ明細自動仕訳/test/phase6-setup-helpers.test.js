@@ -114,6 +114,15 @@ module.exports = ({test, assert, gas}) => {
       'the run must reload stored properties before validating settings');
   });
 
+  test('4.38: a per-minute read-quota hit retries instead of failing the operation', () => {
+    setup();
+    gas.call('registerTestCustomer', [CUSTOMER]);
+    gas.stubs.setSheetsBatchGetFailures([{code: 429, message: "Quota exceeded for quota metric 'Read requests'"}]);
+    const customer = plain(gas.call('getCustomerById', ['C001']));
+    assert.equal(customer.customerId, 'C001',
+      'a quota hit must wait for the minute window, not abort a multi-step operation');
+  });
+
   test('A-30: a process-log field update writes only the named cells', () => {
     setup();
     gas.call('registerTestCustomer', [CUSTOMER]);

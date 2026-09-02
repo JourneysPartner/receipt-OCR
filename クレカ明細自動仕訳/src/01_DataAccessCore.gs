@@ -76,13 +76,31 @@ function withScriptLock_(callback) {
  */
 function sheetsReadRanges_(sheet, ranges) {
   SpreadsheetApp.flush();
-  var response = Sheets.Spreadsheets.Values.batchGet(sheet.getParent().getId(), {
-    ranges: ranges,
-    valueRenderOption: 'UNFORMATTED_VALUE',
-    dateTimeRenderOption: 'SERIAL_NUMBER',
-    majorDimension: 'ROWS'
-  });
-  return (response.valueRanges || []).map(function(range) { return range.values || []; });
+  var lastError = null;
+  for (var attempt = 0; attempt <= 4; attempt += 1) {
+    try {
+      var response = Sheets.Spreadsheets.Values.batchGet(sheet.getParent().getId(), {
+        ranges: ranges,
+        valueRenderOption: 'UNFORMATTED_VALUE',
+        dateTimeRenderOption: 'SERIAL_NUMBER',
+        majorDimension: 'ROWS'
+      });
+      return (response.valueRanges || []).map(function(range) { return range.values || []; });
+    } catch (error) {
+      lastError = error;
+      var status = Number(error && (error.code || error.status));
+      var message = String(error && error.message || '');
+      var quotaExceeded = status === 429 || /Quota exceeded/i.test(message);
+      var transientFailure = quotaExceeded || status === 500 || status === 503 ||
+        /(?:^|\D)(?:500|503)(?:\D|$)/.test(message);
+      if (!transientFailure || attempt === 4) throw error;
+      // 毎分クォータ（読取60件/分/ユーザー）は数秒の指数バックオフでは
+      // 回復しない。クォータ超過は分の窓が空くまで長めに待つ ── これが
+      // 多段の運用操作を自然に上限内へペーシングする。
+      Utilities.sleep(quotaExceeded ? 20000 * (attempt + 1) : computeBackoffMs(attempt + 1));
+    }
+  }
+  throw lastError;
 }
 
 function padRowValues_(row, width) {
