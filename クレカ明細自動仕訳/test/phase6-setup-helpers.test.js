@@ -133,6 +133,28 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(gas.stubs.getApiCallCounts().cellsWritten, 3);
   });
 
+  test('opsRetryDestinationFix resolves the review and rewinds the file to DISCOVERED', () => {
+    setup();
+    gas.call('registerTestCustomer', [CUSTOMER]);
+    const customer = gas.call('getCustomerById', ['C001']);
+    gas.call('createOrUpdateProcessLog', ['RUN_Y', customer, {
+      id: 'fileY', name: 'y.csv', binaryHash: 'b'.repeat(64), state: 'REVIEW_WAIT'
+    }]);
+    gas.call('registerReview', [{
+      reviewType: 'DESTINATION_FIX', fileId: 'fileY',
+      customerId: 'C001', customerName: 'テスト顧客', fileNameOriginal: 'y.csv'
+    }]);
+
+    const results = plain(gas.call('opsRetryDestinationFix', []));
+    assert.equal(results.length, 1);
+    const reviews = plain(gas.call('openReviews', [{}]));
+    assert.equal(reviews.filter((r) => r.reviewType === 'DESTINATION_FIX').length, 0,
+      'the review must be settled, not left open');
+    const record = gas.call('getProcessLogRecord_', ['fileY']);
+    assert.equal(String(record.values[16]), 'DISCOVERED',
+      'the file must be rediscoverable by the next run');
+  });
+
   test('the real setup sequence carries a SMBC-family CSV end to end', () => {
     setup();
     gas.call('registerTestCustomer', [CUSTOMER]);
