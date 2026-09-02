@@ -168,8 +168,16 @@ function validateDestinationSchema(customer, index) {
     });
   }
 
-  // 項目7：シート構成バージョンの完全一致。
-  if (String(customer.schemaVersion) !== String(VERSIONS.SHEET_SCHEMA)) {
+  // 項目7：シート構成バージョンの一致。実機のセルは「1.0」を数値1として
+  // 保存するため、両辺が10進数として解釈できる場合は数値として比較する
+  // （文字列比較だと '1' ≠ '1.0' で、正しい構成が恒久的に不一致になる）。
+  var expectedVersion = String(VERSIONS.SHEET_SCHEMA);
+  var actualVersion = String(customer.schemaVersion);
+  var decimalPattern = /^\d+(\.\d+)?$/;
+  var versionMatches = decimalPattern.test(expectedVersion) && decimalPattern.test(actualVersion) ?
+    Number(expectedVersion) === Number(actualVersion) :
+    expectedVersion === actualVersion;
+  if (!versionMatches) {
     problems.push(schemaProblem_(7, 'SCHEMA_VERSION_MISMATCH', {
       expected: VERSIONS.SHEET_SCHEMA, actual: customer.schemaVersion
     }));

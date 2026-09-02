@@ -481,6 +481,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
     outcome.outcome = result.wroteToDestination ? 'WRITTEN' : 'NO_WRITE';
     outcome.nextState = stateNow;
     outcome.category = result.preValidation.category;
+    outcome.code = result.preValidation.code;
     outcome.written = result.write ? result.write.written.length : 0;
     outcome.reviews = (result.reviewsRegistered || (result.write && result.write.reviewsRegistered) || []).length;
     return outcome;
