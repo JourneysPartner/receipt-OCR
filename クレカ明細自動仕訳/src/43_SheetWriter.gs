@@ -9,12 +9,22 @@ function isDestinationCellEmpty(value, formula) {
   return false;
 }
 
-/** ヘッダー定義範囲の全列を検査する。 */
-function isDestinationRowEmpty(values, formulas, lastColumn) {
+/**
+ * ヘッダー定義範囲の全列を検査する。
+ *
+ * `excludedColumns`（顧客マスターAL列・1起算）は判定から除く。freeeの
+ * 実テンプレートは未入力行にも税計算区分の既定値・残高数式（非空の表示値）
+ * を持ち、除外なしでは空き行が1行も存在しない（実装差戻し#16）。
+ * 除外できる列はシステムが書かない列に限る（4.3が検証する）。
+ */
+function isDestinationRowEmpty(values, formulas, lastColumn, excludedColumns) {
   if (!Array.isArray(values) || !Array.isArray(formulas) || !Number.isInteger(lastColumn) || lastColumn < 1) {
     throw new TypeError('isDestinationRowEmpty requires values, formulas, and lastColumn');
   }
+  var excluded = Object.create(null);
+  (excludedColumns || []).forEach(function(column) { excluded[Number(column)] = true; });
   for (var column = 0; column < lastColumn; column += 1) {
+    if (excluded[column + 1]) continue;
     if (!isDestinationCellEmpty(values[column], formulas[column])) return false;
   }
   return true;
@@ -142,7 +152,7 @@ function expandTemplateRows(customer, sheet, shortage, templateSourceRow) {
   var check = validateExpandedRows(
     added.map(function(r) { return sheet.getRange(r, 1, 1, lastColumn).getValues()[0]; }),
     added.map(function(r) { return sheet.getRange(r, 1, 1, lastColumn).getFormulas()[0]; }),
-    lastColumn);
+    lastColumn, customer.rowScanExcludedColumns);
   if (!check.ok) {
     throw new StateTransitionError(
       'DESTINATION_TEMPLATE_ROW_NOT_EMPTY: expanding did not produce usable empty rows');
@@ -160,13 +170,13 @@ function systemOwnedColumnsAreEmpty_(customer, values) {
     });
 }
 
-function validateExpandedRows(values, formulas, lastColumn) {
+function validateExpandedRows(values, formulas, lastColumn, excludedColumns) {
   if (!Array.isArray(values) || !Array.isArray(formulas)) {
     throw new TypeError('validateExpandedRows requires values and formulas');
   }
   return {
     ok: values.every(function(row, index) {
-      return isDestinationRowEmpty(row || [], formulas[index] || [], lastColumn);
+      return isDestinationRowEmpty(row || [], formulas[index] || [], lastColumn, excludedColumns);
     })
   };
 }

@@ -98,7 +98,8 @@ function getValuesByRow(index, rowNumber) {
 function isRowEmpty(index, rowNumber, customer) {
   var values = getAllValuesByRow(index, rowNumber); var formulas = getFormulasByRow(index, rowNumber);
   if (!values || !formulas) throw new RangeError('Row is outside the destination index');
-  return isDestinationRowEmpty(values, formulas, customer.rowScanLastColumn);
+  return isDestinationRowEmpty(values, formulas, customer.rowScanLastColumn,
+    customer.rowScanExcludedColumns);
 }
 
 function listOccupiedRows(index, customer) {
@@ -155,7 +156,7 @@ function reserveDestinationRows(customer, fullTxIds, fileId, leaseId) {
     candidates.forEach(function(rowNumber, offset) {
       var values = sheet.getRange(rowNumber, 1, 1, customer.rowScanLastColumn).getValues()[0];
       var formulas = sheet.getRange(rowNumber, 1, 1, customer.rowScanLastColumn).getFormulas()[0];
-      if (!isDestinationRowEmpty(values, formulas, customer.rowScanLastColumn)) throw leaseConflict_('Reserved row is no longer empty');
+      if (!isDestinationRowEmpty(values, formulas, customer.rowScanLastColumn, customer.rowScanExcludedColumns)) throw leaseConflict_('Reserved row is no longer empty');
       var txId = String(fullTxIds[offset]);
       sheet.getRange(rowNumber, customer.columnMapping.txId).setValue(txId);
       reserved.push({txId: txId, rowNumber: rowNumber});

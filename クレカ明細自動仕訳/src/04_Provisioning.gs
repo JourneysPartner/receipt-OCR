@@ -19,7 +19,7 @@
  * 実装時に確定する。
  */
 var MASTER_SHEET_SPECS_ = Object.freeze([
-  {key: 'CUSTOMER_MASTER', width: 37, label: '顧客ID'},
+  {key: 'CUSTOMER_MASTER', width: 38, label: '顧客ID'},
   {key: 'COMMON_PARTNER_LIST', width: 6, label: '取引先ID'},
   {key: 'COMMON_PARTNER_DICT', width: 18, label: '辞書ID'},
   {key: 'CUSTOMER_PARTNER_DICT', width: 18, label: '辞書ID'},
@@ -126,11 +126,18 @@ function describeDestinationSheet(spreadsheetId, sheetName, headerRow) {
  * AE列（ヘッダー期待値）は**実物の転記先シートの現在のヘッダー行から生成**
  * する（4.22.1(1)の初期導入手順）。取引ID列はAE期待値に含めない（項目4）。
  *
+ * freeeの実テンプレートのように「ヘッダーの下に入力禁止の仕切り行」がある
+ * 場合は`dataStartRow`を渡す。顧客マスターAD列には**データ前最終行**
+ * （`dataStartRow - 1`）を保存し、AE列の`row`に実ヘッダー行を保存する
+ * （5.11の走査はAD+1から、4.22のヘッダー照合はAE.rowで行われる）。
+ *
  * @param {!Object} config
  *   customerId, customerName, sourceFolderId, destinationSpreadsheetId,
  *   destinationSheetName, columns {B,F,I,K,M,txId},
- *   partnerListSheetName?, headerRow?（既定1）, rowScanLastColumn?,
- *   reviewers?, admins?, customerCategory?（既定CORPORATE）, fiscalYear?
+ *   partnerListSheetName?, headerRow?（既定1）, dataStartRow?（既定headerRow+1）,
+ *   rowScanExcludedColumns?（空き行判定除外列。既定値・数式が常在する列）,
+ *   rowScanLastColumn?, reviewers?, admins?,
+ *   customerCategory?（既定CORPORATE）, fiscalYear?
  */
 function registerTestCustomer(config) {
   if (!config || !config.customerId || !config.customerName || !config.sourceFolderId ||
@@ -145,6 +152,11 @@ function registerTestCustomer(config) {
     }
   });
   var headerRow = Number.isInteger(config.headerRow) ? config.headerRow : 1;
+  var dataStartRow = Number.isInteger(config.dataStartRow) ?
+    config.dataStartRow : headerRow + 1;
+  if (dataStartRow <= headerRow) {
+    throw new TypeError('dataStartRow must be below headerRow');
+  }
   var sheet = requireSheet_(
     SpreadsheetApp.openById(config.destinationSpreadsheetId),
     String(config.destinationSheetName));
@@ -165,7 +177,7 @@ function registerTestCustomer(config) {
   var operator = activeUserEmail_();
   var category = config.customerCategory || CUSTOMER_CATEGORY.CORPORATE;
 
-  var row = Array(37).fill('');
+  var row = Array(38).fill('');
   row[0] = String(config.customerId);
   row[1] = String(config.customerName);
   row[2] = true;
@@ -182,7 +194,9 @@ function registerTestCustomer(config) {
   row[20] = CONFIG.REVIEW_SUMMARY.DEFAULT_SHEET_NAME;
   row[21] = '';
   row[23] = 0; row[24] = 0;
-  row[29] = headerRow;
+  // AD列＝データ前最終行。仕切り行がある場合はその行番号になり、
+  // 5.11の空き行走査はその次（dataStartRow）から始まる。
+  row[29] = dataStartRow - 1;
   row[30] = JSON.stringify({row: headerRow, allowExtraColumns: true, cells: cells});
   row[31] = '{}';
   row[32] = '{}';
@@ -190,12 +204,14 @@ function registerTestCustomer(config) {
   row[34] = String(config.partnerListSheetName || '取引先一覧');
   row[35] = category;
   row[36] = config.fiscalYear === undefined || config.fiscalYear === null ? '' : config.fiscalYear;
+  row[37] = config.rowScanExcludedColumns && config.rowScanExcludedColumns.length ?
+    JSON.stringify(config.rowScanExcludedColumns) : '';
 
   var masterSheet = requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.CUSTOMER_MASTER);
-  var existing = findRowsByColumnValue_(masterSheet, 1, config.customerId, 37);
+  var existing = findRowsByColumnValue_(masterSheet, 1, config.customerId, 38);
   var rowNumber = existing.length ? existing[0].rowNumber : masterSheet.getLastRow() + 1;
   ensureRowExists_(masterSheet, rowNumber);
-  masterSheet.getRange(rowNumber, 1, 1, 37).setValues([row]);
+  masterSheet.getRange(rowNumber, 1, 1, 38).setValues([row]);
 
   // 登録値そのものが4.3の検証を通ることを確認する（通らない行を残さない）。
   var registered = getCustomerById(String(config.customerId));

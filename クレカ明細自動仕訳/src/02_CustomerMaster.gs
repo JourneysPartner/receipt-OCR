@@ -1,6 +1,6 @@
 'use strict';
 
-const CUSTOMER_MASTER_COLUMNS_ = 37;
+const CUSTOMER_MASTER_COLUMNS_ = 38;
 
 function parseCustomerJson_(raw, label, allowEmpty) {
   if ((raw === '' || raw === null || raw === undefined) && allowEmpty) return {};
@@ -30,9 +30,27 @@ function customerFromRow_(values, rowNumber) {
     headerRow: Number(values[29]), expectedHeader: parseCustomerJson_(values[30], 'AE', false),
     requiredFormulas: parseCustomerJson_(values[31], 'AF', true), expectedProtections: parseCustomerJson_(values[32], 'AG', true),
     rowScanLastColumn: Number(values[33]), parallelReferenceSheetName: String(values[34] || values[8] || ''),
-    customerCategory: category, fiscalYear: fiscal, _rowNumber: rowNumber
+    customerCategory: category, fiscalYear: fiscal,
+    // AL列：空き行判定から除外する列番号（実装差戻し#16）。freeeテンプレは
+    // 未入力行にも税計算区分の既定値と残高数式が入っており、除外しないと
+    // 空き行が1行も見つからない。
+    rowScanExcludedColumns: parseExcludedColumns_(values[37]),
+    _rowNumber: rowNumber
   };
   return customer;
+}
+
+/** @param {*} raw @return {!Array<number>} */
+function parseExcludedColumns_(raw) {
+  if (raw === '' || raw === null || raw === undefined) return [];
+  var parsed;
+  try { parsed = JSON.parse(String(raw)); } catch (error) {
+    throw new MasterDataError('AL (excluded columns) is not valid JSON');
+  }
+  if (!Array.isArray(parsed)) {
+    throw new MasterDataError('AL (excluded columns) must be a JSON array');
+  }
+  return parsed.map(Number);
 }
 
 function validateCustomerValues_(customer) {
@@ -49,6 +67,19 @@ function validateCustomerValues_(customer) {
       (!Number.isInteger(customer.fiscalYear) || customer.fiscalYear < 2000 || customer.fiscalYear > 2999)) {
     throw new MasterDataError('AK must be an integer from 2000 through 2999');
   }
+  // AL列：除外できるのはシステムが書かない列だけ。B/F/I/K/M/取引ID列を
+  // 除外すると、使用中の行が空き行に見えて顧客の入力を上書きする。
+  var systemColumns = [customer.columnMapping.B, customer.columnMapping.F,
+    customer.columnMapping.I, customer.columnMapping.K, customer.columnMapping.M,
+    customer.columnMapping.txId];
+  customer.rowScanExcludedColumns.forEach(function(column) {
+    if (!Number.isInteger(column) || column < 1) {
+      throw new MasterDataError('AL entries must be positive column numbers: CUSTOMER_MASTER_INVALID');
+    }
+    if (systemColumns.indexOf(column) >= 0) {
+      throw new MasterDataError('AL must not contain a system-owned column (' + column + '): CUSTOMER_MASTER_INVALID');
+    }
+  });
   return customer;
 }
 
