@@ -384,7 +384,7 @@ function createGasStubs() {
   const Utilities = createUtilitiesStub();
   const spreadsheets = new Map(); const files = new Map(); const folders = new Map(); const properties = new Map();
   let sheetsBatchGetFailures = [];
-  const apiCallCounts = {batchGet: 0, cellsRead: 0, batchUpdate: 0, rangesWritten: 0};
+  const apiCallCounts = {batchGet: 0, cellsRead: 0, batchUpdate: 0, rangesWritten: 0, cellsWritten: 0};
   const scriptLock = new MemoryScriptLock(); let activeSpreadsheetId = null; let activeUserEmail = 'tester@example.com';
   const openSpreadsheet = (id) => { const value = spreadsheets.get(String(id)); if (!value) throw new Error(`Spreadsheet not found: ${id}`); return value; };
   const sheetAndRange = (spreadsheetId, a1) => {
@@ -454,6 +454,7 @@ function createGasStubs() {
           range.setValues(data.values.map((row) => row.map(interpret)));
           totalUpdatedCells += range.getNumRows() * range.getNumColumns();
         }
+        apiCallCounts.cellsWritten += totalUpdatedCells;
         return {totalUpdatedCells};
       }
     },
@@ -570,8 +571,8 @@ function createGasStubs() {
     // 読取量の計上。INV-08 の違反はスタブ上では速度に現れないため、
     // 回数で見るしかない。
     getApiCallCounts: () => Object.assign({}, apiCallCounts),
-    resetApiCallCounts() { apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; },
-    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptLock.reset(); sheetsBatchGetFailures = []; activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; logLines.length = 0; driveListFailures = []; }
+    resetApiCallCounts() { apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; },
+    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptLock.reset(); sheetsBatchGetFailures = []; activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; driveListFailures = []; }
   };
   return {Utilities, SpreadsheetApp, Sheets, DriveApp, Drive, Logger, LockService, Session, PropertiesService, control};
 }
