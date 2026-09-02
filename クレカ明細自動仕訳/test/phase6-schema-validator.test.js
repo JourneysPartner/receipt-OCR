@@ -127,6 +127,15 @@ module.exports = ({test, assert, gas}) => {
     assert.ok(result.problems.some((p) => p.code === 'SCHEMA_VERSION_MISMATCH'));
   });
 
+  test('7: sheet numeric coercion of the version cell is not a mismatch', () => {
+    // 実機のセルは「1.0」を数値1として保存する。読み返しは「1」になるが、
+    // これは構成の不一致ではない。
+    const {customer, index} = setup({15: 1});
+    const result = plain(gas.call('validateDestinationSchema', [customer, index]));
+    assert.equal(result.problems.some((p) => p.code === 'SCHEMA_VERSION_MISMATCH'), false,
+      JSON.stringify(result.problems));
+  });
+
   test('M30: a non-empty template source row is refused before expansion', () => {
     const {customer, index} = setup(null, [['', '2025/12/01', '店', '', 100, '', 'TX1', '']]);
     const bad = plain(gas.call('validateTemplateSourceRow', [customer, 2, index]));
