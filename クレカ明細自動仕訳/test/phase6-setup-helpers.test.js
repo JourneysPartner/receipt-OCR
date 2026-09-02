@@ -155,6 +155,22 @@ module.exports = ({test, assert, gas}) => {
       'the file must be rediscoverable by the next run');
   });
 
+  test('opsRetryFailedFiles rewinds only FAILED files to DISCOVERED', () => {
+    setup();
+    gas.call('registerTestCustomer', [CUSTOMER]);
+    const customer = gas.call('getCustomerById', ['C001']);
+    gas.call('createOrUpdateProcessLog', ['RUN_Z', customer, {
+      id: 'fileZ1', name: 'z1.csv', binaryHash: 'b'.repeat(64), state: 'FAILED'
+    }]);
+    gas.call('createOrUpdateProcessLog', ['RUN_Z', customer, {
+      id: 'fileZ2', name: 'z2.csv', binaryHash: 'b'.repeat(64), state: 'COMPLETED'
+    }]);
+    const retried = plain(gas.call('opsRetryFailedFiles', []));
+    assert.deepEqual(retried, ['fileZ1']);
+    assert.equal(String(gas.call('getProcessLogRecord_', ['fileZ2']).values[16]), 'COMPLETED',
+      'a completed file must never be rewound');
+  });
+
   test('the real setup sequence carries a SMBC-family CSV end to end', () => {
     setup();
     gas.call('registerTestCustomer', [CUSTOMER]);

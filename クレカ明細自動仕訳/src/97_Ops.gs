@@ -28,6 +28,60 @@ function opsShowOpenReviews() {
 }
 
 /**
+ * パイロット顧客（TEST01）の登録・再登録。顧客IDで冪等に上書きする。
+ *
+ * 実物のfreee出納帳の構造（3行目ヘッダー・4行目仕切り・J列税込既定値・
+ * N列残高数式）を反映した確定値。列対応を変えるときはここを直してpushする
+ * ── エディタへの貼り付け・保存はプロジェクトを古いコードで上書きし得る
+ * ため行わない。
+ */
+function opsRegisterPilotCustomer() {
+  loadSettingsFromProperties();
+  var result = registerTestCustomer({
+    customerId: 'TEST01',
+    customerName: 'テスト顧客',
+    sourceFolderId: '1DW1GYXgSe4cRpyCzG51Kpdxwe9P9uX7O',
+    destinationSpreadsheetId: '1A4Uyw_fsVQUafagdEPPKvL9s5NnnNytKloJfCsM2Vzo',
+    destinationSheetName: '入力用シート',
+    partnerListSheetName: '取引先一覧',
+    columns: {B: 2, F: 6, I: 9, K: 11, M: 13, txId: 15},
+    headerRow: 3,
+    dataStartRow: 5,
+    rowScanExcludedColumns: [10, 14],
+    rowScanLastColumn: 15
+  });
+  // 書いた行を読み返して要点を確認する（登録の成否を推測にしない）。
+  var customer = getCustomerById('TEST01');
+  var report = {
+    registered: result,
+    readBack: {
+      headerRow: customer.headerRow,
+      rowScanExcludedColumns: customer.rowScanExcludedColumns,
+      rowScanLastColumn: customer.rowScanLastColumn,
+      txIdColumn: customer.columnMapping.txId
+    }
+  };
+  Logger.log(JSON.stringify(report, null, 2));
+  return report;
+}
+
+/**
+ * `FAILED`のファイルを発見からやり直させる（パイロット運用の簡易再開。
+ * 6.2の再開フローが結線されるまでの代替）。
+ */
+function opsRetryFailedFiles() {
+  loadSettingsFromProperties();
+  var retried = [];
+  permanentIndexRowsForScan_().forEach(function(row) {
+    if (row.state !== FILE_STATE.FAILED) return;
+    updateProcessLog(row.fileId, {internalState: FILE_STATE.DISCOVERED});
+    retried.push(row.fileId);
+  });
+  Logger.log(JSON.stringify({retried: retried}, null, 2));
+  return retried;
+}
+
+/**
  * `DESTINATION_FIX`（転記先構成の不一致）を「直した」として閉じ、
  * 当該ファイルを発見からやり直させる。転記先または顧客マスターを
  * 修正した後に実行する。
