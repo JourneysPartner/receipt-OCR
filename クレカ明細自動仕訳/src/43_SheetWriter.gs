@@ -466,6 +466,26 @@ function plannedValuesMatch_(planned, current) {
 }
 
 /**
+ * 回復後の状態遷移。**変わらないなら遷移させない。**
+ *
+ * 転記行を持たない`REVIEW_REQUIRED`を回復すると、現在状態と予定最終状態が
+ * どちらも`REVIEW_REQUIRED`になる。遷移表に自分自身への遷移は無いので、
+ * 素直に呼ぶと回復そのものが弾かれる。
+ */
+function recordRecoveredLocation_(tx, rowNumber) {
+  // 転記先には行があるのに取引ログのAE列が空、という食い違いが起こり得る
+  // （書込の途中で止まった場合）。回復の機会に揃えておかないと、以後の
+  // 解決操作が行番号を取れずに落ちる。
+  if (Number(tx.destinationRow) === Number(rowNumber)) return;
+  updateTransactionLocation(tx.fullTxId, rowNumber);
+}
+
+function settleRecoveredStatus_(tx) {
+  if (String(tx.transactionStatus) === String(tx.plannedFinalStatus)) return;
+  updateTransactionStatus(tx.fullTxId, tx.transactionStatus, tx.plannedFinalStatus);
+}
+
+/**
  * 仕様11.3の部分失敗からの回復（Step0〜6）。
  *
  * 対象は`PREPARED`／`WRITING`かつ`有効=TRUE`の取引だけである（Step1）。
@@ -492,7 +512,18 @@ function recoverPartialFailure(fileId, runId, index, leaseId, options) {
   }
 
   // Step 1: 対象取引の抽出（INV-03。有効=TRUEのみ）。
-  var targets = getTransactionsByStatus(fileId, [TX_STATUS.PREPARED, TX_STATUS.WRITING]);
+  //
+  // **転記行を持たない`REVIEW_REQUIRED`も対象にする。** 通常の流れでは
+  // 要確認つきの取引も転記されている（F列を空欄で書き、解決操作がそこを
+  // 書き換える）ので、行を持たない`REVIEW_REQUIRED`は不整合である。
+  // 実機では、この状態の取引に`ADOPT_EXISTING_PARTNER`を実行すると
+  // 行番号0で書こうとして落ちた（2026-09-03）。解決操作からは直せない
+  // ── 行を確保して書くのは11.3 Step5の仕事である。
+  var targets = getTransactionsByStatus(fileId, [TX_STATUS.PREPARED, TX_STATUS.WRITING])
+    .concat(getTransactionsByStatus(fileId, [TX_STATUS.REVIEW_REQUIRED])
+      .filter(function(tx) {
+        return !Number.isInteger(Number(tx.destinationRow)) || Number(tx.destinationRow) < 1;
+      }));
 
   for (var n = 0; n < targets.length; n += 1) {
     var tx = targets[n];
@@ -518,7 +549,8 @@ function recoverPartialFailure(fileId, runId, index, leaseId, options) {
         // 「予定値あり・読取確認値なし」を手動変更と誤検知して、
         // 回復した取引を全件、処理開始前に止める。
         updateWrittenValues(tx.fullTxId, tx.planned, current);
-        updateTransactionStatus(tx.fullTxId, tx.transactionStatus, tx.plannedFinalStatus);
+        recordRecoveredLocation_(tx, hit.rowNumber);
+        settleRecoveredStatus_(tx);
         result.recovered.push({fullTxId: tx.fullTxId, step: 3, rowNumber: hit.rowNumber});
       } else {
         // Step 4: 不一致（行予約のみ、RAWのみ成功等）。
@@ -535,7 +567,8 @@ function recoverPartialFailure(fileId, runId, index, leaseId, options) {
             'Read-back verification failed for ' + tx.fullTxId);
         }
         updateWrittenValues(tx.fullTxId, tx.planned, verified4[0].values);
-        updateTransactionStatus(tx.fullTxId, tx.transactionStatus, tx.plannedFinalStatus);
+        recordRecoveredLocation_(tx, hit.rowNumber);
+        settleRecoveredStatus_(tx);
         result.recovered.push({fullTxId: tx.fullTxId, step: 4, rowNumber: hit.rowNumber});
       }
       continue;
@@ -562,7 +595,7 @@ function recoverPartialFailure(fileId, runId, index, leaseId, options) {
     }
     updateWrittenValues(tx.fullTxId, tx.planned, verified5[0].values);
     updateTransactionLocation(tx.fullTxId, rowNumber);
-    updateTransactionStatus(tx.fullTxId, tx.transactionStatus, tx.plannedFinalStatus);
+    settleRecoveredStatus_(tx);
     result.recovered.push({fullTxId: tx.fullTxId, step: 5, rowNumber: rowNumber});
     result.reserved.push(rowNumber);
   }

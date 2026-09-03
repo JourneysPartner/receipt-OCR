@@ -136,6 +136,43 @@ module.exports = ({test, assert, gas}) => {
     assert.ok(restored.every((review) => review.reviewType === 'PARTNER'));
   });
 
+  test('a review transaction that never reached the sheet is written by recovery', () => {
+    // 実機の状態（2026-09-03）：要確認は立っているのに転記行が無い取引。
+    // 解決操作は「既に行があってF列を書き換える」前提なので、行番号0で
+    // 書こうとして落ちる。行を確保して書くのは11.3の回復の仕事である。
+    setup();
+    const txLog = gas.stubs.getSpreadsheet('master').getSheetByName('クレカ取引ログ');
+    const values = txLog.getDataRange().getValues();
+    const target = values.findIndex((r, i) => i > 0 && String(r[0]).indexOf('TX_') === 0 &&
+      String(r[9]) === 'REVIEW_REQUIRED');
+    assert.ok(target > 0, '要確認つきの取引があること');
+    const destinationRow = Number(values[target][30]);
+    assert.ok(destinationRow >= 1);
+    // 取引ログの転記行と、転記先の行そのものを消す（一度も書かれていない状態）。
+    txLog.getRange(target + 1, 31).setValue('');
+    destSheet().getRange(destinationRow, 1, 1, 8)
+      .setValues([Array(8).fill('')]);
+
+    gas.call('opsListPartnerReviews', []);
+    const merchant = String(values[target][15]);
+    decisionSheet().getRange(decisionRowFor(merchant), 6).setValue('株式会社テスト');
+    const failed = plain(gas.call('opsApplyPartnerDecisions', []));
+    assert.equal(failed.errors, 1, '行が無いままでは解決できない');
+
+    // 回復が行を確保して書き直す。状態は REVIEW_REQUIRED のまま（人の判断待ち）。
+    const recovered = plain(gas.call('opsRecoverStuckFiles', []));
+    assert.equal(recovered.length, 1, JSON.stringify(recovered));
+    assert.equal(recovered[0].stopped, null, JSON.stringify(recovered[0]));
+    assert.equal(recovered[0].recovered.length, 1);
+    assert.ok(!recovered[0].rewound, 'REVIEW_WAIT は発見へ戻さない');
+
+    // これで解決操作が通る。
+    decisionSheet().getRange(decisionRowFor(merchant), 7).setValue('');
+    const applied = plain(gas.call('opsApplyPartnerDecisions', []));
+    assert.equal(applied.errors, 0, JSON.stringify(applied.results));
+    assert.equal(applied.resolvedReviews, 1);
+  });
+
   test('a file whose reviews are still open is left alone', () => {
     // 人が判断している最中のファイルを勝手に再検査へ戻さないこと。
     setup();
