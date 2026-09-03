@@ -19,7 +19,7 @@ function merchantOriginal_(rule) {
 /** @param {!Object} rule @return {string} */
 function merchantNormalized_(rule) {
   var stored = rule.normalized !== undefined ? rule.normalized : rule.merchantNormalized;
-  return normalizeMerchant(stored === null || stored === undefined ? merchantOriginal_(rule) : stored);
+  return cachedNormalizeMerchant_(stored === null || stored === undefined ? merchantOriginal_(rule) : stored);
 }
 
 /** @param {!Object} rule @return {string} */
@@ -34,22 +34,53 @@ function merchantMethod_(rule) {
 
 /**
  * 辞書の有効期間を利用日で評価する。利用日未確定なら除外しない。
+ *
+ * 利用日は**変換済みの東京日付文字列**で受け取る。ここでDateから変換すると、
+ * 辞書の件数ぶんタイムゾーン変換が走る（呼出側が取引につき1回だけ変換する）。
  * @param {!Object} rule
- * @param {?Date} usageDate
+ * @param {?string} usageText 東京日付（`YYYY-MM-DD`）。未確定なら`null`
  * @return {boolean}
  */
-function merchantRuleInPeriod_(rule, usageDate) {
-  if (!usageDate) {
+function merchantRuleInPeriod_(rule, usageText) {
+  if (!usageText) {
     return true;
   }
-  var usage = toTokyoDateString_(usageDate);
   var from = rule.validFrom !== undefined ? rule.validFrom : rule.effectiveFrom;
   var to = rule.validTo !== undefined ? rule.validTo : rule.effectiveTo;
-  var fromText = from === null || from === undefined || from === '' ? null :
-    toTokyoDateString_(parseDate(from, SYSTEM_TIMEZONE));
-  var toText = to === null || to === undefined || to === '' ? null :
-    toTokyoDateString_(parseDate(to, SYSTEM_TIMEZONE));
-  return (!fromText || fromText <= usage) && (!toText || usage <= toText);
+  var fromText = merchantPeriodBound_(from);
+  var toText = merchantPeriodBound_(to);
+  return (!fromText || fromText <= usageText) && (!toText || usageText <= toText);
+}
+
+/**
+ * 正規化と有効期間の境界の変換結果を、この実行の中で使い回す。
+ *
+ * どちらも入力文字列だけで決まる純関数だが、照合は「取引 × 辞書規則」の
+ * 二重ループである。顧客辞書3,870件・明細50件では規則の評価が約19万回に
+ * なり、変換を毎回やり直すと**往復を全部潰した後でもここだけで数十秒**を
+ * 使う（2026-09-03の実測：Nodeで8.3秒、実機はその数倍）。
+ *
+ * GASの実行ごとにグローバルは初期化されるので、実行をまたいで残らない。
+ */
+var merchantTextCache_ = {normalized: Object.create(null), periodBound: Object.create(null)};
+
+function cachedNormalizeMerchant_(value) {
+  var key = String(value);
+  var hit = merchantTextCache_.normalized[key];
+  if (hit !== undefined) return hit;
+  var computed = normalizeMerchant(key);
+  merchantTextCache_.normalized[key] = computed;
+  return computed;
+}
+
+function merchantPeriodBound_(value) {
+  if (value === null || value === undefined || value === '') return null;
+  var key = String(value);
+  var hit = merchantTextCache_.periodBound[key];
+  if (hit !== undefined) return hit;
+  var computed = toTokyoDateString_(parseDate(value, SYSTEM_TIMEZONE));
+  merchantTextCache_.periodBound[key] = computed;
+  return computed;
 }
 
 /** @param {!Array<!Object>} rules @return {!Array<!Object>} */
@@ -109,6 +140,9 @@ function matchPartner(tx, customerId, dictIndex) {
   var original = String(tx.merchantOriginal === undefined ? tx.originalMerchant || '' : tx.merchantOriginal);
   var normalized = normalizeMerchant(original);
   var usageDate = tx.date || null;
+  // 利用日の変換は取引につき1回。規則ごとにやり直すと、辞書の件数ぶん
+  // タイムゾーン変換が走る。
+  var usageText = usageDate ? toTokyoDateString_(usageDate) : null;
   var excludedByPeriod = [];
 
   function eligible(rules) {
@@ -116,7 +150,7 @@ function matchPartner(tx, customerId, dictIndex) {
       if (!toBool(rule.active !== undefined ? rule.active : rule.enabled)) {
         return false;
       }
-      if (!merchantRuleInPeriod_(rule, usageDate)) {
+      if (!merchantRuleInPeriod_(rule, usageText)) {
         excludedByPeriod.push(merchantRuleId_(rule));
         return false;
       }

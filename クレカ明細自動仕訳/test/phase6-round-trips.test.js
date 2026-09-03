@@ -117,6 +117,37 @@ module.exports = ({test, assert, gas}) => {
       'まとめる経路（settleWrittenTransactions・registerPrepared・行予約）を見よ。');
   });
 
+  test('partner matching does not redo per-rule work for every transaction', () => {
+    // 照合は「取引 × 辞書規則」の二重ループである。規則ごとに正規化や
+    // タイムゾーン変換をやり直すと、実運用規模（顧客辞書3,870件）で
+    // 往復を全部潰した後でも実機の数十秒をここで使う（2026-09-03）。
+    gas.stubs.reset();
+    const rules = [];
+    for (let i = 0; i < 3000; i += 1) {
+      rules.push({ruleId: 'D' + i, dictId: 'D' + i, customerId: 'C001',
+        original: 'ﾃｽﾄ店舗' + i + '　支店', normalized: '', partnerName: '株式会社テスト' + i,
+        matchMethod: 'exact_original', priority: 1, active: true, approved: true, conflict: false});
+    }
+    gas.context.__rules = rules;
+    const index = gas.evaluate(
+      'buildDictionaryIndex("C001", {customer: __rules, common: [], commonPartners: []})');
+    const txs = [];
+    for (let i = 0; i < 50; i += 1) {
+      txs.push({merchantOriginal: 'ﾃｽﾄ店舗' + (i * 7) + '　支店',
+        date: new Date('2025-12-01T00:00:00Z')});
+    }
+    gas.context.__txs = txs;
+    gas.context.__index = index;
+    const started = Date.now();
+    gas.evaluate('__txs.forEach(function(tx) { matchPartner(tx, "C001", __index); });');
+    const elapsed = Date.now() - started;
+    delete gas.context.__rules; delete gas.context.__txs; delete gas.context.__index;
+    // 規則ごとに変換をやり直す実装だと、同じ条件でおよそ6,000msかかる。
+    assert.ok(elapsed < 1500,
+      `50取引×辞書3,000件の照合に${elapsed}ms。規則ごとの変換をやり直していないか` +
+      '（merchantNormalized_・merchantRuleInPeriod_の記憶化を見よ）');
+  });
+
   test('the fixed cost of one file stays within budget', () => {
     // 実機の往復1回はおよそ0.5〜0.8秒。200往復＝2分強で、6分の上限に対して
     // 1実行で複数ファイルを扱う余地が要る。上限を上げる前に、増えた理由を疑うこと。
