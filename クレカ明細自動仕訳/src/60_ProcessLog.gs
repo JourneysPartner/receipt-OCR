@@ -19,16 +19,64 @@ const PROCESS_FIELD_COLUMNS_ = Object.freeze({
 function processLogSheet_() { return requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.PROCESS_LOG); }
 function permanentFileIndexSheet_() { return requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.PERMANENT_FILE_INDEX); }
 
+/**
+ * fileId → 行番号を、この実行の中だけ覚える。
+ *
+ * 処理ログと恒久ファイルインデックスは**追記のみ**で、行を消すのは処理リース
+ * だけである。だから一度全走査で決めた行番号は、この実行の中で動かない。
+ * 1ファイルの処理で処理ログは18回前後更新され、そのたびにキー列を全走査
+ * していた ── 1ファイルあたり約100往復、実機では1分以上をここで使っていた
+ * （2026-09-03）。
+ *
+ * **覚えるのは位置だけで、値は覚えない。** 値を持ち回ると、古い状態を
+ * 書き戻す事故（2026-09-02に実機で起きた、全行書き戻しによる巻き戻り）を
+ * こちらの層で再現することになる。
+ *
+ * GASの実行ごとにグローバルは初期化されるので、実行をまたいで残らない。
+ */
+var fileRowNumberCache_ = {process: Object.create(null), index: Object.create(null)};
+
+/** 覚えた行番号を捨てる。マスターを向け直したときに呼ばれる（01）。 */
+function forgetFileRowNumbers_() {
+  fileRowNumberCache_ = {process: Object.create(null), index: Object.create(null)};
+}
+
+function readRowByNumber_(sheet, rowNumber, width) {
+  var range = quoteSheetName_(sheet.getName()) + '!A' + rowNumber + ':' +
+    columnLetter_(width) + rowNumber;
+  return padRowValues_((sheetsReadRanges_(sheet, [range])[0] || [])[0], width);
+}
+
+/**
+ * 覚えた行番号でその行だけを読み、**鍵列を検算する**。
+ *
+ * 検算は省けない。覚えた位置が誤っていた場合に間違った行を返せば、
+ * 呼出側はそこへ書く。位置を覚える価値は「キー列の全走査を省ける」ことに
+ * あり、行の読取そのものはどのみち必要なので、検算に追加の往復はかからない。
+ */
+function cachedFileRecord_(sheet, cache, fileId, keyColumn, width, duplicateDetail) {
+  var key = String(fileId);
+  var remembered = cache[key];
+  if (remembered) {
+    var values = readRowByNumber_(sheet, remembered, width);
+    if (String(values[keyColumn - 1]) === key) return {rowNumber: remembered, values: values};
+    delete cache[key];
+  }
+  var matches = findRowsByColumnValue_(sheet, keyColumn, fileId, width);
+  if (matches.length > 1) throw new IntegrityError('TRANSACTION_LOG_AMBIGUOUS', duplicateDetail);
+  if (!matches.length) return null;
+  cache[key] = matches[0].rowNumber;
+  return {rowNumber: matches[0].rowNumber, values: matches[0].values};
+}
+
 function getProcessLogRecord_(fileId) {
-  var matches = findRowsByColumnValue_(processLogSheet_(), 8, fileId, PROCESS_LOG_WIDTH_);
-  if (matches.length > 1) throw new IntegrityError('TRANSACTION_LOG_AMBIGUOUS', 'Duplicate process log fileId');
-  return matches.length ? {rowNumber: matches[0].rowNumber, values: matches[0].values} : null;
+  return cachedFileRecord_(processLogSheet_(), fileRowNumberCache_.process, fileId, 8,
+    PROCESS_LOG_WIDTH_, 'Duplicate process log fileId');
 }
 
 function getPermanentFileIndexRecord_(fileId) {
-  var matches = findRowsByColumnValue_(permanentFileIndexSheet_(), 1, fileId, FILE_INDEX_WIDTH_);
-  if (matches.length > 1) throw new IntegrityError('TRANSACTION_LOG_AMBIGUOUS', 'Duplicate permanent file index fileId');
-  return matches.length ? {rowNumber: matches[0].rowNumber, values: matches[0].values} : null;
+  return cachedFileRecord_(permanentFileIndexSheet_(), fileRowNumberCache_.index, fileId, 1,
+    FILE_INDEX_WIDTH_, 'Duplicate permanent file index fileId');
 }
 
 function fileProperty_(file, names, fallback) {
@@ -98,16 +146,18 @@ function createOrUpdateProcessLog(runId, customer, file) {
 function updateProcessLogUnlocked_(fileId, fields) {
     var record = getProcessLogRecord_(fileId);
     if (!record) throw makeCatalogError_('REQUIRED_LOG_WRITE_FAILED', 'Process log not found: ' + fileId);
+    var rowNumber = record.rowNumber;
+    var current = record.values;
     var sheetName = processLogSheet_().getName();
     var data = [];
     Object.keys(fields || {}).forEach(function(name) {
       var column = PROCESS_FIELD_COLUMNS_[name];
       if (!column) throw new TypeError('Unknown process log field: ' + name);
-      if (name === 'submittedContentHash' && record.values[column - 1] &&
-          record.values[column - 1] !== fields[name]) {
+      if (name === 'submittedContentHash' && current[column - 1] &&
+          current[column - 1] !== fields[name]) {
         throw new IntegrityError(null, 'Submitted content hash is immutable');
       }
-      data.push({range: a1Range_(sheetName, record.rowNumber, column, column),
+      data.push({range: a1Range_(sheetName, rowNumber, column, column),
         values: [[fields[name]]]});
     });
     if (fields.internalState !== undefined) {
