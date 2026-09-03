@@ -87,10 +87,17 @@ function registerPrepared(txs, runId) {
   if (!Array.isArray(txs)) throw new TypeError('txs must be an array');
   return withScriptLock_(function() {
     var logSheet = transactionLogSheet_();
-    txs.forEach(function(tx) {
-      var id = String(txInput_(tx, ['fullTxId', 'transactionId', 'txId'], ''));
-      var existing = activeTransactionRecords_(id);
-      if (existing.length > 1) throw new IntegrityError('TRANSACTION_LOG_AMBIGUOUS', 'More than one active transaction row');
+    var ids = txs.map(function(tx) {
+      return String(txInput_(tx, ['fullTxId', 'transactionId', 'txId'], ''));
+    });
+    // 既存行の照会は1回にまとめる。取引ごとに引くと、取引ログのキー列の
+    // 全読みが件数ぶん走る（`settleWrittenTransactions`と同じ理由）。
+    var existingById = activeTransactionRecordsByIds_(ids);
+    var appends = [];
+
+    txs.forEach(function(tx, position) {
+      var id = ids[position];
+      var existing = existingById[id] ? [existingById[id]] : [];
 
       // 再合流時の取引再登録（6.1 step 8-13・A-28）。
       // 再合流は「まだ確定していない取引だけを更新し、確定済みの取引には触れない」。
@@ -124,9 +131,41 @@ function registerPrepared(txs, runId) {
       var year = Number(now.slice(0, 4)); var indexSheet = getTxIndexSheet(row[3], year, true);
       var indexRow = [row[0], row[3], row[4], Number(txInput_(tx, ['occurrenceIndex', 'appearanceOrder'], 0)), row[38],
         txInput_(tx, ['contentHash', 'submittedContentHash'], ''), row[40], row[12], true, now, now];
-      logSheet.appendRow(row); indexSheet.appendRow(indexRow);
+      appends.push({row: row, indexSheet: indexSheet, indexRow: indexRow});
+    });
+
+    appendRowsBatched_(logSheet, appends.map(function(a) { return a.row; }),
+      TRANSACTION_LOG_WIDTH_);
+    // 恒久取引インデックスは顧客×年で分かれる。シートごとにまとめる。
+    var byIndexSheet = [];
+    appends.forEach(function(append) {
+      var bucket = byIndexSheet.filter(function(item) { return item.sheet === append.indexSheet; })[0];
+      if (!bucket) { bucket = {sheet: append.indexSheet, rows: []}; byIndexSheet.push(bucket); }
+      bucket.rows.push(append.indexRow);
+    });
+    byIndexSheet.forEach(function(bucket) {
+      appendRowsBatched_(bucket.sheet, bucket.rows, TX_INDEX_WIDTH_);
     });
   });
+}
+
+/**
+ * 複数行を1回の`batchUpdate`で追記する。
+ *
+ * `appendRow`を行数ぶん呼ぶと書込の往復が行数に比例する。追記先の行番号は
+ * `apiLastDataRow_`で決める ── `getLastRow()`はSpreadsheetAppのキャッシュ
+ * 越しで、Sheets APIで足したばかりの行を数え落とす。
+ */
+function appendRowsBatched_(sheet, rows, width) {
+  if (!rows || !rows.length) return;
+  var startRow = apiLastDataRow_(sheet, width) + 1;
+  ensureRowExists_(sheet, startRow + rows.length - 1);
+  var values = rows.map(function(row) { return padRowValues_(row, width); });
+  Sheets.Spreadsheets.Values.batchUpdate({valueInputOption: 'RAW', data: [{
+    range: quoteSheetName_(sheet.getName()) + '!A' + startRow + ':' +
+      columnLetter_(width) + (startRow + rows.length - 1),
+    values: values
+  }]}, sheet.getParent().getId());
 }
 
 /**
@@ -172,6 +211,86 @@ function updateWrittenValues(fullTxId, planned, verified) {
     transactionLogSheet_().getRange(row._rowNumber, 45).setValue(nowIso_());
   });
 }
+
+/** 取引IDの集合に対する有効行を、キー列1回＋一致行1回の読取で引く。 */
+function activeTransactionRecordsByIds_(fullTxIds) {
+  var found = findRowsByColumnValues_(transactionLogSheet_(), 1, fullTxIds, TRANSACTION_LOG_WIDTH_);
+  var records = Object.create(null);
+  Object.keys(found).forEach(function(id) {
+    var active = found[id].map(txLogFromRecord_).filter(function(row) { return row.active; });
+    if (active.length > 1) {
+      throw new IntegrityError('TRANSACTION_LOG_AMBIGUOUS', 'More than one active transaction row');
+    }
+    if (active.length) records[id] = active[0];
+  });
+  return records;
+}
+
+/**
+ * 読取確認を通った取引をまとめて確定させる（6.1 9-7）。
+ *
+ * `updateWrittenValues` → `updateTransactionLocation` →
+ * `updateTransactionStatus` を取引ごとに呼ぶと、**取引ログのキー列の全読みが
+ * 1取引につき3回**走る。実機では1件あたり約20秒かかり、7〜8件のファイルで
+ * 6分の実行上限に当たった（2026-09-03）。読取をまとめ、書込を1回の
+ * `batchUpdate`にまとめて、1ファイルあたりの往復を件数に依らない定数にする。
+ *
+ * **先に全件を検査してから書く。** 1件ずつ書きながら進むと、途中で状態遷移が
+ * 弾かれたときに「一部だけ確定済み」が残り、どこまで進んだかを呼出側が
+ * 知る手段がない。
+ *
+ * @param {!Array<{fullTxId:string, planned:!Object, verified:!Object,
+ *   destinationRow:number, fromStatus:string, toStatus:string}>} entries
+ */
+function settleWrittenTransactions(entries) {
+  if (!Array.isArray(entries)) throw new TypeError('entries must be an array');
+  if (!entries.length) return [];
+  return withScriptLock_(function() {
+    var sheet = transactionLogSheet_();
+    var records = activeTransactionRecordsByIds_(entries.map(function(entry) {
+      return entry.fullTxId;
+    }));
+
+    var updates = entries.map(function(entry) {
+      var record = records[String(entry.fullTxId)];
+      if (!record) throw new IntegrityError(null, 'Transaction not found: ' + entry.fullTxId);
+      var allowed = ALLOWED_TX_TRANSITIONS[String(entry.fromStatus)] || [];
+      if (allowed.indexOf(entry.toStatus) < 0) {
+        throw new StateTransitionError('Transaction transition is not allowed');
+      }
+      if (record.transactionStatus !== String(entry.fromStatus)) {
+        throw new StateTransitionError('Transaction compare-and-set failed');
+      }
+      return {rowNumber: record._rowNumber, entry: entry};
+    });
+
+    var name = sheet.getName();
+    var now = nowIso_();
+    var data = [];
+    updates.forEach(function(update) {
+      var entry = update.entry;
+      // 自分が持つ列だけを書く。行全体を書き戻すと、読んだ時点の値で
+      // 他の列を巻き戻す（処理ログで実際に起きた事故と同じ形）。
+      data.push({range: a1Range_(name, update.rowNumber, 10, 10), values: [[entry.toStatus]]});
+      data.push({range: a1Range_(name, update.rowNumber, 19, 28), values: [
+        [].concat(plannedVerifiedArray_(entry.planned), plannedVerifiedArray_(entry.verified))
+      ]});
+      data.push({range: a1Range_(name, update.rowNumber, 31, 31), values: [[entry.destinationRow]]});
+      data.push({range: a1Range_(name, update.rowNumber, 45, 45), values: [[now]]});
+    });
+    for (var start = 0; start < data.length; start += SETTLE_BATCH_RANGES_) {
+      Sheets.Spreadsheets.Values.batchUpdate(
+        {valueInputOption: 'RAW', data: data.slice(start, start + SETTLE_BATCH_RANGES_)},
+        masterSpreadsheet_().getId());
+    }
+    return updates.map(function(update) {
+      return {fullTxId: update.entry.fullTxId, rowNumber: update.rowNumber};
+    });
+  });
+}
+
+/** 1回のbatchUpdateへ載せる範囲の上限。1取引あたり4範囲を使う。 */
+var SETTLE_BATCH_RANGES_ = 400;
 
 function findTxIndexRecord_(tx) {
   var year = Number(String(tx.registeredAt).slice(0, 4)); var sheet = getTxIndexSheet(tx.customerId, year, false);

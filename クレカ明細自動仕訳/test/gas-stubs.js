@@ -117,6 +117,24 @@ function parseA1(a1, defaults = {}) {
 
 function cloneCellValue(value) { return value instanceof Date ? new Date(value.getTime()) : value; }
 
+// 実GASでは Range の読み書き・flush・Sheets APIの各呼出しが、それぞれ
+// サーバーへの往復になる（1往復およそ0.1〜1秒）。処理が6分上限に当たるか
+// どうかを決めるのは計算量ではなくこの往復回数なので、テストから見える
+// ように数える。`depth`はcopyToのように実機では1往復で済む操作の内側を
+// 二重に数えないための抑止。
+const roundTrips = {rangeReads: 0, rangeWrites: 0, flushes: 0, _depth: 0};
+let roundTripListener = null;
+function countRoundTrip(kind) {
+  if (roundTrips._depth !== 0) return;
+  roundTrips[kind] += 1;
+  if (roundTripListener) roundTripListener(kind);
+}
+function asOneRoundTrip(kind, fn) {
+  countRoundTrip(kind);
+  roundTrips._depth += 1;
+  try { return fn(); } finally { roundTrips._depth -= 1; }
+}
+
 class MemoryRange {
   constructor(sheet, row, column, numRows, numColumns) {
     this.sheet = sheet; this.row = row; this.column = column; this.numRows = numRows; this.numColumns = numColumns;
@@ -130,8 +148,8 @@ class MemoryRange {
     const end = `${numberToColumn(this.column + this.numColumns - 1)}${this.row + this.numRows - 1}`;
     return start === end ? start : `${start}:${end}`;
   }
-  getValues() { return this.sheet._read(this.row, this.column, this.numRows, this.numColumns, false); }
-  getFormulas() { return this.sheet._read(this.row, this.column, this.numRows, this.numColumns, true); }
+  getValues() { countRoundTrip('rangeReads'); return this.sheet._read(this.row, this.column, this.numRows, this.numColumns, false); }
+  getFormulas() { countRoundTrip('rangeReads'); return this.sheet._read(this.row, this.column, this.numRows, this.numColumns, true); }
   getValue() { return this.getValues()[0][0]; }
   getFormula() { return this.getFormulas()[0][0]; }
   setValues(values) {
@@ -139,6 +157,7 @@ class MemoryRange {
         values.some((row) => !Array.isArray(row) || row.length !== this.numColumns)) {
       throw new RangeError('setValues dimensions do not match range');
     }
+    countRoundTrip('rangeWrites');
     this.sheet._write(this.row, this.column, values, false); return this;
   }
   setFormulas(values) {
@@ -146,6 +165,7 @@ class MemoryRange {
         values.some((row) => !Array.isArray(row) || row.length !== this.numColumns)) {
       throw new RangeError('setFormulas dimensions do not match range');
     }
+    countRoundTrip('rangeWrites');
     this.sheet._write(this.row, this.column, values, true); return this;
   }
   setValue(value) { return this.setValues([[value]]); }
@@ -176,6 +196,9 @@ class MemoryRange {
   // に分解すると、空文字列の数式が直前に書いた値を消してしまう（_write を見よ）。
   // なお実 Sheets は相対参照を移動先へずらすが、ここでは式を字句のまま複製する。
   copyTo(destination) {
+    return asOneRoundTrip('rangeWrites', () => this._copyTo(destination));
+  }
+  _copyTo(destination) {
     const values = this.getValues();
     const formulas = this.getFormulas();
     values.forEach((row, r) => row.forEach((value, c) => {
@@ -394,10 +417,13 @@ function createGasStubs() {
     const resolved = parseA1(a1, {sheetName: sheet.getName(), maxRows: sheet.getMaxRows(), maxColumns: sheet.getMaxColumns()});
     return {sheet, range: sheet.getRange(resolved.row, resolved.column, resolved.numRows, resolved.numColumns)};
   };
-  const SpreadsheetApp = {openById: openSpreadsheet, getActiveSpreadsheet: () => activeSpreadsheetId ? openSpreadsheet(activeSpreadsheetId) : null, flush: () => {}, ProtectionType: Object.freeze({RANGE: 'RANGE', SHEET: 'SHEET'})};
+  const SpreadsheetApp = {openById: openSpreadsheet, getActiveSpreadsheet: () => activeSpreadsheetId ? openSpreadsheet(activeSpreadsheetId) : null, flush: () => { roundTrips.flushes += 1; if (roundTripListener) roundTripListener('flushes'); }, ProtectionType: Object.freeze({RANGE: 'RANGE', SHEET: 'SHEET'})};
   const Sheets = {Spreadsheets: {
     Values: {
       batchGet(spreadsheetId, request) {
+        return asOneRoundTrip('rangeReads', () => this._batchGet(spreadsheetId, request));
+      },
+      _batchGet(spreadsheetId, request) {
         // INV-08（転記先を取引ごとに読まない）を検査できるようにする。
         apiCallCounts.batchGet += 1;
         // 実APIは末尾の空行・空セルを返さない（トリムする）。読取量の計上も
@@ -451,6 +477,9 @@ function createGasStubs() {
         })};
       },
       batchUpdate(request, spreadsheetId) {
+        return asOneRoundTrip('rangeWrites', () => this._batchUpdate(request, spreadsheetId));
+      },
+      _batchUpdate(request, spreadsheetId) {
         // 書込レンジ数を検査できるようにする。1セル1レンジだと200件で
         // 1,200レンジになり、リクエストサイズ上限に近づく。
         apiCallCounts.batchUpdate += 1;
@@ -590,8 +619,11 @@ function createGasStubs() {
     // 読取量の計上。INV-08 の違反はスタブ上では速度に現れないため、
     // 回数で見るしかない。
     getApiCallCounts: () => Object.assign({}, apiCallCounts),
+    onRoundTrip(fn) { roundTripListener = fn; },
+    roundTrips() { return {rangeReads: roundTrips.rangeReads, rangeWrites: roundTrips.rangeWrites, flushes: roundTrips.flushes}; },
+    resetRoundTrips() { roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; },
     resetApiCallCounts() { apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; },
-    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptLock.reset(); sheetsBatchGetFailures = []; activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; driveListFailures = []; }
+    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptLock.reset(); sheetsBatchGetFailures = []; activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; driveListFailures = []; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; }
   };
   return {Utilities, SpreadsheetApp, Sheets, DriveApp, Drive, Logger, LockService, Session, PropertiesService, control};
 }

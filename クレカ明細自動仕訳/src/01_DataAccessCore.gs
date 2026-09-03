@@ -35,6 +35,8 @@ function setMasterSpreadsheetId(spreadsheetId) {
   if (!spreadsheetId) throw new TypeError('setMasterSpreadsheetId requires an id');
   PropertiesService.getScriptProperties()
     .setProperty('MASTER_SPREADSHEET_ID', String(spreadsheetId));
+  // 別のマスターに向け直したら、覚えている行番号は意味を失う（60）。
+  forgetFileRowNumbers_();
 }
 
 function requireSheet_(spreadsheet, name) {
@@ -182,6 +184,52 @@ function findRowsByColumnValue_(sheet, column, value, width) {
     }
   });
   return rows;
+}
+
+/**
+ * 指定列が「複数の値のいずれか」に一致する行を、値ごとにまとめて返す。
+ *
+ * `findRowsByColumnValue_`を値の数だけ呼ぶと、**キー列の全読みが値の数だけ
+ * 走る**。取引ログは1ファイルにつき数百件を扱うので、確定処理が
+ * 「1件につき全列走査3回」になり、実機で1件あたり20秒かかっていた
+ * （2026-09-03）。読取はキー列1回＋一致行1回の計2回に収める。
+ *
+ * @return {!Object<string, !Array<{rowNumber:number, values:!Array<*>}>>}
+ */
+function findRowsByColumnValues_(sheet, column, values, width) {
+  var wanted = Object.create(null);
+  (values || []).forEach(function(value) { wanted[String(value)] = true; });
+  var result = Object.create(null);
+  Object.keys(wanted).forEach(function(key) { result[key] = []; });
+  if (!Object.keys(wanted).length) return result;
+
+  var name = quoteSheetName_(sheet.getName());
+  var letter = columnLetter_(column);
+  var columnRows = sheetsReadRanges_(sheet, [name + '!' + letter + '2:' + letter])[0];
+
+  var matches = [];
+  for (var offset = 0; offset < columnRows.length; offset += 1) {
+    var cell = columnRows[offset] ? columnRows[offset][0] : '';
+    var text = String(cell === undefined ? '' : cell);
+    if (wanted[text]) matches.push({rowNumber: offset + 2, key: text});
+  }
+  if (!matches.length) return result;
+
+  var groups = groupConsecutiveRows(matches);
+  var ranges = groups.map(function(group) {
+    return name + '!A' + group.startRow + ':' + columnLetter_(width) + group.endRow;
+  });
+  var fetched = sheetsReadRanges_(sheet, ranges);
+  var keyByRow = Object.create(null);
+  matches.forEach(function(match) { keyByRow[match.rowNumber] = match.key; });
+  groups.forEach(function(group, index) {
+    var rows = fetched[index] || [];
+    for (var row = group.startRow; row <= group.endRow; row += 1) {
+      result[keyByRow[row]].push(
+        {rowNumber: row, values: padRowValues_(rows[row - group.startRow], width)});
+    }
+  });
+  return result;
 }
 
 /**

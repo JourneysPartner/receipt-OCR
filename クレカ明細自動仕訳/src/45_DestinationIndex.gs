@@ -152,14 +152,28 @@ function reserveDestinationRows(customer, fullTxIds, fileId, leaseId) {
     // 取引IDと行番号の対応を明示して返す。呼出側が「i番目の取引はi番目の
     // 行」という添字一致に頼ると、空き行が非連続に見つかる場合や順序が
     // 変わった場合に、取引が別の行へ紐づいて二重転記になる。
+    //
+    // 空き確認と予約は**行ごとに往復しない**。1行につき読取2回・書込1回を
+    // 素直に回すと、200件のファイルで600往復になり6分の実行上限に当たる
+    // （実機で1件あたり約20秒だった。2026-09-03）。候補行を覆う範囲を
+    // 一度だけ読み、取引IDは連続行ごとにまとめて書く。
     var reserved = [];
+    var firstRow = Math.min.apply(null, candidates);
+    var lastRow = Math.max.apply(null, candidates);
+    var block = sheet.getRange(firstRow, 1, lastRow - firstRow + 1, customer.rowScanLastColumn);
+    var blockValues = block.getValues();
+    var blockFormulas = block.getFormulas();
     candidates.forEach(function(rowNumber, offset) {
-      var values = sheet.getRange(rowNumber, 1, 1, customer.rowScanLastColumn).getValues()[0];
-      var formulas = sheet.getRange(rowNumber, 1, 1, customer.rowScanLastColumn).getFormulas()[0];
+      var values = blockValues[rowNumber - firstRow];
+      var formulas = blockFormulas[rowNumber - firstRow];
       if (!isDestinationRowEmpty(values, formulas, customer.rowScanLastColumn, customer.rowScanExcludedColumns)) throw leaseConflict_('Reserved row is no longer empty');
-      var txId = String(fullTxIds[offset]);
-      sheet.getRange(rowNumber, customer.columnMapping.txId).setValue(txId);
-      reserved.push({txId: txId, rowNumber: rowNumber});
+      reserved.push({txId: String(fullTxIds[offset]), rowNumber: rowNumber});
+    });
+    groupConsecutiveRows(reserved.slice().sort(function(a, b) {
+      return a.rowNumber - b.rowNumber;
+    })).forEach(function(group) {
+      sheet.getRange(group.startRow, customer.columnMapping.txId, group.rowWrites.length, 1)
+        .setValues(group.rowWrites.map(function(item) { return [item.txId]; }));
     });
     // 予約は SpreadsheetApp で書いた。ロックを解放すると、続く書込ブロックが
     // Sheets API で同じ行へ書く。ここで flush しないと予約が相手から見えず、

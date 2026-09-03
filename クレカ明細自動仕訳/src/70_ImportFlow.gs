@@ -281,6 +281,7 @@ function runWriteBlock(input) {
 
       // 9-6：読取確認。取引ごとに個別照合する（仕様11.4）。
       var verified = verifyWrittenValues(customer, rowWrites);
+      var toSettle = [];
       verified.forEach(function(v, i) {
         var tx = batch[i];
         if (!v.ok) {
@@ -289,14 +290,23 @@ function runWriteBlock(input) {
           });
           return;
         }
-        settled[v.rowNumber] = true;
-      // 9-7：K列（予定最終状態）へ更新し、予定値・読取確認値を同時に保存する。
-      // `tx`は取引ログから読んだ行なので、8-12で空欄化した予定値が反映済み。
-      updateWrittenValues(tx.fullTxId, tx.planned, v.values);
-      updateTransactionLocation(tx.fullTxId, v.rowNumber);
-        updateTransactionStatus(tx.fullTxId, tx.transactionStatus, tx.plannedFinalStatus);
-        result.written.push(tx.fullTxId);
-        result.verified.push(v.rowNumber);
+        // 9-7：K列（予定最終状態）へ更新し、予定値・読取確認値を同時に保存する。
+        // `tx`は取引ログから読んだ行なので、8-12で空欄化した予定値が反映済み。
+        toSettle.push({
+          fullTxId: tx.fullTxId, planned: tx.planned, verified: v.values,
+          destinationRow: v.rowNumber, fromStatus: tx.transactionStatus,
+          toStatus: tx.plannedFinalStatus
+        });
+      });
+
+      // 確定は全件まとめて1回で行う（件数に依らない往復数にするため）。
+      // **成功してから`settled`を立てる** ── 確定が弾かれたとき、書いた行は
+      // どの取引からも指されていないので、`finally`が空き行へ戻すのが正しい。
+      settleWrittenTransactions(toSettle);
+      toSettle.forEach(function(entry) {
+        settled[entry.destinationRow] = true;
+        result.written.push(entry.fullTxId);
+        result.verified.push(entry.destinationRow);
       });
     } finally {
       var orphaned = rowWrites
