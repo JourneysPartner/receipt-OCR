@@ -177,6 +177,36 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(destSheet().getRange(4, 3).getValue(), 'まだ一覧に無い取引先');
   });
 
+  test('an exact decision matches through width and spacing differences', () => {
+    // 担当者がシート上で店名を打ち直す・貼り直すと、全角半角や空白が
+    // 揺れる。字面の一致に頼ると、下した判断が黙って無効になる。
+    setup();
+    gas.call('opsListPartnerReviews', []);
+    const row = decisionRowFor('キュウテン');
+    decisionSheet().getRange(row, 2).setValue('  ｷｭｳﾃﾝ ');
+    decisionSheet().getRange(row, 6).setValue('株式会社キュウテン');
+
+    const summary = plain(gas.call('opsApplyPartnerDecisions', []));
+    assert.equal(summary.errors, 0, JSON.stringify(summary.results));
+    assert.equal(summary.resolvedReviews, 1);
+  });
+
+  test('a decision whose reviews are already closed says so instead of failing', () => {
+    setup();
+    gas.call('opsListPartnerReviews', []);
+    decisionSheet().getRange(decisionRowFor('キュウテン'), 6).setValue('株式会社キュウテン');
+    gas.call('opsApplyPartnerDecisions', []);
+
+    // 同じ店名をもう一度依頼する（別経路で閉じた後の再実行に相当）。
+    const row = decisionRowFor('キュウテン');
+    decisionSheet().getRange(row, 7).setValue('');
+    const summary = plain(gas.call('opsApplyPartnerDecisions', []));
+    assert.equal(summary.errors, 0);
+    assert.equal(summary.results[0].resolved, 0);
+    assert.ok(String(decisionSheet().getRange(row, 7).getValue()).indexOf('既に解決済み') >= 0,
+      '0件だった理由が状態欄に残ること');
+  });
+
   test('a purpose on the exempt list needs no partner and raises no review', () => {
     // 「私用」「ふるさと納税」「振替」のように相手取引先を立てない仕訳がある。
     // 毎回「取引先なしで解決」を押させるのは作業であって判断ではない。
