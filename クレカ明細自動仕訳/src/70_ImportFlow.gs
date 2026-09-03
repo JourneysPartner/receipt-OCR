@@ -230,9 +230,15 @@ function runWriteBlock(input) {
     return result;
   }
 
+  // 書くものが無くても**要確認登録（9-8）まで進む**。ここで戻ってはならない。
+  //
+  // 再合流したファイルは、既存取引が`REVIEW_REQUIRED`等の終端側にあるため
+  // 書込対象が0件になり得る。ここで戻ると9-8へ到達せず、**欠けている要確認を
+  // 作り直す機会が永久に来ない**。実機では、取引が`REVIEW_REQUIRED`なのに
+  // 要確認が1件も無く転記行も持たないファイルが、再取込しても直らなくなった
+  // （2026-09-03）。担当者は解決操作を起動できず、ファイルは完了しない
+  // ── 8-10の橋渡しが防ごうとしている状態そのものである。
   var targets = getTransactionsByStatus(fileId, [TX_STATUS.PREPARED, TX_STATUS.WRITING]);
-  if (!targets.length) return result;
-
   var batchSize = Number(SETTINGS.WRITE_BATCH_SIZE || 200);
   for (var offset = 0; offset < targets.length; offset += batchSize) {
     var batch = targets.slice(offset, offset + batchSize);

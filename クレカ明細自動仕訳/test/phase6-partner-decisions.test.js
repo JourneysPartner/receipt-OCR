@@ -109,6 +109,31 @@ module.exports = ({test, assert, gas}) => {
     throw new Error('決定行が見つからない: ' + merchant);
   }
 
+  test('re-entry restores reviews even when there is nothing left to write', () => {
+    // 実機で起きた状態（2026-09-03）：取引は`REVIEW_REQUIRED`なのに要確認が
+    // 1件も無く、転記行も無い。担当者は解決操作を起動できず、ファイルは
+    // 永久に完了しない。再取込しても、書込対象が0件だと要確認登録まで
+    // 到達しないなら、この状態からは二度と抜け出せない。
+    setup();
+    assert.equal(plain(gas.call('openReviews', [{}])).length, 3);
+
+    // 要確認だけが失われた状態を作る（取引は REVIEW_REQUIRED のまま）。
+    const reviewSheet = gas.stubs.getSpreadsheet('master').getSheetByName('要確認');
+    const lastRow = reviewSheet.getLastRow();
+    reviewSheet.getRange(2, 1, lastRow - 1, reviewSheet.getLastColumn())
+      .setValues(Array.from({length: lastRow - 1},
+        () => Array(reviewSheet.getLastColumn()).fill('')));
+    assert.equal(plain(gas.call('openReviews', [{}])).length, 0);
+
+    gas.call('updateProcessLog', ['fileA', {internalState: 'DISCOVERED'}]);
+    gas.call('runImport', [{}]);
+
+    const restored = plain(gas.call('openReviews', [{}]));
+    assert.equal(restored.length, 3,
+      '書くものが無くても要確認は登録される（9-8へ到達すること）');
+    assert.ok(restored.every((review) => review.reviewType === 'PARTNER'));
+  });
+
   test('the decision sheet lists each unresolved merchant once, with its count', () => {
     setup();
     const first = plain(gas.call('opsListPartnerReviews', []));
