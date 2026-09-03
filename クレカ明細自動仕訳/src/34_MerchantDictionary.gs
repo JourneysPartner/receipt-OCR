@@ -30,6 +30,40 @@ function learnFromResolution(customerId, original, normalized, partnerName, acto
   return dictId;
 }
 
+/**
+ * 前方一致・部分一致の辞書規則を登録する（5.7 STEP5）。
+ *
+ * 完全一致の学習（`learnFromResolution`）では受けられない明細がある ──
+ * 楽天のふるさと納税は「熊本県荒尾市　ﾗｸﾃﾝｲﾁﾊﾞ911963」のように寄付ごとの
+ * 番号が付き、**同じ文字列が二度と現れない**。1件ずつ完全一致で覚えても
+ * 次の明細では当たらないので、パターンで受ける必要がある。
+ *
+ * `承認済=TRUE`で登録する。STEP5が自動採用するのは承認済のパターンだけで、
+ * 未承認は候補提示にとどまる（5.7）。パターンは人が決めるものなので、
+ * 実行者が当該顧客の管理者であることを確かめる。
+ */
+function registerDictionaryPattern(customerId, pattern, partnerName, matchMethod, actor) {
+  if (matchMethod !== 'prefix' && matchMethod !== 'partial') {
+    throw new TypeError('registerDictionaryPattern supports prefix and partial only');
+  }
+  if (!partnerName) throw new TypeError('registerDictionaryPattern requires a partner name');
+  var normalized = normalizeMerchant(pattern);
+  if (!normalized) throw new MasterDataError('Pattern must not be empty after normalization');
+  var customer = getCustomerById(customerId);
+  if (customer.admins.indexOf(String(actor).toLowerCase()) < 0) {
+    throw new AuthorizationError('System administrator role is required');
+  }
+  var dictId = generateId('DICT');
+  var now = nowIso_();
+  dictionarySheet_(false).appendRow([dictId, String(pattern), normalized, String(partnerName),
+    matchMethod, '', String(customerId), '', '', true, String(actor), String(actor), now, 1,
+    true, false, '', '']);
+  appendAudit({type: 'DICT_REGISTER', actor: actor, approver: actor, targetType: 'DICT',
+    targetId: dictId, customerId: customerId, before: null,
+    after: {B: String(pattern), C: normalized, D: String(partnerName), E: matchMethod, J: true, O: true}});
+  return dictId;
+}
+
 function promoteToCommon(dictId, approver) {
   if (!approver) throw new AuthorizationError('Approver is required');
   var source = readDictionary_(false).filter(function(row) { return row.dictId === String(dictId) && row.active; });
