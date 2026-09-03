@@ -202,7 +202,12 @@ function runImport(options) {
           customerReport.files.push({fileId: candidate.fileId, outcome: 'DEFERRED_TIME_BUDGET'});
           return;
         }
-        customerReport.files.push(processDiscoveredFile_(runId, customer, candidate, opts));
+        // 1ファイルの所要時間を報告に残す。6分上限に当たったとき、どの
+        // ファイルのどの段階で溶けたのかを知る材料がこれしかない。
+        var fileStartedAt = Date.now();
+        var fileOutcome = processDiscoveredFile_(runId, customer, candidate, opts);
+        fileOutcome.elapsedMs = Date.now() - fileStartedAt;
+        customerReport.files.push(fileOutcome);
       });
     } catch (error) {
       customerReport.skipped = (error && error.code) || 'CUSTOMER_ERROR';
