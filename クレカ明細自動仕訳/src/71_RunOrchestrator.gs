@@ -432,8 +432,11 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
           commonPartners: commonPartnersForRun_()
         });
         transactions = transactions.map(function(tx) {
-          var match = matchPartner(tx, customer.customerId, dictionary);
-          var resolved = match && match.autoConfirm === true;
+          // 顧客マスターAM列の用途は取引先を立てない（実装差戻し#30）。
+          // 照合もしない ── 結果を使わないうえ、辞書の件数ぶん無駄に回る。
+          var exempt = isPartnerExemptPurpose(customer, tx.purpose);
+          var match = exempt ? null : matchPartner(tx, customer.customerId, dictionary);
+          var resolved = !exempt && match && match.autoConfirm === true;
           var planned = {
             b: tx.date ? toTokyoDateString_(tx.date) : '',
             f: resolved ? String(match.partnerName) : '',
@@ -442,8 +445,8 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
             m: tx.amountBillingJpy
           };
           return Object.assign({}, tx, {
-            partnerResolutionStatus: resolved ?
-              PARTNER_STATUS.RESOLVED_WITH_PARTNER : PARTNER_STATUS.UNRESOLVED,
+            partnerResolutionStatus: exempt ? PARTNER_STATUS.RESOLVED_WITHOUT_PARTNER :
+              (resolved ? PARTNER_STATUS.RESOLVED_WITH_PARTNER : PARTNER_STATUS.UNRESOLVED),
             partnerMatch: match,
             merchantNormalized: normalizeMerchant(tx.merchantOriginal || ''),
             planned: planned,
