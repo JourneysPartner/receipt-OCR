@@ -125,13 +125,24 @@ module.exports = ({test, assert, gas}) => {
         () => Array(reviewSheet.getLastColumn()).fill('')));
     assert.equal(plain(gas.call('openReviews', [{}])).length, 0);
 
-    gas.call('updateProcessLog', ['fileA', {internalState: 'DISCOVERED'}]);
+    // 動かす手段の無いファイルだけを再検査へ戻す運用手段。
+    const rewound = plain(gas.call('opsRetryStalledReviewWait', []));
+    assert.equal(rewound.retried, 1);
     gas.call('runImport', [{}]);
 
     const restored = plain(gas.call('openReviews', [{}]));
     assert.equal(restored.length, 3,
       '書くものが無くても要確認は登録される（9-8へ到達すること）');
     assert.ok(restored.every((review) => review.reviewType === 'PARTNER'));
+  });
+
+  test('a file whose reviews are still open is left alone', () => {
+    // 人が判断している最中のファイルを勝手に再検査へ戻さないこと。
+    setup();
+    const summary = plain(gas.call('opsRetryStalledReviewWait', []));
+    assert.equal(summary.retried, 0);
+    assert.equal(summary.skipped, 1);
+    assert.equal(summary.waitingOnPeople[0].openReviews, 3);
   });
 
   test('the decision sheet lists each unresolved merchant once, with its count', () => {
