@@ -15,14 +15,16 @@ module.exports = ({test, assert, gas}) => {
   const sheetHeader = (n, label) => { const r = blank(n); r[0] = label; return r; };
   const AE = JSON.stringify({row: 1, cells: [{column: 2, text: '利用日', match: 'exact'}]});
 
-  function customerRow() {
-    const row = blank(37);
+  function customerRow(options) {
+    const row = blank(39);
     Object.assign(row, {
       0: 'C001', 1: '顧客A', 2: 'TRUE', 3: 'folder1', 5: 'dest1', 7: '入力用シート', 8: '取引先一覧',
       9: 2, 10: 3, 11: 4, 12: 5, 13: 6, 14: 7, 15: '1.0',
       16: 'reviewer@example.com', 17: 'admin@example.com', 18: 0, 20: 'システム情報', 21: '',
       23: 0, 24: 0, 29: 1, 30: AE, 31: '{}', 32: '{}', 33: 8,
-      34: '取引先一覧', 35: 'CORPORATE', 36: ''
+      34: '取引先一覧', 35: 'CORPORATE', 36: '',
+      38: options && options.partnerExemptPurposes
+        ? JSON.stringify(options.partnerExemptPurposes) : ''
     });
     return row;
   }
@@ -43,10 +45,10 @@ module.exports = ({test, assert, gas}) => {
   }
 
   /** 未解決の取引先を3種類含む明細を1本取り込み、PARTNER要確認を立てる。 */
-  function setup() {
+  function setup(options) {
     gas.stubs.reset();
     gas.stubs.createSpreadsheet('master', {sheets: [
-      {name: '顧客マスター', values: [sheetHeader(37, '顧客ID'), customerRow()]},
+      {name: '顧客マスター', values: [sheetHeader(39, '顧客ID'), customerRow(options)]},
       {name: 'カード形式マスター', values: [sheetHeader(34, '形式ID'), formatRow()]},
       {name: '使用用途補完マスター', values: [sheetHeader(10, 'ルールID'),
         Object.assign(blank(10), {0: 'PR1', 1: '仕入', 2: '仕入れ', 3: 'TRUE'})]},
@@ -91,10 +93,7 @@ module.exports = ({test, assert, gas}) => {
       createdTime: '2026-08-01T00:00:00Z', contentType: 'text/csv'
     });
     gas.stubs.createFolder('folder1', {fileIds: ['fileA']});
-    const report = plain(gas.call('runImport', [{}]));
-    assert.equal(report.customers[0].files[0].nextState, 'REVIEW_WAIT',
-      JSON.stringify(report.customers[0].files[0]));
-    return report;
+    return plain(gas.call('runImport', [{}]));
   }
 
   const decisionSheet = () =>
@@ -161,20 +160,55 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(gas.stubs.getFile('fileA').getName(), '【済】三井住友カード202601.csv');
   });
 
-  test('a partner name absent from the partner list is refused, not written', () => {
+  test('a partner absent from the list is accepted and flagged as new', () => {
+    // freeeは取込時に未登録の取引先を自動で作る。一覧に無いことを理由に
+    // 拒むと、正当な新規取引先のたびに一覧の手入力を強いることになる。
+    // 打ち間違いに気づく手がかりとして状態欄に書き添えるだけにする。
     setup();
     gas.call('opsListPartnerReviews', []);
     const row = decisionRowFor('キュウテン');
-    decisionSheet().getRange(row, 6).setValue('実在しない取引先');
+    decisionSheet().getRange(row, 6).setValue('まだ一覧に無い取引先');
 
     const summary = plain(gas.call('opsApplyPartnerDecisions', []));
-    assert.equal(summary.errors, 1);
-    assert.equal(summary.resolvedReviews, 0);
-    assert.ok(String(decisionSheet().getRange(row, 7).getValue()).indexOf('エラー') === 0);
-    // 要確認は開いたまま。取り違えた名前でF列を書いてしまわないこと。
-    const open = plain(gas.call('openReviews', [{}]))
-      .filter((review) => review.merchantOriginal === 'キュウテン');
+    assert.equal(summary.errors, 0, JSON.stringify(summary.results));
+    assert.equal(summary.resolvedReviews, 1);
+    assert.ok(String(decisionSheet().getRange(row, 7).getValue()).indexOf('新規取引先') >= 0,
+      '一覧に無いことは通知する（止めはしない）');
+    assert.equal(destSheet().getRange(4, 3).getValue(), 'まだ一覧に無い取引先');
+  });
+
+  test('a purpose on the exempt list needs no partner and raises no review', () => {
+    // 「私用」「ふるさと納税」「振替」のように相手取引先を立てない仕訳がある。
+    // 毎回「取引先なしで解決」を押させるのは作業であって判断ではない。
+    const report = setup({partnerExemptPurposes: ['ふるさと納税', '私用']});
+    const file = report.customers[0].files[0];
+    assert.equal(file.written, 3);
+    // ふるさと納税2件は要確認にならず、F列は空欄のまま確定する。
+    const rows = destSheet().getDataRange().getValues().slice(1)
+      .filter((r) => String(r[6] || '').indexOf('TX_') === 0);
+    const furusato = rows.filter((r) => r[3] === 'ふるさと納税');
+    assert.equal(furusato.length, 2);
+    assert.deepEqual(furusato.map((r) => r[2]), ['', ''], 'F列は空欄');
+    // 残る要確認は「キュウテン」の1種類だけ。
+    const open = plain(gas.call('openReviews', [{}]));
     assert.equal(open.length, 1);
+    assert.equal(open[0].merchantOriginal, 'キュウテン');
+  });
+
+  test('the exempt list can be applied to reviews that are already open', () => {
+    // AM列を後から設定した場合、既に立っている要確認は残る。取込を
+    // やり直さずに片付けられること。
+    setup();
+    assert.equal(plain(gas.call('openReviews', [{}])).length, 3);
+    const master = gas.stubs.getSpreadsheet('master').getSheetByName('顧客マスター');
+    master.getRange(2, 39).setValue(JSON.stringify(['ふるさと納税']));
+
+    const summary = plain(gas.call('opsResolvePartnerExemptReviews', []));
+    assert.equal(summary.errors, 0, JSON.stringify(summary.results));
+    assert.equal(summary.resolved, 2, 'ふるさと納税の2件だけが閉じる');
+    const open = plain(gas.call('openReviews', [{}]));
+    assert.equal(open.length, 1);
+    assert.equal(open[0].merchantOriginal, 'キュウテン');
   });
 
   test('applying twice does not re-resolve or duplicate the dictionary rule', () => {

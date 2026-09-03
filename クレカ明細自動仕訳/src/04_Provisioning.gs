@@ -19,7 +19,7 @@
  * 実装時に確定する。
  */
 var MASTER_SHEET_SPECS_ = Object.freeze([
-  {key: 'CUSTOMER_MASTER', width: 38, label: '顧客ID'},
+  {key: 'CUSTOMER_MASTER', width: 39, label: '顧客ID'},
   {key: 'COMMON_PARTNER_LIST', width: 6, label: '取引先ID'},
   {key: 'COMMON_PARTNER_DICT', width: 18, label: '辞書ID'},
   {key: 'CUSTOMER_PARTNER_DICT', width: 18, label: '辞書ID'},
@@ -153,6 +153,8 @@ function describeDestinationSheet(spreadsheetId, sheetName, headerRow) {
  *   partnerListSheetName?, headerRow?（既定1）, dataStartRow?（既定headerRow+1）,
  *   rowScanExcludedColumns?（空き行判定除外列。既定値・数式が常在する列）,
  *   rowScanLastColumn?, reviewers?, admins?,
+ *   partnerExemptPurposes?（取引先を空欄のままにしてよい使用用途。
+ *     例 ["私用", "ふるさと納税", "振替"]）,
  *   customerCategory?（既定CORPORATE）, fiscalYear?
  */
 function registerTestCustomer(config) {
@@ -193,7 +195,7 @@ function registerTestCustomer(config) {
   var operator = activeUserEmail_();
   var category = config.customerCategory || CUSTOMER_CATEGORY.CORPORATE;
 
-  var row = Array(38).fill('');
+  var row = Array(CUSTOMER_MASTER_COLUMNS_).fill('');
   row[0] = String(config.customerId);
   row[1] = String(config.customerName);
   row[2] = true;
@@ -222,13 +224,15 @@ function registerTestCustomer(config) {
   row[36] = config.fiscalYear === undefined || config.fiscalYear === null ? '' : config.fiscalYear;
   row[37] = config.rowScanExcludedColumns && config.rowScanExcludedColumns.length ?
     JSON.stringify(config.rowScanExcludedColumns) : '';
+  row[38] = config.partnerExemptPurposes && config.partnerExemptPurposes.length ?
+    JSON.stringify(config.partnerExemptPurposes) : '';
 
   var masterSheet = requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.CUSTOMER_MASTER);
-  ensureSheetWidth_(masterSheet, 38);
-  var existing = findRowsByColumnValue_(masterSheet, 1, config.customerId, 38);
+  ensureSheetWidth_(masterSheet, CUSTOMER_MASTER_COLUMNS_);
+  var existing = findRowsByColumnValue_(masterSheet, 1, config.customerId, CUSTOMER_MASTER_COLUMNS_);
   var rowNumber = existing.length ? existing[0].rowNumber : masterSheet.getLastRow() + 1;
   ensureRowExists_(masterSheet, rowNumber);
-  masterSheet.getRange(rowNumber, 1, 1, 38).setValues([row]);
+  masterSheet.getRange(rowNumber, 1, 1, CUSTOMER_MASTER_COLUMNS_).setValues([row]);
 
   // 登録値そのものが4.3の検証を通ることを確認する（通らない行を残さない）。
   var registered = getCustomerById(String(config.customerId));
