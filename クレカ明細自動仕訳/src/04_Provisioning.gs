@@ -410,8 +410,11 @@ function installSmbcXlsxFormat() {
  *
  * まだ含めない（理由つき）：イオン系・UCS・コメリ（日付が数値のYYYYMMDD/
  * YYMMDDで、5.1.0の列挙では数値＝Excelシリアルとなり誤読するため、解釈の
- * 設計追加が先）、dカード内訳明細（複数セクション）、AMEXの用途を
- * 海外通貨列へ記入した変則ファイル（列の役割が定義と食い違う）。
+ * 設計追加が先）、dカード内訳明細（複数セクション）、コストコ／オリコ
+ * （ヘッダーブロックが縦持ち）。
+ *
+ * 期待する判定結果は`test/phase6-real-samples.test.js`が実サンプルから
+ * 生成した固定データで固定している。ここを触ったらそちらも見ること。
  */
 var ANNOTATED_FORMAT_SPECS_ = [
   {
@@ -500,6 +503,24 @@ var ANNOTATED_FORMAT_SPECS_ = [
       keywords: ['ご利用日', 'データ処理日', 'ご利用内容', '金額', '使用用途'], minMatch: 5}]},
     headerRow: 1, dataStartRow: 2,
     dateColumn: 'A', merchantColumn: 'C', amountColumn: 'D', purposeColumn: 'F',
+    columnProfile: {minColumns: 6, maxColumns: 6, sampleRows: 5, columns: [
+      {index: 0, type: 'date', required: true},
+      {index: 2, type: 'text', required: true},
+      {index: 3, type: 'number', required: true}
+    ]},
+    exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
+    countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    billingRule: null
+  },
+  {
+    formatId: 'amex_6_alt', formatName: 'AMEX系Excel（6列・用途を海外通貨列Eに記入）',
+    fileTypes: ['xlsx'],
+    // amex_7と見出しは同一で、違うのは幅だけ（換算レート列まで6列）。
+    // 顧客は見出しの無い右端が無いため「海外通貨利用金額」列へ用途を書く。
+    keywordRule: {allOf: [{maxRow: 1,
+      keywords: ['ご利用日', 'データ処理日', 'ご利用内容', '金額', '換算レート'], minMatch: 5}]},
+    headerRow: 1, dataStartRow: 2,
+    dateColumn: 'A', merchantColumn: 'C', amountColumn: 'D', purposeColumn: 'E',
     columnProfile: {minColumns: 6, maxColumns: 6, sampleRows: 5, columns: [
       {index: 0, type: 'date', required: true},
       {index: 2, type: 'text', required: true},

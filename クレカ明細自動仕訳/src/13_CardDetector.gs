@@ -451,6 +451,31 @@ function matchesKeywords(sheet, formatRow) {
 }
 
 /**
+ * 表の幅＝ヘッダー行と標本行における「最終非空セル位置＋1」の最大。
+ *
+ * 実装差戻し#28：`row.length`は幅の代わりにならない。XLSXの読取は
+ * `getRange(1, 1, rowCount, sheet.getMaxColumns())`の矩形読みなので、
+ * 全行の長さは変換後グリッドの幅であって表の幅ではない。
+ * ヘッダー行を含めるのは、三井住友系のように見出し行だけが末尾の
+ * 「使用用途」を持ち、データ行はそこが空になり得るため。
+ */
+function detectorTableWidth_(rows, headerRowNumber, samples) {
+  var candidates = samples.slice();
+  var header = rows[Number(headerRowNumber) - 1];
+  if (Array.isArray(header)) candidates.push(header);
+  var width = 0;
+  candidates.forEach(function(row) {
+    for (var index = row.length - 1; index >= 0; index -= 1) {
+      if (!isParserBlank_(row[index])) {
+        width = Math.max(width, index + 1);
+        break;
+      }
+    }
+  });
+  return width;
+}
+
+/**
  * N列を2.1.2.3の評価規則で判定する。
  * @return {?boolean} N列が空欄なら判定を適用しない（null）
  */
@@ -471,16 +496,24 @@ function matchesColumnProfile(sheet, formatRow) {
     if (hasDate || hasAmount) samples.push(row);
   }
   if (!samples.length) return false;
-  return samples.every(function(row) {
-    if (row.length < profile.minColumns) return false;
-    // 実装差戻し#27：列数の上限。同一発行元の幅違い変種（7/8/9列）を
-    // 分けるための唯一の安定した材料である。
-    if (profile.maxColumns !== undefined && row.length > profile.maxColumns) return false;
+
+  var width = detectorTableWidth_(rows, formatRow.headerRow, samples);
+  if (width < profile.minColumns) return false;
+  // 実装差戻し#27：列数の上限。同一発行元の幅違い変種（7/8/9列）を
+  // 分けるための唯一の安定した材料である。
+  if (profile.maxColumns !== undefined && width > profile.maxColumns) return false;
+
+  // 実装差戻し#28：明細には調整行・返品行・ポイント充当行など、必須列が
+  // 欠けた少数の行が混ざる（例：三井住友系の「キャッシュバック（ポイント
+  // 交換）」は金額列が空）。全標本一致を求めると実ファイルが1行で不成立に
+  // なるため、過半数で判定する。誤った形式は過半数を取れない。
+  var conforming = samples.filter(function(row) {
     return profile.columns.every(function(column) {
       if (!column.required) return true;
       return parserCellMatchesType_(row[column.index], column.type);
     });
-  });
+  }).length;
+  return conforming * 2 > samples.length;
 }
 
 /**
