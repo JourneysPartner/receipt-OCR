@@ -2,3 +2,7 @@
 # 顧客から預かった実明細そのもの。リポジトリには入れない。
 # 先頭の / が必須 ── これが無いと test/fixtures/samples/ まで巻き込む。
 /samples/
+
+# OAuthクライアントの秘密。clasp run（Apps Script API実行）に使う。
+client_secret_*.json
+.clasprc.json
