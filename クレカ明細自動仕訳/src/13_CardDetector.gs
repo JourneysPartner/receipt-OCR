@@ -13,7 +13,7 @@
  * N列が空の形式では列構造の判定を適用しない。
  */
 
-var CARD_FORMAT_COLUMNS_ = 34; // A〜AH
+var CARD_FORMAT_COLUMNS_ = 35; // A〜AI
 
 /** @param {string} column @return {number} 0起算。不正は-1 */
 function detectorColumnIndex_(column) {
@@ -312,6 +312,11 @@ function formatRowFromValues_(values, rowNumber) {
     foreignAmountColumn: null,
     exchangeRateColumn: null,
     updatedAt: values[33] || null,
+    // AI列：カード名の取得元（2.1.2.7）。年会費のように**明細の店名に
+    // カード会社が現れない**取引で、取引先をカード名から決めるために使う。
+    // 取得元は形式ごとに違う（1行目のセル・シート名・ファイル名）ので、
+    // 顧客ではなく形式の知識として持つ。
+    cardNameRule: detectorParseJson_(values[34], 'AI', problems),
     valid: false,
     errorCode: null,
     problems: problems,

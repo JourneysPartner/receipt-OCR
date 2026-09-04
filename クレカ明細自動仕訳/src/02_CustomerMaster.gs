@@ -1,6 +1,6 @@
 'use strict';
 
-const CUSTOMER_MASTER_COLUMNS_ = 39;
+const CUSTOMER_MASTER_COLUMNS_ = 40;
 
 function parseCustomerJson_(raw, label, allowEmpty) {
   if ((raw === '' || raw === null || raw === undefined) && allowEmpty) return {};
@@ -39,7 +39,10 @@ function customerFromRow_(values, rowNumber) {
     // 「私用」「ふるさと納税」「振替」のように相手取引先を立てない仕訳があり、
     // これらに取引先要確認を立てると、担当者が毎回「取引先なしで解決」を
     // 押すだけの作業になる。顧客ごとに増やせるようデータで持つ。
-    partnerExemptPurposes: parsePurposeExemptions_(values[38]),
+    partnerExemptPurposes: parsePurposeExemptions_(values[38], 'AM'),
+    // AN列：取引先をカード名で決める使用用途（実装差戻し#31）。
+    // 年会費のように、明細の店名にカード会社が現れない取引のためにある。
+    cardNamePartnerPurposes: parsePurposeExemptions_(values[39], 'AN'),
     _rowNumber: rowNumber
   };
   return customer;
@@ -50,32 +53,40 @@ function customerFromRow_(values, rowNumber) {
  * 記入は全角・半角・空白が揺れるので、字面の一致に頼ると取りこぼす。
  * @param {*} raw @return {!Array<string>} 正規化済みの用途
  */
-function parsePurposeExemptions_(raw) {
+function parsePurposeExemptions_(raw, label) {
   if (raw === '' || raw === null || raw === undefined) return [];
   var parsed;
   try { parsed = JSON.parse(String(raw)); } catch (error) {
-    throw new MasterDataError('AM (partner-exempt purposes) is not valid JSON');
+    throw new MasterDataError((label || 'AM') + ' (purpose list) is not valid JSON');
   }
   if (!Array.isArray(parsed)) {
-    throw new MasterDataError('AM (partner-exempt purposes) must be a JSON array');
+    throw new MasterDataError((label || 'AM') + ' (purpose list) must be a JSON array');
   }
   var exemptions = [];
   parsed.forEach(function(value) {
     var normalized = normalizeMerchant(value);
     if (!normalized) {
-      throw new MasterDataError('AM (partner-exempt purposes) must not contain empty values');
+      throw new MasterDataError((label || 'AM') + ' (purpose list) must not contain empty values');
     }
     if (exemptions.indexOf(normalized) < 0) exemptions.push(normalized);
   });
   return exemptions;
 }
 
-/** 当該用途が「取引先を立てない」対象か。 */
-function isPartnerExemptPurpose(customer, purpose) {
-  var exemptions = customer && customer.partnerExemptPurposes;
-  if (!exemptions || !exemptions.length) return false;
+function purposeInList_(list, purpose) {
+  if (!list || !list.length) return false;
   var normalized = normalizeMerchant(purpose === null || purpose === undefined ? '' : purpose);
-  return normalized !== '' && exemptions.indexOf(normalized) >= 0;
+  return normalized !== '' && list.indexOf(normalized) >= 0;
+}
+
+/** 当該用途が「取引先を立てない」対象か（AM列）。 */
+function isPartnerExemptPurpose(customer, purpose) {
+  return purposeInList_(customer && customer.partnerExemptPurposes, purpose);
+}
+
+/** 当該用途が「取引先をカード名で決める」対象か（AN列）。 */
+function isCardNamePartnerPurpose(customer, purpose) {
+  return purposeInList_(customer && customer.cardNamePartnerPurposes, purpose);
 }
 
 /** @param {*} raw @return {!Array<number>} */

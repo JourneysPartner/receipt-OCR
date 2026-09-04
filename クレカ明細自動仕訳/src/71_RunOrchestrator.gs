@@ -431,11 +431,24 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
           common: readDictionary_(true),
           commonPartners: commonPartnersForRun_()
         });
+        // 年会費のように、明細の店名にカード会社が現れない取引がある
+        // （実装差戻し#31）。そのファイルがどのカードのものかは形式が知って
+        // いるので、1度だけ解決して照合キーに使う。取れない形式では null。
+        var cardName = resolveCardName(resolvedSheet, fileName, cardFormat);
+
         transactions = transactions.map(function(tx) {
           // 顧客マスターAM列の用途は取引先を立てない（実装差戻し#30）。
           // 照合もしない ── 結果を使わないうえ、辞書の件数ぶん無駄に回る。
           var exempt = isPartnerExemptPurpose(customer, tx.purpose);
-          var match = exempt ? null : matchPartner(tx, customer.customerId, dictionary);
+          // AN列の用途は、店名ではなくカード名で取引先を照合する。
+          // 「基本カード年会費」はどのカードでも同じ文字列なので、店名で
+          // 辞書を作ると全カードの年会費が1つの取引先へ潰れる。
+          var matchKey = !exempt && cardName &&
+            isCardNamePartnerPurpose(customer, tx.purpose) ? cardName : null;
+          var forMatching = matchKey
+            ? Object.assign({}, tx, {merchantOriginal: matchKey, originalMerchant: matchKey})
+            : tx;
+          var match = exempt ? null : matchPartner(forMatching, customer.customerId, dictionary);
           var resolved = !exempt && match && match.autoConfirm === true;
           var planned = {
             b: tx.date ? toTokyoDateString_(tx.date) : '',
@@ -448,7 +461,11 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
             partnerResolutionStatus: exempt ? PARTNER_STATUS.RESOLVED_WITHOUT_PARTNER :
               (resolved ? PARTNER_STATUS.RESOLVED_WITH_PARTNER : PARTNER_STATUS.UNRESOLVED),
             partnerMatch: match,
-            merchantNormalized: normalizeMerchant(tx.merchantOriginal || ''),
+            // 照合キーが店名と違う場合、要確認にもそれを見せる ── 担当者が
+            // 判断するのは「このカードの取引先は何か」であって、「基本カード
+            // 年会費」という文字列ではない。K列へ書く元店名は変えない。
+            partnerMatchKey: matchKey,
+            merchantNormalized: normalizeMerchant(matchKey || tx.merchantOriginal || ''),
             planned: planned,
             originalDate: tx.dateRawText,
             originalMerchant: tx.merchantOriginal,
