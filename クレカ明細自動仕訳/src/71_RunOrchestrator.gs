@@ -434,7 +434,8 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
         // 年会費のように、明細の店名にカード会社が現れない取引がある
         // （実装差戻し#31）。そのファイルがどのカードのものかは形式が知って
         // いるので、1度だけ解決して照合キーに使う。取れない形式では null。
-        var cardName = resolveCardName(resolvedSheet, fileName, cardFormat);
+        var cardName = resolveCardName(resolvedSheet, cardFormat,
+          {fileName: fileName, folderName: candidate.folderName || null});
 
         transactions = transactions.map(function(tx) {
           // 顧客マスターAM列の用途は取引先を立てない（実装差戻し#30）。

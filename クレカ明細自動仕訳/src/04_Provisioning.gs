@@ -439,7 +439,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
       rules: [{id: 'deposit', target: 'cell', column: 'B', match: 'contains', value: 'ご入金'},
               {id: 'total', target: 'row', match: 'contains', value: '合計', onlyWhenDateEmpty: true}]},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'cell', row: 1, column: 3}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'cell', row: 1, column: 3}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: {sources: [
       {id: 'fn_ym', kind: 'fileName', pattern: '(20\\d{2})[-_年/]?(0[1-9]|1[0-2])月?',
         groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
@@ -460,7 +460,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
       rules: [{id: 'deposit', target: 'cell', column: 'B', match: 'contains', value: 'ご入金'},
               {id: 'total', target: 'row', match: 'contains', value: '合計', onlyWhenDateEmpty: true}]},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'cell', row: 1, column: 3}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'cell', row: 1, column: 3}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: {sources: [
       {id: 'fn_ym', kind: 'fileName', pattern: '(20\\d{2})[-_年/]?(0[1-9]|1[0-2])月?',
         groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
@@ -481,7 +481,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     exclusionRule: {excludeRowRanges: [{from: 1, to: 6}], excludeWhenDateAndAmountEmpty: true,
       rules: [{id: 'total', target: 'row', match: 'contains', value: '合計', onlyWhenDateEmpty: true}]},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: {sources: [
       {id: 'hdr_pay', kind: 'scanRows', scanMaxRows: 6,
         pattern: '今回のお支払日\\s+(20\\d{2})-(0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])',
@@ -504,7 +504,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
       rules: [{id: 'tax_total', target: 'row', match: 'contains', value: '消費税課税対象合計',
         onlyWhenDateEmpty: true}]},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -521,7 +521,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     ]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -540,7 +540,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     ]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -557,7 +557,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     ]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -574,7 +574,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     ]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -592,7 +592,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true,
       rules: [{id: 'deposit', target: 'row', match: 'contains', value: 'ご入金', onlyWhenDateEmpty: true}]},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: {sources: [
       {id: 'fn_enavi', kind: 'fileName', pattern: 'enavi(20\\d{2})(0[1-9]|1[0-2])',
         groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
@@ -613,7 +613,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true,
       rules: [{id: 'deposit', target: 'row', match: 'contains', value: 'ご入金', onlyWhenDateEmpty: true}]},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -641,7 +641,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     countTotalRule: {count: {source: 'none'},
       total: {source: 'labeledRow', labelColumn: 'B', valueColumn: 'F', label: '【合計】', tolerance: 0},
       totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'cell', row: 1, column: 2}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'cell', row: 1, column: 2}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: {sources: [
       {id: 'hdr_pay', kind: 'scanRows', scanMaxRows: 4,
         pattern: 'お支払日\\s+(20\\d{2})-(0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])',
@@ -662,7 +662,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     ]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -679,7 +679,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     ]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -694,7 +694,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
       {index: 3, type: 'text', required: true},
       {index: 4, type: 'number', required: true}
     ]},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
     billingRule: {sources: [
@@ -714,7 +714,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
       {index: 2, type: 'text', required: true},
       {index: 3, type: 'number', required: true}
     ]},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
     billingRule: {sources: [
@@ -735,7 +735,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
       {index: 2, type: 'text', required: true},
       {index: 6, type: 'number', required: true}
     ]},
-    cardNameRule: {sources: [{kind: 'cell', row: 1, column: 2}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'cell', row: 1, column: 2}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 8}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
     billingRule: {sources: [
@@ -755,7 +755,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
       {index: 2, type: 'text', required: true},
       {index: 6, type: 'number', required: true}
     ]},
-    cardNameRule: {sources: [{kind: 'cell', row: 1, column: 2}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'cell', row: 1, column: 2}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 8}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
     billingRule: {sources: [
@@ -767,8 +767,8 @@ var ANNOTATED_FORMAT_SPECS_ = [
 
 /** 既存形式へカード名の取得元（AI列）を後付けする。 */
 var CARD_NAME_RULE_PATCHES_ = Object.freeze({
-  smbc_family_csv: {sources: [{kind: 'cell', row: 1, column: 3}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
-  smbc_family_x8: {sources: [{kind: 'cell', row: 1, column: 3}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]}
+  smbc_family_csv: {sources: [{kind: 'folderName'}, {kind: 'cell', row: 1, column: 3}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+  smbc_family_x8: {sources: [{kind: 'folderName'}, {kind: 'cell', row: 1, column: 3}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]}
 });
 
 /**
