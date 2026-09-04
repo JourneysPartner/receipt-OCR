@@ -47,17 +47,17 @@ module.exports = ({test, assert, gas}) => {
     'JCBカードＷ__202512meisai': 'jcb_family',
     'Olive_ゴールド__25年12月請求分': 'smbc_family_x7',
     'SPGカード__25年10月請求分': 'amex_9',
-    'USCカード__202512': null,            // 日付が数値YYYYMMDD（5.1.0の解釈追加が先）
+    'USCカード__202512': 'ucs_family',
     'VisaLinePayカード__202502': 'smbc_family_x8',
     'aupayカード__11月引き落とし分': 'aupay_family',
     'dカード__202505': 'smbc_family_x9',
     'dカード__ご利用内訳明細_キャッシングご返済明細_20251010': null,  // 複数セクション
     'アメリカン・エキスプレス⁠・ビジネス・ゴールドカード__25年_10月請求分': 'amex_6',
     'アメリカン・エキスプレス・ゴールド・プリファード__25年12月請求分': 'amex_7',
-    'イオンカード__202512': null,          // 日付が数値YYMMDD＋明細ブロックが途中から
-    'コジマビックカメラカード__meisai202509': null,  // 同上（イオン系）
+    'イオンカード__202512': 'aeon_x8',
+    'コジマビックカメラカード__meisai202509': 'aeon_x9',
     'コストコカード(オリコ)__202601': null,          // ヘッダーブロックが縦持ち
-    'コメリカード__komericard_2025_11': null,        // 日付が数値YYYYMMDD
+    'コメリカード__komericard_2025_11': 'komeri_family',
     'ゴールドポイントカード__202511': 'smbc_family_x8',
     'セゾンプラチナビジネス・アメリカンエキスプレスカード__25年11月請求分': 'saison_x8',
     'セゾンプラチナビジネス・アメリカンエキスプレスカード__SAISON_2511': 'saison_x8',
@@ -119,6 +119,47 @@ module.exports = ({test, assert, gas}) => {
       }
     });
     assert.deepEqual(wrong, []);
+  });
+
+  test('numeric dates parse as dates, not as Excel serials', () => {
+    // UCS・コメリはYYYYMMDD、イオン系はYYMMDDを**数値セル**で持つ。
+    // シリアルとして読むと数千年先の日付になり、静かに誤った日付が
+    // 出納帳へ入る（実装差戻し#32）。
+    setup();
+    const cases = [
+      // YYYYMMDD は年まで確定する。
+      {slug: 'USCカード__202512', formatId: 'ucs_family', hashKey: '2025-10-31'},
+      {slug: 'コメリカード__komericard_2025_11', formatId: 'komeri_family', hashKey: '2025-10-08'},
+      // YYMMDD は月日だけ確定し、**年は補完（5.1）へ委ねる**。ここで年を
+      // 決めないのが正しい ── 抽出器は年を作らない。
+      {slug: 'イオンカード__202512', formatId: 'aeon_x8',
+        yearDigits: 2, year: 25, monthDay: {month: 10, day: 11}, billingMonth: 11},
+      {slug: 'コジマビックカメラカード__meisai202509', formatId: 'aeon_x9',
+        yearDigits: 2, year: 25, monthDay: {month: 7, day: 12}, billingMonth: 8}
+    ];
+    cases.forEach((item) => {
+      const fixture = loadFixture(item.slug);
+      const format = gas.call('pinFormatVersion', [item.formatId, 1]);
+      const sheet = {name: fixture.sheets[0].name, rows: fixture.sheets[0].rows};
+      const parsed = plain(gas.call('parseFile', [sheet, format,
+        {customerId: 'C001', fileId: 'f1', fileNameOriginal: fixture.fileName}]));
+      assert.ok(parsed.txs.length > 0, item.slug + ': 明細が1件も取れていない');
+      const first = parsed.txs[0];
+      assert.ok(first.purpose, item.slug + ': 使用用途が取れていない');
+      if (item.hashKey) {
+        assert.equal(first.dateHashKey, item.hashKey, item.slug + ': ' + JSON.stringify(first));
+      } else {
+        assert.equal(first.dateYearDigits, item.yearDigits, item.slug);
+        assert.equal(first.dateYear, item.year,
+          item.slug + ': シリアルとして読むと数千年先になる ' + JSON.stringify(first));
+        assert.deepEqual(first.dateMonthDay, item.monthDay, item.slug);
+        // 年補完の基準（締め年月）がファイル名から取れること。
+        const billing = plain(gas.call('extractBillingYearMonth',
+          [sheet, fixture.fileName, format]));
+        assert.equal(billing.status, 'RESOLVED', item.slug + ': ' + JSON.stringify(billing));
+        assert.equal(billing.month, item.billingMonth, item.slug);
+      }
+    });
   });
 
   test('the column profile needs a majority of sampled rows, not a lucky one', () => {

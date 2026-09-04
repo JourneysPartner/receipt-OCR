@@ -91,6 +91,39 @@ function parserColumnIndex_(column) {
  *   day:?number, rawText:string}}
  *   yearDigits: 4＝年あり、2＝2桁年（yearは2桁の生値）、0＝年なし
  */
+/**
+ * 数値セルの`YYYYMMDD`／`YYMMDD`（実装差戻し#32）。
+ *
+ * **日付として成立する並びに限る。** `202512`のような年月は月が範囲外に
+ * なるので採らず、シリアルとしての解釈へ落ちる。`YYYYMMDD`は実在日で
+ * あることまで確かめる ── 確かめないと、`20250230`のような入力を静かに
+ * 受け入れて誤った日付を出納帳へ書くことになる。
+ *
+ * @return {?Object} 日付として読めなければ null（呼出側がシリアルへ落とす）
+ */
+function interpretCompactNumericDate_(value, rawText) {
+  if (!Number.isInteger(value) || value <= 0) return null;
+  var text = String(value);
+  if (text.length === 8) {
+    var year = Number(text.slice(0, 4));
+    var month = Number(text.slice(4, 6));
+    var day = Number(text.slice(6, 8));
+    if (year < 1900 || month < 1 || month > 12 || day < 1 || day > 31) return null;
+    if (!dateExists(year, month, day)) return null;
+    return {ok: true, yearDigits: 4, year: year, month: month, day: day, rawText: rawText};
+  }
+  if (text.length === 6) {
+    // 2桁年は実在検査をしない（世紀が決まらないため）。年補完（5.1）が
+    // 世紀を決めた後に、通常の経路で実在性が検査される。
+    var shortMonth = Number(text.slice(2, 4));
+    var shortDay = Number(text.slice(4, 6));
+    if (shortMonth < 1 || shortMonth > 12 || shortDay < 1 || shortDay > 31) return null;
+    return {ok: true, yearDigits: 2, year: Number(text.slice(0, 2)),
+      month: shortMonth, day: shortDay, rawText: rawText};
+  }
+  return null;
+}
+
 function interpretDateExpression(value) {
   var rawText = value === null || value === undefined ?
     '' : cellToCanonicalString(value);
@@ -103,10 +136,15 @@ function interpretDateExpression(value) {
     return {ok: true, yearDigits: 4, year: parts[0], month: parts[1],
       day: parts[2], rawText: rawText};
   }
-  // 数値型はExcelシリアル値（表#7）。YYYYMMDD等の数値は列挙外であり、
-  // シリアルとして解釈した結果が異常なら規則6bのサニティ検査が捕捉する。
+  // 数値型はExcelシリアル値（表#7）。ただし**数値の`YYYYMMDD`・`YYMMDD`は
+  // シリアルではない**（実装差戻し#32）── UCS・コメリはYYYYMMDD、イオン系は
+  // YYMMDDを数値セルで持ち、シリアルとして読むと数千年先の日付になる。
+  // 衝突しない：実在する日付のシリアルは4〜5桁（2026年で約46000）であり、
+  // 6桁は2657年以降、8桁は21万年以降にしか現れない。
   if (typeof value === 'number') {
     if (!isFinite(value)) return failed;
+    var compact = interpretCompactNumericDate_(value, rawText);
+    if (compact) return compact;
     var serialParts = toTokyoDateString_(excelSerialToDate(value)).split('-').map(Number);
     return {ok: true, yearDigits: 4, year: serialParts[0], month: serialParts[1],
       day: serialParts[2], rawText: rawText};

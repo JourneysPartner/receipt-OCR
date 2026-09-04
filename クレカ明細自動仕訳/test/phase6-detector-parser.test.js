@@ -217,6 +217,20 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(serial.yearDigits, 4);
     assert.equal(serial.year, 2026);
 
+    // ただし数値の`YYYYMMDD`・`YYMMDD`はシリアルではない（実装差戻し#32）。
+    // UCS・コメリはYYYYMMDD、イオン系はYYMMDDを**数値セル**で持つ。
+    // 実在日付のシリアルは4〜5桁（2026年で約46000）なので衝突しない。
+    const ymd8 = interpret(20251031);
+    assert.deepEqual([ymd8.ok, ymd8.yearDigits, ymd8.year, ymd8.month, ymd8.day],
+      [true, 4, 2025, 10, 31]);
+    const ymd6 = interpret(251011);
+    assert.deepEqual([ymd6.ok, ymd6.yearDigits, ymd6.year, ymd6.month, ymd6.day],
+      [true, 2, 25, 10, 11], '2桁年は年補完へ委ねる');
+
+    // 日付に見えない数値はシリアルのまま扱う（月が範囲外・実在しない日）。
+    assert.equal(interpret(202512).year, 2454, '202512は年月であって日付ではない');
+    assert.equal(interpret(20250230).year, 57343, '2月30日は実在しないのでシリアル扱い');
+
     // 解釈しないもの：混在区切り・実在しない日付・月日順不明
     assert.equal(interpret('2026-01/05').ok, false);
     assert.equal(interpret('2025/02/30').ok, false);

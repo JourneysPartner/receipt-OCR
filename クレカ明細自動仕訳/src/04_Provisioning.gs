@@ -439,7 +439,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
       rules: [{id: 'deposit', target: 'cell', column: 'B', match: 'contains', value: 'ご入金'},
               {id: 'total', target: 'row', match: 'contains', value: '合計', onlyWhenDateEmpty: true}]},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'cell', row: 1, column: 3}, {kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'cell', row: 1, column: 3}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: {sources: [
       {id: 'fn_ym', kind: 'fileName', pattern: '(20\\d{2})[-_年/]?(0[1-9]|1[0-2])月?',
         groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
@@ -460,7 +460,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
       rules: [{id: 'deposit', target: 'cell', column: 'B', match: 'contains', value: 'ご入金'},
               {id: 'total', target: 'row', match: 'contains', value: '合計', onlyWhenDateEmpty: true}]},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'cell', row: 1, column: 3}, {kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'cell', row: 1, column: 3}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: {sources: [
       {id: 'fn_ym', kind: 'fileName', pattern: '(20\\d{2})[-_年/]?(0[1-9]|1[0-2])月?',
         groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
@@ -481,7 +481,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     exclusionRule: {excludeRowRanges: [{from: 1, to: 6}], excludeWhenDateAndAmountEmpty: true,
       rules: [{id: 'total', target: 'row', match: 'contains', value: '合計', onlyWhenDateEmpty: true}]},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: {sources: [
       {id: 'hdr_pay', kind: 'scanRows', scanMaxRows: 6,
         pattern: '今回のお支払日\\s+(20\\d{2})-(0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])',
@@ -504,7 +504,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
       rules: [{id: 'tax_total', target: 'row', match: 'contains', value: '消費税課税対象合計',
         onlyWhenDateEmpty: true}]},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -521,7 +521,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     ]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -540,7 +540,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     ]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -557,7 +557,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     ]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -574,7 +574,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     ]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -592,7 +592,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true,
       rules: [{id: 'deposit', target: 'row', match: 'contains', value: 'ご入金', onlyWhenDateEmpty: true}]},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: {sources: [
       {id: 'fn_enavi', kind: 'fileName', pattern: 'enavi(20\\d{2})(0[1-9]|1[0-2])',
         groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
@@ -613,7 +613,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true,
       rules: [{id: 'deposit', target: 'row', match: 'contains', value: 'ご入金', onlyWhenDateEmpty: true}]},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -641,7 +641,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     countTotalRule: {count: {source: 'none'},
       total: {source: 'labeledRow', labelColumn: 'B', valueColumn: 'F', label: '【合計】', tolerance: 0},
       totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'cell', row: 1, column: 2}, {kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'cell', row: 1, column: 2}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: {sources: [
       {id: 'hdr_pay', kind: 'scanRows', scanMaxRows: 4,
         pattern: 'お支払日\\s+(20\\d{2})-(0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])',
@@ -662,7 +662,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     ]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -679,15 +679,96 @@ var ANNOTATED_FORMAT_SPECS_ = [
     ]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
-    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
     billingRule: null
+  },
+  {
+    formatId: 'ucs_family', formatName: 'UCS系Excel（11列・数値YYYYMMDD・用途K）',
+    fileTypes: ['xlsx'],
+    keywordRule: {allOf: [{maxRow: 1,
+      keywords: ['支払方法コード', '支払方法', '利用日', '加盟店名称', '利用金額'], minMatch: 5}]},
+    headerRow: 1, dataStartRow: 2,
+    dateColumn: 'C', merchantColumn: 'D', amountColumn: 'E', purposeColumn: 'K',
+    columnProfile: {minColumns: 11, maxColumns: 11, sampleRows: 5, columns: [
+      {index: 2, type: 'date', required: true},
+      {index: 3, type: 'text', required: true},
+      {index: 4, type: 'number', required: true}
+    ]},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
+    countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    billingRule: {sources: [
+      {id: 'fn_ym', kind: 'fileName', pattern: '(20\\d{2})[-_]?(0[1-9]|1[0-2])',
+        groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
+    ]}
+  },
+  {
+    formatId: 'komeri_family', formatName: 'コメリ系Excel（11列・数値YYYYMMDD・用途K）',
+    fileTypes: ['xlsx'],
+    keywordRule: {allOf: [{maxRow: 1,
+      keywords: ['ご利用日', 'ご利用先など', 'ご利用金額', '今回のご請求額', '使用用途'], minMatch: 5}]},
+    headerRow: 1, dataStartRow: 2,
+    dateColumn: 'A', merchantColumn: 'C', amountColumn: 'D', purposeColumn: 'K',
+    columnProfile: {minColumns: 11, maxColumns: 11, sampleRows: 5, columns: [
+      {index: 0, type: 'date', required: true},
+      {index: 2, type: 'text', required: true},
+      {index: 3, type: 'number', required: true}
+    ]},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
+    countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    billingRule: {sources: [
+      {id: 'fn_ym', kind: 'fileName', pattern: '(20\\d{2})[-_](0?[1-9]|1[0-2])',
+        groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
+    ]}
+  },
+  {
+    formatId: 'aeon_x8', formatName: 'イオン系Excel（8列・数値YYMMDD・用途H）',
+    fileTypes: ['xlsx'],
+    // 明細ブロックは8行目から始まる（1〜7行目は請求額・口座の見出し）。
+    keywordRule: {allOf: [{maxRow: 8,
+      keywords: ['ご利用カード', 'ご利用明細', 'ご利用日', 'ご利用先', 'ご利用金額'], minMatch: 5}]},
+    headerRow: 8, dataStartRow: 9,
+    dateColumn: 'A', merchantColumn: 'C', amountColumn: 'G', purposeColumn: 'H',
+    columnProfile: {minColumns: 8, maxColumns: 8, sampleRows: 5, columns: [
+      {index: 0, type: 'date', required: true},
+      {index: 2, type: 'text', required: true},
+      {index: 6, type: 'number', required: true}
+    ]},
+    cardNameRule: {sources: [{kind: 'cell', row: 1, column: 2}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    exclusionRule: {excludeRowRanges: [{from: 1, to: 8}], excludeWhenDateAndAmountEmpty: true, rules: []},
+    countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    billingRule: {sources: [
+      {id: 'fn_ym', kind: 'fileName', pattern: '(20\\d{2})[-_]?(0[1-9]|1[0-2])',
+        groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
+    ]}
+  },
+  {
+    formatId: 'aeon_x9', formatName: 'イオン系Excel（9列・数値YYMMDD・用途I）',
+    fileTypes: ['xlsx'],
+    keywordRule: {allOf: [{maxRow: 8,
+      keywords: ['ご利用カード', 'ご利用明細', 'ご利用日', 'ご利用先', 'ご利用金額'], minMatch: 5}]},
+    headerRow: 8, dataStartRow: 9,
+    dateColumn: 'A', merchantColumn: 'C', amountColumn: 'G', purposeColumn: 'I',
+    columnProfile: {minColumns: 9, maxColumns: 9, sampleRows: 5, columns: [
+      {index: 0, type: 'date', required: true},
+      {index: 2, type: 'text', required: true},
+      {index: 6, type: 'number', required: true}
+    ]},
+    cardNameRule: {sources: [{kind: 'cell', row: 1, column: 2}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    exclusionRule: {excludeRowRanges: [{from: 1, to: 8}], excludeWhenDateAndAmountEmpty: true, rules: []},
+    countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    billingRule: {sources: [
+      {id: 'fn_ym', kind: 'fileName', pattern: '(20\\d{2})[-_]?(0[1-9]|1[0-2])',
+        groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
+    ]}
   }
 ];
 
 /** 既存形式へカード名の取得元（AI列）を後付けする。 */
 var CARD_NAME_RULE_PATCHES_ = Object.freeze({
-  smbc_family_csv: {sources: [{kind: 'cell', row: 1, column: 3}, {kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
-  smbc_family_x8: {sources: [{kind: 'cell', row: 1, column: 3}, {kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]}
+  smbc_family_csv: {sources: [{kind: 'cell', row: 1, column: 3}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+  smbc_family_x8: {sources: [{kind: 'cell', row: 1, column: 3}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]}
 });
 
 /**
@@ -742,7 +823,11 @@ function installCardNameRules() {
     if (!current || !current.valid) {
       return {formatId: formatId, skipped: current ? 'INVALID_DEFINITION' : 'NOT_INSTALLED'};
     }
-    if (current.cardNameRule) return {formatId: formatId, skipped: 'ALREADY_SET'};
+    // 内容が同じときだけ飛ばす。「取得元があるか」で判定すると、誤った
+    // 取得元が入った版を直せない（実機に`\s`を落とした版が入った）。
+    if (JSON.stringify(current.cardNameRule) === JSON.stringify(wanted[formatId])) {
+      return {formatId: formatId, skipped: 'ALREADY_SET'};
+    }
     return installCardFormat({
       formatId: formatId, formatName: current.formatName, fileTypes: current.fileTypes,
       keywordRule: current.keywordRule, headerRow: current.headerRow,
