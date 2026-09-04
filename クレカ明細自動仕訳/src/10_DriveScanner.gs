@@ -58,20 +58,23 @@ function driveListPage_(query, pageToken) {
  */
 function listFilesRecursively_(folderId) {
   var visited = Object.create(null);
-  var queue = [String(folderId)];
+  // **ルート直下のファイルにはフォルダ名を与えない**（実装差戻し#33）。
+  // そこにあるのは顧客フォルダの名前であってカード名ではない。カード名は
+  // 「顧客がカードごとに作った下位フォルダ」の名前にだけ現れる。
+  var queue = [{id: String(folderId), name: null}];
   var found = [];
   while (queue.length) {
     var current = queue.shift();
-    if (visited[current]) continue;
-    visited[current] = true;
+    if (visited[current.id]) continue;
+    visited[current.id] = true;
     var pageToken = null;
     do {
-      var page = driveListPage_("'" + current + "' in parents and trashed = false", pageToken);
+      var page = driveListPage_("'" + current.id + "' in parents and trashed = false", pageToken);
       (page.files || []).forEach(function(file) {
         if (file.mimeType === DRIVE_FOLDER_MIME_) {
-          queue.push(String(file.id));
+          queue.push({id: String(file.id), name: String(file.name || '')});
         } else {
-          found.push(file);
+          found.push(Object.assign({}, file, {folderName: current.name}));
         }
       });
       pageToken = page.nextPageToken || null;
@@ -141,6 +144,8 @@ function scanUnprocessedFiles(customerId, options) {
         modifiedTime: file.modifiedTime || null,
         size: file.size === undefined ? null : Number(file.size),
         revisionId: file.headRevisionId || null,
+        // カード名の取得元（2.1.2.7）。ルート直下なら null。
+        folderName: file.folderName || null,
         registered: stateByFileId[String(file.id)] !== undefined
       };
     });

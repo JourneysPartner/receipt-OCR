@@ -14,7 +14,9 @@ module.exports = ({test, assert, gas}) => {
   const sheetHeader = (n, label) => { const r = blank(n); r[0] = label; return r; };
   const AE = JSON.stringify({row: 1, cells: [{column: 2, text: '利用日', match: 'exact'}]});
 
-  const CARD_NAME_RULE = {sources: [{kind: 'cell', row: 1, column: 3}]};
+  // フォルダ名が最優先、無ければ1行目のカード名セル。実運用では顧客が
+  // カードごとにフォルダを作るので、前者がほぼ常に効く。
+  const CARD_NAME_RULE = {sources: [{kind: 'folderName'}, {kind: 'cell', row: 1, column: 3}]};
 
   function customerRow(options) {
     const row = blank(40);
@@ -92,7 +94,13 @@ module.exports = ({test, assert, gas}) => {
         createdTime: '2026-08-01T00:00:00Z', contentType: 'text/csv'
       });
     });
-    gas.stubs.createFolder('folder1', {fileIds: ['fileA', 'fileB']});
+    if (options && options.useCardFolders) {
+      gas.stubs.createFolder('cardA', {name: 'ＡＭＥＸ・ビジネス・ゴールド', fileIds: ['fileA']});
+      gas.stubs.createFolder('cardB', {name: 'ＪＣＢカードＷ（家族）', fileIds: ['fileB']});
+      gas.stubs.createFolder('folder1', {subFolderIds: ['cardA', 'cardB']});
+    } else {
+      gas.stubs.createFolder('folder1', {fileIds: ['fileA', 'fileB']});
+    }
     return plain(gas.call('runImport', [{}]));
   }
 
@@ -114,18 +122,30 @@ module.exports = ({test, assert, gas}) => {
       ['〇〇　様', '4980-00**', 'ＡＭＥＸゴールド', ''],
       ['2025/12/16', '基本カード年会費', 75000, '年会費']
     ]};
-    assert.equal(gas.call('resolveCardName', [sheet, '202512.xlsx', {cardNameRule: CARD_NAME_RULE}]),
+    const ctx = {fileName: '202512.xlsx', folderName: null};
+    assert.equal(gas.call('resolveCardName', [sheet, {cardNameRule: CARD_NAME_RULE}, ctx]),
       'ＡＭＥＸゴールド');
 
     // シート名からも取れる（「カード名＋4桁以上の数字」に限る）。
     const byName = {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]};
-    assert.equal(gas.call('resolveCardName', [sheet, 'x.xlsx', {cardNameRule: byName}]),
-      'アメックス');
+    assert.equal(gas.call('resolveCardName', [sheet, {cardNameRule: byName}, ctx]), 'アメックス');
     // 汎用のシート名は取らない ── 別カードの明細に同じ名前が付くため。
     assert.equal(gas.call('resolveCardName',
-      [{name: '25年12月請求分', rows: []}, 'x.xlsx', {cardNameRule: byName}]), null);
+      [{name: '25年12月請求分', rows: []}, {cardNameRule: byName}, ctx]), null);
     // 取得元が無い形式は null。呼出側は通常どおり要確認へ回す。
-    assert.equal(gas.call('resolveCardName', [sheet, 'x.xlsx', {}]), null);
+    assert.equal(gas.call('resolveCardName', [sheet, {}, ctx]), null);
+
+    // フォルダ名が最も確実 ── 汎用のシート名しか無いファイルでもカードが
+    // 分かる。順序どおり、フォルダ名があればそれを採る。
+    const withFolder = {sources: [{kind: 'folderName'},
+      {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]};
+    assert.equal(gas.call('resolveCardName', [{name: '25年12月請求分', rows: []},
+      {cardNameRule: withFolder}, {fileName: 'x.xlsx', folderName: 'ＡＭＥＸゴールド'}]),
+      'ＡＭＥＸゴールド');
+    // ルート直下（フォルダ名なし）では次の取得元へ落ちる。顧客フォルダの
+    // 名前をカード名にしてはならない。
+    assert.equal(gas.call('resolveCardName', [sheet,
+      {cardNameRule: withFolder}, {fileName: 'x.xlsx', folderName: null}]), 'アメックス');
   });
 
   test('the annual fee review asks about the card, not the generic merchant', () => {
@@ -158,6 +178,17 @@ module.exports = ({test, assert, gas}) => {
       .filter((r) => r[4] === '基本カード年会費');
     assert.equal(rows.length, 2);
     assert.deepEqual(rows.map((r) => r[2]).sort(), ['AMEX', 'JCB']);
+  });
+
+  test('a card folder names the card, even when the file itself does not', () => {
+    // 顧客はカードごとにフォルダを作って明細を入れる。ファイルの中身に
+    // カード名が無い形式（AMEX系・JAL系・楽天系）でも、これでカードが分かる。
+    setup({cardNamePartnerPurposes: ['年会費'], useCardFolders: true});
+    const merchants = plain(gas.call('openReviews', [{}]))
+      .map((review) => review.merchantOriginal).sort();
+    assert.deepEqual(merchants,
+      ['ローソン', 'ローソン', 'ＡＭＥＸ・ビジネス・ゴールド', 'ＪＣＢカードＷ（家族）'].sort(),
+      JSON.stringify(merchants));
   });
 
   test('without the purpose list the merchant is used, as before', () => {

@@ -559,7 +559,7 @@ function createGasStubs() {
       const folder = folders.get(match[1]);
       if (!folder || folder.readAllowed === false) throw new Error(`Folder not found or denied: ${match[1]}`);
       const items = []
-        .concat((folder.subFolderIds || []).map((id) => ({id, name: id, mimeType: 'application/vnd.google-apps.folder'})))
+        .concat((folder.subFolderIds || []).map((id) => ({id, name: (folders.get(String(id)) || {}).name || id, mimeType: 'application/vnd.google-apps.folder'})))
         .concat(folder.fileIds.map((id) => files.get(id)).filter(Boolean).map(driveFileMeta));
       const pageSize = Number(request.pageSize || 100);
       const start = Number(request.pageToken || 0);
@@ -596,7 +596,7 @@ function createGasStubs() {
   const control = {
     createSpreadsheet(id, options = {}) { const ss = new MemorySpreadsheet(id, options); spreadsheets.set(String(id), ss); if (!activeSpreadsheetId) activeSpreadsheetId = String(id); return ss; },
     createFile(id, options = {}) { const file = new MemoryDriveFile(id, options, Utilities); files.set(String(id), file); return file; },
-    createFolder(id, options = {}) { const folder = {id: String(id), fileIds: (options.fileIds || []).slice(), subFolderIds: (options.subFolderIds || []).slice(), readAllowed: options.readAllowed !== false}; folders.set(String(id), folder); return folder; },
+    createFolder(id, options = {}) { const folder = {id: String(id), name: options.name || String(id), fileIds: (options.fileIds || []).slice(), subFolderIds: (options.subFolderIds || []).slice(), readAllowed: options.readAllowed !== false}; folders.set(String(id), folder); return folder; },
     setDriveListFailures(failures) { driveListFailures = failures.slice(); },
     addProtection(spreadsheetId, sheetName, options = {}) {
       const sheet = openSpreadsheet(spreadsheetId).getSheetByName(sheetName);

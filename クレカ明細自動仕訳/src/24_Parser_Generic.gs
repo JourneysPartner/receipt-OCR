@@ -614,12 +614,15 @@ function parseFile(sheet, cardFormat, context) {
  * 辞書を作ると全カードの年会費が1つの取引先に潰れる。カード単位で
  * 決めるには、そのファイルがどのカードのものかを知る必要がある。
  *
- * 取得元は形式ごとに違う（1行目のセル・シート名・ファイル名）。取れない
- * 形式もある ── その場合は`null`を返し、呼出側は通常どおり要確認へ回す。
+ * 取得元は形式ごとに違う（フォルダ名・1行目のセル・シート名・ファイル名）。
+ * **フォルダ名が最も確実**である ── 顧客はカードごとにフォルダを作って
+ * 明細を入れるため、汎用のシート名（「25年12月請求分」）しか持たない形式でも
+ * カードが分かる。取れない形式もある ── その場合は`null`を返し、呼出側は
+ * 通常どおり要確認へ回す。
  *
  * @return {?string} 取れたカード名（正準化済み）。取れなければ null
  */
-function resolveCardName(sheet, fileName, cardFormat) {
+function resolveCardName(sheet, cardFormat, context) {
   var rule = cardFormat && cardFormat.cardNameRule;
   var sources = rule && Array.isArray(rule.sources) ? rule.sources : [];
   var rows = sheet && Array.isArray(sheet.rows) ? sheet.rows : [];
@@ -633,8 +636,10 @@ function resolveCardName(sheet, fileName, cardFormat) {
       text = cell === null || cell === undefined ? '' : cellToCanonicalString(cell);
     } else if (source.kind === 'sheetName') {
       text = String((sheet && sheet.name) || '');
+    } else if (source.kind === 'folderName') {
+      text = String((context && context.folderName) || '');
     } else if (source.kind === 'fileName') {
-      text = String(fileName || '');
+      text = String((context && context.fileName) || '');
     } else {
       continue;
     }
