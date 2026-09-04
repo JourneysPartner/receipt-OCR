@@ -96,6 +96,7 @@ module.exports = ({test, assert, gas}) => {
     return plain(gas.call('runImport', [{}]));
   }
 
+  const normalizeMerchantFor = (v) => String(v === null || v === undefined ? '' : v);
   const destSheet = () => gas.stubs.getSpreadsheet('dest1').getSheetByName('入力用シート');
   const decisionSheet = () =>
     gas.stubs.getSpreadsheet('master').getSheetByName('取引先判断（運用）');
@@ -165,6 +166,22 @@ module.exports = ({test, assert, gas}) => {
       .map((review) => review.merchantOriginal);
     assert.deepEqual(merchants.filter((m) => m === '基本カード年会費').length, 2,
       'AN列が空なら従来どおり店名で照合する');
+  });
+
+  test('a generic annual-fee merchant is never learned as an exact rule', () => {
+    // カード名が取れない形式では店名のまま要確認になる。そこで採用した
+    // 取引先を学習すると、**他カードの年会費まで同じ取引先へ自動採用**
+    // される ── この機能が避けようとしているものそのもの。
+    setup({cardNamePartnerPurposes: ['年会費'], withCardNameRule: false});
+    gas.call('opsListPartnerReviews', []);
+    decisionSheet().getRange(decisionRowFor('基本カード年会費'), 6).setValue('AMEX');
+
+    const summary = plain(gas.call('opsApplyPartnerDecisions', []));
+    assert.equal(summary.errors, 0, JSON.stringify(summary.results));
+    assert.ok(summary.results[0].notLearned, '学習しなかったことを報告すること');
+    const learned = plain(gas.call('readDictionary_', [false]))
+      .filter((rule) => normalizeMerchantFor(rule.original) === '基本カード年会費');
+    assert.deepEqual(learned, []);
   });
 
   test('a format with no card-name rule falls back to the merchant', () => {
