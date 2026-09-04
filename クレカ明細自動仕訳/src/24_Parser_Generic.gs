@@ -567,3 +567,46 @@ function parseFile(sheet, cardFormat, context) {
     stop: stop
   };
 }
+
+/**
+ * 明細からカード名を取り出す（2.1.2.7）。
+ *
+ * 年会費のように**明細の店名にカード会社が現れない**取引がある。
+ * 「基本カード年会費」という文字列はどのカードでも同じなので、店名で
+ * 辞書を作ると全カードの年会費が1つの取引先に潰れる。カード単位で
+ * 決めるには、そのファイルがどのカードのものかを知る必要がある。
+ *
+ * 取得元は形式ごとに違う（1行目のセル・シート名・ファイル名）。取れない
+ * 形式もある ── その場合は`null`を返し、呼出側は通常どおり要確認へ回す。
+ *
+ * @return {?string} 取れたカード名（正準化済み）。取れなければ null
+ */
+function resolveCardName(sheet, fileName, cardFormat) {
+  var rule = cardFormat && cardFormat.cardNameRule;
+  var sources = rule && Array.isArray(rule.sources) ? rule.sources : [];
+  var rows = sheet && Array.isArray(sheet.rows) ? sheet.rows : [];
+
+  for (var index = 0; index < sources.length; index += 1) {
+    var source = sources[index];
+    var text = '';
+    if (source.kind === 'cell') {
+      var row = rows[Number(source.row) - 1];
+      var cell = Array.isArray(row) ? row[Number(source.column) - 1] : null;
+      text = cell === null || cell === undefined ? '' : cellToCanonicalString(cell);
+    } else if (source.kind === 'sheetName') {
+      text = String((sheet && sheet.name) || '');
+    } else if (source.kind === 'fileName') {
+      text = String(fileName || '');
+    } else {
+      continue;
+    }
+    if (source.pattern) {
+      var matched = new RegExp(source.pattern).exec(text);
+      if (!matched) continue;
+      text = matched[Number(source.group) >= 1 ? Number(source.group) : 1] || '';
+    }
+    text = String(text === null || text === undefined ? '' : text).trim();
+    if (text) return text;
+  }
+  return null;
+}

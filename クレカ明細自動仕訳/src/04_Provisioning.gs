@@ -19,7 +19,7 @@
  * 実装時に確定する。
  */
 var MASTER_SHEET_SPECS_ = Object.freeze([
-  {key: 'CUSTOMER_MASTER', width: 39, label: '顧客ID'},
+  {key: 'CUSTOMER_MASTER', width: 40, label: '顧客ID'},
   {key: 'COMMON_PARTNER_LIST', width: 6, label: '取引先ID'},
   {key: 'COMMON_PARTNER_DICT', width: 18, label: '辞書ID'},
   {key: 'CUSTOMER_PARTNER_DICT', width: 18, label: '辞書ID'},
@@ -226,6 +226,8 @@ function registerTestCustomer(config) {
     JSON.stringify(config.rowScanExcludedColumns) : '';
   row[38] = config.partnerExemptPurposes && config.partnerExemptPurposes.length ?
     JSON.stringify(config.partnerExemptPurposes) : '';
+  row[39] = config.cardNamePartnerPurposes && config.cardNamePartnerPurposes.length ?
+    JSON.stringify(config.cardNamePartnerPurposes) : '';
 
   var masterSheet = requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.CUSTOMER_MASTER);
   ensureSheetWidth_(masterSheet, CUSTOMER_MASTER_COLUMNS_);
@@ -311,6 +313,7 @@ function installCardFormat(spec) {
   row[31] = spec.foreignAmountColumn || '';
   row[32] = spec.exchangeRateColumn || '';
   row[33] = now;
+  row[34] = spec.cardNameRule ? JSON.stringify(spec.cardNameRule) : '';
 
   var validated = formatRowFromValues_(row, null);
   if (!validated.valid) {
@@ -436,6 +439,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
       rules: [{id: 'deposit', target: 'cell', column: 'B', match: 'contains', value: 'ご入金'},
               {id: 'total', target: 'row', match: 'contains', value: '合計', onlyWhenDateEmpty: true}]},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    cardNameRule: {sources: [{kind: 'cell', row: 1, column: 3}, {kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
     billingRule: {sources: [
       {id: 'fn_ym', kind: 'fileName', pattern: '(20\\d{2})[-_年/]?(0[1-9]|1[0-2])月?',
         groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
@@ -456,6 +460,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
       rules: [{id: 'deposit', target: 'cell', column: 'B', match: 'contains', value: 'ご入金'},
               {id: 'total', target: 'row', match: 'contains', value: '合計', onlyWhenDateEmpty: true}]},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    cardNameRule: {sources: [{kind: 'cell', row: 1, column: 3}, {kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
     billingRule: {sources: [
       {id: 'fn_ym', kind: 'fileName', pattern: '(20\\d{2})[-_年/]?(0[1-9]|1[0-2])月?',
         groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
@@ -476,6 +481,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     exclusionRule: {excludeRowRanges: [{from: 1, to: 6}], excludeWhenDateAndAmountEmpty: true,
       rules: [{id: 'total', target: 'row', match: 'contains', value: '合計', onlyWhenDateEmpty: true}]},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
     billingRule: {sources: [
       {id: 'hdr_pay', kind: 'scanRows', scanMaxRows: 6,
         pattern: '今回のお支払日\\s+(20\\d{2})-(0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])',
@@ -498,6 +504,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
       rules: [{id: 'tax_total', target: 'row', match: 'contains', value: '消費税課税対象合計',
         onlyWhenDateEmpty: true}]},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -514,6 +521,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     ]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -532,6 +540,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     ]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -548,6 +557,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     ]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -564,6 +574,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     ]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -581,6 +592,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true,
       rules: [{id: 'deposit', target: 'row', match: 'contains', value: 'ご入金', onlyWhenDateEmpty: true}]},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
     billingRule: {sources: [
       {id: 'fn_enavi', kind: 'fileName', pattern: 'enavi(20\\d{2})(0[1-9]|1[0-2])',
         groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
@@ -601,6 +613,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true,
       rules: [{id: 'deposit', target: 'row', match: 'contains', value: 'ご入金', onlyWhenDateEmpty: true}]},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -628,6 +641,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     countTotalRule: {count: {source: 'none'},
       total: {source: 'labeledRow', labelColumn: 'B', valueColumn: 'F', label: '【合計】', tolerance: 0},
       totalScope: 'all'},
+    cardNameRule: {sources: [{kind: 'cell', row: 1, column: 2}, {kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
     billingRule: {sources: [
       {id: 'hdr_pay', kind: 'scanRows', scanMaxRows: 4,
         pattern: 'お支払日\\s+(20\\d{2})-(0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])',
@@ -648,6 +662,7 @@ var ANNOTATED_FORMAT_SPECS_ = [
     ]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
     billingRule: null
   },
   {
@@ -664,9 +679,16 @@ var ANNOTATED_FORMAT_SPECS_ = [
     ]},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    cardNameRule: {sources: [{kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
     billingRule: null
   }
 ];
+
+/** 既存形式へカード名の取得元（AI列）を後付けする。 */
+var CARD_NAME_RULE_PATCHES_ = Object.freeze({
+  smbc_family_csv: {sources: [{kind: 'cell', row: 1, column: 3}, {kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]},
+  smbc_family_x8: {sources: [{kind: 'cell', row: 1, column: 3}, {kind: 'sheetName', pattern: '^([^0-9]+?)\s*[0-9]{4,}'}]}
+});
 
 /**
  * 第1弾の形式群を一括投入する。冪等 ── 既にある(形式ID, 版)は書かない。
@@ -694,6 +716,45 @@ function installAnnotatedFormatsBatch1() {
     });
     results.push(installCardFormat(upgraded));
   }
+  Logger.log(JSON.stringify(results, null, 2));
+  return results;
+}
+
+/**
+ * 既に投入済みの形式へ、カード名の取得元（AI列）を後付けする。
+ *
+ * 年会費のように**明細の店名にカード会社が現れない**取引の取引先を、
+ * カード名から決めるために要る（実装差戻し#31）。既存の版は
+ * `installCardFormat`が(形式ID, 版)で冪等なので上書きされない ── 取得元を
+ * 持たない版だけを置き換える（旧版は`有効=FALSE`で履歴として残る）。
+ */
+function installCardNameRules() {
+  var wanted = Object.create(null);
+  ANNOTATED_FORMAT_SPECS_.forEach(function(spec) {
+    if (spec.cardNameRule) wanted[spec.formatId] = spec.cardNameRule;
+  });
+  Object.keys(CARD_NAME_RULE_PATCHES_).forEach(function(formatId) {
+    wanted[formatId] = CARD_NAME_RULE_PATCHES_[formatId];
+  });
+
+  var results = Object.keys(wanted).map(function(formatId) {
+    var current = loadFormatDefinitions({formatId: formatId, enabled: true})[0];
+    if (!current || !current.valid) {
+      return {formatId: formatId, skipped: current ? 'INVALID_DEFINITION' : 'NOT_INSTALLED'};
+    }
+    if (current.cardNameRule) return {formatId: formatId, skipped: 'ALREADY_SET'};
+    return installCardFormat({
+      formatId: formatId, formatName: current.formatName, fileTypes: current.fileTypes,
+      keywordRule: current.keywordRule, headerRow: current.headerRow,
+      dataStartRow: current.dataStartRow, dateColumn: current.dateColumn,
+      merchantColumn: current.merchantColumn, amountColumn: current.amountColumn,
+      purposeColumn: current.purposeColumn, columnProfile: current.columnProfile,
+      exclusionRule: current.exclusionRule, countTotalRule: current.countTotalRule,
+      billingRule: current.billingRule, parserKind: current.parserKind,
+      cardNameRule: wanted[formatId],
+      revisionReason: 'ENHANCEMENT', supersede: true
+    });
+  });
   Logger.log(JSON.stringify(results, null, 2));
   return results;
 }

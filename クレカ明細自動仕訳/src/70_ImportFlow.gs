@@ -95,9 +95,10 @@ function runPreValidationBlock(input) {
       fullTxId: String(tx.fullTxId || tx.transactionId),
       displayTxId: tx.displayTxId || null,
       sourceRow: tx.sourceRow,
-      merchantOriginal: tx.merchantOriginal || tx.originalMerchant || null,
+      merchantOriginal: tx.partnerMatchKey || tx.merchantOriginal || tx.originalMerchant || null,
       merchantNormalized: tx.merchantNormalized ||
-        normalizeMerchant(String(tx.merchantOriginal || tx.originalMerchant || '')),
+        normalizeMerchant(String(tx.partnerMatchKey || tx.merchantOriginal ||
+          tx.originalMerchant || '')),
       // Q列の候補は2.1.7の形（partnerName / dictId / matchMethod）へ写す。
       // `ruleId`のまま流すと、採用操作が`dictId`を取れず辞書学習と結び付かない。
       candidates: (match.candidates || []).map(function(candidate) {
