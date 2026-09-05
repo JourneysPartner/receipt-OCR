@@ -21,6 +21,7 @@ class GasHarness {
       DriveApp: stubs.DriveApp,
       Drive: stubs.Drive,
       Logger: stubs.Logger,
+      ScriptApp: stubs.ScriptApp,
       LockService: stubs.LockService,
       Session: stubs.Session,
       PropertiesService: stubs.PropertiesService,
