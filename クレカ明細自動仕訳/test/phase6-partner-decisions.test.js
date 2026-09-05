@@ -314,6 +314,28 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(open[0].merchantOriginal, 'キュウテン');
   });
 
+  test('（不要）in F column resolves reviews without a partner and learns nothing', () => {
+    setup();
+    gas.call('opsListPartnerReviews', []);
+    const row = decisionRowFor('キュウテン');
+    decisionSheet().getRange(row, 6).setValue('（不要）');
+
+    const summary = plain(gas.call('opsApplyPartnerDecisions', []));
+    assert.equal(summary.errors, 0, JSON.stringify(summary.results));
+    assert.equal(summary.resolvedReviews, 1);
+    const result = summary.results.find((r) => r.merchant === 'キュウテン');
+    assert.equal(result.noPartner, true);
+    assert.equal(result.resolved, 1);
+    assert.ok(String(decisionSheet().getRange(row, 7).getValue()).indexOf('取引先不要') >= 0,
+      '状態欄に「取引先不要」と出ること');
+
+    const rules = plain(gas.call('readDictionary_', [false]))
+      .filter((rule) => rule.original === 'キュウテン');
+    assert.equal(rules.length, 0, '辞書学習なし');
+
+    assert.equal(destSheet().getRange(4, 3).getValue(), '', '転記先の取引先は空欄');
+  });
+
   test('applying twice does not re-resolve or duplicate the dictionary rule', () => {
     setup();
     gas.call('opsListPartnerReviews', []);
