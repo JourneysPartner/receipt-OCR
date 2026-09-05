@@ -407,6 +407,7 @@ function createGasStubs() {
   const Utilities = createUtilitiesStub();
   const spreadsheets = new Map(); const files = new Map(); const folders = new Map(); const properties = new Map();
   let sheetsBatchGetFailures = [];
+  const triggers = [];
   const apiCallCounts = {batchGet: 0, cellsRead: 0, batchUpdate: 0, rangesWritten: 0, cellsWritten: 0};
   const scriptLock = new MemoryScriptLock(); let activeSpreadsheetId = null; let activeUserEmail = 'tester@example.com';
   const openSpreadsheet = (id) => { const value = spreadsheets.get(String(id)); if (!value) throw new Error(`Spreadsheet not found: ${id}`); return value; };
@@ -593,7 +594,40 @@ function createGasStubs() {
     deleteAllProperties() { properties.clear(); return scriptProperties; }
   };
   const PropertiesService = {getScriptProperties: () => scriptProperties};
+
+  // 時間主導トリガー。実GASの ScriptApp のうち、取込の定期実行に使う分だけ。
+  const ScriptApp = {
+    newTrigger(handler) {
+      return {
+        timeBased() {
+          return {
+            everyMinutes(minutes) {
+              return {
+                create() {
+                  const trigger = {
+                    id: 'TRIG_' + (triggers.length + 1),
+                    handler: String(handler),
+                    minutes: Number(minutes),
+                    getUniqueId() { return this.id; },
+                    getHandlerFunction() { return this.handler; }
+                  };
+                  triggers.push(trigger);
+                  return trigger;
+                }
+              };
+            }
+          };
+        }
+      };
+    },
+    getProjectTriggers: () => triggers.slice(),
+    deleteTrigger(trigger) {
+      const index = triggers.findIndex((item) => item.id === (trigger && trigger.id));
+      if (index >= 0) triggers.splice(index, 1);
+    }
+  };
   const control = {
+    getTriggers: () => triggers.slice(),
     createSpreadsheet(id, options = {}) { const ss = new MemorySpreadsheet(id, options); spreadsheets.set(String(id), ss); if (!activeSpreadsheetId) activeSpreadsheetId = String(id); return ss; },
     createFile(id, options = {}) { const file = new MemoryDriveFile(id, options, Utilities); files.set(String(id), file); return file; },
     createFolder(id, options = {}) { const folder = {id: String(id), name: options.name || String(id), fileIds: (options.fileIds || []).slice(), subFolderIds: (options.subFolderIds || []).slice(), readAllowed: options.readAllowed !== false}; folders.set(String(id), folder); return folder; },
@@ -623,9 +657,9 @@ function createGasStubs() {
     roundTrips() { return {rangeReads: roundTrips.rangeReads, rangeWrites: roundTrips.rangeWrites, flushes: roundTrips.flushes}; },
     resetRoundTrips() { roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; },
     resetApiCallCounts() { apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; },
-    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptLock.reset(); sheetsBatchGetFailures = []; activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; driveListFailures = []; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; }
+    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptLock.reset(); sheetsBatchGetFailures = []; activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; driveListFailures = []; triggers.length = 0; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; }
   };
-  return {Utilities, SpreadsheetApp, Sheets, DriveApp, Drive, Logger, LockService, Session, PropertiesService, control};
+  return {Utilities, SpreadsheetApp, Sheets, DriveApp, Drive, Logger, LockService, Session, PropertiesService, ScriptApp, control};
 }
 
 module.exports = {createUtilitiesStub, createGasStubs, columnToNumber, numberToColumn, parseA1};
