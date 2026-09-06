@@ -144,7 +144,13 @@ function forceReleaseLease(leaseId, reason, actor) {
     // 課すと強制終了で残った行を誰も解放できない。
     if (lease.purpose !== LEASE_PURPOSE.WRITE_ONLY) {
       var process = getProcessLogRecord_(lease.fileId);
-      if (!process || [FILE_STATE.VALIDATING, FILE_STATE.WRITING].indexOf(String(process.values[16])) < 0) throw new StateTransitionError('Lease state is not force-releasable');
+      // 処理ログ行が**無い**リースは孤児である。`acquireLease`は
+      // `createOrUpdateProcessLog`より先に走るので、その隙に実行が落ちると
+      // この形で残る。守るべき取込が存在しないうえ、心拍が閾値を超えている
+      // 以上（生きた実行は6分で終わる）持ち主も居ない。ここで拒むと
+      // そのファイルは永久に取り込めない。
+      // 行が**在って**状態が食い違う場合は従来どおり調査対象として拒む。
+      if (process && [FILE_STATE.VALIDATING, FILE_STATE.WRITING].indexOf(String(process.values[16])) < 0) throw new StateTransitionError('Lease state is not force-releasable');
     }
     var customer = getCustomerById(lease.customerId);
     if (customer.admins.indexOf(String(actor).toLowerCase()) < 0) throw new AuthorizationError('System administrator role is required');
@@ -173,7 +179,9 @@ function detectStalledLeases() {
     if (!isFinite(elapsed) || elapsed <= SETTINGS.HEARTBEAT_TIMEOUT_SECONDS) return false;
     if (lease.purpose === LEASE_PURPOSE.WRITE_ONLY) return true;
     var process = getProcessLogRecord_(lease.fileId);
-    var state = process ? String(process.values[16]) : '';
-    return [FILE_STATE.VALIDATING, FILE_STATE.WRITING].indexOf(state) >= 0;
+    // 処理ログ行を持たないリースは孤児。見逃すと、そのファイルが止まって
+    // いる理由に運用者が辿り着けない（実機で28時間気づけなかった）。
+    if (!process) return true;
+    return [FILE_STATE.VALIDATING, FILE_STATE.WRITING].indexOf(String(process.values[16])) >= 0;
   });
 }
