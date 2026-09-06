@@ -205,6 +205,45 @@ module.exports = ({test, assert, gas}) => {
       [{formatId: 'komeri_family', enabled: true}])).length, 1);
   });
 
+  test('patching one format field never drops the others', () => {
+    // 後付けの差し替えは、現行定義を読んで項目を組み直して書く。組み直しの
+    // 一覧に新しい項目を足し忘れると、**別の修正を当てた瞬間に黙って消える**。
+    // 実際 installCardNameRules は予備金額列とセクション見出しを持たない
+    // まま書かれていた。項目が増えるたびに3つの関数を直す作りは必ず破れる。
+    setup();
+    const patchers = ['installCardNameRules', 'installBillingRules',
+      'installAmountFallbackColumns', 'installSectionBreakRules'];
+    // 全部の項目を載せた定義を1つ作る。
+    gas.call('installCardFormat', [{
+      formatId: 'aeon_x8', formatName: 'イオン系（検査用）', fileTypes: ['xlsx'],
+      keywordRule: {allOf: [{maxRow: 8, keywords: ['ご利用日'], minMatch: 1}]},
+      headerRow: 8, dataStartRow: 9,
+      dateColumn: 'A', merchantColumn: 'C', amountColumn: 'G', purposeColumn: 'H',
+      amountFallbackColumn: 'F',
+      sectionBreakRule: {patterns: ['分割・ボーナス払い明細']},
+      cardNameRule: {sources: [{kind: 'folderName'}]},
+      billingRule: {sources: [{id: 'fn', kind: 'fileName', pattern: '(20\\d{2})[-_](1[0-2]|0?[1-9])',
+        groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}]},
+      exclusionRule: {excludeRowRanges: [{from: 1, to: 8}],
+        excludeWhenDateAndAmountEmpty: true, rules: []},
+      parserKind: 'generic', revisionReason: 'DEFECT_FIX', supersede: true
+    }]);
+
+    patchers.forEach((name) => {
+      gas.call(name, []);
+      const after = plain(gas.call('loadFormatDefinitions',
+        [{formatId: 'aeon_x8', enabled: true}]))[0];
+      assert.equal(after.valid, true, name + ' の後で定義が壊れた');
+      assert.ok(after.cardNameRule, name + ' がカード名規則を消した');
+      assert.ok(after.billingRule, name + ' が請求年月規則を消した');
+      assert.equal(after.amountFallbackColumn, 'F', name + ' が予備金額列を消した');
+      assert.deepEqual(after.sectionBreakRule, {patterns: ['分割・ボーナス払い明細']},
+        name + ' がセクション見出し規則を消した');
+      assert.ok(after.exclusionRule, name + ' が除外規則を消した');
+      assert.equal(after.purposeColumn, 'H', name + ' が用途列を消した');
+    });
+  });
+
   test('parse smoke: JAL serial dates become real dates and purposes come from I', () => {
     setup();
     const family = FAMILIES.filter((f) => f.expect === 'jal_family')[0];

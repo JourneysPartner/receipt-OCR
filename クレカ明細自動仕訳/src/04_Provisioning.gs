@@ -24,7 +24,7 @@ var MASTER_SHEET_SPECS_ = Object.freeze([
   {key: 'COMMON_PARTNER_DICT', width: 18, label: '辞書ID'},
   {key: 'CUSTOMER_PARTNER_DICT', width: 18, label: '辞書ID'},
   {key: 'PURPOSE_COMPLEMENT', width: 10, label: 'ルールID'},        // ※
-  {key: 'CARD_FORMAT_MASTER', width: 36, label: '形式ID'},          // ※
+  {key: 'CARD_FORMAT_MASTER', width: 37, label: '形式ID'},          // ※
   {key: 'PROCESS_LOG', width: 40, label: '実行ID'},
   {key: 'TRANSACTION_LOG', width: 45, label: '取引ID完全値'},
   {key: 'AUDIT_LOG', width: 15, label: '監査ID'},
@@ -315,6 +315,7 @@ function installCardFormat(spec) {
   row[33] = now;
   row[34] = spec.cardNameRule ? JSON.stringify(spec.cardNameRule) : '';
   row[35] = spec.amountFallbackColumn || '';
+  row[36] = spec.sectionBreakRule ? JSON.stringify(spec.sectionBreakRule) : '';
 
   var validated = formatRowFromValues_(row, null);
   if (!validated.valid) {
@@ -751,6 +752,9 @@ var ANNOTATED_FORMAT_SPECS_ = [
       {index: 6, type: 'number', required: true}
     ]},
     cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'cell', row: 1, column: 2}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    // 末尾に列構成の違う「分割・ボーナス払い明細」が続く。見出しで打ち切る
+    // （下に取引がある月は5.3 M11が取り残しとして知らせる）。
+    sectionBreakRule: {patterns: ['分割・ボーナス払い明細']},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 8}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
     billingRule: {sources: [
@@ -771,6 +775,9 @@ var ANNOTATED_FORMAT_SPECS_ = [
       {index: 6, type: 'number', required: true}
     ]},
     cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'cell', row: 1, column: 2}, {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    // 末尾に列構成の違う「分割・ボーナス払い明細」が続く。見出しで打ち切る
+    // （下に取引がある月は5.3 M11が取り残しとして知らせる）。
+    sectionBreakRule: {patterns: ['分割・ボーナス払い明細']},
     exclusionRule: {excludeRowRanges: [{from: 1, to: 8}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
     billingRule: {sources: [
@@ -817,117 +824,100 @@ function installAnnotatedFormatsBatch1() {
 }
 
 /**
- * 既に投入済みの形式へ、カード名の取得元（AI列）を後付けする。
+ * 投入済みの形式の1項目だけを差し替える（旧版は`有効=FALSE`で履歴に残る）。
  *
- * 年会費のように**明細の店名にカード会社が現れない**取引の取引先を、
- * カード名から決めるために要る（実装差戻し#31）。既存の版は
- * `installCardFormat`が(形式ID, 版)で冪等なので上書きされない ── 取得元を
- * 持たない版だけを置き換える（旧版は`有効=FALSE`で履歴として残る）。
+ * 差し替えは現行定義を読んで組み直して書く。**組み直しの一覧に項目を
+ * 足し忘れると、別の修正を当てた瞬間にその項目が黙って消える** ── 実際
+ * `installCardNameRules`は予備金額列を持たないまま書かれており、実行すれば
+ * それを消した。項目が増えるたびに複数の関数を直す作りは必ず破れるので、
+ * 引き継ぎはここ1か所に集める。
+ *
+ * @param {string} field 差し替える項目名（形式定義のプロパティ名）
+ * @param {!Object<string,*>} wanted 形式ID → その項目のあるべき値
+ * @param {string} reason 改訂理由
  */
-function installCardNameRules() {
-  var wanted = Object.create(null);
-  ANNOTATED_FORMAT_SPECS_.forEach(function(spec) {
-    if (spec.cardNameRule) wanted[spec.formatId] = spec.cardNameRule;
-  });
-  Object.keys(CARD_NAME_RULE_PATCHES_).forEach(function(formatId) {
-    wanted[formatId] = CARD_NAME_RULE_PATCHES_[formatId];
-  });
-
+function patchFormatField_(field, wanted, reason) {
   var results = Object.keys(wanted).map(function(formatId) {
     var current = loadFormatDefinitions({formatId: formatId, enabled: true})[0];
     if (!current || !current.valid) {
       return {formatId: formatId, skipped: current ? 'INVALID_DEFINITION' : 'NOT_INSTALLED'};
     }
-    // 内容が同じときだけ飛ばす。「取得元があるか」で判定すると、誤った
-    // 取得元が入った版を直せない（実機に`\s`を落とした版が入った）。
-    if (JSON.stringify(current.cardNameRule) === JSON.stringify(wanted[formatId])) {
+    // 内容が同じときだけ飛ばす。「項目があるか」で判定すると、誤った値が
+    // 入った版を直せない（実機に`\s`を落とした版が入った）。
+    if (JSON.stringify(current[field] || null) === JSON.stringify(wanted[formatId] || null)) {
       return {formatId: formatId, skipped: 'ALREADY_SET'};
     }
-    return installCardFormat({
+    var next = {
       formatId: formatId, formatName: current.formatName, fileTypes: current.fileTypes,
       keywordRule: current.keywordRule, headerRow: current.headerRow,
       dataStartRow: current.dataStartRow, dateColumn: current.dateColumn,
       merchantColumn: current.merchantColumn, amountColumn: current.amountColumn,
-      purposeColumn: current.purposeColumn, columnProfile: current.columnProfile,
-      exclusionRule: current.exclusionRule, countTotalRule: current.countTotalRule,
-      billingRule: current.billingRule, parserKind: current.parserKind,
-      cardNameRule: wanted[formatId],
-      revisionReason: 'ENHANCEMENT', supersede: true
-    });
+      purposeColumn: current.purposeColumn, dateAltColumn: current.dateAltColumn,
+      columnProfile: current.columnProfile, exclusionRule: current.exclusionRule,
+      countTotalRule: current.countTotalRule, billingRule: current.billingRule,
+      cardNameRule: current.cardNameRule,
+      amountFallbackColumn: current.amountFallbackColumn,
+      sectionBreakRule: current.sectionBreakRule,
+      parserKind: current.parserKind,
+      revisionReason: reason, supersede: true
+    };
+    next[field] = wanted[formatId];
+    return installCardFormat(next);
   });
   Logger.log(JSON.stringify(results, null, 2));
   return results;
+}
+
+/** 形式定義群から、ある項目を持つものを 形式ID → 値 に集める。 */
+function wantedFormatField_(field, extras) {
+  var wanted = Object.create(null);
+  ANNOTATED_FORMAT_SPECS_.forEach(function(spec) {
+    if (spec[field]) wanted[spec.formatId] = spec[field];
+  });
+  Object.keys(extras || {}).forEach(function(formatId) {
+    wanted[formatId] = extras[formatId];
+  });
+  return wanted;
 }
 
 /**
- * 既に投入済みの形式へ、請求年月の規則（AQ列）を後付けで差し替える。
- *
- * 規則の誤りはコードを直しただけでは実機に届かない ── 投入済みの定義が
- * 正だからである。月の枝順を誤った版が実機に入り、`komericard_2025_11`の
- * 締め年月が2024-12と読まれて明細8件が範囲外になった（2026-09-06）。
- * `installCardNameRules`と同じく、内容が違う版だけを置き換える。
+ * カード名の取得元（AI列）を後付けする。年会費のように**明細の店名に
+ * カード会社が現れない**取引の取引先を、カード名から決めるために要る
+ * （実装差戻し#31）。
  */
-function installAmountFallbackColumns() {
-  // ANNOTATED_FORMAT_SPECS_ の外で定義される形式（csv・x8）も同じ手当てが要る。
-  var wanted = Object.create(null);
-  ANNOTATED_FORMAT_SPECS_.forEach(function(spec) {
-    if (spec.amountFallbackColumn) wanted[spec.formatId] = spec.amountFallbackColumn;
-  });
-  wanted.smbc_family_csv = 'F';
-  wanted.smbc_family_x8 = 'F';
-
-  var results = Object.keys(wanted).map(function(formatId) {
-    var spec = {formatId: formatId, amountFallbackColumn: wanted[formatId]};
-    var current = loadFormatDefinitions({formatId: formatId, enabled: true})[0];
-    if (!current || !current.valid) {
-      return {formatId: formatId, skipped: current ? 'INVALID_DEFINITION' : 'NOT_INSTALLED'};
-    }
-    if (String(current.amountFallbackColumn || '') === String(spec.amountFallbackColumn)) {
-      return {formatId: formatId, skipped: 'ALREADY_SET'};
-    }
-    return installCardFormat({
-      formatId: formatId, formatName: current.formatName, fileTypes: current.fileTypes,
-      keywordRule: current.keywordRule, headerRow: current.headerRow,
-      dataStartRow: current.dataStartRow, dateColumn: current.dateColumn,
-      merchantColumn: current.merchantColumn, amountColumn: current.amountColumn,
-      purposeColumn: current.purposeColumn, columnProfile: current.columnProfile,
-      exclusionRule: current.exclusionRule, countTotalRule: current.countTotalRule,
-      billingRule: current.billingRule, cardNameRule: current.cardNameRule,
-      parserKind: current.parserKind,
-      amountFallbackColumn: spec.amountFallbackColumn,
-      revisionReason: 'ENHANCEMENT', supersede: true
-    });
-  });
-  Logger.log(JSON.stringify(results, null, 2));
-  return results;
+function installCardNameRules() {
+  return patchFormatField_('cardNameRule',
+    wantedFormatField_('cardNameRule', CARD_NAME_RULE_PATCHES_), 'ENHANCEMENT');
 }
 
+/**
+ * 予備の金額列（AJ列）を後付けする。「ご利用金額」が空欄でも「当月支払額」に
+ * 金額がある行（キャッシュバック等）を人手なしで通すために要る。
+ */
+function installAmountFallbackColumns() {
+  return patchFormatField_('amountFallbackColumn',
+    wantedFormatField_('amountFallbackColumn',
+      {smbc_family_csv: 'F', smbc_family_x8: 'F'}), 'ENHANCEMENT');
+}
+
+/**
+ * セクション見出しの規則（AK列）を後付けする。イオン系の末尾にある
+ * 「分割・ボーナス払い明細」を取引行として読ませないために要る。
+ */
+function installSectionBreakRules() {
+  return patchFormatField_('sectionBreakRule',
+    wantedFormatField_('sectionBreakRule', null), 'DEFECT_FIX');
+}
+
+/**
+ * 請求年月の規則（AQ列）を後付けで差し替える。規則の誤りはコードを直した
+ * だけでは実機に届かない ── 投入済みの定義が正だからである。月の枝順を
+ * 誤った版が実機に入り、`komericard_2025_11`の締め年月が2024-12と読まれて
+ * 明細8件が範囲外になった（2026-09-06）。
+ */
 function installBillingRules() {
-  var results = ANNOTATED_FORMAT_SPECS_.filter(function(spec) {
-    return !!spec.billingRule;
-  }).map(function(spec) {
-    var formatId = spec.formatId;
-    var current = loadFormatDefinitions({formatId: formatId, enabled: true})[0];
-    if (!current || !current.valid) {
-      return {formatId: formatId, skipped: current ? 'INVALID_DEFINITION' : 'NOT_INSTALLED'};
-    }
-    if (JSON.stringify(current.billingRule) === JSON.stringify(spec.billingRule)) {
-      return {formatId: formatId, skipped: 'ALREADY_SET'};
-    }
-    return installCardFormat({
-      formatId: formatId, formatName: current.formatName, fileTypes: current.fileTypes,
-      keywordRule: current.keywordRule, headerRow: current.headerRow,
-      dataStartRow: current.dataStartRow, dateColumn: current.dateColumn,
-      merchantColumn: current.merchantColumn, amountColumn: current.amountColumn,
-      purposeColumn: current.purposeColumn, columnProfile: current.columnProfile,
-      exclusionRule: current.exclusionRule, countTotalRule: current.countTotalRule,
-      cardNameRule: current.cardNameRule, parserKind: current.parserKind,
-      billingRule: spec.billingRule,
-      revisionReason: 'DEFECT_FIX', supersede: true
-    });
-  });
-  Logger.log(JSON.stringify(results, null, 2));
-  return results;
+  return patchFormatField_('billingRule',
+    wantedFormatField_('billingRule', null), 'DEFECT_FIX');
 }
 
 /**
