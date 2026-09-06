@@ -24,7 +24,7 @@ var MASTER_SHEET_SPECS_ = Object.freeze([
   {key: 'COMMON_PARTNER_DICT', width: 18, label: '辞書ID'},
   {key: 'CUSTOMER_PARTNER_DICT', width: 18, label: '辞書ID'},
   {key: 'PURPOSE_COMPLEMENT', width: 10, label: 'ルールID'},        // ※
-  {key: 'CARD_FORMAT_MASTER', width: 35, label: '形式ID'},          // ※
+  {key: 'CARD_FORMAT_MASTER', width: 36, label: '形式ID'},          // ※
   {key: 'PROCESS_LOG', width: 40, label: '実行ID'},
   {key: 'TRANSACTION_LOG', width: 45, label: '取引ID完全値'},
   {key: 'AUDIT_LOG', width: 15, label: '監査ID'},
@@ -314,6 +314,7 @@ function installCardFormat(spec) {
   row[32] = spec.exchangeRateColumn || '';
   row[33] = now;
   row[34] = spec.cardNameRule ? JSON.stringify(spec.cardNameRule) : '';
+  row[35] = spec.amountFallbackColumn || '';
 
   var validated = formatRowFromValues_(row, null);
   if (!validated.valid) {
@@ -342,6 +343,9 @@ function installSmbcCsvFormat() {
     headerRow: 1,
     dataStartRow: 2,
     dateColumn: 'A', merchantColumn: 'B', amountColumn: 'C', purposeColumn: 'G',
+    // C(ご利用金額)が空欄の行はF(当月支払額)を見る。キャッシュバックの
+    // 行はカード明細側の仕様でCが空になる。
+    amountFallbackColumn: 'F',
     columnProfile: {minColumns: 7, sampleRows: 5, columns: [
       {index: 0, type: 'date', required: true},
       {index: 1, type: 'text', required: true},
@@ -384,6 +388,9 @@ function installSmbcXlsxFormat() {
     headerRow: 1,
     dataStartRow: 2,
     dateColumn: 'A', merchantColumn: 'B', amountColumn: 'C', purposeColumn: 'H',
+    // C(ご利用金額)が空欄の行はF(当月支払額)を見る。キャッシュバックの
+    // 行はカード明細側の仕様でCが空になる。
+    amountFallbackColumn: 'F',
     columnProfile: {minColumns: 8, sampleRows: 5, columns: [
       {index: 0, type: 'date', required: true},
       {index: 1, type: 'text', required: true},
@@ -430,6 +437,9 @@ var ANNOTATED_FORMAT_SPECS_ = [
     keywordRule: {allOf: [{maxRow: 1, keywords: ['様'], minMatch: 1}]},
     headerRow: 1, dataStartRow: 2,
     dateColumn: 'A', merchantColumn: 'B', amountColumn: 'C', purposeColumn: 'G',
+    // C(ご利用金額)が空欄の行はF(当月支払額)を見る。キャッシュバックの
+    // 行はカード明細側の仕様でCが空になる。
+    amountFallbackColumn: 'F',
     columnProfile: {minColumns: 7, maxColumns: 7, sampleRows: 5, columns: [
       {index: 0, type: 'date', required: true},
       {index: 1, type: 'text', required: true},
@@ -451,6 +461,9 @@ var ANNOTATED_FORMAT_SPECS_ = [
     keywordRule: {allOf: [{maxRow: 1, keywords: ['様'], minMatch: 1}]},
     headerRow: 1, dataStartRow: 2,
     dateColumn: 'A', merchantColumn: 'B', amountColumn: 'C', purposeColumn: 'I',
+    // C(ご利用金額)が空欄の行はF(当月支払額)を見る。キャッシュバックの
+    // 行はカード明細側の仕様でCが空になる。
+    amountFallbackColumn: 'F',
     columnProfile: {minColumns: 9, maxColumns: 9, sampleRows: 5, columns: [
       {index: 0, type: 'date', required: true},
       {index: 1, type: 'text', required: true},

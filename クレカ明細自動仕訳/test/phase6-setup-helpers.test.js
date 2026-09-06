@@ -92,6 +92,36 @@ module.exports = ({test, assert, gas}) => {
       'an invalid definition must be refused at the door, not stored');
   });
 
+  test('the amount fallback column survives a round trip through the format master', () => {
+    // 形式定義に足した項目は、マスターへ書いて読み直しても残らなければ
+    // 実機では効かない（列を増やし忘れると黙って消える）。
+    setup();
+    gas.call('installCardFormat', [{
+      formatId: 'fallback_probe', formatName: '予備列の確認', fileTypes: ['xlsx'],
+      keywordRule: {allOf: [{maxRow: 1, keywords: ['利用日'], minMatch: 1}]},
+      headerRow: 1, dataStartRow: 2,
+      dateColumn: 'A', merchantColumn: 'B', amountColumn: 'C', purposeColumn: 'H',
+      amountFallbackColumn: 'F',
+      parserKind: 'generic', version: 1, revisionReason: 'NEW'
+    }]);
+    const loaded = plain(gas.call('loadFormatDefinitions',
+      [{formatId: 'fallback_probe', enabled: true}]))[0];
+    assert.equal(loaded.valid, true, JSON.stringify(loaded.problems));
+    assert.equal(loaded.amountFallbackColumn, 'F');
+
+    // 宣言しない形式では null のままで、既定の挙動を変えない。
+    gas.call('installCardFormat', [{
+      formatId: 'no_fallback_probe', formatName: '予備列なし', fileTypes: ['xlsx'],
+      keywordRule: {allOf: [{maxRow: 1, keywords: ['利用日'], minMatch: 1}]},
+      headerRow: 1, dataStartRow: 2,
+      dateColumn: 'A', merchantColumn: 'B', amountColumn: 'C', purposeColumn: 'H',
+      parserKind: 'generic', version: 1, revisionReason: 'NEW'
+    }]);
+    const plainFormat = plain(gas.call('loadFormatDefinitions',
+      [{formatId: 'no_fallback_probe', enabled: true}]))[0];
+    assert.equal(plainFormat.amountFallbackColumn, null);
+  });
+
   test('runImport reloads Script Properties itself (a fresh GAS execution has default SETTINGS)', () => {
     setup();
     gas.call('registerTestCustomer', [CUSTOMER]);

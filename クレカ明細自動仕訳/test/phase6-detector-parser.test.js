@@ -445,6 +445,44 @@ module.exports = ({test, assert, gas}) => {
     assert.deepEqual(yearless.dateMonthDay, {month: 12, day: 28});
   });
 
+  test('4.13: a blank usage amount falls back to the payment column', () => {
+    // 三井住友系の明細は、キャッシュバック（ポイント交換）の行だけ
+    // 「ご利用金額」(C)を空欄にし、金額を「当月支払額」(F)にだけ書く
+    // ── カード明細側の仕様であって記入漏れではない。C列だけを見ると
+    // 金額不明の要確認になり、担当者が毎回同じ転記をさせられる。
+    gas.stubs.reset();
+    const format = Object.assign({}, smbcFormat, {amountFallbackColumn: 'F'});
+    const sheet = {name: '明細', rows: [
+      ['〇〇様', '4980-00**-****-****', '三井住友ゴールド', '', '', '', ''],
+      ['2025/12/16', 'ローソン', 10800, 1, 1, 10800, '仕入れ'],
+      ['2025/02/15', 'キャッシュバック（ポイント交換）', '', '', '', -21029, '雑収益']
+    ]};
+    const result = plain(gas.call('parseFile', [sheet, format,
+      {customerId: 'C001', fileId: 'f1', fileNameOriginal: '25年3月請求.xlsx'}]));
+
+    assert.equal(result.txs.length, 2);
+    assert.equal(result.txs[1].merchantOriginal, 'キャッシュバック（ポイント交換）');
+    assert.equal(result.txs[1].amountBillingJpy, -21029, '符号ごとF列の値を採る');
+    assert.equal(result.txs[1].purpose, '雑収益');
+
+    // C列に値がある行はF列を見ない。分割払いはC(利用額)とF(当月支払額)が
+    // 食い違うので、無条件にF列を優先すると請求額を取り違える。
+    assert.equal(result.txs[0].amountBillingJpy, 10800);
+  });
+
+  test('4.13: without the fallback declared, a blank amount stays unreadable', () => {
+    // 予備列は形式ごとの宣言であって、既定の挙動を変えない。
+    gas.stubs.reset();
+    const sheet = {name: '明細', rows: [
+      ['〇〇様', '4980-00**-****-****', '三井住友ゴールド', '', '', '', ''],
+      ['2025/02/15', 'キャッシュバック（ポイント交換）', '', '', '', -21029, '雑収益']
+    ]};
+    const result = plain(gas.call('parseFile', [sheet, smbcFormat,
+      {customerId: 'C001', fileId: 'f1', fileNameOriginal: 'x.xlsx'}]));
+    assert.equal(result.txs.length, 1);
+    assert.equal(result.txs[0].amountBillingJpy, null, '宣言が無ければ従来どおり金額不明');
+  });
+
   test('INV-12: CSV physical row numbers come from recordStarts, not record index', () => {
     gas.stubs.reset();
     const sheet = Object.assign({}, smbcSheet, {recordStarts: [1, 3, 5, 6]});
