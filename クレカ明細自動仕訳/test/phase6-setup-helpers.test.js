@@ -224,6 +224,33 @@ module.exports = ({test, assert, gas}) => {
       'a completed file must never be rewound');
   });
 
+  test('opsRetryCustomerFixFiles rewinds only CUSTOMER_FIX_REQUIRED files', () => {
+    // 区分1の差し戻しは、元ファイルの直しだけでなく**こちら側の形式定義の
+    // 欠陥**でも起きる（イオン系の第2セクションを取引行として読んでいた）。
+    // 直したあと、そのファイルを取込へ戻す手段が要る。
+    setup();
+    gas.call('registerTestCustomer', [CUSTOMER]);
+    const customer = gas.call('getCustomerById', ['C001']);
+    gas.call('createOrUpdateProcessLog', ['RUN_C', customer, {
+      id: 'fixMe', name: 'aeon.xlsx', binaryHash: 'b'.repeat(64),
+      state: 'CUSTOMER_FIX_REQUIRED'
+    }]);
+    gas.call('createOrUpdateProcessLog', ['RUN_C', customer, {
+      id: 'doneAlready', name: 'done.xlsx', binaryHash: 'b'.repeat(64), state: 'COMPLETED'
+    }]);
+    gas.call('createOrUpdateProcessLog', ['RUN_C', customer, {
+      id: 'waiting', name: 'wait.xlsx', binaryHash: 'b'.repeat(64), state: 'REVIEW_WAIT'
+    }]);
+
+    const retried = plain(gas.call('opsRetryCustomerFixFiles', []));
+    assert.deepEqual(retried, ['fixMe']);
+    assert.equal(String(gas.call('getProcessLogRecord_', ['fixMe']).values[16]), 'DISCOVERED');
+    assert.equal(String(gas.call('getProcessLogRecord_', ['doneAlready']).values[16]),
+      'COMPLETED', '完了したファイルを巻き戻さない');
+    assert.equal(String(gas.call('getProcessLogRecord_', ['waiting']).values[16]),
+      'REVIEW_WAIT', '人が判断中のファイルを巻き戻さない');
+  });
+
   test('the real setup sequence carries a SMBC-family CSV end to end', () => {
     setup();
     gas.call('registerTestCustomer', [CUSTOMER]);
