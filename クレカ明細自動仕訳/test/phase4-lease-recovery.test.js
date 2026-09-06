@@ -99,6 +99,50 @@ module.exports = ({test, assert, gas}) => {
       'releasing a live lease would let two writers into the same file');
   });
 
+  test('INV-20: the force-release threshold outlives a GAS execution but not by much', () => {
+    // 閾値の根拠を数で残す。Apps Scriptの実行は6分で強制終了されるので、
+    // 心拍がそれ＋心拍間隔ぶん途絶えたリースは**確実に死んでいる**。
+    // 30分にしていた頃は、切れるたびに30分ファイルが動かせず、しかも
+    // 再試行で心拍が更新されて時計が振り出しに戻った（2026-09-06）。
+    const threshold = gas.evaluate('SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS');
+    const detection = gas.evaluate('SETTINGS.HEARTBEAT_TIMEOUT_SECONDS');
+    const maxExecution = 6 * 60;
+
+    // 実行がリースを取った直後に心拍が止まっても、その実行は6分後には
+    // 必ず終わっている。閾値が実行上限を余裕をもって超えていれば、
+    // 閾値を過ぎたリースの持ち主は**死んでいると断定できる**。
+    assert.ok(threshold >= maxExecution * 1.5,
+      '実行上限(' + maxExecution + 's)の1.5倍以上あること。余裕が無いと、' +
+      '生きている実行のリースを奪って同じファイルに書き手が2人入る');
+    // 検出（心拍超過）が先、解放が後。逆転すると解放できるのに気づけない。
+    assert.ok(threshold > detection,
+      '検出閾値(' + detection + 's)より後であること');
+    assert.ok(threshold <= 15 * 60,
+      '長すぎると、切れた実行のたびにその時間だけファイルが動かせない');
+  });
+
+  test('INV-20: a lease stranded just past the threshold is releasable', () => {
+    setup('REVIEW_WAIT');
+    const leaseId = gas.call('acquireLease',
+      ['C001', 'file1', 'RUN_1', 'reviewer@example.com', 'WRITE_ONLY']);
+    const threshold = gas.evaluate('SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS');
+    const sheet = gas.stubs.getSpreadsheet('master').getSheetByName('処理リース');
+
+    // 閾値ちょうど手前では拒む。
+    sheet.getRange(2, 8).setValue(
+      new Date(Date.now() - (threshold - 30) * 1000).toISOString());
+    assert.throws(() => gas.call('forceReleaseLease',
+      [leaseId, 'x', 'admin@example.com']),
+      (error) => error && /threshold/.test(String(error.message)));
+
+    // 閾値を超えたら解放できる。
+    sheet.getRange(2, 8).setValue(
+      new Date(Date.now() - (threshold + 30) * 1000).toISOString());
+    gas.call('forceReleaseLease', [leaseId, 'stranded', 'admin@example.com']);
+    assert.ok(gas.call('acquireLease',
+      ['C001', 'file1', 'RUN_1', 'reviewer@example.com', 'WRITE_ONLY']));
+  });
+
   test('INV-20: force release still requires the administrator role', () => {
     setup('REVIEW_WAIT');
     const leaseId = strandLease('WRITE_ONLY');
