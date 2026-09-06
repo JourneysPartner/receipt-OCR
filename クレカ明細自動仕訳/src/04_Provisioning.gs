@@ -867,6 +867,35 @@ function installCardNameRules() {
  * 締め年月が2024-12と読まれて明細8件が範囲外になった（2026-09-06）。
  * `installCardNameRules`と同じく、内容が違う版だけを置き換える。
  */
+function installAmountFallbackColumns() {
+  var results = ANNOTATED_FORMAT_SPECS_.filter(function(spec) {
+    return !!spec.amountFallbackColumn;
+  }).map(function(spec) {
+    var formatId = spec.formatId;
+    var current = loadFormatDefinitions({formatId: formatId, enabled: true})[0];
+    if (!current || !current.valid) {
+      return {formatId: formatId, skipped: current ? 'INVALID_DEFINITION' : 'NOT_INSTALLED'};
+    }
+    if (String(current.amountFallbackColumn || '') === String(spec.amountFallbackColumn)) {
+      return {formatId: formatId, skipped: 'ALREADY_SET'};
+    }
+    return installCardFormat({
+      formatId: formatId, formatName: current.formatName, fileTypes: current.fileTypes,
+      keywordRule: current.keywordRule, headerRow: current.headerRow,
+      dataStartRow: current.dataStartRow, dateColumn: current.dateColumn,
+      merchantColumn: current.merchantColumn, amountColumn: current.amountColumn,
+      purposeColumn: current.purposeColumn, columnProfile: current.columnProfile,
+      exclusionRule: current.exclusionRule, countTotalRule: current.countTotalRule,
+      billingRule: current.billingRule, cardNameRule: current.cardNameRule,
+      parserKind: current.parserKind,
+      amountFallbackColumn: spec.amountFallbackColumn,
+      revisionReason: 'ENHANCEMENT', supersede: true
+    });
+  });
+  Logger.log(JSON.stringify(results, null, 2));
+  return results;
+}
+
 function installBillingRules() {
   var results = ANNOTATED_FORMAT_SPECS_.filter(function(spec) {
     return !!spec.billingRule;
