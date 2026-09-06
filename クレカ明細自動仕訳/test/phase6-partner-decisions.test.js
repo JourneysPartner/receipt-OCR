@@ -336,6 +336,33 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(destSheet().getRange(4, 3).getValue(), '', '転記先の取引先は空欄');
   });
 
+  test('opsReprocessFile takes a review-blocked file back for a fresh import', () => {
+    // 形式定義の欠陥で立った要確認は、人が判断すべきものではない ── 定義を
+    // 直したら取り込み直すのが正しい。実機ではコメリの請求年月規則の誤りで
+    // DATE要確認が8件立ち、ファイルが REVIEW_WAIT から動けなくなった
+    // （2026-09-06）。ファイル単位の要確認が無いので既存の取消経路に乗らない。
+    setup();
+    assert.equal(plain(gas.call('openReviews', [{}])).length, 3);
+    assert.equal(gas.call('getFileState', ['fileA']), 'REVIEW_WAIT');
+
+    const result = plain(gas.call('opsReprocessFile', ['fileA']));
+    assert.equal(result.fileState, 'DISCOVERED');
+    assert.ok(result.canceled.length >= 1, JSON.stringify(result));
+
+    // 孤児の要確認を残さない（残すと抑止キーが効いて再登録されない。A-6）。
+    assert.equal(plain(gas.call('openReviews', [{}])).length, 0);
+    // 転記行は空く。
+    const occupied = destSheet().getDataRange().getValues().slice(1)
+      .filter((r) => String(r[6] || '').indexOf('TX_') === 0);
+    assert.equal(occupied.length, 0, '転記行が解放されていること');
+
+    // 取り込み直せる（supersedeされているので重複で止まらない）。
+    const report = plain(gas.call('runImport', [{}]));
+    const file = report.customers[0].files[0];
+    assert.equal(file.written, 3, JSON.stringify(file));
+    assert.equal(plain(gas.call('openReviews', [{}])).length, 3, '要確認は登録し直される');
+  });
+
   test('applying twice does not re-resolve or duplicate the dictionary rule', () => {
     setup();
     gas.call('opsListPartnerReviews', []);
