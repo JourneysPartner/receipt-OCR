@@ -13,7 +13,7 @@
  * N列が空の形式では列構造の判定を適用しない。
  */
 
-var CARD_FORMAT_COLUMNS_ = 35; // A〜AI
+var CARD_FORMAT_COLUMNS_ = 36; // A〜AJ
 
 /** @param {string} column @return {number} 0起算。不正は-1 */
 function detectorColumnIndex_(column) {
@@ -317,6 +317,7 @@ function formatRowFromValues_(values, rowNumber) {
     // 取得元は形式ごとに違う（1行目のセル・シート名・ファイル名）ので、
     // 顧客ではなく形式の知識として持つ。
     cardNameRule: detectorParseJson_(values[34], 'AI', problems),
+    amountFallbackColumn: null,
     valid: false,
     errorCode: null,
     problems: problems,
@@ -350,6 +351,8 @@ function formatRowFromValues_(values, rowNumber) {
   row.amountColumn = detectorOptionalColumn_(values[10], 'K', problems);
   row.purposeColumn = detectorOptionalColumn_(values[11], 'L', problems);
   row.dateAltColumn = detectorOptionalColumn_(values[12], 'M', problems);
+  // 「ご利用金額」が空欄の行で見る予備の金額列（キャッシュバック等）。
+  row.amountFallbackColumn = detectorOptionalColumn_(values[35], 'AJ', problems);
   if (!row.merchantColumn) problems.push('J (merchant column) is required');
   if (!row.amountColumn) problems.push('K (amount column) is required');
   // I・M両方空は、genericでは日付を組み立てられない（A-19）。

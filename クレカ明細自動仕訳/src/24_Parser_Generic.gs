@@ -472,6 +472,8 @@ function parseFile(sheet, cardFormat, context) {
 
   var dateIndex = parserDateColumnIndex_(format);
   var amountIndex = parserColumnIndex_(format.amountColumn);
+  var fallbackAmountIndex = format.amountFallbackColumn ?
+    parserColumnIndex_(format.amountFallbackColumn) : -1;
   var merchantIndex = parserColumnIndex_(format.merchantColumn);
   var purposeIndex = format.purposeColumn ? parserColumnIndex_(format.purposeColumn) : -1;
   if (dateIndex < 0) {
@@ -517,7 +519,14 @@ function parseFile(sheet, cardFormat, context) {
     var dateCell = row[dateIndex];
     var interpreted = isParserBlank_(dateCell) ?
       null : interpretDateExpression(dateCell);
+    // 「ご利用金額」が空欄でも「当月支払額」に金額がある行がある（キャッシュ
+    // バック等。カード明細側の仕様）。予備列を宣言した形式に限り、そちらを
+    // 見る。値がある行では見ない ── 分割払いは両者が食い違うため。
     var amount = interpretAmountCell(row[amountIndex]);
+    if (!amount.ok && fallbackAmountIndex >= 0) {
+      var fallback = interpretAmountCell(row[fallbackAmountIndex]);
+      if (fallback.ok) amount = fallback;
+    }
     var merchantRaw = row[merchantIndex];
     var merchantCanonical = merchantRaw === null || merchantRaw === undefined ?
       '' : cellToCanonicalString(merchantRaw);
