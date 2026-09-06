@@ -109,6 +109,20 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(loaded.valid, true, JSON.stringify(loaded.problems));
     assert.equal(loaded.amountFallbackColumn, 'F');
 
+    // セクション見出しの規則も同じ経路で往復すること。
+    gas.call('installCardFormat', [{
+      formatId: 'section_probe', formatName: 'セクション見出しの確認', fileTypes: ['xlsx'],
+      keywordRule: {allOf: [{maxRow: 1, keywords: ['利用日'], minMatch: 1}]},
+      headerRow: 1, dataStartRow: 2,
+      dateColumn: 'A', merchantColumn: 'B', amountColumn: 'C', purposeColumn: 'H',
+      sectionBreakRule: {patterns: ['分割・ボーナス払い明細']},
+      parserKind: 'generic', version: 1, revisionReason: 'NEW'
+    }]);
+    const withSection = plain(gas.call('loadFormatDefinitions',
+      [{formatId: 'section_probe', enabled: true}]))[0];
+    assert.equal(withSection.valid, true, JSON.stringify(withSection.problems));
+    assert.deepEqual(withSection.sectionBreakRule, {patterns: ['分割・ボーナス払い明細']});
+
     // 宣言しない形式では null のままで、既定の挙動を変えない。
     gas.call('installCardFormat', [{
       formatId: 'no_fallback_probe', formatName: '予備列なし', fileTypes: ['xlsx'],

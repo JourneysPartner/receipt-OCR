@@ -48,11 +48,18 @@ function findReadStop(rows, options) {
   }
   var totalRows = Object.create(null);
   (settings.totalRowIndexes || []).forEach(function(index) { totalRows[index] = true; });
+  var sectionBreaks = Object.create(null);
+  (settings.sectionBreakIndexes || []).forEach(function(index) { sectionBreaks[index] = true; });
   var consecutiveEmpty = 0;
 
   for (var index = 0; index < rows.length; index += 1) {
     if (totalRows[index]) {
       return {reason: 'TOTAL_ROW', stopIndex: index, stopRow: index + 1};
+    }
+    // 別の列構成を持つ2つ目の明細ブロックの手前で止める。主明細の列で
+    // 読むと店名・金額が別の意味になる。
+    if (sectionBreaks[index]) {
+      return {reason: 'SECTION_BREAK', stopIndex: index, stopRow: index + 1};
     }
     if (isCompletelyEmptyParserRow_(rows[index])) {
       consecutiveEmpty += 1;
@@ -414,6 +421,38 @@ function extractBillingYearMonth(sheet, fileName, cardFormat) {
 }
 
 /** P列が指す合計行・請求額行の行インデックス（読取終了条件2）。 */
+/**
+ * 2つ目の明細ブロックの見出し行を探す（0起算）。
+ *
+ * イオン系の明細は主明細の下に「分割・ボーナス払い明細」を持ち、そこから
+ * **列構成が変わる**。見出しを取引行として読むと店名が空欄になり、
+ * 区分1でファイルごと顧客へ差し戻される。
+ */
+function parserSectionBreakIndexes_(rows, cardFormat) {
+  var rule = (cardFormat || {}).sectionBreakRule;
+  var patterns = rule && Array.isArray(rule.patterns) ? rule.patterns : [];
+  if (!patterns.length) return [];
+  var dataStart = Number((cardFormat || {}).dataStartRow) >= 1
+    ? Number(cardFormat.dataStartRow) : 1;
+  var wanted = patterns.map(function(text) { return normalizeMerchant(text); })
+    .filter(function(text) { return text !== ''; });
+  if (!wanted.length) return [];
+
+  var indexes = [];
+  for (var index = dataStart - 1; index < rows.length; index += 1) {
+    var row = rows[index];
+    if (!Array.isArray(row)) continue;
+    // 見出しは行のどこに置かれていてもよい（列位置は明細ごとに揺れる）。
+    var hit = row.some(function(cell) {
+      if (isParserBlank_(cell)) return false;
+      var text = normalizeMerchant(cellToCanonicalString(cell));
+      return wanted.indexOf(text) >= 0;
+    });
+    if (hit) indexes.push(index);
+  }
+  return indexes;
+}
+
 function parserTotalRowIndexes_(rows, cardFormat) {
   var format = cardFormat || {};
   var rule = format.countTotalRule || format.reconciliationRule;
@@ -489,11 +528,13 @@ function parseFile(sheet, cardFormat, context) {
 
   var stop = findReadStop(rows, {
     totalRowIndexes: parserTotalRowIndexes_(rows, format),
+    sectionBreakIndexes: parserSectionBreakIndexes_(rows, format),
     inputLimitReached: ctx.inputLimitReached === true
   });
-  // 合計行そのものは明細でない。空行打切り・末尾到達では停止行まで読む
-  // （停止行は空行または最終行であり、有効明細条件で自然に落ちる）。
-  var lastDetailIndex = stop.reason === 'TOTAL_ROW' ? stop.stopIndex - 1 : stop.stopIndex;
+  // 合計行・セクション見出しそのものは明細でない。空行打切り・末尾到達では
+  // 停止行まで読む（停止行は空行または最終行であり、有効明細条件で自然に落ちる）。
+  var lastDetailIndex = (stop.reason === 'TOTAL_ROW' || stop.reason === 'SECTION_BREAK')
+    ? stop.stopIndex - 1 : stop.stopIndex;
 
   var txs = [];
   var excludedRows = [];

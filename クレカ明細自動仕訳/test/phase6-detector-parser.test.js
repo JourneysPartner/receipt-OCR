@@ -483,6 +483,79 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(result.txs[0].amountBillingJpy, null, '宣言が無ければ従来どおり金額不明');
   });
 
+  // ---- 5.3 第2セクションでの打切り ----
+
+  const aeonFormat = {
+    formatId: 'aeon_x8', parserKind: 'generic', headerRow: 8, dataStartRow: 9,
+    dateColumn: 'A', merchantColumn: 'C', amountColumn: 'G', purposeColumn: 'H',
+    sectionBreakRule: {patterns: ['分割・ボーナス払い明細']},
+    exclusionRule: {excludeRowRanges: [{from: 1, to: 8}],
+      excludeWhenDateAndAmountEmpty: true, rules: []},
+    countTotalRule: null, billingRule: null, columnProfile: null
+  };
+
+  /** 8行の前置き＋明細1件の土台に、行を継ぎ足す。 */
+  function aeonSheet(extraRows) {
+    const head = [];
+    for (let i = 0; i < 7; i += 1) head.push(['', '', '', '', '', '', '', '']);
+    head.push(['ご利用日', '利用者区分', 'ご利用先', '支払方法', '', '', 'ご利用金額', '備考']);
+    head.push([251018, '本人', 'フアミリ−マ−ト', '１回', '', '', 1450, '仕入れ']);
+    return {name: 'イオンクレジット202512', rows: head.concat(extraRows || [])};
+  }
+
+  test('5.3: an empty second section ends the read without bouncing the file', () => {
+    // イオン系の明細は末尾に「分割・ボーナス払い明細」の見出しと、
+    // **主明細とは列構成の違う**2つ目のヘッダーを持つ。これを取引行として
+    // 読むと店名が空欄になり、区分1でファイル全体が顧客へ差し戻される
+    // （実機で2ファイルが動けなくなった。2026-09-06）。
+    gas.stubs.reset();
+    const sheet = aeonSheet([
+      ['分割・ボーナス払い明細'],
+      ['ご利用日', 'ご利用先', '支払回数', 'ご利用金額', '実質年率',
+       'お支払い総額', '今回ご請求金額', '内手数料', '今回回数']
+    ]);
+    const result = plain(gas.call('parseFile', [sheet, aeonFormat,
+      {customerId: 'C001', fileId: 'f1', fileNameOriginal: '202512.xlsx'}]));
+
+    assert.equal(result.txs.length, 1, '主明細の1件だけが取引になること');
+    assert.equal(result.txs[0].merchantOriginal, 'フアミリ−マ−ト');
+    assert.equal(result.stop.reason, 'SECTION_BREAK');
+
+    // 中身が無いセクションで打切っただけなので、知らせることは何もない。
+    const truncation = plain(gas.call('checkScanTruncation', [{
+      rows: sheet.rows, stopIndex: result.stop.stopIndex,
+      stopReason: result.stop.reason,
+      dateColumnIndex: 0, amountColumnIndex: 6
+    }]));
+    assert.equal(truncation.ok, true);
+    assert.equal(truncation.remainingCandidateRows, 0);
+  });
+
+  test('5.3: a second section holding real rows is reported, never dropped in silence', () => {
+    // 分割払いのある月は、この下に本物の取引が並ぶ。列構成が違うので
+    // 主明細の規則では読めないが、**黙って捨てたら帳簿が合わない**。
+    gas.stubs.reset();
+    const sheet = aeonSheet([
+      ['分割・ボーナス払い明細'],
+      ['ご利用日', 'ご利用先', '支払回数', 'ご利用金額', '実質年率',
+       'お支払い総額', '今回ご請求金額', '内手数料', '今回回数'],
+      [251102, 'ヤマダデンキ', '１０回', 120000, 15.0, 128000, 12800, 800, 1],
+      [251115, 'ジヨーシン', '６回', 60000, 15.0, 63000, 10500, 500, 1]
+    ]);
+    const result = plain(gas.call('parseFile', [sheet, aeonFormat,
+      {customerId: 'C001', fileId: 'f1', fileNameOriginal: '202512.xlsx'}]));
+    assert.equal(result.txs.length, 1, '主明細だけを取引にする');
+
+    const truncation = plain(gas.call('checkScanTruncation', [{
+      rows: sheet.rows, stopIndex: result.stop.stopIndex,
+      stopReason: result.stop.reason,
+      dateColumnIndex: 0, amountColumnIndex: 6
+    }]));
+    assert.equal(truncation.ok, false, '取り残しがあるなら知らせること');
+    assert.equal(truncation.remainingCandidateRows, 2,
+      '2つ目のヘッダー行は取引に数えない');
+  });
+
   test('INV-12: CSV physical row numbers come from recordStarts, not record index', () => {
     gas.stubs.reset();
     const sheet = Object.assign({}, smbcSheet, {recordStarts: [1, 3, 5, 6]});

@@ -272,11 +272,28 @@ function checkScanTruncation(parseResult) {
     throw new TypeError('checkScanTruncation requires stopIndex');
   }
   var stopRow = stopIndex + 1;
+  var dateColumn = parseResult.dateColumnIndex;
+  var amountColumn = parseResult.amountColumnIndex;
+
+  // 2つ目の明細ブロックで打切った場合も数える。分割払いのある月はそこに
+  // 本物の取引が並ぶので、黙って捨てると帳簿が合わない。ただし判定は
+  // **日付・金額として読めること**を求める ── 空欄有無で数えると、その
+  // ブロック自身のヘッダー行（「ご利用日」等）を取引と誤って数える。
+  if (parseResult.stopReason === 'SECTION_BREAK') {
+    var real = parseResult.rows.slice(stopIndex + 1).filter(function(row) {
+      if (!Array.isArray(row)) return false;
+      var date = row[dateColumn];
+      var amount = row[amountColumn];
+      if (date === null || date === undefined || date === '') return false;
+      if (amount === null || amount === undefined || amount === '') return false;
+      return interpretDateExpression(date).ok && interpretAmountCell(amount).ok;
+    }).length;
+    return {ok: real === 0, stopRow: stopRow, remainingCandidateRows: real};
+  }
+
   if (parseResult.stopReason !== 'EMPTY_RUN') {
     return {ok: true, stopRow: stopRow, remainingCandidateRows: 0};
   }
-  var dateColumn = parseResult.dateColumnIndex;
-  var amountColumn = parseResult.amountColumnIndex;
   var count = parseResult.rows.slice(stopIndex + 1).filter(function(row) {
     var date = row[dateColumn];
     var amount = row[amountColumn];
