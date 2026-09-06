@@ -79,6 +79,38 @@ module.exports = ({test, assert, gas}) => {
     assert.ok(again, 'the whole point of the release is that work can resume');
   });
 
+  test('INV-20: an orphan PROCESS lease with no process log row can be recovered', () => {
+    // 実機で28時間動かないファイルがあった（2026-09-06）。原因は処理ログ行を
+    // 持たないPROCESSリース ── `acquireLease`は`createOrUpdateProcessLog`より
+    // 先に走るので、その間に実行が落ちるとこの形で残る。
+    //
+    // 従来はこれが**検出も解放もできなかった**：検出は状態が
+    // VALIDATING/WRITINGであることを求め、行が無いと状態は空文字になる。
+    // 強制解放は`!process`を「調査対象」として拒む。結果、そのファイルは
+    // 永久に取り込めず、しかも一覧にも出ないので誰も原因に辿り着けない。
+    //
+    // 守るべきものは「動いている取込のリースを奪わない」ことだが、生きた
+    // 実行は6分で必ず終わるので、心拍が閾値(10分)途絶えた時点で持ち主は
+    // 居ない。行が無いなら守る取込そのものが無い。
+    setup('REVIEW_WAIT');
+    const ghost = gas.call('acquireLease',
+      ['C001', 'ghostFile', 'RUN_1', 'reviewer@example.com', 'PROCESS']);
+    const sheet = gas.stubs.getSpreadsheet('master').getSheetByName('処理リース');
+    const rows = sheet.getDataRange().getValues();
+    const rowNumber = rows.findIndex((r) => String(r[0]) === ghost) + 1;
+    assert.ok(rowNumber > 1, 'リース行があること');
+    sheet.getRange(rowNumber, 8).setValue(new Date(Date.now() - 3 * 3600 * 1000).toISOString());
+
+    const stalled = plain(gas.call('detectStalledLeases', []));
+    assert.ok(stalled.some((lease) => lease.leaseId === ghost),
+      '検出できなければ、運用者はこのファイルが止まっている理由に辿り着けない');
+
+    gas.call('forceReleaseLease', [ghost, 'orphan', 'admin@example.com']);
+    assert.ok(gas.call('acquireLease',
+      ['C001', 'ghostFile', 'RUN_1', 'reviewer@example.com', 'PROCESS']),
+      '解放の目的は、そのファイルの取込が再び動けること');
+  });
+
   test('INV-20: a PROCESS lease still requires the file to be mid-import', () => {
     setup('COMPLETED');
     const leaseId = strandLease('PROCESS');
