@@ -718,7 +718,9 @@ var ANNOTATED_FORMAT_SPECS_ = [
     exclusionRule: {excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
     billingRule: {sources: [
-      {id: 'fn_ym', kind: 'fileName', pattern: '(20\\d{2})[-_](0?[1-9]|1[0-2])',
+      // 月は2桁の枝を先に置く。`0?[1-9]`を先に書くと"11"の先頭だけが
+      // 食われて月=1になる（後ろに必須の文字が続かないので後戻りしない）。
+      {id: 'fn_ym', kind: 'fileName', pattern: '(20\\d{2})[-_](1[0-2]|0?[1-9])',
         groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
     ]}
   },
