@@ -868,10 +868,16 @@ function installCardNameRules() {
  * `installCardNameRules`と同じく、内容が違う版だけを置き換える。
  */
 function installAmountFallbackColumns() {
-  var results = ANNOTATED_FORMAT_SPECS_.filter(function(spec) {
-    return !!spec.amountFallbackColumn;
-  }).map(function(spec) {
-    var formatId = spec.formatId;
+  // ANNOTATED_FORMAT_SPECS_ の外で定義される形式（csv・x8）も同じ手当てが要る。
+  var wanted = Object.create(null);
+  ANNOTATED_FORMAT_SPECS_.forEach(function(spec) {
+    if (spec.amountFallbackColumn) wanted[spec.formatId] = spec.amountFallbackColumn;
+  });
+  wanted.smbc_family_csv = 'F';
+  wanted.smbc_family_x8 = 'F';
+
+  var results = Object.keys(wanted).map(function(formatId) {
+    var spec = {formatId: formatId, amountFallbackColumn: wanted[formatId]};
     var current = loadFormatDefinitions({formatId: formatId, enabled: true})[0];
     if (!current || !current.valid) {
       return {formatId: formatId, skipped: current ? 'INVALID_DEFINITION' : 'NOT_INSTALLED'};
