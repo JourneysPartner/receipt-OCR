@@ -316,6 +316,69 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(empty.status, 'NOT_FOUND');
   });
 
+  test('2.1.2.6: a two-digit month is not truncated to its first digit', () => {
+    // 実機で起きた誤り（2026-09-06）：`komericard_2025_11.xlsx`の基準年月が
+    // 2024-12と推定され、明細8件が全部 OUT_OF_RANGE になった。月の選択肢を
+    // `0?[1-9]|1[0-2]`と書くと、正規表現の選択は左から順に試されるため
+    // "11"の先頭の"1"だけが1つ目の枝に食われて**月=1**になる。後ろに必須の
+    // 文字が続く書き方なら後戻りで救われるが、ここは何も続かない。
+    const komeriFormat = {
+      formatId: 'komeri_family',
+      billingRule: {sources: [
+        {id: 'fn_ym', kind: 'fileName', pattern: '(20\\d{2})[-_](1[0-2]|0?[1-9])',
+          groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
+      ]}
+    };
+    const sheet = {name: 'S', rows: [['']]};
+    const nov = plain(gas.call('extractBillingYearMonth',
+      [sheet, 'komericard_2025_11.xlsx', komeriFormat]));
+    assert.equal(nov.status, 'RESOLVED');
+    assert.equal(nov.year, 2025);
+    assert.equal(nov.month, 10, '支払2025-11 − offset1 = 締め2025-10');
+
+    // 1桁月と、10月・12月も取り違えないこと。
+    const jan = plain(gas.call('extractBillingYearMonth',
+      [sheet, 'komericard_2025_1.xlsx', komeriFormat]));
+    assert.equal(jan.year, 2024);
+    assert.equal(jan.month, 12, '支払2025-01 − offset1 = 締め2024-12');
+
+    const dec = plain(gas.call('extractBillingYearMonth',
+      [sheet, 'komericard_2025_12.xlsx', komeriFormat]));
+    assert.equal(dec.month, 11);
+
+    const oct = plain(gas.call('extractBillingYearMonth',
+      [sheet, 'komericard_2025_10.xlsx', komeriFormat]));
+    assert.equal(oct.month, 9);
+
+    // ゼロ詰めの2桁月も従来どおり読めること。
+    const zeroPadded = plain(gas.call('extractBillingYearMonth',
+      [sheet, 'komericard_2025_08.xlsx', komeriFormat]));
+    assert.equal(zeroPadded.month, 7);
+  });
+
+  test('no shipped billing pattern lets a two-digit month collapse to one digit', () => {
+    // 出荷される定義そのものを検査する。テスト内で書き直したパターンが
+    // 通っても、実機に入っている定義が誤っていれば意味がない。
+    const specs = plain(gas.evaluate('ANNOTATED_FORMAT_SPECS_'));
+    const checked = [];
+    specs.forEach((spec) => {
+      ((spec.billingRule && spec.billingRule.sources) || []).forEach((source) => {
+        if (source.kind !== 'fileName') return;
+        // 12か月すべてについて、読み取れた月が書いた月と一致すること。
+        for (let month = 1; month <= 12; month += 1) {
+          const mm = String(month).padStart(2, '0');
+          const re = new RegExp(source.pattern);
+          const hit = re.exec('card_2025_' + mm + '_2025-' + mm + '_2025' + mm + '.xlsx');
+          if (!hit) continue;
+          assert.equal(Number(hit[source.groups.month]), month,
+            spec.formatId + ' が ' + mm + ' 月を ' + hit[source.groups.month] + ' と読んだ');
+          checked.push(spec.formatId);
+        }
+      });
+    });
+    assert.ok(checked.length > 0, 'fileName 由来の請求年月規則が検査対象にあること');
+  });
+
   test('2.1.2.6: a month-ordinal offset crosses the year boundary correctly', () => {
     const januaryPay = {formatId: 't', billingRule: {sources: [
       {id: 'fn', kind: 'fileName', pattern: '(20\\d{2})(0[1-9]|1[0-2])',

@@ -215,31 +215,31 @@ const BILLING_MONTH_PATTERN_SEEDS = Object.freeze([
   }),
   Object.freeze({
     id: 'fn_ym_closing', kind: 'fileName',
-    pattern: '(20\\d{2})[-_年/]?(0?[1-9]|1[0-2])月?締',
+    pattern: '(20\\d{2})[-_年/]?(1[0-2]|0?[1-9])月?締',
     groups: Object.freeze({year: 1, month: 2}), yearDigits: 4,
     means: 'closing', offsetMonths: null
   }),
   Object.freeze({
     id: 'fn_ym', kind: 'fileName',
-    pattern: '(20\\d{2})[-_年/]?(0?[1-9]|1[0-2])月?',
+    pattern: '(20\\d{2})[-_年/]?(1[0-2]|0?[1-9])月?',
     groups: Object.freeze({year: 1, month: 2}), yearDigits: 4,
     means: 'payment', offsetMonths: 1
   }),
   Object.freeze({
     id: 'hdr_period', kind: 'scanRows',
-    pattern: 'ご?利用期間[^0-9]{0,8}(20\\d{2})[/年](0?[1-9]|1[0-2])[/月](?:0?[1-9]|[12]\\d|3[01])日?[^0-9]{0,4}[~〜\\-][^0-9]{0,4}(20\\d{2})[/年](0?[1-9]|1[0-2])[/月]',
+    pattern: 'ご?利用期間[^0-9]{0,8}(20\\d{2})[/年](1[0-2]|0?[1-9])[/月](?:3[01]|[12]\\d|0?[1-9])日?[^0-9]{0,4}[~〜\\-][^0-9]{0,4}(20\\d{2})[/年](1[0-2]|0?[1-9])[/月]',
     groups: Object.freeze({year: 1, month: 2, endYear: 3, endMonth: 4}),
     yearDigits: 4, means: 'periodEnd', offsetMonths: null
   }),
   Object.freeze({
     id: 'hdr_closing', kind: 'scanRows',
-    pattern: '(20\\d{2})年\\s*(0?[1-9]|1[0-2])月\\s*締(?:め)?(?:切)?',
+    pattern: '(20\\d{2})年\\s*(1[0-2]|0?[1-9])月\\s*締(?:め)?(?:切)?',
     groups: Object.freeze({year: 1, month: 2}), yearDigits: 4,
     means: 'closing', offsetMonths: null
   }),
   Object.freeze({
     id: 'hdr_pay', kind: 'scanRows',
-    pattern: '(20\\d{2})年\\s*(0?[1-9]|1[0-2])月\\s*(?:お)?支払(?:い)?分',
+    pattern: '(20\\d{2})年\\s*(1[0-2]|0?[1-9])月\\s*(?:お)?支払(?:い)?分',
     groups: Object.freeze({year: 1, month: 2}), yearDigits: 4,
     means: 'payment', offsetMonths: 1
   })
