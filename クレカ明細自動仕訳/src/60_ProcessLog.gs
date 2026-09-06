@@ -172,6 +172,41 @@ function updateProcessLogUnlocked_(fileId, fields) {
 }
 
 /**
+ * 提出時点の内容ハッシュを消す（取り込み直しの前処理）。
+ *
+ * 内容ハッシュは金額・日付・店名・用途から作るので、**パーサーや形式定義を
+ * 直すと元ファイルが変わっていなくても値が変わる**。INV-07は「提出後に元
+ * ファイルが差し替わった」ことを捕まえるための不変条件であって、こちらが
+ * 意図した再導出を妨げるためのものではない。消さないと、欠陥を直しても
+ * そのファイルは二度と取り込めない。
+ *
+ * 取消し（6.4 選択肢A）の一部としてだけ呼ぶこと。
+ */
+function clearSubmittedContentHash(fileId) {
+  return withScriptLock_(function() {
+    var record = getProcessLogRecord_(fileId);
+    var data = [];
+    if (record) {
+      data.push({
+        range: a1Range_(processLogSheet_().getName(), record.rowNumber,
+          PROCESS_FIELD_COLUMNS_.submittedContentHash,
+          PROCESS_FIELD_COLUMNS_.submittedContentHash),
+        values: [['']]
+      });
+    }
+    var permanent = getPermanentFileIndexRecord_(fileId);
+    if (permanent) {
+      data.push({range: a1Range_(permanentFileIndexSheet_().getName(),
+        permanent.rowNumber, 6, 6), values: [['']]});
+    }
+    if (!data.length) return false;
+    Sheets.Spreadsheets.Values.batchUpdate(
+      {valueInputOption: 'RAW', data: data}, masterSpreadsheet_().getId());
+    return true;
+  });
+}
+
+/**
  * 恒久ファイルインデックスF列（明細内容ハッシュ・提出時点で不変）を書く。
  * 行全体を書き戻さない（上記と同じ理由）。
  */

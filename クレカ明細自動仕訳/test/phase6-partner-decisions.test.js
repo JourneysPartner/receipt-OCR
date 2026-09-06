@@ -363,6 +363,33 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(plain(gas.call('openReviews', [{}])).length, 3, '要確認は登録し直される');
   });
 
+  test('reprocessing clears the submitted content hash so a parser fix can land', () => {
+    // 内容ハッシュは金額・日付・店名・用途から作る（4.16）。つまり**パーサーを
+    // 直すと、元ファイルが1バイトも変わっていなくてもハッシュが変わる**。
+    // INV-07は「提出後に元ファイルが差し替わる」ことを捕まえるための不変条件
+    // だが、取り込み直しはこちらが再導出を意図した操作である。消さないと
+    // 「Submitted content hash is immutable」で二度と取り込めない
+    // （実機で予備金額列の修正が入らなかった。2026-09-06）。
+    setup();
+    const processLog = gas.stubs.getSpreadsheet('master').getSheetByName('クレカ処理ログ');
+    const fileIndex = gas.stubs.getSpreadsheet('master')
+      .getSheetByName('恒久ファイルインデックス');
+    const hashBefore = processLog.getRange(2, 13).getValue();
+    assert.ok(hashBefore, '取込でハッシュが入っていること');
+    assert.ok(fileIndex.getRange(2, 6).getValue(), '恒久インデックスにも入っていること');
+
+    gas.call('opsReprocessFile', ['fileA']);
+
+    assert.equal(processLog.getRange(2, 13).getValue(), '',
+      '処理ログの提出時ハッシュが空くこと');
+    assert.equal(fileIndex.getRange(2, 6).getValue(), '',
+      '恒久インデックスの内容ハッシュも空くこと');
+
+    // 空いていれば、違うハッシュでも不変条件に弾かれない。
+    gas.call('syncPermanentContentHash', ['fileA', 'f'.repeat(64)]);
+    assert.equal(fileIndex.getRange(2, 6).getValue(), 'f'.repeat(64));
+  });
+
   test('applying twice does not re-resolve or duplicate the dictionary rule', () => {
     setup();
     gas.call('opsListPartnerReviews', []);
