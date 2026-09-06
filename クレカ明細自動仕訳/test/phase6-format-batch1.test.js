@@ -160,6 +160,51 @@ module.exports = ({test, assert, gas}) => {
     assert.ok(again.every((r) => r.installed === false || r.formatId === undefined || r.installed !== undefined));
   });
 
+  test('installBillingRules replaces a wrong billing pattern already in the master', () => {
+    // 実機には月の枝順を誤った版が入っており（komericard_2025_11 → 2024-12）、
+    // コードを直しても投入済みの定義は古いまま残る。取込をやり直させずに
+    // 差し替えられること。カード名規則の後付け（#31）と同じ筋の手当てである。
+    setup();
+    const before = plain(gas.call('loadFormatDefinitions',
+      [{formatId: 'komeri_family', enabled: true}]))[0];
+    assert.ok(before, 'komeri_family が入っていること');
+
+    // 誤った版を実機と同じ形で置く。
+    gas.call('installCardFormat', [Object.assign({}, before, {
+      billingRule: {sources: [
+        {id: 'fn_ym', kind: 'fileName', pattern: '(20\\d{2})[-_](0?[1-9]|1[0-2])',
+          groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
+      ]},
+      revisionReason: 'DEFECT_FIX', supersede: true
+    })]);
+    const broken = plain(gas.call('loadFormatDefinitions',
+      [{formatId: 'komeri_family', enabled: true}]))[0];
+    assert.equal(plain(gas.call('extractBillingYearMonth',
+      [{name: 'S', rows: [['']]}, 'komericard_2025_11.xlsx', broken])).month, 12,
+      '誤った版では11月が1月に潰れ、締めが2024-12になる');
+
+    const results = plain(gas.call('installBillingRules', []));
+    assert.ok(results.some((r) => r.formatId === 'komeri_family' && !r.skipped),
+      'komeri_family が差し替え対象になること: ' + JSON.stringify(results));
+
+    const fixed = plain(gas.call('loadFormatDefinitions',
+      [{formatId: 'komeri_family', enabled: true}]))[0];
+    const resolved = plain(gas.call('extractBillingYearMonth',
+      [{name: 'S', rows: [['']]}, 'komericard_2025_11.xlsx', fixed]));
+    assert.equal(resolved.year, 2025);
+    assert.equal(resolved.month, 10, '差し替え後は締め2025-10');
+
+    // 有効な版は常に1つ。旧版は履歴として残る。
+    const all = plain(gas.call('loadFormatDefinitions', [{formatId: 'komeri_family'}]));
+    assert.equal(all.filter((r) => r.enabled).length, 1);
+
+    // 二度目は何も積まない。
+    const again = plain(gas.call('installBillingRules', []));
+    assert.ok(again.every((r) => r.skipped), '内容が同じなら飛ばす: ' + JSON.stringify(again));
+    assert.equal(plain(gas.call('loadFormatDefinitions',
+      [{formatId: 'komeri_family', enabled: true}])).length, 1);
+  });
+
   test('parse smoke: JAL serial dates become real dates and purposes come from I', () => {
     setup();
     const family = FAMILIES.filter((f) => f.expect === 'jal_family')[0];
