@@ -124,6 +124,7 @@ function cloneCellValue(value) { return value instanceof Date ? new Date(value.g
 // 二重に数えないための抑止。
 const roundTrips = {rangeReads: 0, rangeWrites: 0, flushes: 0, _depth: 0};
 let roundTripListener = null;
+  let valuesBatchUpdateListener = null;
 function countRoundTrip(kind) {
   if (roundTrips._depth !== 0) return;
   roundTrips[kind] += 1;
@@ -481,6 +482,7 @@ function createGasStubs() {
         return asOneRoundTrip('rangeWrites', () => this._batchUpdate(request, spreadsheetId));
       },
       _batchUpdate(request, spreadsheetId) {
+        if (valuesBatchUpdateListener) valuesBatchUpdateListener(request, spreadsheetId);
         // 書込レンジ数を検査できるようにする。1セル1レンジだと200件で
         // 1,200レンジになり、リクエストサイズ上限に近づく。
         apiCallCounts.batchUpdate += 1;
@@ -654,6 +656,10 @@ function createGasStubs() {
     // 回数で見るしかない。
     getApiCallCounts: () => Object.assign({}, apiCallCounts),
     onRoundTrip(fn) { roundTripListener = fn; },
+    /** 値書込の要求そのものを覗く。**どの列へ書いたか**を検査するために要る
+     *  ── 書込後のセルを見るだけでは、空文字を書いたのか触れなかったのかを
+     *  区別できない。 */
+    onValuesBatchUpdate(fn) { valuesBatchUpdateListener = fn; },
     roundTrips() { return {rangeReads: roundTrips.rangeReads, rangeWrites: roundTrips.rangeWrites, flushes: roundTrips.flushes}; },
     resetRoundTrips() { roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; },
     resetApiCallCounts() { apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; },

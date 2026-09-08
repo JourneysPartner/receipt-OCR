@@ -1,6 +1,8 @@
 'use strict';
 
-const TRANSACTION_LOG_WIDTH_ = 45;
+// 46・47列目は相手税区分の予定値・読取確認値。**末尾に足す** ── 予定値の
+// ブロック(19〜23)の途中へ挿すと、以降20列分の意味がずれて既存行が壊れる。
+const TRANSACTION_LOG_WIDTH_ = 47;
 const TX_INDEX_WIDTH_ = 11;
 
 function transactionLogSheet_() { return requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.TRANSACTION_LOG); }
@@ -16,8 +18,10 @@ function txLogFromRecord_(record) {
     sourceSheetName: v[5] || null, sourceRow: Number(v[6]), generation: Number(v[7]), formatId: String(v[8]), transactionStatus: String(v[9]),
     plannedFinalStatus: String(v[10]), partnerResolutionStatus: String(v[11]), freeeStatus: String(v[12]), batchId: v[13] || null,
     originalDate: v[14], originalMerchant: v[15], originalAmount: v[16], originalPurpose: v[17],
-    planned: {b: v[18], f: v[19], i: v[20], k: v[21], m: v[22]},
-    verified: {b: v[23], f: v[24], i: v[25], k: v[26], m: v[27]},
+    planned: {b: v[18], f: v[19], i: v[20], k: v[21], m: v[22],
+      g: v[45] === '' || v[45] === undefined ? undefined : v[45]},
+    verified: {b: v[23], f: v[24], i: v[25], k: v[26], m: v[27],
+      g: v[46] === '' || v[46] === undefined ? undefined : v[46]},
     destinationSpreadsheetId: v[28], destinationSheetName: v[29], destinationRow: v[30], currency: v[31], amountOriginal: v[32], exchangeRate: v[33],
     dateInferenceSource: v[34], dateInferenceBase: v[35], purposeInferred: toBool(v[36]), purposeRuleId: v[37], identityHash: v[38],
     transactionIdVersion: String(v[39]), hashVersion: String(v[40]), active: toBool(v[41]), invalidationReason: v[42],
@@ -60,6 +64,7 @@ function makeTransactionRow_(tx, runId, now) {
   row[18] = txInput_(planned, ['b', 'B'], txInput_(tx, ['plannedB'], '')); row[19] = txInput_(planned, ['f', 'F'], txInput_(tx, ['plannedF'], ''));
   row[20] = txInput_(planned, ['i', 'I'], txInput_(tx, ['plannedI'], '')); row[21] = txInput_(planned, ['k', 'K'], txInput_(tx, ['plannedK'], row[15]));
   row[22] = txInput_(planned, ['m', 'M'], txInput_(tx, ['plannedM'], row[16]));
+  row[45] = planned.g === undefined || planned.g === null ? '' : planned.g;
   row[28] = txInput_(tx, ['destinationSpreadsheetId'], ''); row[29] = txInput_(tx, ['destinationSheetName'], ''); row[30] = txInput_(tx, ['destinationRow'], '');
   row[31] = txInput_(tx, ['currency', 'currencyCode'], ''); row[32] = txInput_(tx, ['amountOriginal'], ''); row[33] = txInput_(tx, ['exchangeRate'], '');
   row[34] = txInput_(tx, ['dateInferenceSource'], ''); row[35] = txInput_(tx, ['dateInferenceBase'], '');
@@ -198,6 +203,12 @@ function updateTransactionStatus(fullTxId, fromStatus, toStatus) {
   });
 }
 
+/** 相手税区分のセル値。持たない取引は空欄で残す。 */
+function taxCategoryCell_(object) {
+  var value = object && object.g;
+  return value === undefined || value === null ? '' : value;
+}
+
 function plannedVerifiedArray_(object) {
   object = object || {};
   return [valueOr_(object, ['b', 'B'], ''), valueOr_(object, ['f', 'F'], ''), valueOr_(object, ['i', 'I'], ''),
@@ -209,6 +220,8 @@ function updateWrittenValues(fullTxId, planned, verified) {
     var row = getTransaction(fullTxId); if (!row) throw new IntegrityError(null, 'Transaction not found');
     transactionLogSheet_().getRange(row._rowNumber, 19, 1, 10).setValues([[].concat(plannedVerifiedArray_(planned), plannedVerifiedArray_(verified))]);
     transactionLogSheet_().getRange(row._rowNumber, 45).setValue(nowIso_());
+    transactionLogSheet_().getRange(row._rowNumber, 46, 1, 2)
+      .setValues([[taxCategoryCell_(planned), taxCategoryCell_(verified)]]);
   });
 }
 
@@ -277,6 +290,8 @@ function settleWrittenTransactions(entries) {
       ]});
       data.push({range: a1Range_(name, update.rowNumber, 31, 31), values: [[entry.destinationRow]]});
       data.push({range: a1Range_(name, update.rowNumber, 45, 45), values: [[now]]});
+      data.push({range: a1Range_(name, update.rowNumber, 46, 47), values: [
+        [taxCategoryCell_(entry.planned), taxCategoryCell_(entry.verified)]]});
     });
     for (var start = 0; start < data.length; start += SETTLE_BATCH_RANGES_) {
       Sheets.Spreadsheets.Values.batchUpdate(

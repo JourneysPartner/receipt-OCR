@@ -1,6 +1,6 @@
 'use strict';
 
-const CUSTOMER_MASTER_COLUMNS_ = 41;
+const CUSTOMER_MASTER_COLUMNS_ = 42;
 
 function parseCustomerJson_(raw, label, allowEmpty) {
   if ((raw === '' || raw === null || raw === undefined) && allowEmpty) return {};
@@ -21,7 +21,9 @@ function customerFromRow_(values, rowNumber) {
     customerId: String(values[0] || ''), customerName: String(values[1] || ''), isActive: toBool(values[2]),
     sourceFolderId: String(values[3] || ''), destinationSpreadsheetId: String(values[5] || ''),
     destinationSheetName: String(values[7] || ''), partnerListSheetName: String(values[8] || ''),
-    columnMapping: {B: Number(values[9]), F: Number(values[10]), I: Number(values[11]), K: Number(values[12]), M: Number(values[13]), txId: Number(values[14])},
+    // AP列（税区分の転記先列）は任意。未設定なら相手税区分を一切書かない。
+    columnMapping: {B: Number(values[9]), F: Number(values[10]), I: Number(values[11]), K: Number(values[12]), M: Number(values[13]), txId: Number(values[14]),
+      G: values[41] === '' || values[41] === null || values[41] === undefined ? null : Number(values[41])},
     schemaVersion: String(values[15] || ''), reviewers: csvEmails_(values[16]), admins: csvEmails_(values[17]),
     reviewCount: Number(values[18] || 0), reviewSummarySheetName: String(values[20] || CONFIG.REVIEW_SUMMARY.DEFAULT_SHEET_NAME),
     parallelState: String(values[21] || ''), parallelStartedOn: values[22] || null,
