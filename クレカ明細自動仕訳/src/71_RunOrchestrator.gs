@@ -457,6 +457,10 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
             b: tx.date ? toTokyoDateString_(tx.date) : '',
             f: resolved ? String(match.partnerName) : '',
             i: composeMemoTags(tx.purpose, memoTagsForTransaction(tx, customer)),
+            // 相手税区分。カード会社からの返金は課税取引ではない。
+            // 該当しない行では`undefined`のまま置き、その列に一切書かない
+            // （空文字を書くと転記先の既定値・数式を消す）。
+            g: cashback && customer.columnMapping.G ? '対象外' : undefined,
             k: tx.merchantOriginal || '',
             m: tx.amountBillingJpy
           };

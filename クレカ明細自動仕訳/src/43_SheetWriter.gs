@@ -186,7 +186,7 @@ function writeColumnNumber_(customer, key) {
   var mapping = customer.columnMapping || {};
   var map = {
     b: mapping.B, f: mapping.F, i: mapping.I,
-    k: mapping.K, m: mapping.M, txId: mapping.txId
+    k: mapping.K, m: mapping.M, txId: mapping.txId, g: mapping.G
   };
   var column = Number(map[key]);
   if (!Number.isInteger(column) || column < 1) {
@@ -213,7 +213,7 @@ function writeTransactionRows(customer, rowWrites, leaseId, fileId) {
   assertLeaseHeldForWrite(fileId, leaseId);
 
   var groups = [
-    {option: 'RAW', keys: ['txId', 'f', 'i', 'k']},
+    {option: 'RAW', keys: ['txId', 'f', 'i', 'k', 'g']},
     {option: 'USER_ENTERED', keys: ['b', 'm']}
   ];
   var sheetName = customer.destinationSheetName;
@@ -344,7 +344,7 @@ function verifyWrittenValues(customer, rowWrites, index) {
   return rowWrites.map(function(write) {
     var current = rows[write.rowNumber];
     var mismatches = [];
-    ['b', 'f', 'i', 'k', 'm'].forEach(function(key) {
+    ['b', 'f', 'i', 'k', 'm', 'g'].forEach(function(key) {
       var planned = (write.values || {})[key];
       if (planned === undefined) return;
       if (!canonicalReadValuesEqual(key, planned, current[key])) {
@@ -393,7 +393,10 @@ function updateTransactionLocation(fullTxId, rowNumber) {
 function buildRowWrite(rowNumber, txLog) {
   var all = {
     b: txLog.planned.b, f: txLog.planned.f, i: txLog.planned.i,
-    k: txLog.planned.k, m: txLog.planned.m
+    k: txLog.planned.k, m: txLog.planned.m,
+    // 相手税区分は持つ行だけが書く。空文字を書くと転記先テンプレートの
+    // 既定値や数式を消してしまう ── 書かないことと空を書くことは違う。
+    g: txLog.planned.g
   };
   var values = all;
   if (Array.isArray(txLog.columns) && txLog.columns.length) {
@@ -428,6 +431,8 @@ function readDestinationRows_(customer, rowNumbers, index) {
 
   var columns = {b: customer.columnMapping.B, f: customer.columnMapping.F,
     i: customer.columnMapping.I, k: customer.columnMapping.K, m: customer.columnMapping.M};
+  // 相手税区分の列は任意設定。未設定の顧客では読まない。
+  if (customer.columnMapping.G) columns.g = customer.columnMapping.G;
   var ranges = unique.map(function(rowNumber) {
     return a1Range_(customer.destinationSheetName, rowNumber, 1, customer.rowScanLastColumn);
   });

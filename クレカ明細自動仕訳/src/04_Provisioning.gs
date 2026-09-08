@@ -19,14 +19,14 @@
  * 実装時に確定する。
  */
 var MASTER_SHEET_SPECS_ = Object.freeze([
-  {key: 'CUSTOMER_MASTER', width: 41, label: '顧客ID'},
+  {key: 'CUSTOMER_MASTER', width: 42, label: '顧客ID'},
   {key: 'COMMON_PARTNER_LIST', width: 6, label: '取引先ID'},
   {key: 'COMMON_PARTNER_DICT', width: 18, label: '辞書ID'},
   {key: 'CUSTOMER_PARTNER_DICT', width: 18, label: '辞書ID'},
   {key: 'PURPOSE_COMPLEMENT', width: 10, label: 'ルールID'},        // ※
   {key: 'CARD_FORMAT_MASTER', width: 37, label: '形式ID'},          // ※
   {key: 'PROCESS_LOG', width: 40, label: '実行ID'},
-  {key: 'TRANSACTION_LOG', width: 45, label: '取引ID完全値'},
+  {key: 'TRANSACTION_LOG', width: 47, label: '取引ID完全値'},
   {key: 'AUDIT_LOG', width: 15, label: '監査ID'},
   {key: 'REVIEW', width: 32, label: '要確認ID'},
   {key: 'PROCESS_LEASE', width: 10, label: 'リースID'},
