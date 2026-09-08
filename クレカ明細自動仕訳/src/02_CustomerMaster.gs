@@ -1,6 +1,6 @@
 'use strict';
 
-const CUSTOMER_MASTER_COLUMNS_ = 40;
+const CUSTOMER_MASTER_COLUMNS_ = 41;
 
 function parseCustomerJson_(raw, label, allowEmpty) {
   if ((raw === '' || raw === null || raw === undefined) && allowEmpty) return {};
@@ -43,6 +43,9 @@ function customerFromRow_(values, rowNumber) {
     // AN列：取引先をカード名で決める使用用途（実装差戻し#31）。
     // 年会費のように、明細の店名にカード会社が現れない取引のためにある。
     cardNamePartnerPurposes: parsePurposeExemptions_(values[39], 'AN'),
+    // AO列：カード会社からの返金として扱う店名。相手取引先を立てず、
+    // メモタグ「キャッシュバック」と相手税区分「対象外」を付ける。
+    cashbackMerchants: parsePurposeExemptions_(values[40], 'AO'),
     _rowNumber: rowNumber
   };
   return customer;
@@ -87,6 +90,11 @@ function isPartnerExemptPurpose(customer, purpose) {
 /** 当該用途が「取引先をカード名で決める」対象か（AN列）。 */
 function isCardNamePartnerPurpose(customer, purpose) {
   return purposeInList_(customer && customer.cardNamePartnerPurposes, purpose);
+}
+
+/** 当該店名がカード会社からの返金か（AO列）。 */
+function isCashbackMerchant(customer, merchant) {
+  return purposeInList_(customer && customer.cashbackMerchants, merchant);
 }
 
 /** @param {*} raw @return {!Array<number>} */

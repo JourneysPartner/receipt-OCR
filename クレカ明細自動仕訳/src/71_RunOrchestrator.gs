@@ -440,7 +440,9 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
         transactions = transactions.map(function(tx) {
           // 顧客マスターAM列の用途は取引先を立てない（実装差戻し#30）。
           // 照合もしない ── 結果を使わないうえ、辞書の件数ぶん無駄に回る。
-          var exempt = isPartnerExemptPurpose(customer, tx.purpose);
+          // カード会社からの返金（AO列）にも相手取引先は無い。
+          var cashback = isCashbackMerchant(customer, tx.merchantOriginal);
+          var exempt = cashback || isPartnerExemptPurpose(customer, tx.purpose);
           // AN列の用途は、店名ではなくカード名で取引先を照合する。
           // 「基本カード年会費」はどのカードでも同じ文字列なので、店名で
           // 辞書を作ると全カードの年会費が1つの取引先へ潰れる。
@@ -454,7 +456,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
           var planned = {
             b: tx.date ? toTokyoDateString_(tx.date) : '',
             f: resolved ? String(match.partnerName) : '',
-            i: tx.purpose || '',
+            i: composeMemoTags(tx.purpose, memoTagsForTransaction(tx, customer)),
             k: tx.merchantOriginal || '',
             m: tx.amountBillingJpy
           };
