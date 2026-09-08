@@ -483,6 +483,26 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(result.txs[0].amountBillingJpy, null, '宣言が無ければ従来どおり金額不明');
   });
 
+  test('5.3: a row whose cells hold only whitespace is not a detail row', () => {
+    // dカードの合計行は全セルが半角スペース1つである。`isParserBlank_`は
+    // 空文字だけを空欄とみなすため、この行が明細と判定され、店名が空欄だと
+    // いう理由でファイルごと顧客へ差し戻されていた。金額の解釈側
+    // （interpretAmountCell）は最初から空白を除去しており、判定が食い違う。
+    gas.stubs.reset();
+    const format = Object.assign({}, smbcFormat, {purposeColumn: 'G'});
+    const sheet = {name: '明細', rows: [
+      ['〇〇様', '4980-00**-****-****', '三井住友ゴールド', '', '', '', ''],
+      ['2025/12/16', 'ローソン', 10800, 1, 1, 10800, '仕入れ'],
+      [' ', ' ', ' ', ' ', ' ', 248143, ' '],
+      ['　', '　', '　', '　', '　', '　', '　']
+    ]};
+    const result = plain(gas.call('parseFile', [sheet, format,
+      {customerId: 'C001', fileId: 'f1', fileNameOriginal: 'd.xlsx'}]));
+    assert.equal(result.txs.length, 1,
+      '空白だけの行は、半角でも全角でも取引にしない');
+    assert.equal(result.txs[0].merchantOriginal, 'ローソン');
+  });
+
   // ---- 5.3 第2セクションでの打切り ----
 
   const aeonFormat = {

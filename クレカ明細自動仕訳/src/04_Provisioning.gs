@@ -739,6 +739,58 @@ var ANNOTATED_FORMAT_SPECS_ = [
     ]}
   },
   {
+    formatId: 'docomo_family', formatName: 'dカード内訳明細Excel（9列・用途I）',
+    fileTypes: ['xlsx'],
+    // 1行目は表題、2行目がヘッダー。1行目まで含めると他形式と衝突しない。
+    keywordRule: {allOf: [{maxRow: 2,
+      keywords: ['ご利用内訳明細', 'カード番号', 'ご利用年月日', '利用店名', '利用金額'],
+      minMatch: 5}]},
+    headerRow: 2, dataStartRow: 3,
+    dateColumn: 'D', merchantColumn: 'E', amountColumn: 'F', purposeColumn: 'I',
+    columnProfile: {minColumns: 9, maxColumns: 10, sampleRows: 5, columns: [
+      {index: 3, type: 'date', required: true},
+      {index: 4, type: 'text', required: true},
+      {index: 5, type: 'number', required: true}
+    ]},
+    cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'cell', row: 3, column: 3}]},
+    // 明細のあとに列構成の違う「キャッシングご返済明細」が続く。
+    sectionBreakRule: {patterns: ['キャッシングご返済明細']},
+    // 合計行は全セルが空白1つ。空白だけのセルは空欄として扱われるので、
+    // 日付・金額が空の行として自然に落ちる。
+    exclusionRule: {excludeRowRanges: [{from: 1, to: 2}],
+      excludeWhenDateAndAmountEmpty: true, rules: []},
+    countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    billingRule: {sources: [
+      {id: 'fn_ymd', kind: 'fileName', pattern: '_(20\\d{2})(1[0-2]|0[1-9])[0-3]\\d',
+        groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
+    ]}
+  },
+  {
+    formatId: 'orico_family', formatName: 'オリコ系Excel（縦持ち見出し＋15列・用途O）',
+    fileTypes: ['xlsx'],
+    // 1〜8行目は「項目名・値」の縦持ちブロック、9行目が<利用明細>、
+    // 10行目が明細のヘッダー。
+    keywordRule: {allOf: [{maxRow: 10,
+      keywords: ['ご契約番号', '<利用明細>', 'ご利用日', 'ご利用先など', '当月ご請求額'],
+      minMatch: 5}]},
+    headerRow: 10, dataStartRow: 11,
+    dateColumn: 'A', merchantColumn: 'B', amountColumn: 'I', purposeColumn: 'O',
+    columnProfile: {minColumns: 14, maxColumns: 15, sampleRows: 5, columns: [
+      {index: 0, type: 'date', required: true},
+      {index: 1, type: 'text', required: true},
+      {index: 8, type: 'any', required: true}
+    ]},
+    cardNameRule: {sources: [{kind: 'folderName'}, {kind: 'cell', row: 2, column: 2},
+      {kind: 'sheetName', pattern: '^([^0-9]+?)\\s*[0-9]{4,}'}]},
+    exclusionRule: {excludeRowRanges: [{from: 1, to: 10}],
+      excludeWhenDateAndAmountEmpty: true, rules: []},
+    countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
+    billingRule: {sources: [
+      {id: 'fn_ym', kind: 'fileName', pattern: '(20\\d{2})[-_]?(1[0-2]|0[1-9])',
+        groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}
+    ]}
+  },
+  {
     formatId: 'aeon_x8', formatName: 'イオン系Excel（8列・数値YYMMDD・用途H）',
     fileTypes: ['xlsx'],
     // 明細ブロックは8行目から始まる（1〜7行目は請求額・口座の見出し）。
