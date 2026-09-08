@@ -230,6 +230,8 @@ function registerTestCustomer(config) {
     JSON.stringify(config.cardNamePartnerPurposes) : '';
   row[40] = config.cashbackMerchants && config.cashbackMerchants.length ?
     JSON.stringify(config.cashbackMerchants) : '';
+  // AP列：相手税区分の転記先列（任意）。未設定なら税区分を一切書かない。
+  row[41] = Number.isInteger(config.columns.G) ? config.columns.G : '';
 
   var masterSheet = requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.CUSTOMER_MASTER);
   ensureSheetWidth_(masterSheet, CUSTOMER_MASTER_COLUMNS_);
