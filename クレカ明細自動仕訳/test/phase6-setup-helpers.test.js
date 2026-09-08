@@ -251,6 +251,43 @@ module.exports = ({test, assert, gas}) => {
       'REVIEW_WAIT', '人が判断中のファイルを巻き戻さない');
   });
 
+  test('every rewind path clears the submitted content hash', () => {
+    // 発見へ戻す理由は「もう一度取り込ませたい」であり、取り込み直せば
+    // 内容ハッシュは変わりうる（形式定義を直した後なら必ず変わる）。
+    // 消さずに戻すと再取込が INV-07 で落ち、FAILED が積み上がる ── 実機で
+    // opsReprocessFile だけ直したら、opsRetryCustomerFixFiles で同じことが
+    // 起きた（2026-09-08）。戻す経路が増えるたび個別に直す作りは破れる。
+    setup();
+    gas.call('registerTestCustomer', [CUSTOMER]);
+    const customer = gas.call('getCustomerById', ['C001']);
+    const hash = 'a'.repeat(64);
+
+    const cases = [
+      {fn: 'opsRetryFailedFiles', state: 'FAILED'},
+      {fn: 'opsRetryCustomerFixFiles', state: 'CUSTOMER_FIX_REQUIRED'}
+    ];
+    cases.forEach((entry, index) => {
+      const fileId = 'rewind' + index;
+      gas.call('createOrUpdateProcessLog', ['RUN_R', customer, {
+        id: fileId, name: fileId + '.csv', binaryHash: 'b'.repeat(64),
+        contentHash: hash, hashVersion: '3', state: entry.state
+      }]);
+      gas.call('syncPermanentContentHash', [fileId, hash]);
+      assert.equal(String(gas.call('getProcessLogRecord_', [fileId]).values[12]), hash,
+        entry.fn + ': 前提としてハッシュが入っていること');
+
+      gas.call(entry.fn, []);
+
+      assert.equal(String(gas.call('getProcessLogRecord_', [fileId]).values[16]),
+        'DISCOVERED', entry.fn + ' が発見へ戻すこと');
+      assert.equal(String(gas.call('getProcessLogRecord_', [fileId]).values[12]), '',
+        entry.fn + ' が提出時ハッシュを消していない');
+      assert.equal(
+        String(gas.call('getPermanentFileIndexRecord_', [fileId]).values[5]), '',
+        entry.fn + ' が恒久インデックスのハッシュを消していない');
+    });
+  });
+
   test('the real setup sequence carries a SMBC-family CSV end to end', () => {
     setup();
     gas.call('registerTestCustomer', [CUSTOMER]);
