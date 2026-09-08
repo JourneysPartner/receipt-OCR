@@ -228,6 +228,8 @@ function registerTestCustomer(config) {
     JSON.stringify(config.partnerExemptPurposes) : '';
   row[39] = config.cardNamePartnerPurposes && config.cardNamePartnerPurposes.length ?
     JSON.stringify(config.cardNamePartnerPurposes) : '';
+  row[40] = config.cashbackMerchants && config.cashbackMerchants.length ?
+    JSON.stringify(config.cashbackMerchants) : '';
 
   var masterSheet = requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.CUSTOMER_MASTER);
   ensureSheetWidth_(masterSheet, CUSTOMER_MASTER_COLUMNS_);
