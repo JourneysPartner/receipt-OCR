@@ -224,6 +224,27 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(refund[0].purpose, '返品');
   });
 
+  test('the dCard cashing section reports nothing when it holds no transactions', () => {
+    // 打切りの取り残し検査は「見出しの下に本物の取引があるか」を推定する。
+    // dカードのキャッシング欄は空でも `[null,null,"合計",0,0,0]` を必ず持ち、
+    // 数値0はExcelシリアルとして1899年の日付に化ける。毎月これで警告が出ると
+    // 担当者は警告を読まなくなり、**本当に取引が残っている月を見落とす**。
+    const defs = setup();
+    const fixture = loadFixture('dカード__ご利用内訳明細_キャッシングご返済明細_20251010');
+    const format = plain(defs).filter((d) => d.formatId === 'docomo_family')[0];
+    const parsed = plain(gas.call('parseFile', [
+      {name: fixture.sheets[0].name, rows: fixture.sheets[0].rows}, format,
+      {customerId: 'C001', fileId: 'f1', fileNameOriginal: fixture.fileName}]));
+
+    const truncation = plain(gas.call('checkScanTruncation', [{
+      rows: fixture.sheets[0].rows, stopIndex: parsed.stop.stopIndex,
+      stopReason: parsed.stop.reason, dateColumnIndex: 3, amountColumnIndex: 5
+    }]));
+    assert.equal(truncation.remainingCandidateRows, 0,
+      '合計行だけの空のセクションで警告を出さない');
+    assert.equal(truncation.ok, true);
+  });
+
   test('the Orico fixture parses its yen-string amounts and serial dates', () => {
     const defs = setup();
     const fixture = loadFixture('コストコカード(オリコ)__202601');

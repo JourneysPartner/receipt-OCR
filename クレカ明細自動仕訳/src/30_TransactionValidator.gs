@@ -286,7 +286,16 @@ function checkScanTruncation(parseResult) {
       var amount = row[amountColumn];
       if (date === null || date === undefined || date === '') return false;
       if (amount === null || amount === undefined || amount === '') return false;
-      return interpretDateExpression(date).ok && interpretAmountCell(amount).ok;
+      var parsed = interpretDateExpression(date);
+      if (!parsed.ok) return false;
+      // 年が明細としてあり得ることまで求める。数値セルはすべてExcelシリアル
+      // として解釈されるので、`0`は1899年の日付として「読めて」しまう ──
+      // dカードのキャッシング欄は空でも`合計 0 0 0`の行を必ず持つ。毎月
+      // 警告が出れば担当者は警告を読まなくなり、本当に取引が残っている月を
+      // 見落とす。2桁年（イオン系のYYMMDD等）は年が確定していないので、
+      // ここでは年を問わない。
+      if (parsed.yearDigits === 4 && !(Number(parsed.year) >= 2000)) return false;
+      return interpretAmountCell(amount).ok;
     }).length;
     return {ok: real === 0, stopRow: stopRow, remainingCandidateRows: real};
   }
