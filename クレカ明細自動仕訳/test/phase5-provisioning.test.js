@@ -32,6 +32,33 @@ module.exports = ({test, assert, gas}) => {
       JSON.stringify(checks.problems.filter((p) => p.check === 2)));
   });
 
+  test('10.4: provisioning widens every sheet to the width its reader expects', () => {
+    // 幅が2か所（初期化の一覧と読み手の定数）にあり、片方だけ増やすと
+    // 実機でだけ範囲外になる ── 列を足しても`widened`が空のままで、
+    // 新しい列が永久に読めない（顧客マスターAO列で起きた。2026-09-08）。
+    setup();
+    gas.call('provisionMasterSheets', []);
+    const widthOf = (name) => gas.evaluate(
+      "masterSpreadsheet_().getSheetByName('" + name + "').getMaxColumns()");
+    const readers = [
+      ['CUSTOMER_MASTER', 'CUSTOMER_MASTER_COLUMNS_'],
+      ['CARD_FORMAT_MASTER', 'CARD_FORMAT_COLUMNS_'],
+      ['PROCESS_LOG', 'PROCESS_LOG_WIDTH_'],
+      ['TRANSACTION_LOG', 'TRANSACTION_LOG_WIDTH_'],
+      ['PERMANENT_FILE_INDEX', 'FILE_INDEX_WIDTH_']
+    ];
+    const narrow = [];
+    readers.forEach(([key, constant]) => {
+      const name = gas.evaluate("CONFIG.SHEET_NAMES." + key);
+      const expected = gas.evaluate(constant);
+      const actual = widthOf(name);
+      if (actual < expected) {
+        narrow.push(`${name}: 初期化は${actual}列だが${constant}は${expected}列を読む`);
+      }
+    });
+    assert.deepEqual(narrow, []);
+  });
+
   test('10.4: provisioning is idempotent and never touches an existing sheet', () => {
     setup();
     gas.call('provisionMasterSheets', []);
