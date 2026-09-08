@@ -51,12 +51,12 @@ module.exports = ({test, assert, gas}) => {
     'VisaLinePayカード__202502': 'smbc_family_x8',
     'aupayカード__11月引き落とし分': 'aupay_family',
     'dカード__202505': 'smbc_family_x9',
-    'dカード__ご利用内訳明細_キャッシングご返済明細_20251010': null,  // 複数セクション
+    'dカード__ご利用内訳明細_キャッシングご返済明細_20251010': 'docomo_family',
     'アメリカン・エキスプレス⁠・ビジネス・ゴールドカード__25年_10月請求分': 'amex_6',
     'アメリカン・エキスプレス・ゴールド・プリファード__25年12月請求分': 'amex_7',
     'イオンカード__202512': 'aeon_x8',
     'コジマビックカメラカード__meisai202509': 'aeon_x9',
-    'コストコカード(オリコ)__202601': null,          // ヘッダーブロックが縦持ち
+    'コストコカード(オリコ)__202601': 'orico_family',
     'コメリカード__komericard_2025_11': 'komeri_family',
     'ゴールドポイントカード__202511': 'smbc_family_x8',
     'セゾンプラチナビジネス・アメリカンエキスプレスカード__25年11月請求分': 'saison_x8',
@@ -196,6 +196,49 @@ module.exports = ({test, assert, gas}) => {
     const format = plain(defs).filter((d) => d.formatId === 'amex_6_alt')[0];
     assert.equal(gas.call('matchesColumnProfile', [{name: 'S', rows: fixture.sheets[0].rows}, format]),
       true);
+  });
+
+  test('the dCard fixture parses without reading its total row or cashing section', () => {
+    // 判定が通っても、合計行や第2セクションを取引にしていたら意味がない。
+    // 実ファイルの中身で確かめる。
+    const defs = setup();
+    const fixture = loadFixture('dカード__ご利用内訳明細_キャッシングご返済明細_20251010');
+    const format = plain(defs).filter((d) => d.formatId === 'docomo_family')[0];
+    const parsed = plain(gas.call('parseFile', [
+      {name: fixture.sheets[0].name, rows: fixture.sheets[0].rows}, format,
+      {customerId: 'C001', fileId: 'f1', fileNameOriginal: fixture.fileName}]));
+
+    // 3〜30行目が明細（28件）。31行目の合計、32行目以降のキャッシングは入らない。
+    assert.equal(parsed.txs.length, 28, JSON.stringify(parsed.txs.length));
+    assert.equal(parsed.stop.reason, 'SECTION_BREAK');
+    assert.ok(parsed.txs.every((tx) => String(tx.merchantOriginal).trim() !== ''),
+      '店名が空欄の取引を作らない（区分1で差し戻される）');
+    assert.equal(parsed.txs[0].merchantOriginal, 'ｄ払いＢ／カワチ薬品福島さくら店');
+    assert.equal(parsed.txs[0].amountBillingJpy, 3624);
+    assert.equal(parsed.txs[0].purpose, '仕入れ');
+    assert.equal(parsed.txs[0].dateHashKey, '2025-08-16');
+    // 返品行は負の金額のまま残す。
+    const refund = parsed.txs.filter((tx) => tx.amountBillingJpy < 0);
+    assert.equal(refund.length, 1);
+    assert.equal(refund[0].amountBillingJpy, -81540);
+    assert.equal(refund[0].purpose, '返品');
+  });
+
+  test('the Orico fixture parses its yen-string amounts and serial dates', () => {
+    const defs = setup();
+    const fixture = loadFixture('コストコカード(オリコ)__202601');
+    const format = plain(defs).filter((d) => d.formatId === 'orico_family')[0];
+    const parsed = plain(gas.call('parseFile', [
+      {name: fixture.sheets[0].name, rows: fixture.sheets[0].rows}, format,
+      {customerId: 'C001', fileId: 'f1', fileNameOriginal: fixture.fileName}]));
+
+    // 11〜30行目が明細（20件）。1〜10行目の縦持ち見出しは入らない。
+    assert.equal(parsed.txs.length, 20, JSON.stringify(parsed.txs.length));
+    assert.ok(parsed.txs.every((tx) => String(tx.merchantOriginal).trim() !== ''));
+    assert.equal(parsed.txs[0].merchantOriginal, 'カブシキガイシヤカプセルゼツト');
+    assert.equal(parsed.txs[0].amountBillingJpy, 4290, '"\\4,290" を金額として読む');
+    assert.equal(parsed.txs[0].purpose, 'ツール代');
+    assert.ok(parsed.txs[0].dateHashKey, 'シリアル値の日付が読めること');
   });
 
   test('detection does not depend on the converted grid being trimmed', () => {

@@ -2,7 +2,11 @@
 
 /** @param {*} value @return {boolean} */
 function isParserBlank_(value) {
-  return value === null || value === undefined || value === '';
+  if (value === null || value === undefined || value === '') return true;
+  // 空白だけのセルは空欄として扱う。金額の解釈（interpretAmountCell）は
+  // 最初から空白を除去しており、ここだけ厳密だと判定が食い違う ── dカードの
+  // 合計行は全セルが半角スペース1つで、明細行と誤判定されていた。
+  return typeof value === 'string' && value.replace(/[\s　]/g, '') === '';
 }
 
 /**
