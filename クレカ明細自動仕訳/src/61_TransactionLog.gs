@@ -66,7 +66,7 @@ function makeTransactionRow_(tx, runId, now) {
   row[22] = txInput_(planned, ['m', 'M'], txInput_(tx, ['plannedM'], row[16]));
   row[45] = planned.g === undefined || planned.g === null ? '' : planned.g;
   row[28] = txInput_(tx, ['destinationSpreadsheetId'], ''); row[29] = txInput_(tx, ['destinationSheetName'], ''); row[30] = txInput_(tx, ['destinationRow'], '');
-  row[31] = txInput_(tx, ['currency', 'currencyCode'], ''); row[32] = txInput_(tx, ['amountOriginal'], ''); row[33] = txInput_(tx, ['exchangeRate'], '');
+  row[31] = txInput_(tx, ['currencyOriginal', 'currency', 'currencyCode'], ''); row[32] = txInput_(tx, ['amountOriginal'], ''); row[33] = txInput_(tx, ['exchangeRate'], '');
   row[34] = txInput_(tx, ['dateInferenceSource'], ''); row[35] = txInput_(tx, ['dateInferenceBase'], '');
   row[36] = Boolean(txInput_(tx, ['purposeInferred'], false)); row[37] = txInput_(tx, ['purposeRuleId', 'purposeInferenceRuleId'], '');
   row[38] = txInput_(tx, ['identityHash', 'transactionIdentityHash'], ''); row[39] = txInput_(tx, ['transactionIdVersion'], VERSIONS.TRANSACTION_ID);

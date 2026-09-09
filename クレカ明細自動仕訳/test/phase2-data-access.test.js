@@ -292,6 +292,19 @@ module.exports = ({test, assert, gas}) => {
     assert.throws(() => gas.call('updateTransactionStatus', ['TX_001', 'WRITING', 'DELETED_ACCEPTED']));
   });
 
+  test('the log records the currency under the name the parser actually emits', () => {
+    // パーサーが出すのは`currencyOriginal`（24_Parser_Generic）。ログ側が
+    // `currency`/`currencyCode`しか見ないと、外貨建ての通貨がログから消える。
+    // 消えると、記録から海外決済を割り出す遡及（opsFilesNeedingTagBackfill）が
+    // 通貨列を持つ形式の取引を丸ごと取りこぼす。
+    const env = setup();
+    gas.call('registerPrepared', [[Object.assign(txFixture(), {
+      currencyOriginal: 'USD', amountOriginal: 12.5, exchangeRate: 150
+    })], 'RUN_1']);
+    const row = env.master.getSheetByName(names.transaction).getRange(2, 32, 1, 3).getValues()[0];
+    assert.deepEqual(row, ['USD', 12.5, 150]);
+  });
+
   test('INV-01: planned and verified destination values are written together in S through AB', () => {
     const env = setup(); gas.call('registerPrepared', [[txFixture()], 'RUN_1']);
     const planned = {b: '2026-02-01', f: 'P', i: 'I', k: 'K', m: 200}; const verified = {...planned};
