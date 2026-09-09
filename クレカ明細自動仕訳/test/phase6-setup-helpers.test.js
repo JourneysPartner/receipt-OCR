@@ -288,6 +288,43 @@ module.exports = ({test, assert, gas}) => {
     });
   });
 
+  test('the tag backfill clears the hash of a file already waiting to be imported', () => {
+    // 取込が途中で落ちると、提出時ハッシュだけが書かれてファイルは取込待ちに
+    // 残る。形式やパーサーを直すと再導出の値は変わるので、そのハッシュは以後の
+    // 取込を INV-07 で永久に拒む（実機で2ファイルが10分ごとに同じ理由で落ち
+    // 続けた。2026-09-09）。取込待ちを「やることなし」と飛ばすと素通りする。
+    setup();
+    gas.call('registerTestCustomer', [Object.assign({}, CUSTOMER, {
+      cashbackMerchants: ['キャッシュバック'], columns: {B: 2, F: 3, I: 4, K: 5, M: 6, txId: 7, G: 8}
+    })]);
+    const customer = gas.call('getCustomerById', ['C001']);
+    const hash = 'e'.repeat(64);
+    gas.call('createOrUpdateProcessLog', ['RUN_B', customer, {
+      id: 'waiting', name: 'waiting.csv', binaryHash: 'b'.repeat(64),
+      contentHash: hash, hashVersion: '3', state: 'DISCOVERED'
+    }]);
+    gas.call('syncPermanentContentHash', ['waiting', hash]);
+    // タグも税区分も付いていない、遅れた取引を1件置く。
+    gas.call('registerPrepared', [[{
+      fullTxId: 'TX_W', displayTxId: 'TX_W', customerId: 'C001', fileId: 'waiting',
+      sourceRow: 2, formatId: 'smbc', plannedFinalStatus: 'COMMITTED',
+      originalDate: '2026-01-02', originalMerchant: 'キャッシュバック',
+      originalAmount: 100, originalPurpose: '雑収益',
+      planned: {b: '2026-01-02', f: '', i: '雑収益', k: 'キャッシュバック', m: 100},
+      identityHash: 'd'.repeat(64), contentHash: 'c'.repeat(64), occurrenceIndex: 0,
+      transactionIdVersion: '2', hashVersion: '3'
+    }], 'RUN_B']);
+
+    const summary = plain(gas.call('opsBackfillMemoTags', []));
+
+    assert.equal(summary.errors, 0, '取込待ちは失敗ではない');
+    assert.equal(String(gas.call('getProcessLogRecord_', ['waiting']).values[12]), '',
+      '取込待ちでも提出時ハッシュを消すこと');
+    assert.equal(
+      String(gas.call('getPermanentFileIndexRecord_', ['waiting']).values[5]), '',
+      '恒久インデックスのハッシュも消すこと');
+  });
+
   test('the real setup sequence carries a SMBC-family CSV end to end', () => {
     setup();
     gas.call('registerTestCustomer', [CUSTOMER]);
