@@ -292,6 +292,22 @@ module.exports = ({test, assert, gas}) => {
     assert.throws(() => gas.call('updateTransactionStatus', ['TX_001', 'WRITING', 'DELETED_ACCEPTED']));
   });
 
+  test('a transaction can be superseded again after a second registration', () => {
+    // 取り込み直すたび、恒久インデックスには世代がもう1行積まれる（無効化した
+    // 行は履歴として残す）。`findTxIndexRecord_`が有効・無効を問わず「1行だけ」を
+    // 求めると、2回目の取り消しが必ずINV-03で落ちる ── 形式や規則を直して同じ
+    // ファイルを2度戻した時点で、そのファイルは二度と取り消せなくなる。
+    const env = setup();
+    gas.call('registerPrepared', [[txFixture()], 'RUN_1']);
+    gas.call('supersede', ['TX_001', 'REPROCESS', 'admin@example.com']);
+    gas.call('registerPrepared', [[txFixture()], 'RUN_2']);
+    const index = env.txidx.getSheets()[0];
+    assert.equal(index.getLastRow(), 3, '世代ごとに1行積まれる');
+    gas.call('supersede', ['TX_001', 'REPROCESS', 'admin@example.com']);
+    assert.equal(index.getRange(3, 9).getValue(), false, '無効化されるのは有効だった行');
+    assert.equal(index.getRange(2, 9).getValue(), false);
+  });
+
   test('the log records the currency under the name the parser actually emits', () => {
     // パーサーが出すのは`currencyOriginal`（24_Parser_Generic）。ログ側が
     // `currency`/`currencyCode`しか見ないと、外貨建ての通貨がログから消える。
