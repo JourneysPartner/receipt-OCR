@@ -133,6 +133,26 @@ module.exports = ({test, assert, gas}) => {
     assert.ok(Array.isArray(snapshots[0].formulas), 'formula state must be captured too');
   });
 
+  // ---- 選択肢A：手順14で止まった取消しを、次の呼び出しが引き継ぐ ----
+  test('6.4 choice A: a cancel that stopped before superseding finishes on a later call', () => {
+    // 手順14のsupersedeが落ちると、CANCELEDのまま有効な行が残る（INV-03で
+    // 実際に起きた）。その行は再取込で読み飛ばされ（登録は確定・取消済みに
+    // 触れない）、取消しの対象状態にもCANCELEDが無いので、以後どの操作も
+    // 届かなくなる。取消しは何度呼んでも同じ状態へ収束すること。
+    const customer = setup([destRow('TX_F')]);
+    registerTx('TX_F', 'CANCELED');
+    const leaseId = lease(customer);
+    const index = gas.call('buildIndex', [customer]);
+
+    const result = gas.call('cancelTransactions', [{
+      customer, fileId: 'file1', runId: 'RUN_1', choice: 'REPROCESS', leaseId, index
+    }]);
+
+    assert.deepEqual(plain(result.superseded), ['TX_F']);
+    assert.equal(gas.call('getTransaction', ['TX_F']), null,
+      'the stranded row must be superseded so re-import can build a new generation');
+  });
+
   // ---- 選択肢A：supersede される ----
   test('6.4 choice A: REPROCESS supersedes the transaction log so re-import is not blocked', () => {
     const customer = setup([destRow('TX_C')]);
