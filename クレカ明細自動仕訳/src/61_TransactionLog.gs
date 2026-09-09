@@ -310,7 +310,11 @@ var SETTLE_BATCH_RANGES_ = 400;
 function findTxIndexRecord_(tx) {
   var year = Number(String(tx.registeredAt).slice(0, 4)); var sheet = getTxIndexSheet(tx.customerId, year, false);
   if (!sheet) throw new IntegrityError(null, 'Permanent transaction index partition not found');
-  var matches = findRowsByColumnValue_(sheet, 1, tx.fullTxId, TX_INDEX_WIDTH_);
+  // 取り込み直すたびに世代が1行積まれ、古い行は`有効=FALSE`で履歴として残る。
+  // 有効・無効を問わず1行だけを求めると、2度目の取り消しが必ずINV-03で落ちる。
+  // 一意でなければならないのは**有効な行**であって、行数そのものではない。
+  var matches = findRowsByColumnValue_(sheet, 1, tx.fullTxId, TX_INDEX_WIDTH_)
+    .filter(function(match) { return toBool(match.values[8]); });
   if (matches.length !== 1) throw new IntegrityError('TRANSACTION_LOG_AMBIGUOUS', 'Permanent transaction index row is not unique');
   return {sheet: sheet, rowNumber: matches[0].rowNumber, values: matches[0].values};
 }
