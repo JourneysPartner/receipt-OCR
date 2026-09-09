@@ -108,12 +108,20 @@ function cancelTransactions(input) {
   // これをしないと、内容が変わっていないファイルの再処理が
   // 明細内容ハッシュ一致による重複停止で妨げられる（INV-03・仕様17.3）。
   if (choice === 'REPROCESS') {
+    // 前回の取消しが手順14で落ちると、`CANCELED`のまま有効な行が残る
+    // （supersedeがINV-03で落ちて実際に起きた）。その行は再登録が読み飛ばし、
+    // 取消しの対象状態にも`CANCELED`が無いため、以後どの操作も届かない。
+    // 取り残しをここで引き取り、何度呼んでも同じ状態へ収束させる。
+    var stranded = (input.fullTxIds && input.fullTxIds.length) ? [] :
+      getTransactionsByStatus(input.fileId, [TX_STATUS.CANCELED])
+        .map(function(tx) { return tx.fullTxId; })
+        .filter(function(id) { return result.canceled.indexOf(id) < 0; });
     // 無効化理由は2.1.5 S列の許容値と同じ語彙を使う（`CANCEL_REPROCESS`）。
     // 要確認の除外理由（REVIEW_EXCLUDE_REASON）とは別の語彙である。
-    result.canceled.forEach(function(fullTxId) {
+    result.superseded = result.canceled.concat(stranded);
+    result.superseded.forEach(function(fullTxId) {
       supersede(fullTxId, DICT_INVALIDATION_REASON.CANCEL_REPROCESS, input.actor || null);
     });
-    result.superseded = result.canceled.slice();
   }
 
   return result;
