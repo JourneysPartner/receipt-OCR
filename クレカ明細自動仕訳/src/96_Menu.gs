@@ -1,8 +1,8 @@
 'use strict';
 
 /**
- * 設計 §4.2 `01_Menu.gs` の参照系部分の暫定実装。
- * `03_Authorization.gs` 実装まで操作系を含めない。
+ * 設計 §4.2 `01_Menu.gs` の参照系部分。
+ * 操作系は次段階で追加し、閲覧範囲は `03_Authorization.gs` の認可で決める。
  *
  * 読込時の例外は定期取込まで止めるため、トップレベルには関数宣言と
  * リテラルだけで作る定数以外を置かない。
@@ -248,7 +248,7 @@ function menuShowAbout() {
     var now = new Date();
     var scope;
     try {
-      scope = menuViewerScope_();
+      scope = menuViewerScope_(actionName);
     } catch (scopeError) {
       if (scopeError instanceof AuthorizationError) {
         presentMenuError_(ui, actionName, scopeError, menuBindingLines_());
@@ -261,14 +261,21 @@ function menuShowAbout() {
     var active = SpreadsheetApp.getActiveSpreadsheet();
     var activeId = active ? active.getId() : null;
     var customers = menuCustomerSummary_(scope.customers, false);
+    var customerRoles = scope.customers.map(function(customer) {
+      return String(customer.customerName || '（顧客不明）') + '(' + customer.customerId + ')=' +
+        roleLabel(scope.rolesByCustomerId[customer.customerId]);
+    }).join('、');
     var text = menuHeaderLines_(scope, now).join('\n') + '\n\n' +
       '実行者: ' + scope.email + '（オーナー: ' + (scope.isOwner ? 'はい' : 'いいえ') + '）\n' +
+      '役割: ' + roleLabel(scope.role) + '\n' +
+      '顧客ごとの役割: ' + customerRoles + '\n' +
+      'マスターのオーナー: ' + (scope.ownerEmail || '(取得不能)') + '\n' +
       '閲覧できる顧客: ' + customers + '\n' +
       'マスタースプレッドシート: ' + (configuredMasterId || '(未設定。アクティブなスプレッドシートを使用)') + '\n' +
       'このスプレッドシート: ' + (activeId || '(なし)') + '\n' +
       '両者の関係: ' + (activeId && activeId === master.getId() ? '一致' : '不一致') + '\n' +
       'コード版: ' + VERSIONS.CODE + '\n' +
-      'このメニューは参照専用です。取込・確定・取消しなどの操作は含みません（認可モジュール実装まで）。';
+      'このメニューは参照専用です。取込・確定・取消しなどの操作は次の段階で追加します。';
     presentMenuResult_(ui, {kind: 'alert', title: actionName, text: text});
   } catch (error) {
     presentMenuError_(ui, actionName, error, []);
@@ -282,7 +289,7 @@ function runMenuAction_(actionName, fn) {
   try {
     loadSettingsFromProperties();
     var now = new Date();
-    var scope = menuViewerScope_();
+    var scope = menuViewerScope_(actionName);
     presentMenuResult_(ui, fn(scope, now));
   } catch (error) {
     presentMenuError_(ui, actionName, error, []);
@@ -325,42 +332,32 @@ function presentMenuError_(ui, actionName, error, extraLines) {
 }
 
 /**
- * 参照専用の暫定範囲であり、書込を伴う操作に流用しない。
- * 実行者が不明なまま全顧客へ広げると、拒否すべき人に情報を見せてしまう。
+ * 閲覧範囲の取得。操作系メニューは一覧表示時の結果を流用せず、書込直前に
+ * 対象顧客ごとの認可を呼び直す。
  */
-function menuViewerScope_() {
-  var email = activeUserEmail_();
-  if (!email) {
-    throw new AuthorizationError(
-      '実行者のメールアドレスを取得できないため表示できません（仕様 §20.5）。スクリプトの承認が済んでいるか確認してください。');
-  }
-  var spreadsheet = masterSpreadsheet_();
-  var owner = spreadsheet.getOwner();
-  var ownerEmail = owner && owner.getEmail ? String(owner.getEmail() || '') : '';
-  var isOwner = Boolean(ownerEmail) && ownerEmail.toLowerCase() === String(email).toLowerCase();
-  var customers = isOwner ? getActiveCustomers() : getAuthorizedCustomers(email);
-  if (!customers.length) {
-    throw new AuthorizationError('閲覧を許可された顧客がありません。実行者: ' + email +
-      '。顧客マスターの Q列（確認担当者）または R列（システム管理者）にこのアドレスを登録してください。');
-  }
+function menuViewerScope_(actionName) {
+  var authorized = authorize(ROLE.REVIEWER, null, {operation: 'MENU:' + actionName});
   var customerIds = [];
   var customerNameById = {};
-  customers.forEach(function(customer) {
+  authorized.customers.forEach(function(customer) {
     customerIds.push(customer.customerId);
     customerNameById[customer.customerId] = customer.customerName;
   });
   return {
-    email: email,
-    isOwner: isOwner,
-    customers: customers,
+    email: authorized.userEmail,
+    role: authorized.role,
+    isOwner: authorized.isOwner,
+    ownerEmail: authorized.ownerEmail,
+    customers: authorized.customers,
     customerIds: customerIds,
-    customerNameById: customerNameById
+    customerNameById: customerNameById,
+    rolesByCustomerId: authorized.rolesByCustomerId
   };
 }
 
 function menuHeaderLines_(scope, now) {
   return [
-    '実行者: ' + scope.email + (scope.isOwner ? '（オーナー）' : ''),
+    '実行者: ' + scope.email + '（' + roleLabel(scope.role) + '）',
     '対象顧客: ' + menuCustomerSummary_(scope.customers, true) +
       '　取得: ' + formatMenuTimestamp_(now)
   ];

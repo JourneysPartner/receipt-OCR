@@ -158,6 +158,7 @@ const DICT_INVALIDATION_REASON = createStringEnum_([
 ]);
 
 const CUSTOMER_CATEGORY = createStringEnum_(['CORPORATE', 'INDIVIDUAL']);
+const ROLE = createStringEnum_(['REVIEWER', 'SYSTEM_ADMIN', 'OWNER_ADMIN']);
 const LEASE_STATE = createStringEnum_(['ACTIVE']);
 const LEASE_PURPOSE = createStringEnum_(['PROCESS', 'WRITE_ONLY']);
 const RENAME_STATE = createStringEnum_(['OK', 'PENDING_RETRY', 'FAILED_MAX_RETRY']);
