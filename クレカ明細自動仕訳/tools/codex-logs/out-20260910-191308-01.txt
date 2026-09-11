@@ -1,0 +1,39 @@
+参照専用カスタムメニューを実装し、全764件のテストが通過しました。`clasp push` は実行していません。
+
+作成：
+
+- [src/96_Menu.gs](<C:/Users/ko-ch/Desktop/仕事/receipt OCR/クレカ明細自動仕訳/src/96_Menu.gs>)
+- [test/phase7-menu-readonly.test.js](<C:/Users/ko-ch/Desktop/仕事/receipt OCR/クレカ明細自動仕訳/test/phase7-menu-readonly.test.js>)
+
+変更：
+
+- [src/97_Ops.gs](<C:/Users/ko-ch/Desktop/仕事/receipt OCR/クレカ明細自動仕訳/src/97_Ops.gs>)
+- [test/gas-stubs.js](<C:/Users/ko-ch/Desktop/仕事/receipt OCR/クレカ明細自動仕訳/test/gas-stubs.js>)
+- [test/gas-harness.js](<C:/Users/ko-ch/Desktop/仕事/receipt OCR/クレカ明細自動仕訳/test/gas-harness.js>)
+
+テスト結果：
+
+- 作業前：728/728
+- テスト追加直後：728/764（赤を確認）
+- 実装後：764/764
+- 新規テスト：36ケース
+
+静的検査：
+
+- `96_Menu.gs` の書込API：0件
+- `97_Ops.gs` の追加コードの書込API：0件
+- `getUi()` の存在ファイル：`96_Menu.gs`のみ
+- 設計§4.4の予約済み認可関数定義：0件
+
+仕様上の注意点として、`opsFilesNeedingTagBackfill().detail[].customerId` の追加要求と、既存戻り値・Logger出力の完全維持には緊張があります。`customerId`を非列挙プロパティとして追加し、コードからは参照可能にしつつ、既存のJSON形式とLogger出力を変えない形で両方を満たしました。未実装・省略した機能はありません。
+
+実機未確認事項については、以下を仮定しています。
+
+- U-1：コンテナとマスターは別でもよい。別なら処理ログへのリンクを表示します。
+- U-2：承認済みメニュー実行では実行者メールを取得できる。空なら仕様文言で拒否します。
+- U-3：最大警告構成は838文字・27行で、規定範囲内です。実際のダイアログ表示は未確認です。
+- U-4：オーナーメールが取得できる。null・空文字なら非オーナーとして扱います。
+- U-5：ファイル読込順には依存しないよう、トップレベル参照をリテラルに限定しました。
+- U-6：初回OAuth承認画面の遷移・未確認アプリ警告は未確認です。
+- U-7：公開ハンドラには末尾アンダースコアを付けていません。
+- U-8：日時表示と取込状況の停滞判定は文字列・Date・シリアル値を処理します。既存`opsShowLeases`との判定互換は維持しているため、実機では両者の比較確認が必要です。

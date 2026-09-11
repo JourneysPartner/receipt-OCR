@@ -1,0 +1,33 @@
+修正完了しました。`clasp push` は実行していません。
+
+変更ファイル：
+
+- [src/96_Menu.gs](</C:/Users/ko-ch/Desktop/仕事/receipt OCR/クレカ明細自動仕訳/src/96_Menu.gs:210>)
+  - タグ遡及メニューを `collectTagBackfillTargets_()` に接続
+- [src/97_Ops.gs](</C:/Users/ko-ch/Desktop/仕事/receipt OCR/クレカ明細自動仕訳/src/97_Ops.gs:1108>)
+  - `collectTagBackfillTargets_()` を抽出
+  - `customerId` を通常の列挙可能プロパティとして保持
+  - `opsFilesNeedingTagBackfill()` では `customerId` を明示的に除外し、従来形式を維持
+- [test/phase7-menu-readonly.test.js](</C:/Users/ko-ch/Desktop/仕事/receipt OCR/クレカ明細自動仕訳/test/phase7-menu-readonly.test.js:206>)
+  - 指摘された4箇所を補強
+  - collect/ops の新しい境界検証を追加
+
+ミューテーション確認結果：
+
+| 一時的に壊した箇所 | 検出結果 |
+|---|---|
+| リースの顧客フィルタを除去 | テスト4が失敗、763/764 |
+| 取込状況のファイル顧客フィルタを除去 | テスト13が失敗、763/764 |
+| 検出／解放の可・不可を反転 | テスト25が失敗、763/764 |
+| 30分条件を除去して常時警告 | テスト10が失敗、763/764 |
+
+すべて個別に確認後、正しい実装へ復元済みです。
+
+最終結果：
+
+- 全テスト：`764/764 tests passed`
+- テスト30：通過
+- `opsFilesNeedingTagBackfill()` の戻り値・Logger形式：従来どおり
+- `Object.defineProperty`：撤廃済み
+
+仕様書には、§7.8・§9.4・テスト31の「opsのdetailへcustomerId追加」と、§9.4・テスト30の「戻り値とLoggerを一字一句変えない」が両立しない矛盾があります。仕様書自体は変更せず、今回のレビュー指示どおり collector のみに `customerId` を持たせました。
