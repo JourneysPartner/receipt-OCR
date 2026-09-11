@@ -6,3 +6,7 @@
 # OAuthクライアントの秘密。clasp run（Apps Script API実行）に使う。
 client_secret_*.json
 .clasprc.json
+
+# Codex実行の全トランスクリプト。1回で18MB出ることがあり、履歴に残す価値より
+# 容量が勝る。結論は out-*.txt に残るのでそちらは追跡する。
+tools/codex-logs/err-*.txt

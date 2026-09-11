@@ -1,0 +1,22 @@
+修正完了しました。`clasp push` は実行していません。
+
+変更ファイル：
+
+- [src/97_Ops.gs](<C:/Users/ko-ch/Desktop/仕事/receipt OCR/クレカ明細自動仕訳/src/97_Ops.gs:542>)
+  - `fileErrorTotal_(file)` を追加
+  - `assessImportStatus_` から共有ヘルパーを使用
+- [src/95_Notifications.gs](<C:/Users/ko-ch/Desktop/仕事/receipt OCR/クレカ明細自動仕訳/src/95_Notifications.gs:209>)
+  - watch 更新も同じ共有ヘルパーを使用
+- [test/gas-stubs.js](<C:/Users/ko-ch/Desktop/仕事/receipt OCR/クレカ明細自動仕訳/test/gas-stubs.js:707>)
+  - `getScriptProperties` の失敗注入を追加
+- [test/phase7-notifications.test.js](<C:/Users/ko-ch/Desktop/仕事/receipt OCR/クレカ明細自動仕訳/test/phase7-notifications.test.js:231>)
+  - 必須2件と任意1件の回帰テストを追加
+
+検証結果：
+
+- 全テスト：`813/813` 通過
+- 指摘1：watch 側を `errorCount` のみへ変異させると、新テスト `notify 2d` が失敗し `812/813`
+- 指摘2：外側 catch を `throw error` へ変異させると、新テスト `notify 25b` が `"properties boom"` で失敗し `812/813`
+- いずれの変異も復元後、再度 `813/813` を確認済み
+
+指摘3は採用しました。期限切れエピソードをGC前でも新規扱いする意味を直接固定する `notify 6b` を追加しています。当該分岐を削除すると `812/813` になり、新テストが落ちることも確認済みです。

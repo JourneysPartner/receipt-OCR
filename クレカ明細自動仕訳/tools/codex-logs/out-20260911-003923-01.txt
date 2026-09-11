@@ -1,0 +1,48 @@
+実装完了です。`clasp push` は実行していません。
+
+### 変更ファイル
+
+- 新規: [src/95_Notifications.gs](<C:/Users/ko-ch/Desktop/仕事/receipt OCR/クレカ明細自動仕訳/src/95_Notifications.gs:1>)
+- 変更: [src/71_RunOrchestrator.gs](<C:/Users/ko-ch/Desktop/仕事/receipt OCR/クレカ明細自動仕訳/src/71_RunOrchestrator.gs:521>)
+- 変更: [src/96_Menu.gs](<C:/Users/ko-ch/Desktop/仕事/receipt OCR/クレカ明細自動仕訳/src/96_Menu.gs:96>)
+- 変更: [src/97_Ops.gs](<C:/Users/ko-ch/Desktop/仕事/receipt OCR/クレカ明細自動仕訳/src/97_Ops.gs:444>)
+- 変更: [test/gas-harness.js](<C:/Users/ko-ch/Desktop/仕事/receipt OCR/クレカ明細自動仕訳/test/gas-harness.js:28>)
+- 変更: [test/gas-stubs.js](<C:/Users/ko-ch/Desktop/仕事/receipt OCR/クレカ明細自動仕訳/test/gas-stubs.js:668>)
+- 変更: [test/phase7-menu-readonly.test.js](<C:/Users/ko-ch/Desktop/仕事/receipt OCR/クレカ明細自動仕訳/test/phase7-menu-readonly.test.js:685>)
+- 新規: [test/phase7-notifications.test.js](<C:/Users/ko-ch/Desktop/仕事/receipt OCR/クレカ明細自動仕訳/test/phase7-notifications.test.js:1>)
+
+### テスト
+
+- 実装前: `764/764`
+- テスト追加後の赤: `765/810`（45件失敗）
+- 実装後: **`810/810 tests passed`**
+- 通知テスト: 45件ちょうど
+- メニューテスト37を追加
+- `git diff --check`: 問題なし
+- 通知送信失敗でも取込を継続することは `notify 20`・`notify 25` で固定
+
+### 意図的な破壊確認
+
+すべて破壊後に復元し、最後に810件を再実行しました。
+
+- `outcome === 'FAILED'` の検知を破壊 → `notify 1, 1b, 3, 4, 5, 9, 20` が失敗
+- `errorTotal > watch` を逆転 → `menu 37`、`notify 1, 2, 2b, 2c, 11` が失敗
+- `errorDropped` を合計から除外 → `notify 2c` が失敗
+- CRITICAL再送窓を360分から0分へ変更 → `notify 1, 4, 5, 6, 10, 10b, 23b, 30, 32, 33b, 33c` が失敗
+- 顧客通知へ全顧客管理者を混入 → `notify 15, 22` が失敗
+
+追加レビューでも、WARNING本文の再送窓、non-nullの`skipped`、継続所見の二重掲載を、それぞれ赤にしてから修正しました。
+
+### 仕様書上の矛盾・差異
+
+- §15.3テスト33b: 指定された40エピソードは、`fingerprint: []` にした段階でも実測 **10,077 bytes** で8,500以下になりません。§7.6段階4へ進めると **8,266 bytes** です。そのため、送信済み40件を6項目形式で全件保持し、`fingerprint` は省略しています。
+- §15.3テスト33d: 日本語の件名120文字＋detail 200文字はUTF-8で実測 **1,142 bytes** です。1,024未満を優先し、文字数上限適用後にdetailだけを追加短縮しています。
+- §7.7は本文組立てをロック外、§13.3はdue判定後のロック内組立てを指定しており両立しません。二重送信防止と最新エピソード表示を優先し、§13.3の順序を採用しました。
+- §16の実機確認11～17は、未pushのため未実施です。
+
+### 実装者判断1～4
+
+1. 壊れたW列は`errorDropped = 0`・`lastError = null`として扱い、`recordError`自体は変更せず、`RUN_FILE_FAILED`で補完しました。
+2. メニューでは状態を1回読み、その結果を`readNotificationWatch_(state)`へ渡して`getProperties`を1回にしました。
+3. ロック外の状態は所見と`watchByBucket`の導出だけに使用。ロック内で状態を再読込し、古いエピソードを上書きしません。
+4. 古い行番号は使わず、実際の関数位置と名前を基準に改修しました。
