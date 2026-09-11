@@ -214,6 +214,7 @@ class MemoryRange {
 class MemorySheet {
   constructor(parent, name, options = {}) {
     this.parent = parent; this.name = name;
+    this.hidden = options.hidden === true;
     this.maxRows = options.maxRows || Math.max(1000, (options.values || []).length || 1);
     this.maxColumns = options.maxColumns || Math.max(26, Math.max(0, ...(options.values || []).map((r) => r.length)));
     this.values = Array.from({length: this.maxRows}, () => Array(this.maxColumns).fill(''));
@@ -232,6 +233,7 @@ class MemorySheet {
     }
   }
   getName() { return this.name; }
+  isSheetHidden() { return this.hidden; }
   setName(name) { this.name = String(name); return this; }
   getProtections() { return (this.protections || []).slice(); }
   getParent() { return this.parent; }
@@ -357,12 +359,16 @@ class MemorySheet {
 class MemorySpreadsheet {
   constructor(id, options = {}) {
     this.id = String(id); this.name = options.name || this.id; this.sheets = [];
+    this.ownerEmail = options.ownerEmail || null; this.activeSheet = null;
     this.counters = {rangeReads: 0, cellsRead: 0};
     for (const spec of options.sheets || []) this.insertSheet(spec.name, spec);
   }
   getId() { return this.id; }
   getName() { return this.name; }
   getUrl() { return `https://docs.google.com/spreadsheets/d/${this.id}`; }
+  getOwner() {
+    return this.ownerEmail === null ? null : {getEmail: () => this.ownerEmail};
+  }
   getSheets() { return this.sheets.slice(); }
   getSheetByName(name) { return this.sheets.find((sheet) => sheet.getName() === name) || null; }
   insertSheet(name, options = {}) {
@@ -370,6 +376,11 @@ class MemorySpreadsheet {
     const sheet = new MemorySheet(this, String(name), options); this.sheets.push(sheet); return sheet;
   }
   deleteSheet(sheet) { const index = this.sheets.indexOf(sheet); if (index < 0) throw new Error('Unknown sheet'); this.sheets.splice(index, 1); }
+  setActiveSheet(sheet) {
+    if (!sheet || sheet.getParent() !== this) throw new Error('Sheet belongs to another spreadsheet');
+    this.activeSheet = sheet; return sheet;
+  }
+  getActiveSheet() { return this.activeSheet; }
 }
 
 class MemoryDriveFile {
@@ -408,9 +419,15 @@ function createGasStubs() {
   const Utilities = createUtilitiesStub();
   const spreadsheets = new Map(); const files = new Map(); const folders = new Map(); const properties = new Map();
   let sheetsBatchGetFailures = [];
+  let getScriptPropertiesFailures = [];
   const triggers = [];
   const apiCallCounts = {batchGet: 0, cellsRead: 0, batchUpdate: 0, rangesWritten: 0, cellsWritten: 0};
-  const scriptLock = new MemoryScriptLock(); let activeSpreadsheetId = null; let activeUserEmail = 'tester@example.com';
+  const scriptLock = new MemoryScriptLock(); let activeSpreadsheetId = null;
+  let activeUserEmail = 'tester@example.com'; let effectiveUserEmail = 'tester@example.com';
+  let mailQuota = 100; let mailFailures = []; const sentMails = [];
+  const propertyCallCounts = {getProperty: 0, setProperty: 0, deleteProperty: 0, getProperties: 0};
+  const propertyWrites = [];
+  let uiAvailable = true; const uiEvents = []; const menus = []; let promptResponses = [];
   const openSpreadsheet = (id) => { const value = spreadsheets.get(String(id)); if (!value) throw new Error(`Spreadsheet not found: ${id}`); return value; };
   const sheetAndRange = (spreadsheetId, a1) => {
     const spreadsheet = openSpreadsheet(spreadsheetId); const parsed = parseA1(a1);
@@ -419,7 +436,65 @@ function createGasStubs() {
     const resolved = parseA1(a1, {sheetName: sheet.getName(), maxRows: sheet.getMaxRows(), maxColumns: sheet.getMaxColumns()});
     return {sheet, range: sheet.getRange(resolved.row, resolved.column, resolved.numRows, resolved.numColumns)};
   };
-  const SpreadsheetApp = {openById: openSpreadsheet, getActiveSpreadsheet: () => activeSpreadsheetId ? openSpreadsheet(activeSpreadsheetId) : null, flush: () => { roundTrips.flushes += 1; if (roundTripListener) roundTripListener('flushes'); }, ProtectionType: Object.freeze({RANGE: 'RANGE', SHEET: 'SHEET'})};
+  const ButtonSet = Object.freeze({OK: 'OK', OK_CANCEL: 'OK_CANCEL', YES_NO: 'YES_NO', YES_NO_CANCEL: 'YES_NO_CANCEL'});
+  const Button = Object.freeze({OK: 'OK', CANCEL: 'CANCEL', CLOSE: 'CLOSE', YES: 'YES', NO: 'NO'});
+  const makeMenu = (name) => {
+    const node = {name: String(name), items: []};
+    return {
+      _node: node,
+      addItem(caption, functionName) {
+        node.items.push({caption: String(caption), functionName: String(functionName)}); return this;
+      },
+      addSeparator() { node.items.push({separator: true}); return this; },
+      addSubMenu(menu) { node.items.push(menu._node); return this; },
+      addToUi() { menus.push(node); return this; }
+    };
+  };
+  const Ui = {
+    ButtonSet,
+    Button,
+    createMenu: makeMenu,
+    alert(...args) {
+      let title = null; let prompt = ''; let buttons = null;
+      if (args.length === 1) prompt = args[0];
+      else if (args.length === 2) { prompt = args[0]; buttons = args[1]; }
+      else { title = args[0]; prompt = args[1]; buttons = args[2]; }
+      uiEvents.push({type: 'alert', title, prompt: String(prompt), buttons});
+      return Button.OK;
+    },
+    prompt(title, prompt, buttons) {
+      uiEvents.push({type: 'prompt', title: String(title), prompt: String(prompt), buttons});
+      const response = promptResponses.length ? promptResponses.shift() : {button: 'CANCEL', text: ''};
+      return {
+        getSelectedButton: () => Button[String(response.button || 'CANCEL')] || String(response.button || 'CANCEL'),
+        getResponseText: () => String(response.text || '')
+      };
+    },
+    showModalDialog(output, title) {
+      uiEvents.push({type: 'modal', title: String(title), html: output.getContent(),
+        width: output.getWidth(), height: output.getHeight()});
+    },
+    showSidebar(output) {
+      uiEvents.push({type: 'modal', title: output.getTitle(), html: output.getContent(),
+        width: output.getWidth(), height: output.getHeight()});
+    }
+  };
+  const HtmlService = {
+    createHtmlOutput(content) {
+      let html = String(content || ''); let width = null; let height = null; let title = null;
+      return {
+        setWidth(value) { width = Number(value); return this; },
+        setHeight(value) { height = Number(value); return this; },
+        setTitle(value) { title = String(value); return this; },
+        append(value) { html += String(value); return this; },
+        getContent: () => html,
+        getWidth: () => width,
+        getHeight: () => height,
+        getTitle: () => title
+      };
+    }
+  };
+  const SpreadsheetApp = {openById: openSpreadsheet, getActiveSpreadsheet: () => activeSpreadsheetId ? openSpreadsheet(activeSpreadsheetId) : null, getUi: () => { if (!uiAvailable) throw new Error('Cannot call SpreadsheetApp.getUi() from this context.'); return Ui; }, flush: () => { roundTrips.flushes += 1; if (roundTripListener) roundTripListener('flushes'); }, ProtectionType: Object.freeze({RANGE: 'RANGE', SHEET: 'SHEET'})};
   const Sheets = {Spreadsheets: {
     Values: {
       batchGet(spreadsheetId, request) {
@@ -587,15 +662,55 @@ function createGasStubs() {
   const logLines = [];
   const Logger = {log(message) { logLines.push(String(message)); }};
   const LockService = {getScriptLock: () => scriptLock};
-  const Session = {getActiveUser: () => ({getEmail: () => activeUserEmail})};
+  const Session = {
+    getActiveUser: () => ({getEmail: () => activeUserEmail}),
+    getEffectiveUser: () => ({getEmail: () => effectiveUserEmail})
+  };
+  const MailApp = {
+    getRemainingDailyQuota() { return mailQuota; },
+    sendEmail(...args) {
+      if (mailFailures.length) throw new Error(String(mailFailures.shift()));
+      const value = args.length === 1 && args[0] && typeof args[0] === 'object' ? args[0] :
+        {to: args[0], subject: args[1], body: args[2]};
+      const recipients = String(value.to || '').split(',').map((item) => item.trim()).filter(Boolean);
+      if (mailQuota < recipients.length) {
+        throw new Error('Service invoked too many times for one day: email.');
+      }
+      mailQuota -= recipients.length;
+      sentMails.push({to: recipients, subject: String(value.subject || ''),
+        body: String(value.body || ''), name: value.name === undefined ? undefined : String(value.name)});
+    }
+  };
   const scriptProperties = {
-    getProperty: (key) => properties.has(String(key)) ? properties.get(String(key)) : null,
-    setProperty(key, value) { properties.set(String(key), String(value)); return scriptProperties; },
-    deleteProperty(key) { properties.delete(String(key)); return scriptProperties; },
-    getProperties: () => Object.fromEntries(properties),
+    getProperty(key) {
+      propertyCallCounts.getProperty += 1;
+      return properties.has(String(key)) ? properties.get(String(key)) : null;
+    },
+    setProperty(key, value) {
+      propertyCallCounts.setProperty += 1;
+      propertyWrites.push({operation: 'set', key: String(key)});
+      properties.set(String(key), String(value)); return scriptProperties;
+    },
+    deleteProperty(key) {
+      propertyCallCounts.deleteProperty += 1;
+      propertyWrites.push({operation: 'delete', key: String(key)});
+      properties.delete(String(key)); return scriptProperties;
+    },
+    getProperties() {
+      propertyCallCounts.getProperties += 1;
+      return Object.fromEntries(properties);
+    },
     deleteAllProperties() { properties.clear(); return scriptProperties; }
   };
-  const PropertiesService = {getScriptProperties: () => scriptProperties};
+  const PropertiesService = {
+    getScriptProperties() {
+      if (getScriptPropertiesFailures.length) {
+        const failure = getScriptPropertiesFailures.shift();
+        if (failure) throw (failure instanceof Error ? failure : new Error(String(failure)));
+      }
+      return scriptProperties;
+    }
+  };
 
   // 時間主導トリガー。実GASの ScriptApp のうち、取込の定期実行に使う分だけ。
   const ScriptApp = {
@@ -610,6 +725,21 @@ function createGasStubs() {
                     id: 'TRIG_' + (triggers.length + 1),
                     handler: String(handler),
                     minutes: Number(minutes),
+                    getUniqueId() { return this.id; },
+                    getHandlerFunction() { return this.handler; }
+                  };
+                  triggers.push(trigger);
+                  return trigger;
+                }
+              };
+            },
+            everyHours(hours) {
+              return {
+                create() {
+                  const trigger = {
+                    id: 'TRIG_' + (triggers.length + 1),
+                    handler: String(handler),
+                    hours: Number(hours),
                     getUniqueId() { return this.id; },
                     getHandlerFunction() { return this.handler; }
                   };
@@ -650,7 +780,33 @@ function createGasStubs() {
     getLogLines: () => logLines.slice(),
     setActiveSpreadsheet(id) { activeSpreadsheetId = String(id); },
     setActiveUser(email) { activeUserEmail = String(email); },
+    setEffectiveUser(email) { effectiveUserEmail = String(email); },
+    getSentMails: () => sentMails.map((mail) => Object.assign({}, mail, {to: mail.to.slice()})),
+    resetSentMails() { sentMails.length = 0; },
+    setMailQuota(value) { mailQuota = Number(value); },
+    setMailFailures(values) { mailFailures = (values || []).slice(); },
+    getPropertyCallCounts: () => Object.assign({}, propertyCallCounts),
+    getPropertyWrites: () => propertyWrites.map((item) => Object.assign({}, item)),
+    resetPropertyCallCounts() {
+      Object.keys(propertyCallCounts).forEach((key) => { propertyCallCounts[key] = 0; });
+      propertyWrites.length = 0;
+    },
+    setSpreadsheetOwner(id, email) { openSpreadsheet(id).ownerEmail = email === null ? null : String(email); },
+    getActiveSheetName(id) {
+      const active = openSpreadsheet(id).getActiveSheet(); return active ? active.getName() : null;
+    },
+    hideSheet(id, name) {
+      const target = openSpreadsheet(id).getSheetByName(name);
+      if (!target) throw new Error(`Sheet not found: ${name}`);
+      target.hidden = true;
+    },
+    setUiAvailable(value) { uiAvailable = Boolean(value); },
+    setPromptResponses(responses) { promptResponses = (responses || []).slice(); },
+    getUiEvents: () => uiEvents.slice(),
+    resetUiEvents() { uiEvents.length = 0; },
+    getMenus: () => menus.slice(),
     setSheetsBatchGetFailures(failures) { sheetsBatchGetFailures = failures.slice(); },
+    setGetScriptPropertiesFailures(failures) { getScriptPropertiesFailures = (failures || []).slice(); },
     getScriptLock: () => scriptLock,
     // 読取量の計上。INV-08 の違反はスタブ上では速度に現れないため、
     // 回数で見るしかない。
@@ -663,9 +819,10 @@ function createGasStubs() {
     roundTrips() { return {rangeReads: roundTrips.rangeReads, rangeWrites: roundTrips.rangeWrites, flushes: roundTrips.flushes}; },
     resetRoundTrips() { roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; },
     resetApiCallCounts() { apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; },
-    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptLock.reset(); sheetsBatchGetFailures = []; activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; driveListFailures = []; triggers.length = 0; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; }
+    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptLock.reset(); sheetsBatchGetFailures = []; getScriptPropertiesFailures = []; activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; effectiveUserEmail = 'tester@example.com'; mailQuota = 100; mailFailures = []; sentMails.length = 0; propertyWrites.length = 0; Object.keys(propertyCallCounts).forEach((key) => { propertyCallCounts[key] = 0; }); uiAvailable = true; uiEvents.length = 0; menus.length = 0; promptResponses = []; apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; driveListFailures = []; triggers.length = 0; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; }
   };
-  return {Utilities, SpreadsheetApp, Sheets, DriveApp, Drive, Logger, LockService, Session, PropertiesService, ScriptApp, control};
+  return {Utilities, SpreadsheetApp, Sheets, DriveApp, Drive, Logger, LockService, Session,
+    PropertiesService, ScriptApp, MailApp, HtmlService, control};
 }
 
 module.exports = {createUtilitiesStub, createGasStubs, columnToNumber, numberToColumn, parseA1};

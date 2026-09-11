@@ -521,6 +521,9 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
     // 例外＝`FAILED`。リースを解放し、ループを止めない（6.1の帰着）。
     outcome.outcome = 'FAILED';
     outcome.error = String((error && error.code) || (error && error.message) || error);
+    // 本文へ機微情報を含み得るmessageを渡さず、固定語彙だけで原因を束ねる。
+    outcome.errorCode = (error && error.code) || null;
+    outcome.errorName = (error && error.name) || 'Error';
     try {
       recordError(fileId, {code: (error && error.code) || 'UNEXPECTED_ERROR',
         detail: String(error && error.message)});

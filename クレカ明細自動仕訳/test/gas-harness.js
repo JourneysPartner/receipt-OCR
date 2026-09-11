@@ -25,6 +25,8 @@ class GasHarness {
       LockService: stubs.LockService,
       Session: stubs.Session,
       PropertiesService: stubs.PropertiesService,
+      MailApp: stubs.MailApp,
+      HtmlService: stubs.HtmlService,
       ...options.globals
     });
   }
