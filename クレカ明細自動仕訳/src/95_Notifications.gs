@@ -514,9 +514,15 @@ function composeNotificationMail_(bucket, dueFindings, continuingFindings, conte
     lines.push('（スプレッドシートを開いて「クレカ自動処理 ▸ 取込の状況」でも確認できます）');
   } else lines.push('（マスターを開けないため省略）');
   lines.push('', '■ この通知について');
+  // 抑制なしを「0分は再送しません」と書くと、日本語として壊れるうえ意味が逆に
+  // 読める。INFOに抑制を置かないのは意図である ── 「定期取込を自動停止」は
+  // `opsStartScheduledImport`の実行を促す通知で、抑制すると次のバッチで取込が
+  // 止まったままになる。文言のほうを事実に合わせる。
   var repeatMinutes = Number(NOTIFY_REPEAT_MINUTES_[severity] || 0);
-  var repeatWindow = repeatMinutes === 0 ? '0分' : String(repeatMinutes / 60) + '時間';
-  lines.push('同じ事象は ' + repeatWindow + ' は再送しません（要対応: 6時間、注意: 24時間）。解消しても通知しません。');
+  lines.push(repeatMinutes === 0 ?
+    '同じ事象でも毎回通知します（要対応: 6時間、注意: 24時間は再送しません）。解消しても通知しません。' :
+    '同じ事象は ' + String(repeatMinutes / 60) +
+      ' 時間は再送しません（要対応: 6時間、注意: 24時間）。解消しても通知しません。');
   if (Number(context.quotaSkipped || 0) > 0) {
     lines.push('前回までにクォータ上限で ' + Number(context.quotaSkipped) + ' 件の通知を送れませんでした。');
   }

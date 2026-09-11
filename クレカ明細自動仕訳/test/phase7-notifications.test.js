@@ -313,7 +313,7 @@ module.exports = ({test, assert, gas}) => {
     resetNotify();
     const item = finding('CUSTOMER_FIX', 'C001', 'WARNING', ['f1'], 1);
     dispatch([item], t0);
-    assert.match(gas.stubs.getSentMails()[0].body, /同じ事象は 24時間 は再送しません/);
+    assert.match(gas.stubs.getSentMails()[0].body, /同じ事象は 24 時間は再送しません/);
     dispatch([item], at(23 * 60));
     assert.equal(gas.stubs.getSentMails().length, 1);
     dispatch([item], at(24 * 60));
@@ -820,5 +820,29 @@ module.exports = ({test, assert, gas}) => {
     assert.deepEqual(plain(gas.call('opsShowLeases', [])), ['(リースなし)']);
     assert.deepEqual(plain(gas.call('opsReleaseStalledLeases', [])), []);
     assert.deepEqual(plain(gas.call('opsRecoverStuckFiles', [])), []);
+  });
+
+  test('notify 37: the resend note reads as a sentence for every severity', () => {
+    // 抑制なし（INFO）を「0分は再送しません」と書くと、日本語として壊れるうえ
+    // 意味が逆に読める。実機に届いた1通目がこれだった（2026-09-11）。
+    // INFOに抑制が無いのは意図であり、直すのは文言のほう ── この通知は
+    // 「opsStartScheduledImportを実行してください」という行動を促すもので、
+    // 抑制すると次のバッチで取込が止まったままになる。
+    const cases = [
+      {kind: 'FAILED_FILES', severity: 'CRITICAL', expect: /6 時間は再送しません/},
+      {kind: 'ERROR_RECORDS', severity: 'WARNING', expect: /24 時間は再送しません/},
+      {kind: 'SCHEDULE_STOPPED', severity: 'INFO', expect: /毎回通知します/}
+    ];
+    cases.forEach((entry) => {
+      const mail = plain(gas.call('composeNotificationMail_', ['SYSTEM', [{
+        kind: entry.kind, severity: entry.severity, bucket: 'SYSTEM', count: 1,
+        elements: [], line: 'x', action: 'y'
+      }], [], {
+        customerName: '', now: t0, source: 'TICK', runId: null, links: null,
+        episodes: {[entry.kind]: {firstSeenAt: t0.toISOString(), lastSentAt: null, seenCount: 1}},
+        quotaSkipped: 0, customerMasterUnavailable: false, codeVersion: '3.0.0'}]));
+      assert.match(mail.body, entry.expect, entry.severity);
+      assert.doesNotMatch(mail.body, /0分|0 分/, entry.severity + ': 0分と書かない');
+    });
   });
 };
