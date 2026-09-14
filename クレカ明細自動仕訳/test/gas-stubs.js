@@ -427,7 +427,7 @@ function createGasStubs() {
   let mailQuota = 100; let mailFailures = []; const sentMails = [];
   const propertyCallCounts = {getProperty: 0, setProperty: 0, deleteProperty: 0, getProperties: 0};
   const propertyWrites = [];
-  let uiAvailable = true; const uiEvents = []; const menus = []; let promptResponses = [];
+  let uiAvailable = true; const uiEvents = []; const menus = []; let promptResponses = []; let alertResponses = [];
   const openSpreadsheet = (id) => { const value = spreadsheets.get(String(id)); if (!value) throw new Error(`Spreadsheet not found: ${id}`); return value; };
   const sheetAndRange = (spreadsheetId, a1) => {
     const spreadsheet = openSpreadsheet(spreadsheetId); const parsed = parseA1(a1);
@@ -459,8 +459,13 @@ function createGasStubs() {
       if (args.length === 1) prompt = args[0];
       else if (args.length === 2) { prompt = args[0]; buttons = args[1]; }
       else { title = args[0]; prompt = args[1]; buttons = args[2]; }
-      uiEvents.push({type: 'alert', title, prompt: String(prompt), buttons});
-      return Button.OK;
+      let returned = 'OK';
+      if (buttons !== ButtonSet.OK && buttons !== null && buttons !== undefined) {
+        returned = alertResponses.length ? String(alertResponses.shift()) :
+          (String(buttons).indexOf('CANCEL') >= 0 ? 'CANCEL' : 'NO');
+      }
+      uiEvents.push({type: 'alert', title, prompt: String(prompt), buttons, returned});
+      return Button[returned] || returned;
     },
     prompt(title, prompt, buttons) {
       uiEvents.push({type: 'prompt', title: String(title), prompt: String(prompt), buttons});
@@ -802,6 +807,7 @@ function createGasStubs() {
     },
     setUiAvailable(value) { uiAvailable = Boolean(value); },
     setPromptResponses(responses) { promptResponses = (responses || []).slice(); },
+    setAlertResponses(responses) { alertResponses = (responses || []).slice(); },
     getUiEvents: () => uiEvents.slice(),
     resetUiEvents() { uiEvents.length = 0; },
     getMenus: () => menus.slice(),
@@ -819,7 +825,7 @@ function createGasStubs() {
     roundTrips() { return {rangeReads: roundTrips.rangeReads, rangeWrites: roundTrips.rangeWrites, flushes: roundTrips.flushes}; },
     resetRoundTrips() { roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; },
     resetApiCallCounts() { apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; },
-    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptLock.reset(); sheetsBatchGetFailures = []; getScriptPropertiesFailures = []; activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; effectiveUserEmail = 'tester@example.com'; mailQuota = 100; mailFailures = []; sentMails.length = 0; propertyWrites.length = 0; Object.keys(propertyCallCounts).forEach((key) => { propertyCallCounts[key] = 0; }); uiAvailable = true; uiEvents.length = 0; menus.length = 0; promptResponses = []; apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; driveListFailures = []; triggers.length = 0; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; }
+    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptLock.reset(); sheetsBatchGetFailures = []; getScriptPropertiesFailures = []; activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; effectiveUserEmail = 'tester@example.com'; mailQuota = 100; mailFailures = []; sentMails.length = 0; propertyWrites.length = 0; Object.keys(propertyCallCounts).forEach((key) => { propertyCallCounts[key] = 0; }); uiAvailable = true; uiEvents.length = 0; menus.length = 0; promptResponses = []; alertResponses = []; apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; driveListFailures = []; triggers.length = 0; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; }
   };
   return {Utilities, SpreadsheetApp, Sheets, DriveApp, Drive, Logger, LockService, Session,
     PropertiesService, ScriptApp, MailApp, HtmlService, control};
