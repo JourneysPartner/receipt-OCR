@@ -368,6 +368,24 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(gas.call('menuReviewStoredIdentity_', [{merchantOriginal: '　', fileNameOriginal: 'source.csv',
       sourceRow: 9, displayTxId: null}]), '（店名なし） / source.csv 9 行目');
   });
+  test('ops regression: blank PARTNER merchants stay in separate singleton groups', () => {
+    const rows = [
+      review('blankNull', 'PARTNER', {merchantOriginal: null}),
+      review('blankEmpty', 'PARTNER', {merchantOriginal: ''}),
+      review('blankWideSpace', 'PARTNER', {merchantOriginal: '　'}),
+      review('namedMerchant', 'PARTNER', {merchantOriginal: 'ローソン'})
+    ];
+    const built = call('buildResolveTargets_', [rows, scope()]);
+    const blankGroups = built.items.filter((item) => item.merchantOriginal === '（店名なし）');
+    assert.equal(built.items.length, 4);
+    assert.equal(blankGroups.length, 3);
+    assert.ok(blankGroups.every((item) => item.kind === 'PARTNER_GROUP' && item.reviews.length === 1));
+    assert.deepEqual(blankGroups.map((item) => item.reviews[0].reviewId).sort(),
+      ['blankEmpty', 'blankNull', 'blankWideSpace']);
+    const namedGroup = built.items.find((item) => item.merchantOriginal === 'ローソン');
+    assert.ok(namedGroup);
+    assert.deepEqual(namedGroup.reviews.map((row) => row.reviewId), ['namedMerchant']);
+  });
   test('ops regression: review status labels never expose raw enum values', () => {
     const expected = {OPEN: '未対応', IN_PROGRESS: '対応中', RESOLVED: '解決済み',
       EXCLUDED: '対象外', NOT_FOUND: '見つかりません'};
@@ -422,6 +440,37 @@ module.exports = ({test, assert, gas}) => {
       {reviewId: 'g0', partnerName: '株式会社テスト'}, {maxPerAction: 2, live: live(), partnerKnown: true},
       scope(), new Date('2026-09-10T03:00:00Z')]);
     assert.match(optionText, /5 件のうち 2 件/); assert.match(confirmText, /5 件のうち 2 件/);
+  });
+
+  test('ops regression: unmet contains only reviews with non-empty conditions', () => {
+    const results = {
+      resolvedA: {committed: true, unmetConditions: [], openReviewTypes: [], transactionStatus: 'COMMITTED'},
+      pending: {committed: false, unmetConditions: ['OPEN_REVIEW_REMAINS'],
+        openReviewTypes: ['DATE'], transactionStatus: 'REVIEW_REQUIRED'},
+      resolvedB: {committed: true, unmetConditions: [], openReviewTypes: [], transactionStatus: 'COMMITTED'},
+      resolvedC: {committed: true, unmetConditions: [], openReviewTypes: [], transactionStatus: 'COMMITTED'}
+    };
+    return withMocks(applyMocks({resolveReview: (reviewId) => results[reviewId]}), () => {
+      const mixedRows = ['resolvedA', 'pending', 'resolvedB'].map((id) => review(id, 'PARTNER'));
+      const mixedItem = applyItem(mixedRows);
+      const mixed = call('applyResolveDecision_', [mixedItem, 'RESOLVE_WITHOUT_PARTNER',
+        {reviewId: mixedRows[0].reviewId}, {maxPerAction: 3, deadlineMs: 999999, tripWorstMs: 0}]);
+      assert.equal(mixed.unmet.length, 1);
+      assert.deepEqual(mixed.unmet[0], {reviewId: 'pending', unmetConditions: ['OPEN_REVIEW_REMAINS'],
+        openReviewTypes: ['DATE'], transactionStatus: 'REVIEW_REQUIRED'});
+      const mixedText = gas.call('buildResolveResultText_', [mixedItem, 'RESOLVE_WITHOUT_PARTNER',
+        {reviewId: mixedRows[0].reviewId}, mixed, scope(), new Date()]);
+      assert.match(mixedText, /未確定: 1 件/);
+
+      const settledRows = ['resolvedA', 'resolvedB', 'resolvedC'].map((id) => review(id, 'PARTNER'));
+      const settledItem = applyItem(settledRows);
+      const settled = call('applyResolveDecision_', [settledItem, 'RESOLVE_WITHOUT_PARTNER',
+        {reviewId: settledRows[0].reviewId}, {maxPerAction: 3, deadlineMs: 999999, tripWorstMs: 0}]);
+      assert.deepEqual(settled.unmet, []);
+      const settledText = gas.call('buildResolveResultText_', [settledItem, 'RESOLVE_WITHOUT_PARTNER',
+        {reviewId: settledRows[0].reviewId}, settled, scope(), new Date()]);
+      assert.doesNotMatch(settledText, /未確定/);
+    });
   });
 
   const catalogCases = [
@@ -1055,6 +1104,56 @@ module.exports = ({test, assert, gas}) => {
     const result = events.filter((event) => event.type === 'alert').at(-1).prompt;
     assert.ok(result.includes('■ 対象: 顧客一(C001) / （店名なし） / ' +
       seeded.fileName + ' 2 行目'), result);
+  });
+
+  test('ops menu 17 leg 2 integration: AMOUNT-only correction preserves date columns', () => {
+    const seeded = setupTypedImport([
+      '2025/12/10,ローソン,1000,仕入れ',
+      '2025/12/11,ローソン,1100,仕入れ',
+      '2025/12/12,ローソン,1200,仕入れ',
+      '2025/12/13,ローソン,金額不明,仕入れ'
+    ]);
+    const amountReview = seeded.reviews.find((row) => row.reviewType === 'AMOUNT');
+    assert.ok(amountReview, JSON.stringify(seeded.reviews));
+    const beforeTx = plain(gas.call('getTransaction', [amountReview.fullTxId]));
+    const destinationSheet = gas.stubs.getSpreadsheet('dest1').getSheetByName('入力用シート');
+    const beforeDestination = destinationSheet.getDataRange().getValues()[beforeTx.destinationRow - 1];
+    const transactionLogSheet = gas.stubs.getSpreadsheet('master').getSheetByName('クレカ取引ログ');
+    const beforeLog = transactionLogSheet.getDataRange().getValues()
+      .find((row) => row[0] === amountReview.fullTxId);
+    const originalDate = beforeTx.planned.b;
+    const beforeDestinationDate = beforeDestination[1];
+    const beforeLogDate = beforeLog[18];
+    const beforeDestinationAmount = beforeDestination[5];
+    const beforeLogAmount = beforeLog[22];
+    let seenInput;
+    const originalResolveReview = gas.context.resolveReview;
+
+    gas.stubs.setPromptResponses([
+      {button: 'OK', text: '1'}, {button: 'OK', text: '1'},
+      {button: 'OK', text: ''}, {button: 'OK', text: '2,500'}
+    ]);
+    gas.stubs.setAlertResponses(['YES']);
+    withMocks({resolveReview: (reviewId, operation, input) => {
+      seenInput = plain(input);
+      return originalResolveReview(reviewId, operation, input);
+    }}, () => gas.call('menuResolveReview', []));
+
+    assert.equal(Object.hasOwn(seenInput, 'correctedDate'), false,
+      '空の日付は input の鍵ごと落とす');
+    assert.equal(seenInput.correctedAmount, 2500);
+    const afterTx = plain(gas.call('getTransaction', [amountReview.fullTxId]));
+    const afterDestination = destinationSheet.getDataRange().getValues()[beforeTx.destinationRow - 1];
+    const afterLog = transactionLogSheet.getDataRange().getValues()
+      .find((row) => row[0] === amountReview.fullTxId);
+    assert.deepEqual(afterDestination[1], beforeDestinationDate, '転記先 B 列は変えない');
+    assert.equal(afterLog[18], beforeLogDate, '取引ログ S 列は変えない');
+    assert.equal(afterTx.planned.b, originalDate);
+    assert.notEqual(beforeDestinationAmount, 2500);
+    assert.notEqual(beforeLogAmount, 2500);
+    assert.equal(afterDestination[5], 2500, '転記先 M 列を修正する');
+    assert.equal(afterLog[22], 2500, '取引ログ W 列を修正する');
+    assert.equal(afterTx.planned.m, 2500);
   });
 
   test('ops menu 12 integration: handler resolves three imported PARTNER rows with real effects', () => {
