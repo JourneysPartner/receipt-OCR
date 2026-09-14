@@ -639,7 +639,7 @@ function resolveOptionsFor_(item, roleForCustomer, live) {
     } else if ((code === 'EXCLUDE' || code === 'EXCLUDE_PRIOR_YEAR') && live &&
         (live.freeeStatus === FREEE_IMPORT_STATUS.IMPORTED || live.freeeStatus === FREEE_IMPORT_STATUS.NEEDS_FREEE_FIX)) {
       disabledReason = '（freee取込済みのため画面から不可。管理者へ）';
-    } else if ((code === 'EXCLUDE' || code === 'EXCLUDE_PRIOR_YEAR') && live &&
+    } else if (definition.unit !== 'FILE' && live && live.transactionStatus &&
         [TX_STATUS.REVIEW_REQUIRED, TX_STATUS.COMMITTED].indexOf(live.transactionStatus) < 0) {
       disabledReason = '（取引の状態 ' + live.transactionStatus + ' では不可。管理者へ）';
     } else if (code === 'CANCEL_FILE' && live && Number(live.liveTransactionCount || 0) > 0) {
@@ -858,10 +858,17 @@ function applyResolveDecision_(item, code, inputs, options) {
       if (code === 'RESIZE_INPUT') input.askCustomerToSplit = true;
       if (code === 'CANCEL_FILE') input.choice = 'CANCELED';
       if (code === 'ADOPT_EXISTING_PARTNER') {
+        var txForAdopt = getTransaction(review.fullTxId);
+        var transactionStatus = txForAdopt && txForAdopt.transactionStatus;
+        if ([TX_STATUS.REVIEW_REQUIRED, TX_STATUS.COMMITTED].indexOf(transactionStatus) < 0) {
+          outcome.errors.push({reviewId: review.reviewId, code: 'STATE_TRANSITION',
+            message: '取引の状態 ' + (transactionStatus || '不明') +
+              ' では確定できません。管理者へ連絡してください。'});
+          continue;
+        }
         input.learn = false;
         if (!learned) {
-          var txForLearning = getTransaction(review.fullTxId);
-          if (!isCardNamePartnerPurpose(customer, txForLearning && txForLearning.planned ? txForLearning.planned.i : '')) {
+          if (!isCardNamePartnerPurpose(customer, txForAdopt && txForAdopt.planned ? txForAdopt.planned.i : '')) {
             input.learn = true;
           }
         }

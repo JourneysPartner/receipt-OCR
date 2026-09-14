@@ -2,7 +2,7 @@
 
 /**
  * 操作メニューは帳簿へ書くため、表示だけでなく「その誤実装なら赤になる」境界を
- * 仕様 §12.3 の62ケースとして固定する。シートを要しない契約は純粋関数で検査し、
+ * 仕様 §12.3 の64ケースとして固定する。シートを要しない契約は純粋関数で検査し、
  * 書込経路は既存の部品を通す結合テストから補完する。
  */
 module.exports = ({test, assert, gas}) => {
@@ -553,9 +553,26 @@ module.exports = ({test, assert, gas}) => {
         return;
       }
       if (id === '16b') {
-        const options = call('resolveOptionsFor_', [applyItem([review('imported', 'PARTNER')]),
-          'REVIEWER', live({freeeStatus: 'IMPORTED'})]);
-        assert.equal(options.find((option) => option.code === 'EXCLUDE').enabled, false);
+        const seeded = setupPartnerImport(1, 2);
+        const imported = seeded.reviews[1];
+        gas.call('updateFreeeStatus', [imported.fullTxId, 'NOT_IMPORTED', 'IMPORTED', 'BATCH_1']);
+        const destination = gas.stubs.getSpreadsheet('dest1').getSheetByName('入力用シート');
+        const before = plain(destination.getDataRange().getValues());
+        gas.stubs.resetUiEvents(); gas.stubs.resetApiCallCounts(); gas.stubs.resetRoundTrips();
+        gas.stubs.setPromptResponses([
+          {button: 'OK', text: '1'}, {button: 'OK', text: '3'}, {button: 'OK', text: '2'}
+        ]);
+        gas.stubs.setAlertResponses(['YES']);
+        gas.call('menuResolveReview', []);
+        const events = gas.stubs.getUiEvents();
+        assert.equal(events.filter((event) => event.type === 'prompt').length, 3);
+        assert.match(events.filter((event) => event.type === 'alert').at(-1).prompt,
+          /この操作は選べません:.*freee取込済み/);
+        assert.ok(events.filter((event) => event.type === 'alert')
+          .every((event) => !/実行しますか？/.test(event.prompt)), '確認画面へ進まない');
+        assert.equal(gas.stubs.getApiCallCounts().batchUpdate, 0);
+        assert.deepEqual(plain(destination.getDataRange().getValues()), before);
+        assert.equal(plain(gas.call('getReviewById', [imported.reviewId])).status, 'OPEN');
         return;
       }
       if (id === '17') {
@@ -837,17 +854,24 @@ module.exports = ({test, assert, gas}) => {
       }
       if (id === '36') {
         let reads = 0;
-        const rows = [review('l1', 'PARTNER', {fileId: 'leased'}),
-          review('l2', 'PARTNER', {fileId: 'leased'}), review('ok', 'PARTNER', {fileId: 'free'})];
+        const seeded = setupPartnerImport(2, 2);
+        const rows = seeded.reviews;
         return withMocks(applyMocks({completeFileIfFullyResolved_: (fileId, options) => {
           options.readLeases(); return {fileId, completed: false, state: 'REVIEW_WAIT', skipped: null};
         }}), () => {
           const outcome = call('applyResolveDecision_', [applyItem(rows), 'RESOLVE_WITHOUT_PARTNER',
-            {reviewId: 'l1'}, {maxPerAction: 3, deadlineMs: 999999, tripWorstMs: 0,
-              readLeases: () => { reads += 1; return [{fileId: 'leased', owner: 'worker'}]; }}]);
+            {reviewId: rows[0].reviewId}, {maxPerAction: 4, deadlineMs: 999999, tripWorstMs: 0,
+              readLeases: () => { reads += 1; return [{fileId: 'partnerFile0', owner: 'worker'}]; }}]);
           assert.deepEqual({resolved: outcome.resolved, errors: outcome.errors.length,
-            skipped: outcome.skippedByLease}, {resolved: 1, errors: 1, skipped: 1});
-          assert.equal(reads, 3, 'ループ内2ファイルと成功ファイルの完了判定で各1回');
+            skipped: outcome.skippedByLease}, {resolved: 2, errors: 1, skipped: 1});
+          assert.equal(reads, 3,
+            'リース側1回、非リース側2件をキャッシュして1回、成功ファイルの完了判定で1回');
+          const inverse = call('applyResolveDecision_', [applyItem(rows), 'RESOLVE_WITHOUT_PARTNER',
+            {reviewId: rows[0].reviewId}, {maxPerAction: 4, deadlineMs: 999999, tripWorstMs: 0,
+              readLeases: () => []}]);
+          assert.deepEqual({resolved: inverse.resolved, errors: inverse.errors.length,
+            skipped: inverse.skippedByLease, notAttempted: inverse.notAttempted},
+          {resolved: 4, errors: 0, skipped: 0, notAttempted: 0});
         });
       }
       if (id === '37') {
@@ -1051,6 +1075,64 @@ module.exports = ({test, assert, gas}) => {
     assert.match(resultAlert.prompt, /確定した要確認: 1 件/);
   });
 
+  test('ops menu 16c integration: a canceled DATE transaction disables every remaining PARTNER operation', () => {
+    const seeded = setupTypedImport(['日付不明,未登録店,10800,仕入れ']);
+    assert.deepEqual(seeded.reviews.map((row) => row.reviewType).sort(), ['DATE', 'PARTNER']);
+    const dateReview = seeded.reviews.find((row) => row.reviewType === 'DATE');
+    const partnerReview = seeded.reviews.find((row) => row.reviewType === 'PARTNER');
+    assert.equal(dateReview.fullTxId, partnerReview.fullTxId);
+
+    const partnerItem = applyItem([partnerReview]);
+    const dateItem = applyItem([dateReview], 'TRANSACTION', 'DATE');
+    const current = plain(gas.call('getTransaction', [dateReview.fullTxId]));
+    assert.equal(current.transactionStatus, 'REVIEW_REQUIRED');
+    assert.ok(call('resolveOptionsFor_', [partnerItem, 'REVIEWER', current])
+      .every((option) => option.enabled), '通常の取引では PARTNER の全操作を選べる');
+    assert.ok(call('resolveOptionsFor_', [dateItem, 'REVIEWER', current])
+      .every((option) => option.enabled), '通常の取引では DATE の全操作を選べる');
+    ['PARTNER', 'DATE', 'AMOUNT', 'ZERO_AMOUNT', 'PRIOR_YEAR'].forEach((reviewType) => {
+      const kind = reviewType === 'PARTNER' ? 'PARTNER_GROUP' : 'TRANSACTION';
+      const item = applyItem([partnerReview], kind, reviewType);
+      assert.ok(call('resolveOptionsFor_', [item, 'REVIEWER', current]).every((option) => option.enabled),
+        `通常の REVIEW_REQUIRED では ${reviewType} の全操作を選べる`);
+    });
+
+    gas.stubs.setPromptResponses([{button: 'OK', text: '2'}, {button: 'OK', text: '2'}]);
+    gas.stubs.setAlertResponses(['YES']);
+    gas.call('menuResolveReview', []);
+    assert.equal(plain(gas.call('getReviewById', [dateReview.reviewId])).status, 'EXCLUDED');
+    assert.equal(plain(gas.call('getReviewById', [partnerReview.reviewId])).status, 'OPEN');
+    assert.equal(plain(gas.call('getTransaction', [dateReview.fullTxId])).transactionStatus, 'CANCELED');
+
+    const destination = gas.stubs.getSpreadsheet('dest1').getSheetByName('入力用シート');
+    const cleared = plain(destination.getRange(current.destinationRow, 1, 1, 8).getValues()[0]);
+    const stateBeforeBlockedAdopt = gas.call('getFileState', [seeded.fileId]);
+    const dictionary = gas.stubs.getSpreadsheet('master').getSheetByName('共通取引先辞書');
+    const dictionaryRowsBefore = dictionary.getDataRange().getValues().slice(1).filter((row) => row[0]).length;
+    assert.ok(cleared.slice(1, 7).every((value) => value === ''));
+    gas.stubs.resetUiEvents(); gas.stubs.resetApiCallCounts(); gas.stubs.resetRoundTrips();
+    gas.stubs.setPromptResponses([
+      {button: 'OK', text: '1'}, {button: 'OK', text: '1'},
+      {button: 'OK', text: '株式会社テスト'}
+    ]);
+    gas.stubs.setAlertResponses(['YES']);
+    gas.call('menuResolveReview', []);
+
+    const events = gas.stubs.getUiEvents();
+    const optionPrompt = events.filter((event) => event.type === 'prompt')[1].prompt;
+    assert.equal((optionPrompt.match(/取引の状態 CANCELED では不可。管理者へ/g) || []).length, 3,
+      '残った PARTNER の全操作を無効表示する');
+    assert.ok(events.filter((event) => event.type === 'alert')
+      .every((event) => !/実行しますか？/.test(event.prompt)), '確認画面へ進まない');
+    assert.equal(gas.stubs.getApiCallCounts().batchUpdate, 0);
+    assert.deepEqual(plain(destination.getRange(current.destinationRow, 1, 1, 8).getValues()[0]), cleared,
+      '空にした転記行へ書き戻さない');
+    assert.equal(plain(gas.call('getReviewById', [partnerReview.reviewId])).status, 'OPEN');
+    assert.equal(gas.call('getFileState', [seeded.fileId]), stateBeforeBlockedAdopt);
+    assert.equal(dictionary.getDataRange().getValues().slice(1).filter((row) => row[0]).length,
+      dictionaryRowsBefore, '終端取引の判断を辞書へ学習しない');
+  });
+
   test('ops identity integration: imported PRIOR_YEAR target list and result fall back to fullTxId', () => {
     const seeded = setupTypedImport([
       '2025/12/16,ローソン,10800,仕入れ',
@@ -1192,6 +1274,55 @@ module.exports = ({test, assert, gas}) => {
     } finally {
       gas.evaluate('MENU_RESOLVE_MAX_PER_ACTION_ = ' + Number(originalMax) + ';');
     }
+  });
+
+  test('ops menu 12b integration: mixed terminal PARTNER group skips the canceled transaction', () => {
+    const seeded = setupTypedImport([
+      '2025/12/10,未登録店,1000,仕入れ',
+      '日付不明,未登録店,1001,仕入れ',
+      '2025/12/12,未登録店,1002,仕入れ'
+    ]);
+    const partnerReviews = seeded.reviews.filter((row) => row.reviewType === 'PARTNER')
+      .sort((a, b) => Number(a.sourceRow) - Number(b.sourceRow));
+    const dateReview = seeded.reviews.find((row) => row.reviewType === 'DATE');
+    assert.equal(partnerReviews.length, 3);
+    assert.ok(dateReview);
+    assert.equal(dateReview.fullTxId, partnerReviews[1].fullTxId);
+    gas.call('resolveReview', [dateReview.reviewId, 'EXCLUDE',
+      {actor: 'reviewer@example.com', role: 'REVIEWER'}]);
+
+    const transactionsBefore = partnerReviews.map((row) => plain(gas.call('getTransaction', [row.fullTxId])));
+    assert.deepEqual(transactionsBefore.map((tx) => tx.transactionStatus),
+      ['REVIEW_REQUIRED', 'CANCELED', 'REVIEW_REQUIRED']);
+    const destination = gas.stubs.getSpreadsheet('dest1').getSheetByName('入力用シート');
+    const terminalRowNumber = transactionsBefore[1].destinationRow;
+    const terminalBefore = plain(destination.getRange(terminalRowNumber, 2, 1, 5).getValues()[0]);
+    assert.deepEqual(terminalBefore, ['', '', '', '', ''], '2件目の B・F・I・K・M 列は空');
+    gas.stubs.resetUiEvents(); gas.stubs.resetApiCallCounts(); gas.stubs.resetRoundTrips();
+
+    const outcome = call('applyResolveDecision_', [applyItem(partnerReviews), 'ADOPT_EXISTING_PARTNER',
+      {reviewId: partnerReviews[0].reviewId, partnerName: '株式会社テスト'},
+      {maxPerAction: 3, deadlineMs: 999999, tripWorstMs: 0}]);
+
+    const destinationAfter = destination.getDataRange().getValues();
+    [0, 2].forEach((index) => {
+      assert.equal(destinationAfter[transactionsBefore[index].destinationRow - 1][2], '株式会社テスト');
+      assert.equal(plain(gas.call('getReviewById', [partnerReviews[index].reviewId])).status, 'RESOLVED');
+      assert.equal(plain(gas.call('getTransaction', [partnerReviews[index].fullTxId])).transactionStatus,
+        'COMMITTED');
+    });
+    assert.deepEqual(plain(destination.getRange(terminalRowNumber, 2, 1, 5).getValues()[0]),
+      terminalBefore, '終端取引の B・F・I・K・M 列を変えない');
+    assert.equal(plain(gas.call('getReviewById', [partnerReviews[1].reviewId])).status, 'OPEN');
+    assert.equal(plain(gas.call('getTransaction', [partnerReviews[1].fullTxId])).transactionStatus,
+      'CANCELED');
+    assert.deepEqual(outcome.errors, [{reviewId: partnerReviews[1].reviewId, code: 'STATE_TRANSITION',
+      message: '取引の状態 CANCELED では確定できません。管理者へ連絡してください。'}]);
+    const reviewErrors = outcome.errors.filter((error) => error.reviewId);
+    assert.equal(3, outcome.resolved + reviewErrors.length + outcome.skippedByLease + outcome.notAttempted);
+    assert.deepEqual({resolved: outcome.resolved, errors: reviewErrors.length,
+      skippedByLease: outcome.skippedByLease, notAttempted: outcome.notAttempted},
+    {resolved: 2, errors: 1, skippedByLease: 0, notAttempted: 0});
   });
 
   test('ops menu 16 integration: imported PARTNER EXCLUDE selection and result use source identities', () => {
