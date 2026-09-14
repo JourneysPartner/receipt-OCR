@@ -51,6 +51,14 @@ var MENU_REVIEW_TYPE_LABELS_ = {
   SCAN_TRUNCATED: '走査打切り'
 };
 
+var MENU_REVIEW_STATUS_LABELS_ = {
+  OPEN: '未対応',
+  IN_PROGRESS: '対応中',
+  RESOLVED: '解決済み',
+  EXCLUDED: '対象外',
+  NOT_FOUND: '見つかりません'
+};
+
 var MENU_REVIEW_HANDLER_LABELS_ = {
   PARTNER: '確認担当者',
   DATE: '確認担当者',
@@ -337,18 +345,20 @@ function menuResolveReview() {
     }
 
     var item = built.items[targetNumber - 1];
+    var lastReviewStatus = 'NOT_FOUND';
     while (item.reviews.length) {
       var current = getReviewById(item.reviews[0].reviewId);
       if (current && (current.status === 'OPEN' || current.status === 'IN_PROGRESS')) {
         item.reviews[0] = current;
         break;
       }
+      lastReviewStatus = current ? current.status : 'NOT_FOUND';
       if (item.kind !== 'PARTNER_GROUP') {
-        return menuStateChangedResult_(scope, now, current ? current.status : 'NOT_FOUND');
+        return menuStateChangedResult_(scope, now, lastReviewStatus, null, menuReviewStatusLabel_);
       }
       item.reviews.shift();
     }
-    if (!item.reviews.length) return menuStateChangedResult_(scope, now, 'RESOLVED');
+    if (!item.reviews.length) return menuStateChangedResult_(scope, now, lastReviewStatus, null, menuReviewStatusLabel_);
 
     var firstReview = item.reviews[0];
     var currentLive;
@@ -384,8 +394,11 @@ function menuResolveReview() {
     var code = selectedOption.code;
     if (code === 'ADOPT_EXISTING_PARTNER') {
       var candidates = menuReviewCandidates_(firstReview);
+      var partnerPromptLines = menuHeaderLines_(scope, now).concat(['',
+        '候補の番号または取引先名を入力してください。']);
+      if (candidates.length) partnerPromptLines.push('候補: ' + menuPartnerCandidatesText_(candidates));
       var partnerResponse = ui.prompt('クレカ自動処理 ― 要確認を確定：取引先名',
-        menuHeaderLines_(scope, now).concat(['', '候補の番号または取引先名を入力してください。']).join('\n'),
+        partnerPromptLines.join('\n'),
         ui.ButtonSet.OK_CANCEL);
       if (partnerResponse.getSelectedButton() !== ui.Button.OK) return {kind: 'none'};
       var partnerText = String(partnerResponse.getResponseText() || '').trim();
@@ -414,7 +427,7 @@ function menuResolveReview() {
           '修正金額を整数で入力してください。変えない場合は空欄。']).join('\n'),
         ui.ButtonSet.OK_CANCEL);
       if (amountResponse.getSelectedButton() !== ui.Button.OK) return {kind: 'none'};
-      inputs.correctedDate = parseCorrectedDate_(dateResponse.getResponseText());
+      inputs.correctedDate = parseCorrectedDate_(dateResponse.getResponseText(), now);
       inputs.correctedAmount = parseCorrectedAmount_(amountResponse.getResponseText());
       if (inputs.correctedDate === null) {
         return menuAlertResult_('要確認を確定', menuHeaderLines_(scope, now),
@@ -510,9 +523,10 @@ function menuAlertResult_(title, header, message) {
   return {kind: 'alert', title: title, text: (header || []).concat(['', message]).join('\n')};
 }
 
-function menuStateChangedResult_(scope, now, state, title) {
+function menuStateChangedResult_(scope, now, state, title, labeler) {
+  labeler = labeler || menuFileStateLabel_;
   return menuAlertResult_(title || '要確認を確定', menuHeaderLines_(scope, now),
-    '状態が変わっています（現在: ' + menuFileStateLabel_(state) + '）。一覧を開き直してください。');
+    '状態が変わっています（現在: ' + labeler(state) + '）。一覧を開き直してください。');
 }
 
 function buildResolveTargets_(reviews, scope) {
@@ -567,8 +581,9 @@ function menuResolveItem_(kind, reviews) {
     return menuDateMilliseconds_(a.registeredAt) - menuDateMilliseconds_(b.registeredAt);
   });
   var first = reviews[0];
+  var merchantOriginal = normalizeMerchant(first.merchantOriginal) ? first.merchantOriginal : '（店名なし）';
   return {kind: kind, reviewType: first.reviewType, customerId: first.customerId,
-    customerName: first.customerName, merchantOriginal: first.merchantOriginal || '（店名なし）', reviews: reviews};
+    customerName: first.customerName, merchantOriginal: merchantOriginal, reviews: reviews};
 }
 
 function renderResolveTargetPrompt_(built, scope, now) {
@@ -583,9 +598,7 @@ function renderResolveTargetPrompt_(built, scope, now) {
       parts.push(item.reviews.length + ' 件');
       parts.push('例: ' + menuReviewSingleIdentity_(review, null));
     } else if (item.kind === 'TRANSACTION') {
-      parts.push(menuShortText_(review.fileNameOriginal, 24));
-      parts.push(menuShortText_(review.merchantOriginal || '（店名なし）', 24));
-      parts.push(menuResolveDateText_(review.originalDate) + ' / ' + menuAmountText_(review.originalAmount));
+      parts.push(menuReviewStoredIdentity_(review));
     } else {
       parts.push(menuShortText_(review.fileNameOriginal, 24));
     }
@@ -651,13 +664,10 @@ function renderResolveOptionPrompt_(item, options, extras, scope, now) {
   }
   var lines = menuHeaderLines_(scope, now).concat(['', '対象: ' + optionTarget]);
   if (item.kind === 'PARTNER_GROUP') {
-    lines.push('  例: ' + menuPartnerExample_(item.reviews[0]));
+    lines.push('  例: ' + menuPartnerExample_(item.reviews[0], extras.live));
     var candidates = menuReviewCandidates_(item.reviews[0]);
     if (candidates.length) {
-      lines.push('  候補: ' + candidates.map(function(candidate, index) {
-        return (index + 1) + ') ' + candidate.partnerName +
-          (candidate.matchMethod ? '（' + candidate.matchMethod + '）' : '');
-      }).join('  '));
+      lines.push('  候補: ' + menuPartnerCandidatesText_(candidates));
     }
   }
   lines.push('', '操作の番号を入力してください（1〜' + options.length + '）。');
@@ -671,7 +681,7 @@ function renderResolveOptionPrompt_(item, options, extras, scope, now) {
   return lines.join('\n');
 }
 
-function parseCorrectedDate_(text) {
+function parseCorrectedDate_(text, now) {
   var value = String(text === null || text === undefined ? '' : text).trim();
   if (!value) return '';
   var compact = value.replace(/\//g, '-');
@@ -681,7 +691,12 @@ function parseCorrectedDate_(text) {
   var year = Number(matched[1]); var month = Number(matched[2]); var day = Number(matched[3]);
   var date = new Date(Date.UTC(year, month - 1, day));
   if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
-  return matched[1] + '-' + String(month).padStart(2, '0') + '-' + String(day).padStart(2, '0');
+  var normalized = matched[1] + '-' + String(month).padStart(2, '0') + '-' + String(day).padStart(2, '0');
+  var todayParts = toTokyoDateString_(now || new Date()).split('-').map(Number);
+  var upperDate = new Date(Date.UTC(todayParts[0] + 1, todayParts[1] - 1, todayParts[2]));
+  var upper = upperDate.getUTCFullYear() + '-' + String(upperDate.getUTCMonth() + 1).padStart(2, '0') + '-' +
+    String(upperDate.getUTCDate()).padStart(2, '0');
+  return normalized >= '2000-01-01' && normalized <= upper ? normalized : null;
 }
 
 function parseCorrectedAmount_(text) {
@@ -689,7 +704,9 @@ function parseCorrectedAmount_(text) {
   if (!value) return '';
   value = value.replace(/[０-９]/g, function(character) { return String.fromCharCode(character.charCodeAt(0) - 0xFEE0); })
     .replace(/[，,]/g, '').replace(/[−－―ー]/g, '-');
-  return /^-?\d+$/.test(value) ? Number(value) : null;
+  if (!/^-?\d+$/.test(value)) return null;
+  var amount = Number(value);
+  return Math.abs(amount) < 100000000 ? amount : null;
 }
 
 function buildResolveConfirmationText_(item, code, inputs, extras, scope, now) {
@@ -977,8 +994,9 @@ function renderRecheckPrompt_(built, scope, now) {
 }
 
 function buildRecheckConfirmationText_(file, scope, now) {
-  return menuHeaderLines_(scope, now).concat(['', '■ 実行した操作: 要修正ファイルを再検査',
-    'ファイル ' + menuDisplayFileName_(file) + '（顧客 ' + (scope.customerNameById[file.customerId] || '（顧客不明）') +
+  return menuHeaderLines_(scope, now).concat(['', '次の操作を実行します。',
+    '  操作: 要修正ファイルを再検査',
+    '  対象: ファイル ' + menuDisplayFileName_(file) + '（顧客 ' + (scope.customerNameById[file.customerId] || '（顧客不明）') +
       '(' + file.customerId + ')）を取込待ちに戻します。次回の定期取込（10 分以内）で再検査されます。' +
       '修正が不十分なら再び【要修正】になります。転記先には何も書きません。' +
       'Drive 上の最終更新から 10 分以上経ってから取り込まれます。実行しますか？']).join('\n');
@@ -1062,17 +1080,39 @@ function menuResolveTargetIdentity_(item, live) {
 }
 
 function menuReviewSingleIdentity_(review, live) {
-  var date = live && live.planned ? live.planned.b : review.originalDate;
-  var amount = live && live.planned ? live.planned.m : review.originalAmount;
-  var purpose = live && live.planned ? live.planned.i : review.originalPurpose;
+  if (!live) return menuReviewStoredIdentity_(review);
+  var date = live.planned ? live.planned.b : null;
+  var amount = live.planned ? live.planned.m : null;
+  var purpose = live.planned ? live.planned.i : null;
+  var liveMerchant = normalizeMerchant(live.originalMerchant) ? live.originalMerchant :
+    (live.planned && normalizeMerchant(live.planned.k) ? live.planned.k : '（店名なし）');
   var row = menuDestinationRow_(live, review);
-  return menuResolveDateText_(date) + ' / ' + String(review.merchantOriginal || '（店名なし）') + ' / ' +
+  return menuResolveDateText_(date) + ' / ' + String(liveMerchant) + ' / ' +
     menuAmountText_(amount) + ' / ' + String(purpose || '-') + ' / 転記行 ' + (row || '-');
 }
 
-function menuPartnerExample_(review) {
-  return menuResolveDateText_(review.originalDate) + ' / ' + menuAmountText_(review.originalAmount) +
-    ' / ' + String(review.originalPurpose || '-');
+function menuPartnerExample_(review, live) {
+  if (!live) return menuReviewStoredIdentity_(review);
+  var planned = live.planned || {};
+  return menuResolveDateText_(planned.b) + ' / ' + menuAmountText_(planned.m) +
+    ' / ' + String(planned.i || '-') + ' / ' + menuDisplayFileName_(review) +
+    ' / 転記行 ' + (menuDestinationRow_(live, review) || '-');
+}
+
+function menuReviewStoredIdentity_(review) {
+  review = review || {};
+  var merchantOriginal = normalizeMerchant(review.merchantOriginal) ? review.merchantOriginal : '（店名なし）';
+  var parts = [merchantOriginal];
+  var fileName = menuDisplayFileName_(review);
+  if (fileName) parts.push(fileName);
+  if (review.sourceRow !== '' && review.sourceRow !== null && review.sourceRow !== undefined) {
+    var rowText = review.sourceRow + ' 行目';
+    if (fileName) parts[parts.length - 1] += ' ' + rowText;
+    else parts.push(rowText);
+  }
+  var txId = review.displayTxId || review.fullTxId;
+  if (txId) parts[parts.length - 1] += '（' + txId + '）';
+  return parts.join(' / ');
 }
 
 function menuResolveDateText_(value) {
@@ -1090,6 +1130,12 @@ function menuReviewCandidates_(review) {
   } catch (ignored) {
     return [];
   }
+}
+
+function menuPartnerCandidatesText_(candidates) {
+  return (candidates || []).map(function(candidate, index) {
+    return (index + 1) + ') ' + candidate.partnerName;
+  }).join('  ');
 }
 
 function menuAmountText_(value) {
@@ -1559,6 +1605,11 @@ function menuBindingLines_() {
 function menuFileStateLabel_(state) {
   var code = String(state || '(不明)');
   return MENU_FILE_STATE_LABELS_[code] ? MENU_FILE_STATE_LABELS_[code] + ' (' + code + ')' : code;
+}
+
+function menuReviewStatusLabel_(status) {
+  var code = String(status || 'NOT_FOUND');
+  return MENU_REVIEW_STATUS_LABELS_[code] || '見つかりません';
 }
 
 function menuReviewTypeLabel_(type) {
