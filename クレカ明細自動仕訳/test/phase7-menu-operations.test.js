@@ -80,15 +80,81 @@ module.exports = ({test, assert, gas}) => {
     return row;
   }
 
+  function partnerCandidateRow() {
+    const row = blank(18);
+    Object.assign(row, {
+      0: 'DICT_CANDIDATE', 1: '未登録', 2: '未登録', 3: '候補株式会社',
+      4: 'partial', 5: 1, 9: 'FALSE', 10: 'admin@example.com',
+      12: '2026-01-01T00:00:00+09:00', 13: 1, 14: 'TRUE', 15: 'FALSE'
+    });
+    return row;
+  }
+
+  function knownMerchantRow() {
+    const row = blank(18);
+    Object.assign(row, {
+      0: 'DICT_KNOWN', 1: 'ローソン', 2: 'ローソン', 3: '株式会社ローソン',
+      4: 'exact_original', 5: 1, 9: 'TRUE', 10: 'admin@example.com',
+      12: '2026-01-01T00:00:00+09:00', 13: 1, 14: 'TRUE', 15: 'FALSE'
+    });
+    return row;
+  }
+
+  /** 取引単位の各種別を、実際の runImport から立てる。 */
+  function setupTypedImport(rows, options = {}) {
+    gas.stubs.reset();
+    const customer = partnerCustomerRow();
+    customer[35] = options.customerCategory || 'CORPORATE';
+    customer[36] = options.fiscalYear === undefined ? '' : options.fiscalYear;
+    gas.stubs.createSpreadsheet('master', {sheets: [
+      {name: '顧客マスター', values: [sheetHeader(39, '顧客ID'), customer]},
+      {name: 'カード形式マスター', values: [sheetHeader(34, '形式ID'), partnerFormatRow()]},
+      {name: '使用用途補完マスター', values: [sheetHeader(10, 'ルールID'),
+        Object.assign(blank(10), {0: 'PR1', 1: '仕入', 2: '仕入れ', 3: 'TRUE'})]},
+      {name: '共通取引先辞書', values: [sheetHeader(18, '辞書ID'), knownMerchantRow()]}
+    ]});
+    gas.stubs.setActiveSpreadsheet('master');
+    gas.call('setMasterSpreadsheetId', ['master']);
+    gas.call('provisionMasterSheets', []);
+    gas.stubs.createSpreadsheet('dest1', {sheets: [
+      {name: '入力用シート', values: [['', '利用日', 'freee取引先名', '摘要', '金額', 'メモ', '内部ID', '']],
+        maxRows: 30, maxColumns: 8},
+      {name: '取引先一覧', values: [['元店名', '取引先名'], ['ローソン', '株式会社ローソン']]}
+    ]});
+    gas.stubs.createSpreadsheet('txidx', {sheets: []});
+    gas.stubs.createSpreadsheet('snap', {sheets: []});
+    gas.evaluate("SETTINGS.EXECUTION_TIMEOUT_SECONDS=300;SETTINGS.SAFETY_MARGIN_SECONDS=60;" +
+      "SETTINGS.TX_INDEX_SPREADSHEET_ID='txidx';SETTINGS.SNAPSHOT_SPREADSHEET_ID='snap';" +
+      "SETTINGS.SAMPLE_CORPUS_FOLDER_ID='corpus';SETTINGS.PARALLEL_WORK_FOLDER_ID='';" +
+      "SETTINGS.FAULT_INJECTION=null;");
+    gas.stubs.createFolder('corpus', {fileIds: []});
+    const fileId = options.fileId || 'typedFile';
+    const fileName = options.fileName || '三井住友カード202601.csv';
+    const content = ['利用日,利用店名,金額,使用用途'].concat(rows).join('\n') + '\n';
+    gas.stubs.createFile(fileId, {name: fileName, bytes: Buffer.from(content, 'utf8'),
+      lastUpdated: new Date(Date.now() - 3600 * 1000), createdTime: '2026-08-01T00:00:00Z',
+      contentType: 'text/csv'});
+    gas.stubs.createFolder('folder1', {fileIds: [fileId]});
+    gas.stubs.setActiveUser('reviewer@example.com');
+    const report = plain(gas.call('runImport', [{}]));
+    const reviews = plain(gas.call('openReviews', [{}]));
+    if (options.reviewType) {
+      assert.equal(reviews.length, rows.length, JSON.stringify({report, reviews}));
+      assert.ok(reviews.every((row) => row.reviewType === options.reviewType), JSON.stringify(reviews));
+    }
+    gas.stubs.resetUiEvents(); gas.stubs.resetApiCallCounts(); gas.stubs.resetRoundTrips();
+    return {report, reviews, fileId, fileName};
+  }
+
   /** PARTNER の結合テストは、実際の runImport が作った行だけを使う。 */
-  function setupPartnerImport(fileCount, transactionsPerFile = 1) {
+  function setupPartnerImport(fileCount, transactionsPerFile = 1, options = {}) {
     gas.stubs.reset();
     gas.stubs.createSpreadsheet('master', {sheets: [
       {name: '顧客マスター', values: [sheetHeader(39, '顧客ID'), partnerCustomerRow()]},
       {name: 'カード形式マスター', values: [sheetHeader(34, '形式ID'), partnerFormatRow()]},
       {name: '使用用途補完マスター', values: [sheetHeader(10, 'ルールID'),
         Object.assign(blank(10), {0: 'PR1', 1: '仕入', 2: '仕入れ', 3: 'TRUE'})]},
-      {name: '共通取引先辞書', values: [sheetHeader(18, '辞書ID')]}
+      {name: '共通取引先辞書', values: [sheetHeader(18, '辞書ID')].concat(options.dictionaryRows || [])}
     ]});
     gas.stubs.setActiveSpreadsheet('master');
     gas.call('setMasterSpreadsheetId', ['master']);
@@ -284,6 +350,50 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(gas.call('parseCorrectedAmount_', ['12.5']), null);
     assert.equal(gas.call('parseCorrectedAmount_', ['']), '');
   });
+  test('ops regression: corrected date and amount parsers enforce operational bounds', () => {
+    const today = new Date('2026-09-14T00:00:00Z');
+    assert.equal(gas.call('parseCorrectedDate_', ['2000-01-01', today]), '2000-01-01');
+    assert.equal(gas.call('parseCorrectedDate_', ['1999-12-31', today]), null);
+    assert.equal(gas.call('parseCorrectedDate_', ['2027-09-14', today]), '2027-09-14');
+    assert.equal(gas.call('parseCorrectedDate_', ['2027-09-15', today]), null);
+    assert.equal(gas.call('parseCorrectedAmount_', ['99,999,999']), 99999999);
+    assert.equal(gas.call('parseCorrectedAmount_', ['-99,999,999']), -99999999);
+    assert.equal(gas.call('parseCorrectedAmount_', ['100,000,000']), null);
+    assert.equal(gas.call('parseCorrectedAmount_', ['-100,000,000']), null);
+  });
+  test('ops regression: normalized blank merchants use the missing-name label', () => {
+    const built = call('buildResolveTargets_', [[review('blankMerchant', 'PARTNER', {merchantOriginal: '　'})], scope()]);
+    assert.equal(built.items.length, 1);
+    assert.equal(built.items[0].merchantOriginal, '（店名なし）');
+    assert.equal(gas.call('menuReviewStoredIdentity_', [{merchantOriginal: '　', fileNameOriginal: 'source.csv',
+      sourceRow: 9, displayTxId: null}]), '（店名なし） / source.csv 9 行目');
+  });
+  test('ops regression: review status labels never expose raw enum values', () => {
+    const expected = {OPEN: '未対応', IN_PROGRESS: '対応中', RESOLVED: '解決済み',
+      EXCLUDED: '対象外', NOT_FOUND: '見つかりません'};
+    Object.keys(expected).forEach((status) => {
+      assert.equal(gas.call('menuReviewStatusLabel_', [status]), expected[status]);
+    });
+  });
+  test('ops regression: an emptied PARTNER group reports the actual review status', () => {
+    gas.stubs.reset();
+    const listed = review('changedStatus', 'PARTNER');
+    const changed = review('changedStatus', 'PARTNER', {status: 'EXCLUDED'});
+    gas.stubs.setPromptResponses([{button: 'OK', text: '1'}]);
+    return withMocks({loadSettingsFromProperties: () => {}, menuViewerScope_: () => scope(),
+      openReviews: () => [listed], getReviewById: () => changed}, () => {
+      gas.call('menuResolveReview', []);
+      const alert = gas.stubs.getUiEvents().filter((event) => event.type === 'alert').at(-1);
+      assert.match(alert.prompt, /状態が変わっています（現在: 対象外）。/);
+      assert.doesNotMatch(alert.prompt, /EXCLUDED|RESOLVED/);
+    });
+  });
+  test('ops regression: recheck confirmation describes the pending operation in present tense', () => {
+    const text = gas.call('buildRecheckConfirmationText_', [
+      {fileId: 'fix', customerId: 'C001', fileNameOriginal: 'fix.csv'}, scope(), new Date()]);
+    assert.match(text, /次の操作を実行します。/);
+    assert.doesNotMatch(text, /■ 実行した操作:/);
+  });
   test('ops menu 11: option disabling and max-per-action text use supplied values', () => {
     const reviewerFormat = call('resolveOptionsFor_', [
       {kind: 'FILE', reviewType: 'FORMAT_UNKNOWN'}, 'REVIEWER', live()]);
@@ -379,23 +489,6 @@ module.exports = ({test, assert, gas}) => {
           const text = gas.call('buildResolveResultText_', [item, 'RESOLVE_WITHOUT_PARTNER',
             {reviewId: 'unmet'}, outcome, scope(), new Date()]);
           assert.match(text, /未確定: 1 件.*残る要確認: 日付/); assert.match(text, /利用日が未確定/);
-        });
-      }
-      if (id === '16') {
-        let selectedId;
-        const rows = [review('first', 'PARTNER', {originalDate: '2026-01-01'}),
-          review('second', 'PARTNER', {originalDate: '2026-02-02'}),
-          review('third', 'PARTNER', {originalDate: '2026-03-03'})];
-        return withMocks(applyMocks({resolveReview: (reviewId) => {
-          selectedId = reviewId; return {committed: false, unmetConditions: [], openReviewTypes: []};
-        }}), () => {
-          const item = applyItem(rows);
-          const outcome = call('applyResolveDecision_', [item, 'EXCLUDE', {reviewId: 'second'},
-            {deadlineMs: 999999, tripWorstMs: 0}]);
-          assert.equal(selectedId, 'second'); assert.equal(outcome.notAttempted, 0);
-          const text = gas.call('buildResolveResultText_', [item, 'EXCLUDE', {reviewId: 'second'}, outcome,
-            scope(), new Date()]);
-          assert.match(text, /2026-02-02/); assert.doesNotMatch(text, /3 件のうち|この押下の上限/);
         });
       }
       if (id === '15') {
@@ -909,6 +1002,61 @@ module.exports = ({test, assert, gas}) => {
     assert.match(resultAlert.prompt, /確定した要確認: 1 件/);
   });
 
+  test('ops identity integration: imported PRIOR_YEAR target list and result fall back to fullTxId', () => {
+    const seeded = setupTypedImport([
+      '2025/12/16,ローソン,10800,仕入れ',
+      '2025/12/17,ローソン,2900,仕入れ'
+    ], {customerCategory: 'INDIVIDUAL', fiscalYear: 2027, reviewType: 'PRIOR_YEAR'});
+    seeded.reviews.forEach((row) => {
+      assert.equal(row.merchantOriginal, null);
+      assert.equal(row.sourceRow, null);
+      assert.equal(row.displayTxId, null);
+      assert.ok(row.fullTxId);
+    });
+    const identities = seeded.reviews.map((row) => gas.call('menuReviewStoredIdentity_', [row]));
+    assert.equal(new Set(identities).size, 2, '店名・行番号なしでも fullTxId で一意になる');
+    seeded.reviews.forEach((row, index) => assert.ok(identities[index].includes(row.fullTxId)));
+    gas.stubs.setPromptResponses([{button: 'OK', text: '1'}, {button: 'OK', text: '1'}]);
+    gas.stubs.setAlertResponses(['YES']);
+    gas.call('menuResolveReview', []);
+    const events = gas.stubs.getUiEvents();
+    const targetPrompt = events.filter((event) => event.type === 'prompt')[0].prompt;
+    const targetLines = targetPrompt.split('\n').filter((line) => /^\s+\d+\)/.test(line));
+    assert.equal(targetLines.length, 2, targetPrompt);
+    assert.equal(new Set(targetLines.map((line) => line.replace(/^\s+\d+\)\s*/, ''))).size, 2,
+      '同一ファイルの PRIOR_YEAR 2件は番号を除いた一覧本文でも区別できる');
+    seeded.reviews.forEach((row) => assert.ok(targetPrompt.includes(row.fullTxId), targetPrompt));
+    const result = events.filter((event) => event.type === 'alert').at(-1).prompt;
+    assert.ok(result.includes(seeded.reviews[0].fullTxId), result);
+  });
+
+  test('ops identity integration: imported DATE screens use live merchant and result uses stored identity', () => {
+    const seeded = setupTypedImport([
+      '日付不明,ローソン,10800,仕入れ'
+    ], {reviewType: 'DATE'});
+    const reviewRow = seeded.reviews[0];
+    assert.equal(reviewRow.merchantOriginal, null);
+    assert.equal(reviewRow.sourceRow, 2);
+    assert.equal(reviewRow.displayTxId, null);
+    gas.stubs.setPromptResponses([
+      {button: 'OK', text: '1'}, {button: 'OK', text: '1'},
+      {button: 'OK', text: '2025-12-16'}, {button: 'OK', text: ''}
+    ]);
+    gas.stubs.setAlertResponses(['YES']);
+    gas.call('menuResolveReview', []);
+    const events = gas.stubs.getUiEvents();
+    const transaction = plain(gas.call('getTransaction', [reviewRow.fullTxId]));
+    assert.equal(transaction.originalMerchant, 'ローソン');
+    assert.equal(transaction.planned.k, 'ローソン');
+    const optionPrompt = events.filter((event) => event.type === 'prompt')[1].prompt;
+    const confirmation = events.filter((event) => event.type === 'alert')[0].prompt;
+    assert.ok(optionPrompt.includes('ローソン'), optionPrompt);
+    assert.ok(confirmation.includes('ローソン'), confirmation);
+    const result = events.filter((event) => event.type === 'alert').at(-1).prompt;
+    assert.ok(result.includes('■ 対象: 顧客一(C001) / （店名なし） / ' +
+      seeded.fileName + ' 2 行目'), result);
+  });
+
   test('ops menu 12 integration: handler resolves three imported PARTNER rows with real effects', () => {
     const seeded = setupPartnerImport(1, 3);
     const originalMax = gas.evaluate('MENU_RESOLVE_MAX_PER_ACTION_');
@@ -945,6 +1093,86 @@ module.exports = ({test, assert, gas}) => {
     } finally {
       gas.evaluate('MENU_RESOLVE_MAX_PER_ACTION_ = ' + Number(originalMax) + ';');
     }
+  });
+
+  test('ops menu 16 integration: imported PARTNER EXCLUDE selection and result use source identities', () => {
+    const seeded = setupPartnerImport(1, 3);
+    const selected = seeded.reviews[1];
+    const liveBefore = seeded.reviews.map((row) => plain(gas.call('getTransaction', [row.fullTxId])));
+    gas.stubs.resetUiEvents(); gas.stubs.resetApiCallCounts(); gas.stubs.resetRoundTrips();
+    const storedIdentity = (row) =>
+      (gas.call('normalizeMerchant', [row.merchantOriginal]) ? row.merchantOriginal : '（店名なし）') +
+      ' / ' + row.fileNameOriginal + ' ' + row.sourceRow + ' 行目' +
+      (row.displayTxId ? '（' + row.displayTxId + '）' : '');
+    const identities = seeded.reviews.map(storedIdentity);
+    assert.equal(new Set(identities).size, 3, '元ファイルの行番号で3件を区別できる');
+    gas.stubs.setPromptResponses([
+      {button: 'OK', text: '1'}, {button: 'OK', text: '3'}, {button: 'OK', text: '2'}
+    ]);
+    gas.stubs.setAlertResponses(['YES']);
+    gas.call('menuResolveReview', []);
+    const events = gas.stubs.getUiEvents();
+    const excludePrompt = events.filter((event) => event.type === 'prompt')[2].prompt;
+    identities.forEach((identity) => assert.ok(excludePrompt.includes(identity), identity));
+    assert.doesNotMatch(excludePrompt, /\(不明\).*転記行 -/);
+    const resultAlert = events.filter((event) => event.type === 'alert').at(-1).prompt;
+    assert.ok(resultAlert.includes('■ 対象: 顧客一(C001) / ' + storedIdentity(selected)));
+    assert.doesNotMatch(resultAlert, /■ 対象:.*\(不明\).*転記行 -|3 件のうち|この押下の上限|処理しなかった/);
+    seeded.reviews.forEach((row, index) => {
+      const stored = plain(gas.call('getReviewById', [row.reviewId]));
+      const transaction = plain(gas.call('getTransaction', [row.fullTxId]));
+      assert.equal(stored.status, index === 1 ? 'EXCLUDED' : 'OPEN');
+      assert.equal(transaction.transactionStatus, index === 1 ? 'CANCELED' : 'REVIEW_REQUIRED');
+    });
+    const destination = gas.stubs.getSpreadsheet('dest1').getSheetByName('入力用シート')
+      .getDataRange().getValues();
+    assert.ok(destination[liveBefore[1].destinationRow - 1].slice(1, 7).every((value) => value === ''),
+      '選んだ転記行の B・F・I・K・M・取引IDだけを空にする');
+    [0, 2].forEach((index) => {
+      assert.notEqual(destination[liveBefore[index].destinationRow - 1][6], '', '他2件の取引IDは残す');
+    });
+  });
+
+  test('ops menu 16 confirmation: imported PARTNER EXCLUDE shows live transaction values', () => {
+    const seeded = setupPartnerImport(1, 3);
+    const first = seeded.reviews[0];
+    const selected = seeded.reviews[1];
+    const firstLive = plain(gas.call('getTransaction', [first.fullTxId]));
+    const selectedLive = plain(gas.call('getTransaction', [selected.fullTxId]));
+    gas.stubs.resetUiEvents(); gas.stubs.resetApiCallCounts(); gas.stubs.resetRoundTrips();
+    gas.stubs.setPromptResponses([
+      {button: 'OK', text: '1'}, {button: 'OK', text: '3'}, {button: 'OK', text: '2'}
+    ]);
+    gas.stubs.setAlertResponses(['NO']);
+    gas.call('menuResolveReview', []);
+    const events = gas.stubs.getUiEvents();
+    const optionPrompt = events.filter((event) => event.type === 'prompt')[1].prompt;
+    assert.ok(optionPrompt.includes(String(firstLive.planned.b)));
+    assert.ok(optionPrompt.includes(Number(firstLive.planned.m).toLocaleString('ja-JP')));
+    assert.ok(optionPrompt.includes('転記行 ' + firstLive.destinationRow));
+    const confirmation = events.filter((event) => event.type === 'alert')[0].prompt;
+    assert.ok(confirmation.includes(String(selectedLive.planned.b)));
+    assert.ok(confirmation.includes(Number(selectedLive.planned.m).toLocaleString('ja-JP')));
+    assert.ok(confirmation.includes('転記行 ' + selectedLive.destinationRow));
+    assert.match(confirmation, /画面から取り消せません/);
+  });
+
+  test('ops regression: ADOPT partner-name prompt repeats imported candidates', () => {
+    const seeded = setupPartnerImport(1, 1, {dictionaryRows: [partnerCandidateRow()]});
+    assert.equal(call('menuReviewCandidates_', [seeded.reviews[0]])[0].partnerName, '候補株式会社');
+    gas.stubs.setPromptResponses([
+      {button: 'OK', text: '1'}, {button: 'OK', text: '1'}, {button: 'CANCEL', text: ''}
+    ]);
+    gas.call('menuResolveReview', []);
+    const partnerPrompt = gas.stubs.getUiEvents().filter((event) => event.type === 'prompt')[2].prompt;
+    assert.match(partnerPrompt, /候補: 1\) 候補株式会社/);
+  });
+
+  test('ops regression: candidate display never exposes matchMethod', () => {
+    const seeded = setupPartnerImport(1, 1, {dictionaryRows: [partnerCandidateRow()]});
+    const candidates = call('menuReviewCandidates_', [seeded.reviews[0]]);
+    candidates[0].matchMethod = 'latent_method';
+    assert.equal(gas.call('menuPartnerCandidatesText_', [candidates]), '1) 候補株式会社');
   });
 
   test('ops menu 29 integration: transaction confirmation NO writes nothing', () => {
@@ -1003,6 +1231,27 @@ module.exports = ({test, assert, gas}) => {
         openReviews: () => [row], getReviewById: () => row, getTransaction: () => live(),
         applyResolveDecision_: () => { applied += 1; return {}; }}, () => gas.call('menuResolveReview', []));
       assert.equal(applied, 0); assert.equal(gas.stubs.getApiCallCounts().batchUpdate, 0);
+      assert.match(gas.stubs.getUiEvents().filter((event) => event.type === 'alert').at(-1).prompt,
+        entry.expected);
+    });
+  });
+
+  test('ops regression: out-of-range corrections stop with appendix B.2 validation messages', () => {
+    const cases = [
+      {type: 'DATE', prompts: ['1999-12-31', ''], expected: /日付の形式が正しくありません: 1999-12-31。例: 2026-01-05/},
+      {type: 'AMOUNT', prompts: ['', '100000000'], expected: /金額は整数で入力してください: 100000000/}
+    ];
+    cases.forEach((entry) => {
+      gas.stubs.reset(); let applied = 0;
+      const row = review('bounded' + entry.type, entry.type);
+      gas.stubs.setPromptResponses([
+        {button: 'OK', text: '1'}, {button: 'OK', text: '1'},
+        {button: 'OK', text: entry.prompts[0]}, {button: 'OK', text: entry.prompts[1]}
+      ]);
+      withMocks({loadSettingsFromProperties: () => {}, menuViewerScope_: () => scope(),
+        openReviews: () => [row], getReviewById: () => row, getTransaction: () => live(),
+        applyResolveDecision_: () => { applied += 1; return {}; }}, () => gas.call('menuResolveReview', []));
+      assert.equal(applied, 0);
       assert.match(gas.stubs.getUiEvents().filter((event) => event.type === 'alert').at(-1).prompt,
         entry.expected);
     });
