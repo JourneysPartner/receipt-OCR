@@ -167,13 +167,15 @@ module.exports = ({test, assert, gas}) => {
     return {files: [], leases: [], reviews: [], lastActivityAt: null};
   }
 
-  test('menu 1: onOpen registers the exact read-only menu tree', () => {
+  test('menu 1: onOpen registers the exact menu tree', () => {
     setup();
     gas.call('onOpen', []);
     assert.deepEqual(plain(gas.stubs.getMenus()), [{name: 'クレカ自動処理', items: [
       {caption: '取込の状況', functionName: 'menuShowImportStatus'},
       {caption: 'ファイル一覧', functionName: 'menuShowFileList'},
       {caption: '要確認を開く', functionName: 'menuOpenReview'},
+      {caption: '要確認を確定', functionName: 'menuResolveReview'},
+      {caption: '要修正ファイルを再検査', functionName: 'menuRecheck'},
       {caption: '処理ログを開く', functionName: 'menuOpenLog'},
       {separator: true},
       {name: '診断', items: [
@@ -194,7 +196,8 @@ module.exports = ({test, assert, gas}) => {
   });
 
   test('menu 3: every menu handler is global and has no trailing underscore', () => {
-    const names = ['menuShowImportStatus', 'menuShowFileList', 'menuOpenReview', 'menuOpenLog',
+    const names = ['menuShowImportStatus', 'menuShowFileList', 'menuOpenReview', 'menuResolveReview',
+      'menuRecheck', 'menuOpenLog',
       'menuShowLeases', 'menuCheckSettings', 'menuFindTaggedTransactions',
       'menuShowTagBackfillTargets', 'menuShowAbout'];
     names.forEach((name) => {
