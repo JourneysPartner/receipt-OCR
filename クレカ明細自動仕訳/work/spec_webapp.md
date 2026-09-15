@@ -2,10 +2,11 @@
 
 対象システム：クレジットカード明細 自動仕訳システム（Google Apps Script、リポジトリ `クレカ明細自動仕訳`）
 作成日：2026-09-15
-版：0.6（監査 3 巡目の反映。§8.5 の方針を差し替え）
+版：0.7（監査 4 巡目の反映。`52`・`54` を第1段から外した）
 読者：本仕様だけを読んで実装する実装者（AI を含む）。この文書に書いていないことは実装者が決めてよいが、**書いてあることは変えない**。判断に迷う箇所は §2.4「線引きの原理」と §14「未確認事項と課題」を先に読む。
 
 改訂履歴：
+- 0.7（2026-09-15、**監査 4 巡目の反映**。全体整合監査が高 5・中低 17）：**0.6 の目玉が、半分しか効いていなかった。**(1) **`reviewWriteCustomer_` は `52_FileResolution.gs` では恒等写像である。**ファイル単位の要確認（`FORMAT_UNKNOWN`・`DUPLICATE`・`FILE_CHANGED` など、`52` が扱うすべての種別）は M列・N列を持たない ── `70_ImportFlow.gs` は取引単位の分岐（342〜350 行）でしか転記先を渡さず、ファイル単位の分岐（378〜392 行）と `10_RescanManager.gs` 116〜134 行は渡さない。したがって `52` に置いた `reviewWriteCustomer_(review)` は 1 行目のガードで雛形をそのまま返し、**`getCustomerById(review.customerId)` と完全に同じ値を返す**。0.6 が前版を「値が来ない口は変異テストで赤にならず無検証である」として退けた基準に、`52` の変更が自分で当たっていた。`52`・`54` を第1段から外し（変更は **7 → 5 ファイル**）、残る欠陥を **K-W14** として記録した。(2) **その証拠は、0.6 が自分で測っていた。**§8.8 の「M列が空でも当てる」変異が赤にした 6 本は `test/phase4-file-resolution.test.js`、すなわち**ファイル単位の解決のテスト**である。赤になった理由は「そこで使う要確認行が M列を持たないから」── つまり測定結果は「ガードが効いている」と「`52` では方式が効かない」を同時に示していたのに、前者としてだけ読んだ。**測定は、探していたものの証拠にしかならない。**(3) §7.4 に 0.5 の「`writeCustomer` を作って渡す」が残っており、§8.5 の「`customer` は渡さない」と正面衝突していた ── 手順として先に読まれる節なので、1 件 4 往復が無駄に増え予算が合わなくなる。(4) §12.3 ケース 12 が「`input.customer` が効く」を期待したままで、**0.6 の実装では必ず赤になる**（0.5 の改訂履歴が同じ型の欠陥を直したはずの箇所に再発）。赤を消す最短経路が「0.6 が捨てた差し替え口を戻す」であることが最も危うい。(5) **`PERMISSION_DENIED` というコードは `src/` に存在しない。**`AuthorizationError` は `super(null, detail)` で作られるので `code` は必ず `null`（`06_ErrorCatalog.gs` 89〜90 行）── §6.1 が `instanceof` を禁じた結果、認可拒否を判別する手段が 1 つも残っていなかった。`name` と `reason` を写す形に改めた。(6) §6.3 の自動再呼出しに停止条件が無く、`runImport` が `done: 0` で返る 4 経路（`NO_AUTHORIZED_CUSTOMER`・`SETTINGS_INVALID`・`LOG_CAPACITY_EXCEEDED`・`INTEGRITY_STOP`）で無限ループした。§7.3 の `total` も、10 分の安定待ちと恒久インデックスの状態で絞る手順が書かれておらず、同じ結果になっていた。(7) §7.4.1 の事前走査（`getReviewById` × 全件）が予算に入っておらず、判定 3 の再送規約と重なって **2n² 往復**になる。n=28 で 1 件目が始まらなくなるので `WEBAPP_MAX_DECISIONS_ = 20` を足した。(8) §7.1 が `authorize` の戻り値を**そのまま**返す形で、雛形の ID・ソースフォルダ・担当者メールをクライアントへ配っていた（§7.3.2 検証 1 が渡させまいとしている値である）。鍵名も `category` ではなく `customerCategory`。(9) §7.4 に `RESOLVE_WITHOUT_PARTNER` のリース事前確認が無かった ── この操作は `51` 64〜65 行のとおり自分でリースを取らないので、メニューの `96_Menu.gs` 842〜851 行が唯一の守りだった。(10) その他：§7.4.1 に旧値 64 が残っていた（付録C の当たり先から §7.4.1 が漏れていた）、`menuDisplayFileName_` は写さずそのまま呼べる（接頭辞の正本は `11_FileStateManager.gs` 40 行）、スタブの追加は 5 点ではなく 6 点（`getFolders`）、`resolveReview`／`resolveFileReview` の呼出しは 4 箇所ではなく 9 呼出し（`54` 292 行が `51` の `EXCLUDE` へ入る）、`merchantOptional` の分岐は存在するが今日は到達しない、§8.2 の段落順が壊れていて「この検証」の先行詞が逆になっていた、`!review` ガードが到達不能、`clearContent` の範囲は `getLastRow()`、`batchId` に使い道が書かれていなかった。
 - 0.6（2026-09-15、**監査 3 巡目の反映**。全体整合監査が高 9・中低 12、実装者シミュレーションが `80_WebApp.gs` と 15 ケースを実際に書いて 965/965 を通したうえで事実誤認 9 を返した）：**0.5 は「取込が 1 度も走らない」版だった。**(1) §3.3 の取込ゲート `159 + 7 × 15 ＝ 264 往復 ＝ 422,400 ms ≦ 300,000 ms` は**経過時間 0 でも恒偽**で、§6.3 の自動再呼出しと合わさって**1 ファイルも取り込まないまま無限に呼び続け、押すたびに Drive へ空の複製を作る**（実装者が実際に 3 回呼んで確認）。`runImport` は 1 ファイルを途中で切れない（`71` 201〜204 行の締切判定はファイルを始める前にしか効かない）ので「最悪を仮定して止める」形自体が成り立たない。要確認 0 件ぶんの固定費だけを見る形に改め、6 分に当たり得ることを K-W11 として受容した。**`WEBAPP_REVIEW_LIST_LIMIT_`（画面の表示上限）を取込の予算に流用していたのが誤りの根**である。(2) **§8.5 の方針を差し替えた。**前版は `input.customer` という差し替え口を足して Web アプリだけが渡す形だったが、**`resolveReview` を呼ぶのは Web アプリだけではない** ── `96_Menu.gs` 879〜880 行（本番稼働中のメニュー）と `97_Ops.gs` 194・1051 行はいずれも `customer` を渡さないので、Web アプリが転記シートを増やした瞬間に**メニューが雛形の同じ行番号を上書きし、読取確認も同じ誤ったシートを読むので `committed: true` を返す**。ハーネスで実際に起こして確認した。`51`・`52` 自身に要確認行の M列・N列を引かせる形（`reviewWriteCustomer_`）にすると、**`96`・`97` を 1 バイトも変えずに全経路が正しくなり**、950 テストも緑のままである。前版の差し替え口は**値を渡す呼出しが 1 つも無く、どの変異でも赤にならなかった**（＝無検証。§8.8 が自ら定めた基準で不合格）。(3) **§8.7 の `54` の指示は実行時エラーだった。**`resolveIntegrityReview(reviewId, operation, input)` に `options` は無く、行も 274 ではなく **272**。(4) `52` は 5 箇所ではなく **4 箇所**（406 行は 398 行の `customer` を受け取るので触らない）。(5) `WEBAPP_ITEM_TRIPS_` は 64 ではなく **70** ── §7.4.1・§7.4.3 が件ごとに義務づけた読取（`getReviewById` 2・`authorizeOperation` 2・リース 2）を 1 つも算入していなかった。(6) **§7.4.2 判定 1 は、引き金も害も事実と違った。**店名が空欄の明細は `CUSTOMER_FIX_REQUIRED` になり要確認が 1 件も立たない。実在するのは「正規化すると空になる店名」で、害は「以後ずっと自動確定される」ではなく、**転記先 F列に書かれた後に `MasterDataError` が飛び、要確認が `OPEN` のまま残り、画面に無関係な日本語が出る**ことである。(7) §7.3 の手順順序が、**取り込むファイルが 0 本でも複製だけ作る**形だった。(8) §12.2 のスタブ追加は 3 点では足りず 5 点（`Utilities.formatDate` の `yyyyMMdd-HHmm`・`HtmlService.createTemplateFromFile`）。(9) `appsscript.json` は**リポジトリ直下に存在せず `src/appsscript.json` である** ── 直下に作ると `clasp push` されず、`access: MYSELF` が黙って適用されない。受入 2 のコマンドも直下を対象に含めていたので検出できなかった。(10) その他：§7.4.3 と §8.5 が `getTransaction` について正反対を書いていた（付録C は §8.5 を当たり先として正しく挙げていたのに、節を開かなかった）、§7.1 と §5.2 が顧客一覧の作り方を別々に決めていた、§8.6 の締めが 0.3 版の誤り（「別の行を消す」）のまま残っていた、§7.4.2 の「同じ行を 2 つ書くと劣化する」は偽（`33_MerchantMatcher.gs` 223〜229 行が取引先名で重複排除する）、`decisions` の 1 ファイル制限にサーバー側の強制が無く 2 ファイルで無限ループした、判定 3 が呼出しをまたいで 100% 破れた、§7.3.2 の検証にテストが 1 件も無かった、`decisions` が空だと認可が 1 度も走らなかった、`51` の `input` は関数ごとに引数の位置が違う（第2・第3・第4）ので「第3引数に揃える」と書くと `EXCLUDE` で `actor.customer` になる。
 - 0.5（2026-09-15、**監査 2 巡目の反映**。全体整合監査が高 6・中低 9、主張検証が事実誤認 5 を返し、うち中核の主張は**試作を動かして**確かめられた）：**0.4 の修正が届かなかった節がある。**(1) §10 が `71` を「触らない」に残したままだった ── §7.3.1 が同じ文書で `71` 208 行の変更を要求しており、**列挙のほうを読んだ実装者は §7.3.1 を飛ばし、0.4 で直したはずの「取込が雛形へ書く」欠陥へそのまま戻る。**(2) §12.3 のケース 8・12 が**常に空の取引ログ AC・AD列**を期待したままで、書いたとおりに実装すると必ず赤になる。(3) ケース 5 が旧設計（2行目以降が空）のままで §8.2 と食い違っていた。(4) §7.4.1 の「一致しなければ拒否する」に**拒否する手順が無かった** ── `authorizeOperation` は 2 つの `customerId` を比べないので（`03_Authorization.gs` 189〜195 行）、オーナーは全顧客の役割を持ち**素通りする**。0.3 は「検証の規定が無い」状態で監査に見つかったが、0.4 は「検証がある」と書いてしまったので、次の監査は通過済みとして飛ばす ── **誤った安心を文書に固定する寸前だった。**(5) **試作で 5 つの事実誤認が出た。**最も重いのは `runImport` が**件数非依存ではない**こと（149 ＋ 7×要確認件数。要確認 10 件で 366 秒＝6 分の壁）。既存テストが「件数非依存」を固定できていたのは、材料が辞書登録済みの店名で要確認が1件も立たないからで、**Web アプリの主用途はまさに未解決 `PARTNER` である。**§3.3 に取込の件数上限を足した。(6) **自前ループは `input.learn` を明示しなければならない**（§7.4.2）── `adoptExistingPartner_` 143 行は `if (input.learn !== false)` なので未指定は「学習する」であり、**空店名で学習すると以後その顧客の空店名取引がすべて自動確定される**（ハーネス実測）。さらに取引状態の確認（§7.4.3）が要る。`WEBAPP_ITEM_TRIPS_` は 60 ではなく **64**（`getTransaction` の 4 を含む）。(7) §2.4 原理 1 の「取り消せないと告げてから」に対応する確認手順が §7.4 に無かった。(8) **付録C（当たり先の表）を新設した** ── `spec_menu_operations.md` で「1 つの値の変更に 19 箇所の直し漏れ」を止めた唯一の道具で、本文から機械で作っている。(9) その他：`menuViewerScope_` は 1175 行ではなく 1228 行、`rethrow` の枝は 1599 行ではなく 1595 行、`51`・`52` の第3引数の名前は `options` ではなく `input`、恒等式は `errors.length` ではなく「`reviewId` を持つ `errors` の数」、受入 2 は `git diff --stat` では**新設 2 ファイルを数え落とす**ので `git status --porcelain` で数える、§12.2 にスタブの追加 3 点（スプレッドシートを Drive ファイルとして見せる・`makeCopy`・`getParents`）を明記。
 - 0.4（2026-09-15、**監査 1 巡目の反映**。全体整合監査が高 8・中低 6、主張検証が事実誤認 13・未記載の事実 9 を返した）：**土台が事実に反していた。**(1) §2.4 原理 4 は「既存取引の転記先は取引ログ AC列が持つ」と書いていたが、**AC・AD列は受け口があるだけで値を渡す呼出しが `src/` に1つも無く、常に空文字である**（ハーネス実測）。正本は**要確認シート M列・N列**で、`70_ImportFlow.gs` 348〜349 行が書き、`51_ReviewResolution.gs` 229 行が既に使っている。§8.5 のコード例は `SpreadsheetApp.openById('')` で毎回落ちる形だった。**§0 が自ら課した「その値を書いている箇所を確かめてから決める」という規律を、画面の表示項目には適用し、書込先という最も重い値には適用し損ねた。**(2) §8.2 の「2行目以降の値を消す」は、転記先の他列にある**勘定科目の既定値と消費税の数式**を消す。`45_DestinationIndex.gs` 143〜147 行は行を増やすときの複製元を「数式を持つ空き行」から選ぶので、消すと `expandTemplateRows` が `getMaxRows()` へ落ち、`43_SheetWriter.gs` 110〜114 行が明示的に禁じた複製元を使う。しかも `validateDestinationSchema` は「データ行 0 行なら合格」なので**検証を素通りする**。6 列だけ消す形に改めた。(3) **原理 4 を掲げながら、本文の主要2経路がそれを破る手順を書いていた** ── 取込は `runImport` に差し替え口が無いのに §10 が `71` を「触らない」と決め、要確認の確定は `applyResolveDecision_` が自ら `getCustomerById` を呼ぶのに §10 が `96` を「変更しない」と決めていた。前者は `71` 208 行に口を1つ足し、後者は自前のループに改めた。(4) クライアントから来る `destinationSpreadsheetId`・`reviewId` に検証の規定が無く、`executeAs: USER_DEPLOYING` の全権限で任意のスプレッドシートへ書けた。(5) 受入 2（3ファイル差分）が §10（6ファイル変更）と両立せず、受入 1 は既存テスト `auth F-35` が必ず赤になるため達成不能だった ── **赤を消す最短経路が「認可を外す」である**ことが最も危うい。(6) 予算に**ファイル数を掛けていなかった**（`spec_menu_operations.md` v2.0 で一度直した欠陥と同型）。Web アプリは店名でグループ化しないのでメニューより条件が悪く、15 件が 15 ファイルに跨れば後始末の最悪は締切の 5 倍になる。計測段階の上限は 2 ではなく **1**。(7) その他：`CANCEL_FILE` は転記行を触る（触らないと書いていた）、取消しの壊れ方は「別の行を消す」ではなく「1行も消せない」、`buildIndex` の呼出しは 4 箇所ではなく 7 箇所（`97_Ops.gs` の 2 箇所は定期取込から自動実行される）、`classifyMenuError_` は 661 行ではなく 1551 行、`EXCLUDE` は 37 ではなく 36 往復、`candidates` は配列ではなく JSON 文字列、`INTEGRITY` が種別の列挙から漏れ、`runImport` はオーナーを特権化しない、雛形の複製で `取引先一覧` タブも複製される。
@@ -137,7 +138,7 @@
 |---|---|---|
 | `getReviewById` | 2 | §7.4.1 手順 0 |
 | `authorizeOperation` | 2 | §7.4.1 手順 1 |
-| リース確認 | 2 | §6.1 |
+| リース確認 | 2 | §7.4（`RESOLVE_WITHOUT_PARTNER` のみ。`ADOPT_EXISTING_PARTNER` は `51` 124 行が自らリースを取るので不要だが、安全側に常に算入する） |
 | `getTransaction` | 4 | §7.4.2 判定 2・§7.4.3 |
 | `resolveReview` `ADOPT_EXISTING_PARTNER` | 60 | §7.4 |
 | **合計** | **70** | |
@@ -180,6 +181,8 @@
 
 1. **1 回の呼出しで 1 ファイルだけ**取り込む（`maxFilesPerCustomer: 1` ＋ `fileIds` を 1 件に絞る）。
 2. `runImport` を呼ぶ前に確かめるのは**要確認 0 件ぶんの固定費だけ**である：`elapsed + WEBAPP_IMPORT_BASE_TRIPS_ × WEBAPP_TRIP_WORST_MS_ <= WEBAPP_DEADLINE_MS_`（＝159×1600＝254 秒）。満たさなければそのファイルは次の呼出しへ回す。
+
+   **残りは 45.6 秒である。**ゲートに達するまでに手順 1（認可 2 往復）・手順 2（§7.3.2 の 4 検証）・手順 3（Drive 走査＋恒久ファイルインデックスの一括読取）を通っており、見積で 12〜15 往復＝19〜24 秒を使う。**第1段では収まるが余裕は薄い** ── `WEBAPP_TRIP_WORST_MS_` を上げるか検証を増やすと静かに門が閉じる。**閉じても無限ループにはならない**（`elapsed` は呼出しごとに 0 に戻り、`runImport` の締切は `71` 内の `startedAt` から測る）が、毎回 `done: 0` が返るので §6.3 の停止条件が要る。
 3. **要確認が多いファイルで 6 分に当たり得ることは受容し、当たったときに何が起きるかを利用者に見せる。**強制終了されても帳簿は整合している（既存の設計どおり）が、そのファイルは恒久ファイルインデックスの状態が `WRITING`／`VALIDATING` のまま残る。**第1段は `opsRecoverStuckFiles` を止めている**（§8.7）ので誰も戻さない ── 画面に付録B の「処理中のまま停止」を出す。
 4. **K-W11 として §14 に記録する。**`registerPendingReviews` を次の呼出しへ繰り越して取込を件数で分割できる形が、第2段の課題である。
 
@@ -300,7 +303,11 @@
 | 元ファイル | **要確認行の `fileNameOriginal`**（`50_ReviewStore.gs` 63 行が読み、163 行が書く。Drive を引き直さない ── 引くと 1 件ごとに往復が増え、下の見積にも入っていない） | **`decisions` は1回の呼出しにつき1ファイル分**（§3.3）なので、利用者がどれを1回で送れるか判るように**必ず出す。**画面が混在させておいて「1ファイルに絞れ」とだけ言うのは、利用者に区別する材料を与えていない |
 | （非表示） | `fileId` | 送信の単位。クライアントは同じ `fileId` の行だけをまとめて送る |
 
-**要確認表のファイル名は `menuDisplayFileName_`（`96_Menu.gs` 1158 行）と同じ扱い ── 接頭辞【処理中】【済】等を剥がす**（`removableStatePrefixRegex_`）。**§5.3 の Drive 一覧は接頭辞を残す**（状態が一目で分かるようにするため）。用途が違うので揃えない。`96_Menu.gs` は変更しないので**同じ処理を `80_WebApp.gs` に書く**ことになるが、**取り違えの避け方は写す**：ファイル名が取れないときは `（ファイル名不明）` と出し、空文字のまま出さない。
+**要確認表のファイル名は `menuDisplayFileName_`（`96_Menu.gs` 1158 行）と同じ扱い ── 接頭辞【処理中】【済】等を剥がす**（`removableStatePrefixRegex_`）。**§5.3 の Drive 一覧は接頭辞を残す**（状態が一目で分かるようにするため）。用途が違うので揃えない。
+
+**`menuDisplayFileName_(review)` をそのまま呼ぶ。同じ処理を `80_WebApp.gs` へ写してはならない。****`96_Menu.gs` を変更しないことと、その関数を呼べないことは別である** ── GAS も `test/gas-harness.js` も `src/*.gs` を同一スコープに読み込むので、変更せずに呼べる（§6.1 が同じ `96_Menu.gs` の `classifyMenuError_` でそうしている）。写すと、剥がす接頭辞の正本（`removableStatePrefixRegex_`。**`96_Menu.gs` ではなく `11_FileStateManager.gs` 40 行**）が 2 つになり、増えたとき片方だけが直る。
+
+ファイル名が取れないときは `（ファイル名不明）` と出し、空文字のまま出さない。
 
 **識別子は店名だけにしない。**同じ店名の明細が同じファイルに 2 行あるとき、店名だけでは利用者がどちらに何を入れたか判らない。`spec_menu_operations.md` §7.4 の識別規則と同じく、**元店名・ファイル名・元ファイルの行番号（`sourceRow`）**を並べる。`sourceRow` は要確認行が持っている。
 
@@ -316,7 +323,9 @@
 
 **分類はサーバー側で行う** ── `withFailureHandler` が受け取る例外は `message` しか残らない（`google.script.run` は例外オブジェクトを構造化して渡さない）。`80_WebApp.gs` の各サーバー関数は本体を `try` で囲み、例外を `classifyMenuError_(error)` へ渡し、戻り値 `{title, lines}` の **`lines` を改行で連結した文字列**を `message` に持つ新しい `Error` を投げ直す。クライアントはその `message` をそのまま出す。
 
-**投げ直す `Error` には、元の例外の `name` と `code` を写す**（`err.code = error && error.code; err.name = error && error.name;`）。**型（`instanceof`）は保てない**ので、テストも §7.4 の `errors[].code` も**型ではなく `code` で判定する。**写さないと、`AuthorizationError` が plain `Error` になって `code` が消え、§12.3 ケース 4 のような認可のテストが書けなくなる。
+**投げ直す `Error` には、元の例外の `name`・`code`・`reason` を写す**（`err.name = error && error.name; err.code = error && error.code; err.reason = error && error.reason;`）。**型（`instanceof`）は保てない**ので、テストも §7.4 の `errors[].code` も型では判定しない。
+
+**`reason` を写すのは `AuthorizationError` のためである。**同クラスは `super(null, detail)` で作られるので **`code` は必ず `null`** であり（`06_ErrorCatalog.gs` 84・89〜90 行）、`code` だけでは認可拒否を判別できない。**`PERMISSION_DENIED` というコードは `src/` に 1 つも無い**（2026-09-15 に全文検索して 0 件）。判別は **`err.name === 'AuthorizationError'`** で行い、理由の内訳が要るときだけ `err.reason`（`denyAuthorization_` が付ける `ACTOR_UNKNOWN`／`NO_CUSTOMER_ACCESS`／`ROLE_INSUFFICIENT`／`CUSTOMER_NOT_ACTIVE`）を見る。
 
 `classifyMenuError_` が `rethrow: true` を返す枝（1595〜1597 行、`Cannot call SpreadsheetApp.getUi`）は `lines` が空である。Web アプリでは起き得ないが、**空なら画面が無言になる**ので、空のときは元の例外の `message` の前に `想定していないエラーです: ` を付けて投げ直す。
 
@@ -333,7 +342,9 @@
 `runImport` と一括確定は複数回の呼出しに分かれ得る。クライアントは：
 
 - 呼出し中はボタンを無効化し、「処理中… {done}/{total}」を出す
-- 1回の呼出しが返ったら、残りがあれば自動で次を呼ぶ
+- 1回の呼出しが返ったら、**次のすべてを満たすときだけ**自動で次を呼ぶ：`remaining > 0` **かつ** `stoppedBy` が空 **かつ** `done > 0`
+- **`done === 0` で返ったら、残りがあっても呼び直さない。**呼び直しても同じ結果が返る経路が 4 つある ── `NO_AUTHORIZED_CUSTOMER`（`71_RunOrchestrator.gs` 134 行。§7.3.4 が実在すると認めている）・`SETTINGS_INVALID`（145 行）・`LOG_CAPACITY_EXCEEDED`（153 行）・顧客の `skipped: 'INTEGRITY_STOP'`（181 行）。いずれも `report.customers` か `files` が空のまま返るので `done` は 0 のままである。**止めないと「処理中… 0 / n」を出しながら永久に呼び続ける**（0.5 の恒偽ゲートと同じ形の事故）
+- 止めたときは `stoppedBy`（または `skipped`）に対応する付録B の文言を画面に出す
 - **利用者が画面を閉じたら止まる。**途中まで書かれた分は残る（帳簿としては整合している ── 既存の設計どおり、1件ずつ確定して後始末する）
 
 ---
@@ -345,10 +356,14 @@
 サーバー関数 `webAppBootstrap_()` が返すもの：
 
 ```
-{actor, isOwner, customers: [{customerId, customerName, category}], version}
+{actor, isOwner, customers: [{customerId, customerName, customerCategory}], version}
 ```
 
-`authorize(ROLE.REVIEWER, null, {operation: 'WEBAPP:一覧'})` の戻り値 `customers` を**そのまま**返す（§5.2）。`getActiveCustomers()` も `filterByScope_` も呼ばない ── `authorize` が既に絞込済みの `customers` を返すからである（`03_Authorization.gs` 123・136 行）。往復：認可 2。
+`authorize(ROLE.REVIEWER, null, {operation: 'WEBAPP:一覧'})` を呼び、戻り値 `customers` から **3 つの鍵だけを写して**返す ── `{customerId, customerName, customerCategory}`。`getActiveCustomers()` も `filterByScope_` も呼ばない（`authorize` が既に絞込済みの `customers` を返す。`03_Authorization.gs` 123・136 行）。往復：認可 2。
+
+> **`category` ではなく `customerCategory` である**（`02_CustomerMaster.gs` 35 行が AJ列から作る鍵名）。`category` という鍵は存在しないので、書き間違えると §5.2 の区分列が全行空欄になる ── §0 の規律にいう「取込側が書かない列を画面に出す」欠陥そのものである。
+>
+> **そのまま返してはならない。**`authorize` が返す `customers` は顧客レコードの全体で、`destinationSpreadsheetId`（＝雛形）・`sourceFolderId`・`reviewers`・`admins` を含む。**§7.3.2 検証 1 が「雛形そのものを渡すな」と防いでいる値を、画面が先にクライアントへ配ることになる。**
 
 ### 7.2 カードフォルダとファイルを取る
 
@@ -359,7 +374,7 @@
 
 **`customerId` はサーバーで検証する** ── `filterByScope_` に通らない顧客 ID が来たら `AuthorizationError` を投げる。
 
-**`folderId` もサーバーで検証する** ── 顧客の `sourceFolderId` の子孫でなければ投げる。クライアントの値をそのまま Drive へ渡さない。
+**`folderId` もサーバーで検証する** ── 顧客の `sourceFolderId` の**直下の子フォルダちょうど 1 段**でなければ投げる。**「子孫」と読んで任意の深さを許してはならない** ── §5.3 が「再帰はしない。モックの木は 1 段である」と決めているので、孫は画面に出ておらず、通すと**利用者が見ていないフォルダのファイルを取り込む**ことになる。クライアントの値をそのまま Drive へ渡さない。
 
 ### 7.3 記帳を実行する
 
@@ -419,6 +434,16 @@ var fileOutcome = processDiscoveredFile_(runId, writeCustomer, candidate, opts);
 
 `scanUnprocessedFiles(customerId, options)`（`10_DriveScanner.gs` 118 行）は `options` に `{now}` しか受け取らず、`listFilesRecursively_(customer.sourceFolderId)`（129 行）で**顧客のソースフォルダ全体を再帰的に**走査する。`folderId` で絞る口は無い。したがって選ばれたフォルダ直下のファイル ID を自分で集め、`opts.fileIds` に入れて呼ぶ（`71` 189〜193 行がその配列で候補を絞る）。**渡さないと、画面に出していないカードB・カードC のファイルまで同じ新しい転記シートへ混ざる。**
 
+**`total` は Drive の一覧の件数ではない。**サーバーは次の 3 つを自分で適用して候補を作る（`10_DriveScanner.gs` 130〜137 行と同じ規則。**規則を写す以上、同じ判定を 2 箇所に持つことになるので、変えるときは両方を変える**）：
+
+1. 拡張子が `.csv` / `.xlsx`
+2. 恒久ファイルインデックスに未登録、または状態が `DISCOVERED`
+3. 最終更新から 10 分以上経過
+
+`total` はこの 3 つを通ったファイルの件数である。**(2)(3) を落とすと `remaining` が 0 にならない** ── 取込済みのファイルや置いたばかりのファイルを数に入れると、`runImport` はそれらを永久に処理しないので `remaining = total − done > 0` が続き、§6.3 の自動再呼出しが止まらない。
+
+**恒久ファイルインデックスは 1 回だけ一括で読む。**ファイルごとに `getFileState` を呼ぶと件数ぶん往復が増え、§5.3 の見積にも入っていない。
+
 **画面の一覧と取込の候補は同じ集合ではない。**`scanUnprocessedFiles` は 122・135〜136 行で「最終更新から 10 分以上経過」したファイルだけを候補にする。§5.3 の一覧は Drive をそのまま出すので、**置いたばかりのファイルは一覧に見えるのに記帳されない。**§5.3 の「状態」列で、恒久ファイルインデックスに未登録かつ更新から 10 分未満のものは `取込待ち（あと n 分）` と出す。理由を出さずに `fileResults` が空で返ると、利用者には「押しても何も起きない」としか見えない。
 
 #### 7.3.4 オーナーでも記帳できない顧客がある
@@ -460,9 +485,10 @@ var fileOutcome = processDiscoveredFile_(runId, writeCustomer, candidate, opts);
 
 - **予算判定は `spec_menu_operations.md` §6.4 の式をそのまま写す。**1件を始める前に `elapsed + WEBAPP_ITEM_TRIPS_ × WEBAPP_TRIP_WORST_MS_ + WEBAPP_CLEANUP_TRIPS_ × ファイル数 × WEBAPP_TRIP_WORST_MS_ <= WEBAPP_DEADLINE_MS_` を確かめ、満たさなければその件を始めない。**ファイル数は `new Set(...)` で数える**（§3.3）。§7.4.1 がサーバー側で 1 ファイルに絞るので**結果は必ず 1 になる**が、**`1` と直書きしてはならない** ── 絞込を外した版・第2段で複数ファイルを許した版で、予算式だけが 1 のまま残る。`spec_menu_operations.md` §6.4 が同じ理由で固定値を退けている。**後始末は「1 件でも書込を試みたファイル」だけに行う**ので、そちらの `new Set` は 1 とは限らない（失敗して書き込めなかったファイルは入らない）
 - 件ごとに §7.4.1 の検証を通す
-- 件ごとに §8.5 の `writeCustomer` を作って `resolveReview` へ渡す
+- **`customer` は渡さない**（§8.5）。`resolveReview(reviewId, code, input)` を素直に呼ぶ ── 転記先は `51` が要確認行の M列・N列から自分で引く。呼出し側で `getCustomerById` を呼ぶと**1 件あたり 4 往復増え**、`WEBAPP_ITEM_TRIPS_`（70）が合わなくなる（§3.2）
 - **件ごとに §7.4.2 の `input.learn` を決める**
 - **件ごとに §7.4.3 の取引状態を確かめる**
+- **`RESOLVE_WITHOUT_PARTNER` の件だけ、呼ぶ前に `activeLeases_()` でそのファイルのリースを確かめる。**取られていたら `resolveReview` を呼ばず `skippedByLease` を 1 増やし、以後同じ `fileId` の件もすべて `skippedByLease` にする（`96_Menu.gs` 842〜851 行と同じ形・同じ理由）。**`ADOPT_EXISTING_PARTNER` には掛けない** ── `51` 124 行が自らリースを取るので、衝突は `LEASE_CONFLICT` 例外として `errors` に載る。**`RESOLVE_WITHOUT_PARTNER` は `51` 64〜65 行のとおりリースを取らないので、この事前確認だけが守りである**（K-W8 が「リースで守られる」と書いているが、この操作は守られない）
 - 1件の失敗で全体を止めず `errors` に積む（§6.2）
 - 後始末（`commitSettledTransactions_`・`completeFileIfFullyResolved_`）は「1件でも書込を試みたファイル」だけに行い、予算判定を掛けない
 
@@ -490,7 +516,19 @@ var fileOutcome = processDiscoveredFile_(runId, writeCustomer, candidate, opts);
 
 **例外にしてはならない。**例外にするとクライアントが直すまで 1 件も進まない。
 
-**放置すると無限ループになる。**§7.4 の予算式に 2 ファイルを入れると `elapsed + 64×1600 + 62×2×1600 ＝ elapsed + 300,800 > 300,000` で、**経過時間 0 でも 1 件目から始まらない** → `notAttempted ＝ decisions.length` → `remaining ＝ decisions.length` → §6.3 の自動再呼出しで同じ配列が永久に送られ続ける。§5.4 の表は店名でグループ化しないので、**15 件が 15 ファイルに跨るのは例外ではなく既定の状態である**（§3.3）。
+**`decisions` の件数もサーバーが限る。**`decisions.length > WEBAPP_MAX_DECISIONS_`（＝20）なら、先頭 20 件だけを材料にし、残りは `errors` に `{reviewId, code: 'TOO_MANY_DECISIONS'}` として返す（同じく例外にしない）。
+
+**理由 ── 事前走査は件数に比例し、予算式に入っていない。**この節の `getReviewById` は `decisions` の全件に掛かり（2 往復 × 件数）、§7.4.2 判定 3 の再送規約により**毎回の呼出しで**掛かる。`WEBAPP_MAX_PER_CALL_` が 1 なので 1 押下は n 回の呼出しに分かれ、**事前走査だけで 2n² 往復**になる。予算判定の頭金は `elapsed ≤ 88,800 ms`（§3.3）なので：
+
+| n | 認可 ＋ 事前走査 | |
+|---|---|---|
+| 15（§5.4 の表示上限） | (2 ＋ 30) × 1600 ＝ 51,200 ms | 収まる |
+| 20 | (2 ＋ 40) × 1600 ＝ 67,200 ms | 収まる |
+| **28** | (2 ＋ 56) × 1600 ＝ **92,800 ms** | **1 件目が始まらない** → `remaining = decisions.length` のまま §6.3 が永久に呼び直す |
+
+**`WEBAPP_REVIEW_LIST_LIMIT_` を上限に使ってはならない** ── §11.3 が自ら「**表に出す**件数。取込が立てる要確認の件数を縛るものではない」と書いた表示専用の値である。§4.4 の「クライアントから来た値を信用しない」は件数にも掛かる。
+
+**放置すると無限ループになる。**§7.4 の予算式に 2 ファイルを入れると `elapsed + 70×1600 + 62×2×1600 ＝ elapsed + 310,400 > 300,000` で、**経過時間 0 でも 1 件目から始まらない** → `notAttempted ＝ decisions.length` → `remaining ＝ decisions.length` → §6.3 の自動再呼出しで同じ配列が永久に送られ続ける。§5.4 の表は店名でグループ化しないので、**15 件が 15 ファイルに跨るのは例外ではなく既定の状態である**（§3.3）。
 
 戻り値に **`deferredByFile`** を足し、`notAttempted` に含める（恒等式は変わらない）── 予算が止めたのか 1 ファイル制限が止めたのかを画面で区別できるようにする。
 
@@ -502,7 +540,9 @@ var fileOutcome = processDiscoveredFile_(runId, writeCustomer, candidate, opts);
 
 1. **`review.merchantNormalized` が空**なら学習しない。
 
-   **引き金は「店名が空」ではない。**店名が空欄の明細は `MERCHANT_REQUIRED`（`35_TransactionChecks.gs` 41〜55 行、`customerFix: true`）になり、`30_TransactionValidator.gs` 702〜706 行が区分1 `SOURCE_REQUIRES_CUSTOMER_FIX` にしてファイルごと `CUSTOMER_FIX_REQUIRED` へ落とす ── **要確認は 1 件も立たない**（2026-09-15 ハーネス実測：`outcome: NO_WRITE`、`openReviews` は空）。実在するのは**正規化すると空になる店名**（制御文字など）で、このとき `merchantOriginal` は非空、`merchantNormalized` が `null` になる。
+   **引き金は「店名が空」ではない。**店名が空欄の明細は `MERCHANT_REQUIRED`（`35_TransactionChecks.gs` 48〜55 行、`customerFix: true`）になり、`30_TransactionValidator.gs` 702〜706 行が区分1 `SOURCE_REQUIRES_CUSTOMER_FIX` にしてファイルごと `CUSTOMER_FIX_REQUIRED` へ落とす ── **要確認は 1 件も立たない**（2026-09-15 ハーネス実測：`outcome: NO_WRITE`、`openReviews` は空）。
+
+**ただし分岐はもう 1 本ある。**`35_TransactionChecks.gs` 42〜47 行は、カード形式が `merchantOptional` を立てているとき（年会費行など）**空店名のまま `PARTNER` 要確認を立てる**。**今日は到達しない** ── `merchantOptional` に値を入れる箇所が `src/` に 1 つも無く（`13_CardDetector.gs` に代入が無い）、`toBool(undefined)` は偽だからである。**判定 1 はこの経路も拾う**ので、いずれ形式マスターに列が足されても正しく動く。「空店名は到達しない」と読んで確認を飛ばさないこと。実在するのは**正規化すると空になる店名**（制御文字など）で、このとき `merchantOriginal` は非空、`merchantNormalized` が `null` になる。
 
    **害も「以後ずっと自動確定される」ではない。**`learnFromResolution`（`34_MerchantDictionary.gs` 23 行）が `String(normalized) !== normalizeMerchant(original)` で `MasterDataError` を投げるので、辞書には 1 行も入らない。**問題は投げる場所である** ── 転記と `updatePartnerResolution` の**後**に投げるので、次の半端な状態が残る（実測）：
 
@@ -527,7 +567,9 @@ var fileOutcome = processDiscoveredFile_(runId, writeCustomer, candidate, opts);
 
    しかも §7.4 の確認画面は押下時に全件を見て「辞書に登録しません」と出しているので、**利用者に見せた内容とサーバーの挙動が食い違う**（§2.4 原理 1 が守られない）。
 
-   **したがってクライアントは、押下ごとに一意な `batchId` を作り、その押下の全 `decisions` を毎回そのまま送る。**既に確定した件はサーバーが飛ばす（`51_ReviewResolution.gs` 45〜50 行が `OPEN`／`IN_PROGRESS` 以外を `StateTransitionError` にするので `errors` に積んで進めばよい）。サーバーは**送られてきた配列全体**で判定 3 を評価し、**処理するのは未確定の先頭 `WEBAPP_MAX_PER_CALL_` 件だけ**にする。`remaining` は「未確定の残件数」である。
+   **したがってクライアントは、その押下の全 `decisions` を毎回そのまま送る。**（押下ごとの一意な `batchId` を `options.batchId` として添え、監査ログの `operation` に付ける。サーバーの判定には使わない ── 判定 3 は送られてきた配列そのもので行う。**受け取らない実装にしてはならない** ── 押下の切れ目が監査ログから追えなくなる。）既に確定した件は **`resolveReview` を呼び、`StateTransitionError` を捕まえて `errors` に `{reviewId, code: 'ALREADY_SETTLED'}` として積む**（`51_ReviewResolution.gs` 45〜50 行が `OPEN`／`IN_PROGRESS` 以外をこの例外にする）。**呼ばずに飛ばしてはならない** ── §7.4 の恒等式が破れてケース 23 が赤になる。
+
+**ただし `code === 'ALREADY_SETTLED'` の件は §6.2 の「エラー: n 件」に数えない。**毎回全件を再送する規約の副産物であって失敗ではない ── 数えると、15 件を全部成功させた押下の最後に「エラー: 14 件」と出る。画面は `errors` を `ALREADY_SETTLED` とそれ以外に分け、**後者だけを件数に出す。**サーバーは**送られてきた配列全体**で判定 3 を評価し、**処理するのは未確定の先頭 `WEBAPP_MAX_PER_CALL_` 件だけ**にする。`remaining` は「未確定の残件数」である。
    利用者が同じ元店名に 2 つの取引先名を入れたということは、その店名は一意に決まらないという申告である。**片方だけ学習すると、次の取込からその店名が黙って片方の取引先に自動確定され、要確認すら立たない。**両方学習しても辞書が壊れるわけではない（ハーネス実測：`partnerNames.length === 1` でなくなるので `autoConfirm` が落ち、以後この店名は毎回要確認になる ── `33_MerchantMatcher.gs` 229 行）が、**その店名は二度と自動解決されなくなる。**どちらも黙って起きるので、学習しないのが正しい。
    `partnerName` が同じなら 1 件目だけ学習し、2 件目以降は `false` にする（**`autoConfirm` は落ちない** ── `33_MerchantMatcher.gs` 223〜229 行が取引先名で重複排除するので `partnerNames.length === 1` のままである。理由は**辞書の掃除係が居ない**ことのほうにある：`learnFromResolution`（`34_MerchantDictionary.gs` 26 行）は無条件に `appendRow` し、`detectDictionaryConflicts` は `src/` のどこからも呼ばれない。同じ行が押下のたびに増え続ける）。
 
@@ -535,7 +577,7 @@ var fileOutcome = processDiscoveredFile_(runId, writeCustomer, candidate, opts);
 
 #### 7.4.3 取引の状態を件ごとに確かめる
 
-**`ADOPT_EXISTING_PARTNER` の前に `getTransaction(review.fullTxId)` を呼び、`transactionStatus` が `REVIEW_REQUIRED` か `COMMITTED` でなければその件を `errors` へ積んで飛ばす。**`96_Menu.gs` 860〜868 行と同じ判定で、同じ理由である ── 取り消し済み・除外済みの取引に取引先名を当てると、**帳簿に居ない取引の行に書き込む（幽霊行）。**メニューはこの欠陥で一度本番に出た（`spec_menu_operations.md` の H-1 と混在グループの修正）。
+**`ADOPT_EXISTING_PARTNER` の前に `getTransaction(review.fullTxId)` を呼び、`transactionStatus` が `REVIEW_REQUIRED` か `COMMITTED` でなければその件を `errors` へ積んで飛ばす**（`{reviewId, code: 'STATE_TRANSITION', message: 付録B}`。`96_Menu.gs` 864 行が同じ `code` を使っている）。`96_Menu.gs` 860〜868 行と同じ判定で、同じ理由である ── 取り消し済み・除外済みの取引に取引先名を当てると、**帳簿に居ない取引の行に書き込む（幽霊行）。**メニューはこの欠陥で一度本番に出た（`spec_menu_operations.md` の H-1 と混在グループの修正）。
 
 この `getTransaction` は §7.4.2 の判定 2 が必要とする `tx.planned.i` も供給するので、**1件につき 1 回でよい**（4 往復。`WEBAPP_ITEM_TRIPS_` に算入する）。§5.4 の表を描くときの `getTransaction` は別のサーバー呼出しなので、使い回せない。
 
@@ -560,7 +602,7 @@ var fileOutcome = processDiscoveredFile_(runId, writeCustomer, candidate, opts);
 ### 8.2 手順
 
 1. `DriveApp.getFileById(customer.destinationSpreadsheetId).makeCopy(name, folder)`
-2. 複製の **`customer.destinationSheetName` のシート**（`入力用シート` と決め打ちしない ── 顧客マスター H列の設定値である。`02_CustomerMaster.gs` 23 行。`src/*.gs` にこのリテラルは `97_Ops.gs` 260 行のテスト顧客登録にしか無い）について、**システムが所有する 6 列だけを消す** ── `customer.columnMapping` の `B`・`F`・`I`・`K`・`M`・`txId` を、`customer.headerRow`（顧客マスター AD列。`02` 32 行。**1 とは限らない**）の次の行から最終行まで `clearContent()` する。
+2. 複製の **`customer.destinationSheetName` のシート**（`入力用シート` と決め打ちしない ── 顧客マスター H列の設定値である。`02_CustomerMaster.gs` 23 行。`src/*.gs` にこのリテラルは `97_Ops.gs` 260 行のテスト顧客登録にしか無い）について、**システムが所有する 6 列だけを消す** ── `customer.columnMapping` の `B`・`F`・`I`・`K`・`M`・`txId` を、`customer.headerRow`（顧客マスター AD列。`02` 32 行。**1 とは限らない**）の次の行から **`sheet.getLastRow()` まで** `clearContent()` する。**`getMaxRows()` を使ってはならない** ── 数式の無い空行まで走査して往復が無駄に増える。合計行が最下行にある場合でも、消すのは 6 列だけなので合計の数式は他の列にあり、**触らない。**
 3. **行全体を消してはならない。値を列ごと全部消してもならない。** ── それ以外の列には**勘定科目の既定値と消費税・残高の数式**が入っている（`43_SheetWriter.gs` 90〜103 行のコメント、`02_CustomerMaster.gs` 37〜39 行の AL列が存在する理由）。消すと 2 つ壊れる：(a) 転記された行に勘定科目も消費税も入らないまま freee へ渡る。(b) `45_DestinationIndex.gs` 143〜147 行は行を増やすときの複製元を「**数式を持つ空き行**」から選ぶので、数式が全滅すると `templateHint` が `null` になり `expandTemplateRows` が `sheet.getMaxRows()` へ落ちる ── そこは `43_SheetWriter.gs` 110〜114 行が「書式も数式も無い空行を複製してしまい、勘定科目の既定値・消費税式が新しい行に入らない ── **この関数が存在する理由そのものが満たされない**」と明示的に禁じた複製元である。
    **`validateDestinationSchema` はこの誤りを検出しない** ── 項目5（必要数式）は「既存データ行が 0 行なら合格」である（`42_SheetSchemaValidator.gs` 111〜117 行）。空にしたシートは検証を素通りする。
    既存の `clearTemplateValueCells`（`43` 82〜89 行）が同じ 6 列を同じ理由で消しているので、**それに揃える**。
@@ -571,11 +613,11 @@ var fileOutcome = processDiscoveredFile_(runId, writeCustomer, candidate, opts);
 
 **したがって `partnerListSheetName` の参照元は雛形のまま据え置く** ── 差し替えるのは `destinationSpreadsheetId` だけで、取引先一覧を読むときは `getCustomerById` が返す元の `customer` を使う。§5.4 の推測候補と §7.4 の取引先入力はこちらを見る。
 
-**この検証が確かめるのはヘッダー・列位置・列重なり・保護までである。必要数式（項目 5）は必ず素通りする** ── 6 列を消した直後は `listOccupiedRows`（`45_DestinationIndex.gs` 105〜110 行）が空を返すからである（`rowScanExcludedColumns` が勘定科目・消費税・残高の列を除外するので、6 列を消した行は「空き行」と判定される）。`42_SheetSchemaValidator.gs` 119 行の `if (occupied.length)` が偽になり、数式の検査は走らない。**数式が残っていることを確かめるのは §12.3 のケース 5・5b・5c だけである。**
+**複製の直後に `validateDestinationSchema(newCustomer, buildIndex(newCustomer, {}))`（`42_SheetSchemaValidator.gs` 43 行）を通し、問題があれば書込を始めずにその内容を返して止める。**取込も同じ検証を `71_RunOrchestrator.gs` 425 行で行うが、そこで落ちるとファイルが `FAILED` になった後である。複製が壊れていることは複製した側で分かる。
 
 **止めるのは `ok === false` のときだけ**にする。`warnings` だけが立った複製は進め、戻り値に載せて画面に出す（`validateDestinationSchema` は `{ok, code, problems, warnings}` を返す。`42` 40〜43 行）。
 
-**複製の直後に `validateDestinationSchema(newCustomer, buildIndex(newCustomer, {}))`（`42_SheetSchemaValidator.gs` 43 行）を通し、問題があれば書込を始めずにその内容を返して止める。**取込も同じ検証を `71_RunOrchestrator.gs` 425 行で行うが、そこで落ちるとファイルが `FAILED` になった後である。複製が壊れていることは複製した側で分かる。
+**この検証が確かめるのはヘッダー・列位置・列重なり・保護までである。必要数式（項目 5）は必ず素通りする** ── 6 列を消した直後は `listOccupiedRows`（`45_DestinationIndex.gs` 105〜110 行）が空を返すからである（`rowScanExcludedColumns` が勘定科目・消費税・残高の列を除外するので、6 列を消した行は「空き行」と判定される）。`42_SheetSchemaValidator.gs` 119 行の `if (occupied.length)` が偽になり、数式の検査は走らない。**数式が残っていることを確かめるのは §12.3 のケース 5・5b・5c だけである。**
 
 ### 8.3 名前と置き場所
 
@@ -604,7 +646,6 @@ var writeCustomer = Object.assign({}, customer,
 | `51_ReviewResolution.gs` | 123 | `ADOPT_EXISTING_PARTNER`（転記先 F列を書く） |
 | `51_ReviewResolution.gs` | 162 | `FIX_DATE_AMOUNT`（B列・M列を書く） |
 | `51_ReviewResolution.gs` | 266 | `EXCLUDE`／`EXCLUDE_PRIOR_YEAR`（行を空にする） |
-| `52_FileResolution.gs` | 209・270・327・398 | ファイル単位の解決 |
 
 `getCustomerById` は顧客マスター F列＝**雛形**を返すので、§2.4 原理 4 の破壊が起きる。
 
@@ -625,7 +666,7 @@ var writeCustomer = Object.assign({}, customer,
  */
 function reviewWriteCustomer_(review) {
   var customer = getCustomerById(review.customerId);
-  if (!review || !review.destinationSpreadsheetId) return customer;
+  if (!review.destinationSpreadsheetId) return customer;
   return Object.assign({}, customer, {
     destinationSpreadsheetId: String(review.destinationSpreadsheetId),
     destinationSheetName: String(review.destinationSheetName || customer.destinationSheetName)
@@ -633,15 +674,33 @@ function reviewWriteCustomer_(review) {
 }
 ```
 
-上の表の 7 箇所を `var customer = reviewWriteCustomer_(review);` にする（`52` 327 行は `getCustomerById(tx.customerId)` だが、同じ関数に `review` が居る ── `updatePurpose_(review, actor, input)`）。
+上の表の **3 箇所**を `var customer = reviewWriteCustomer_(review);` にする。**これで `51` を通る経路はすべて正しい転記先へ届く。**
 
-**`52` 406 行には何も書かない。**398 行の `customer` を `buildIndex(customer)` がそのまま受け取るので自動的に正しくなる。**`52` の変更は 5 箇所ではなく 4 箇所である。**
+#### `52`・`54` はこの方式では直らない ── 第1段から外す
+
+**ファイル単位の要確認は M列・N列を持たない。**`70_ImportFlow.gs` は取引単位の要確認にだけ転記先を書き（342〜350 行）、**ファイル単位の分岐（378〜392 行）では渡さない**。`10_RescanManager.gs` 116〜134 行の `FILE_CHANGED` も同様である。`52` が扱うのは `FILE_REVIEW_OPERATIONS_`（`52` 16〜27 行）のとおり `FORMAT_UNKNOWN`・`DUPLICATE`・`FILE_CHANGED` など**すべてファイル単位の種別**なので、`review.destinationSpreadsheetId` は**必ず `null`** である。
+
+したがって `52` に `reviewWriteCustomer_(review)` を置いても、**1 行目のガードで雛形をそのまま返す恒等写像になる**：
+
+```js
+if (!review.destinationSpreadsheetId) return customer;   // ← 必ずここを通る
+```
+
+**これは 0.6 が前版を退けた基準に、そのまま当たる。**「値が来ない口は変異テストで赤にならず無検証である」── `52` に置いた `reviewWriteCustomer_` は `getCustomerById(review.customerId)` と**完全に同じ値を返す**ので、§8.8 のどの変異も赤にならない。
+
+**第1段の転記先の正本は要確認行しか無い**ので、他の出どころも使えない：取引ログ AC・AD列は常に空（§8.9）、恒久ファイルインデックスは転記先を持たない、ファイルの取引単位要確認から引くのは往復が増えるうえ**要確認が 1 件も立たなかったファイルでは引けない**。
+
+**したがって `52`・`54` は本仕様の変更対象から外す。**変更は **5 ファイル**（`src/appsscript.json`・`80`・`81`・`51`・`71`）になる。残る欠陥は **K-W14** として §14 に記録する。
+
+> **これは新しく生まれる欠陥である。**いまは顧客に転記先が 1 枚しかないので `getCustomerById` が正しく、`52` は壊れていない。**Web アプリが 2 枚目を作った瞬間に生まれる。**
+>
+> **第1段の運用上の制約**（§8.7 の `opsStopScheduledImport` と同じ扱い）：**Web アプリを使い始めたら、メニューのファイル単位の操作（`CANCEL_FILE`・`APPLY_FILE_DIFF`・`ADOPT_AS_NEW_TRANSACTION`・`UPDATE_PURPOSE`）を押さない。**押すと、`CANCEL_FILE` は**1 行も消せず取引ログだけ `CANCELED` になり**、`APPLY_FILE_DIFF`／`ADOPT_AS_NEW_TRANSACTION` は**追加分だけを雛形へ書いて 1 つのファイルの取引を 2 枚に割る**。Web アプリは §5.4 のとおりファイル単位の要確認を表に出さない（K-W2）ので、**Web アプリ経由では起きない。**
 
 #### なぜ「呼出し側から渡す」形にしないのか
 
 前の版は `input.customer || getCustomerById(...)` という差し替え口を足し、Web アプリだけがそこへ値を渡す形だった。**それでは足りない。**
 
-**`resolveReview` を呼ぶのは Web アプリだけではない。**`src/` に 4 箇所ある：
+**`resolveReview`／`resolveFileReview` を呼ぶのは Web アプリだけではない。**`src/` に **9 呼出し**ある：
 
 | 呼出し | 操作 | 転記先へ書くか |
 |---|---|---|
@@ -650,6 +709,8 @@ function reviewWriteCustomer_(review) {
 | `97_Ops.gs` 194 | `opsAutoAdoptPartners` | **書く** |
 | `97_Ops.gs` 1051 | `opsApplyPartnerDecisions` | **書く** |
 | `97_Ops.gs` 1041・1480 | `RESOLVE_WITHOUT_PARTNER` | 書かない（`51` 64〜65 行） |
+| `97_Ops.gs` 344・366 | `REGISTER_FORMAT`／`CONFIRM_DESTINATION_FIXED`（`52` → `moveFile_`） | 書かない（`52` 118 行） |
+| `54_IntegrityResolution.gs` 292 | `EXCLUDE`（`51` 266 行へ入る） | **書く**（転記行を消す）。`51` を直せば正しくなる |
 
 **いずれも `input` に `customer` を載せない。**差し替え口を足しても値が来ないので、Web アプリが転記シートを増やした瞬間に、**メニューの「要確認を確定」が雛形の同じ行番号に居る無関係な取引を上書きする。**しかも `verifyWrittenValues` は同じ誤ったシートを読み戻すので**読取確認が通り、`committed: true` が返る** ── 沈黙の破壊である。
 
@@ -672,18 +733,15 @@ function reviewWriteCustomer_(review) {
 >
 > **ただし §7.4.3 の取引状態の確認のために、1 件につき 1 回だけ `getTransaction(review.fullTxId)` を呼ぶ**（4 往復。`WEBAPP_ITEM_TRIPS_` に算入済み）。同じ戻り値から §7.4.2 の判定 2 が必要とする `tx.planned.i` も取る。**1 件につき 2 回呼んではならない。**
 
-**ファイル単位の操作（`52`）も同じ扱いにする。**`CANCEL_FILE` は `cancelTransactions`（`53_CancelRestoreManager.gs` 32・75 行）を通って**転記行を実際に消す**ので、揃えるのは将来のためではなく必須である。`KEEP_ORIGINAL_RESULT` 等の `moveFile_` 系は転記行を触らないが、同じ形に揃えて正本を 2 つにしない。
+#### `54_IntegrityResolution.gs` も外す
 
-#### `54_IntegrityResolution.gs` は 272 行の 1 箇所だけ
+272 行の `customer2` は `review` を手元に持つが、その `review` は **`INTEGRITY` 種別**であり、**`INTEGRITY` の要確認を登録する経路は `src/` に 1 つも無い**（整合性チェックは `runCustomerIntegrityCheck_` が findings を返すだけで要確認行にしない）。§12.1 の材料規律（「材料は `runImport` で立てる」）では**テストの材料すら作れない。**
 
-**`options.customer` と書いてはならない。**`272` 行が入っている関数は `resolveIntegrityReview(reviewId, operation, input)` で、**`options` はスコープに存在しない** ── そう書くと実行時に `ReferenceError` で落ちる（2026-09-15 の実装者シミュレーションで機械確認）。39・85・150 行の `options.customer` は `acceptManualChange(fullTxId, actor, options)` 等の**別の関数**のものである。
+39・85・150 行は `tx` しか手元に無く（`fullTxId` で呼ばれる整合性の受入・取消し）、要確認行が無いので M列・N列を引けない。既に `options.customer ||` の口があるが、第1段では誰も渡さない。
 
-```js
-// 272 行。274 行の buildIndex(customer2) はこれを受け取るので触らない
-var customer2 = reviewWriteCustomer_(review);
-```
+**`54` は丸ごと外し、K-W13 に統合する。**Web アプリは §5.4 のとおり `INTEGRITY` を表に出さない（K-W2）ので、第1段では到達しない。
 
-**39・85・150 行には触らない。**あちらは `tx` しか手元に無く（`fullTxId` で呼ばれる整合性の受入・取消し）、要確認行が無いので M列・N列を引けない。既に `options.customer ||` の口があり、第1段では誰も渡さない ── **K-W13** として §14 に記録する。
+> **なお、`54_IntegrityResolution.gs` 292 行は `resolveReview(reviewId, 'EXCLUDE', input)` を呼んでおり、`51` 266 行を通って転記行を消す。**`51` を直せばこちらは正しくなる（ただし `INTEGRITY` 要確認が登録されない以上、現状では到達しない）。
 
 ### 8.6 `buildIndex` も同じ問題を持つ（調査済み）
 
@@ -692,14 +750,14 @@ var customer2 = reviewWriteCustomer_(review);
 | 呼出し | `customer` の出どころ | 転記先が複数だと |
 |---|---|---|
 | `71_RunOrchestrator.gs` 174 | 取込の `customers.forEach` | **整合性チェックが1枚しか見ない** |
-| `52_FileResolution.gs` 406 | **398 行の `customer`**（§8.5 で 398 行を直せば自動的に正しくなる。**406 行には何も書かない**） | 直す前は**取消しが1行も消せない** ── `cancelTransactions` は行番号でなく**取引IDで索引を引く**（`53_CancelRestoreManager.gs` 65 行・`45_DestinationIndex.gs` 68〜72 行）。雛形の索引に無い取引は `matchCount === 0` で `clearTransactionRows` が呼ばれず、**取引だけ `CANCELED` になって転記行がシートA に残る**。読取確認（`53` 92〜105 行）も対象 0 件で素通りする |
-| `54_IntegrityResolution.gs` 274 | **272 行の `customer2`**（§8.5 で直すのは **272 行**。274 行は `buildIndex(customer2)` を呼ぶだけ） | 同 |
+| `52_FileResolution.gs` 406 | `getCustomerById`（＝雛形）。**第1段では直さない**（§8.5・K-W14 ── ファイル単位の要確認は M列を持たない） | **取消しが1行も消せない** ── `cancelTransactions` は行番号でなく**取引IDで索引を引く**（`53_CancelRestoreManager.gs` 65 行・`45_DestinationIndex.gs` 68〜72 行）。雛形の索引に無い取引は `matchCount === 0` で `clearTransactionRows` が呼ばれず、**取引だけ `CANCELED` になって転記行がシートA に残る**。読取確認（`53` 92〜105 行）も対象 0 件で素通りする |
+| `54_IntegrityResolution.gs` 274 | `getCustomerById`。**第1段では直さない**（§8.5・K-W13 ── `INTEGRITY` 要確認は登録されない） | 同 |
 | `45_DestinationIndex.gs` 124・150 | 行予約の内部。取込時の `customer` を引き継ぐ | 安全（差し替えた `customer` が届く） |
 | `71_RunOrchestrator.gs` 425 | `processDiscoveredFile_` 内の転記先構成検証 | 安全（`customer` が引数。§7.3.1 の差し替えが届く） |
 | `97_Ops.gs` 772 | `opsRecoverStuckFiles`。**定期取込 tick の先頭で自動実行** | **危険。**§8.7 の但し書きのとおり、第1段では定期取込を止める |
 | `97_Ops.gs` 1121 | `opsReprocessFile` → `cancelTransactions` | 雛形の索引で取り消すので下の `52` 406 と同型。手動実行なので第1段では運用で避ける |
 
-`52` 406 の `cancelFileFromReview_` は §2.4 原理 4 の破壊そのものである ── シートA の取引を取り消すつもりで、**1 行も消せない。**`53_CancelRestoreManager.gs` 64〜65 行は行番号ではなく取引IDで索引を引くので、雛形の索引に無い取引は `matchCount === 0` となり 75 行の `clearTransactionRows` が呼ばれない。**取引ログだけが `CANCELED` になり、転記行はシートA に残る。**読取確認（同 92〜105 行）も対象 0 件で素通りする。
+`52` 406 の `cancelFileFromReview_` は §2.4 原理 4 の破壊そのものである ── シートA の取引を取り消すつもりで、**1 行も消せない。****第1段では直さず K-W14 として記録する**（§8.5）。`53_CancelRestoreManager.gs` 64〜65 行は行番号ではなく取引IDで索引を引くので、雛形の索引に無い取引は `matchCount === 0` となり 75 行の `clearTransactionRows` が呼ばれない。**取引ログだけが `CANCELED` になり、転記行はシートA に残る。**読取確認（同 92〜105 行）も対象 0 件で素通りする。
 
 ### 8.7 決定 ── 書込経路だけ直し、整合性チェックは当面1枚のままにする
 
@@ -708,10 +766,10 @@ var customer2 = reviewWriteCustomer_(review);
 | ファイル | 変更 | 箇所 |
 |---|---|---|
 | `51_ReviewResolution.gs` | `var customer = reviewWriteCustomer_(review);` ＋ `reviewWriteCustomer_` を 1 つ足す | 123・162・266（＋末尾） |
-| `52_FileResolution.gs` | 同（327 行は `getCustomerById(tx.customerId)` だが `review` が手元にある） | 209・270・327・398 ── **4 箇所。406 は触らない** |
-| `54_IntegrityResolution.gs` | `var customer2 = reviewWriteCustomer_(review);` | **272**（274 ではない） |
 
-**`96_Menu.gs`・`97_Ops.gs` は 1 バイトも変えない。**上の 3 ファイルを直せば、メニューも `opsAutoAdoptPartners` も `opsApplyPartnerDecisions` も正しい転記先へ届く（§8.5 の実測）。
+**`96_Menu.gs`・`97_Ops.gs` は 1 バイトも変えない。**`51` を直せば、メニューの「要確認を確定」も `opsAutoAdoptPartners` も `opsApplyPartnerDecisions` も正しい転記先へ届く（§8.5 の実測）。
+
+**`52`・`54` は直さない。**ファイル単位の要確認と `INTEGRITY` 要確認は転記先を持たないので、この方式では効かない（§8.5）。**K-W14・K-W13** として §14 に記録する。
 
 **直さないもの（見張りの網）**：
 
@@ -733,13 +791,23 @@ var customer2 = reviewWriteCustomer_(review);
 |---|---|---|
 | `51` 123 を戻す | `var customer = getCustomerById(review.customerId);` | 13・16・**25**（メニュー経由） |
 | `51` 162・266 を戻す | 同上 | 16 |
-| `52` 209・270・398 を戻す | 同上 | 15 |
-| `52` 327 を戻す | `var customer = getCustomerById(tx.customerId);` | 26 |
-| `54` 272 を戻す | `var customer2 = getCustomerById(review.customerId);` | 27 |
-| `reviewWriteCustomer_` が M列を無視 | `return getCustomerById(review.customerId);` | 13・15・16・25・26・27 の全部 |
-| `reviewWriteCustomer_` が M列が空でも当てる | `if (!review) return ...;`（`|| !review.destinationSpreadsheetId` を落とす） | 既存 950 のどれか（旧行が雛形を指せなくなる） |
+| `reviewWriteCustomer_` が M列を無視 | `return getCustomerById(review.customerId);` | 13・16・25。**既存 950 は 1 本も赤にならない**（実測） |
+| `reviewWriteCustomer_` が M列が空でも当てる | `if (!review) return ...;`（`|| !review.destinationSpreadsheetId` を落とす） | **既存 `test/phase4-file-resolution.test.js` の 6 本**（4.26 系。実測 944/950） |
 
 **最後の 2 行がこの版の要である。**前の版は `input.customer` という差し替え口を足す形だったが、**第1段でそこへ値を渡す呼出しが 1 つも無く、どの変異も赤にならなかった**（＝無検証）。呼出し側に頼らない形にしたので、**メニュー経由のケース 25 が本番の経路をそのまま検証する。**
+
+**2026-09-15 に上の 2 つを実際に注入して測った：**
+
+| 変異 | 既存 950 | ケース 25（メニュー経由） |
+|---|---|---|
+| M列を無視 | **950/950 素通り** | **赤**（雛形の同じ行番号が書き換わる） |
+| M列が空でも当てる | **944/950**（`phase4-file-resolution.test.js` の 4.26 系 6 本） | 緑 |
+
+**上段が、ケース 25 を書かなければならない理由そのものである。**「転記先を要確認行から引く」という本仕様の中核を、**既存 950 は 1 本も守っていない** ── 変異を入れても全部緑のまま通る。ケース 25 だけが本番の経路を押さえる。
+
+**下段は、この版で `52`・`54` を外した理由の証拠でもある。**赤になった 6 本は `test/phase4-file-resolution.test.js`、すなわち**ファイル単位の解決のテスト**である。それらが赤になるのは、**そこで使われる要確認行が M列を持たないから** ── `String(null)` ＝ `"null"` を `openById` に渡して落ちる。
+
+**この測定は「ガードが効いている」ことと「`52` では方式が効かない」ことを同時に示していた。**0.6 はこれを前者としてだけ読み、`52` を変更対象に残した。**測定結果は、探していたものの証拠にしかならない。**
 
 ### 8.9 転記先の正本がどこにあるか（K-W5 の決着の記録）
 
@@ -750,8 +818,8 @@ var customer2 = reviewWriteCustomer_(review);
 K-W5 で挙げた4つの決着（2026-09-15 調査済み。これ以上の確認は要らない）：
 
 - `45_DestinationIndex.gs`（行予約）── **安全。**124・150 行の `buildIndex(customer)` は取込時の `customer` を引き継ぐ。
-- `53_CancelRestoreManager.gs`（取消し・復元）── **安全。**`cancelTransactions(input)` は `input.customer` と `input.index` を引数で受け取り、`53` に `getCustomerById` の呼出しは1つも無い。§8.7 が `52_FileResolution.gs` 398 行を直せば、406 行の `buildIndex(customer)` は自動的に正しい索引を作る。
-- `52_FileResolution.gs` の `CANCEL_FILE` ── **危険。**§8.7 で直す。
+- `53_CancelRestoreManager.gs`（取消し・復元）── **安全。**`cancelTransactions(input)` は `input.customer` と `input.index` を引数で受け取り、`53` に `getCustomerById` の呼出しは1つも無い。ただし `52_FileResolution.gs` 398 行を直せないので（§8.5）、**第1段では雛形の索引が届く。**K-W14。
+- `52_FileResolution.gs` の `CANCEL_FILE` ── **危険。第1段では直せない**（ファイル単位の要確認が転記先を持たない。§8.5）。**K-W14** として §14 へ。
 - `44_IntegrityChecker.gs`（整合性チェック）── **直さない。**索引を渡されるだけで自分では開かない。K-W9 として第2段へ（§8.7）。
 
 ---
@@ -796,8 +864,8 @@ window.open('https://docs.google.com/spreadsheets/d/' + id + '/export?format=xls
 | `96_Menu.gs` | **変更しない** | 既存メニューは残す（§2.3）。§8.5 の形なら**変えずに正しくなる** |
 | `97_Ops.gs` | **変更しない** | 同上。`opsAutoAdoptPartners`・`opsApplyPartnerDecisions` も正しい転記先へ届く |
 | `51_ReviewResolution.gs` | `reviewWriteCustomer_` を足し、3 箇所で使う | §8.5 |
-| `52_FileResolution.gs` | 同（**4 箇所**。209・270・327・398。406 は触らない） | §8.5 |
-| `54_IntegrityResolution.gs` | **272 行**の `customer2`（1 箇所）。**`options.customer` と書くと `ReferenceError`** | §8.5 |
+| `52_FileResolution.gs` | **変更しない** | ファイル単位の要確認が転記先を持たないので方式が効かない（§8.5・K-W14） |
+| `54_IntegrityResolution.gs` | **変更しない** | `INTEGRITY` 要確認が登録されないので到達しない（§8.5・K-W13） |
 | `71_RunOrchestrator.gs` | 208 行に `opts.destinationSpreadsheetId` による `customer` の差し替えを足す（1 箇所）。**174 行には触らない** | §7.3.1 |
 | `43`・`44`・`45`・`70` | **変更しない** | §8.4 のとおり `customer` が引数で届く |
 
@@ -834,6 +902,7 @@ window.open('https://docs.google.com/spreadsheets/d/' + id + '/export?format=xls
 ### 11.3 定数
 
 ```js
+var WEBAPP_MAX_DECISIONS_ = 20;        // 1回の呼出しで受け取る decisions の上限（§7.4.1）
 var WEBAPP_MAX_PER_CALL_ = 1;          // 1回の呼出しで確定する要確認の上限（計測段階。§3.3 の検算による）
 var WEBAPP_ITEM_TRIPS_ = 70;           // 要確認1件の最悪往復（§3.2 の内訳表）
 var WEBAPP_CLEANUP_TRIPS_ = 62;        // 後始末の最悪往復。1ファイルあたり。ファイル数を掛ける
@@ -863,13 +932,14 @@ var WEBAPP_DEADLINE_MS_ = 300000;      // 1回の呼出しの締切
 
 **`doGet` のテストには `HtmlService` のスタブが要る**（既存スタブは `createHtmlOutput` を持つ。488 行）。`createTemplateFromFile` を使うなら、スタブに足すこと。
 
-**§8 の複製と `doGet` にはスタブの追加が要る。足りないものは 5 つある**（2026-09-15 に試作と実装者シミュレーションで実際に足して動かした）：
+**§8 の複製と `doGet` にはスタブの追加が要る。足りないものは 6 つある**（2026-09-15 に試作と実装者シミュレーションで実際に足して動かした）：
 
 1. **`DriveApp.getFileById` がスプレッドシートを見つけられない。**既存スタブ（614〜615 行）は `files` Map だけを見るが、スプレッドシートは別の `spreadsheets` Map に居る。`files` に無ければ `spreadsheets` を見て、ファイル相当のハンドル（`getId`・`getName`・`setName`・`getParents`・`getMimeType`・`makeCopy`）を返す形に足す。
 2. **`makeCopy` が無い。**`MemorySpreadsheet` を新しい ID で作り、**各シートの `values` と `formulas` の両方を複写する**。`formulas` を写さないと §8.2 の「6 列だけ消せば数式が残る」を確かめられず、**テストが通っても本番で数式が消える。**`protections`・`formats` も写す。第2引数の `folder` を受けたらその `folders` の `fileIds` に足す。
 3. **`getParents` が無い。**`folders` を走査して当該 ID を `fileIds` に含むものを返す反復子にする。§7.3.2 の検証 2（親フォルダの一致）がこれを使う。
 4. **`Utilities.formatDate` が `yyyyMMdd-HHmm` を知らない。**既存スタブ（36〜47 行）は 3 パターンだけを持ち、**未対応の書式は `throw` する** ── §8.3 の名前を作る最初の 1 行で落ちる。書式を 1 つ足す。
-5. **`HtmlService.createTemplateFromFile` が無い。**§11.2 が `doGet` にこれを要求しているので、§12.2 が「使うなら足せ」と書いたのは弱すぎる。**必須である。**`.html` は `test/gas-harness.js` が自動で読み込まないので、テンプレートの中身はスタブ側で用意する。
+5. **`getFolderById(...).getFolders()` が無い**（`test/gas-stubs.js` 616〜622 行のハンドルは `getId`・`getFiles` だけ）。`folders` Map に親子関係を持たせ、子フォルダの反復子を返す形に足す。§5.3 のカードフォルダ一覧・§7.2 の子孫検証・ケース 3 がこれを使う。
+6. **`HtmlService.createTemplateFromFile` が無い。**§11.2 が `doGet` にこれを要求しているので、§12.2 が「使うなら足せ」と書いたのは弱すぎる。**必須である。**`.html` は `test/gas-harness.js` が自動で読み込まないので、テンプレートの中身はスタブ側で用意する。
 
 **`makeCopy` の実装で 1 つ注意がある**：複写は `MemorySheet` の `values`・`formulas` を**直接差し替える**こと。`getRange().setValues()` を通すと、空の数式が値を消す実 Sheets 準拠の挙動に引っかかり、**数式が残らない**（§8.2 の検証が意味を失う）。
 
@@ -881,9 +951,9 @@ var WEBAPP_DEADLINE_MS_ = 300000;      // 1回の呼出しの締切
 
 1. `doGet` が HTML を返す
 2. `webAppBootstrap` が **`authorize` が絞り込んだ**顧客だけを返す（非オーナーで他顧客が混ざらない）
-3. `webAppListFolder` が顧客の `sourceFolderId` の子孫でない `folderId` を拒む
+3. `webAppListFolder` が顧客の `sourceFolderId` の**直下の子**でない `folderId` を拒む。**孫フォルダも拒むこと**を 1 レグで確かめる（§7.2）
 3b. **`webAppRunImport` が `options.destinationSpreadsheetId` を検証する**（§7.3.2）。**本仕様で最も重い権限の話なのに、0.5 まで 1 件もテストが無かった。**4 条件それぞれについて 1 レグずつ、`AuthorizationError` になり**転記が 1 行も起きない**ことを確かめる：(1) 顧客マスター F列（雛形）そのものを渡す、(2) 別フォルダにある正しい名前のスプレッドシートを渡す、(3) 同じフォルダにある名前が規則に合わないスプレッドシートを渡す、(4) `customer.destinationSheetName` のシートを持たないスプレッドシートを渡す。**さらに、検証が認可の直後・転記シート決定の前に走ること**（`permissionRows()` が 1 増え、リースが 1 件も取られていないこと）を固定する
-4. `webAppListFolder` がクライアント由来の `customerId` を検証する（担当外なら `code === 'PERMISSION_DENIED'`、`permissionRows()` が1増える。**型ではなく `code` で判定する** ── §6.1 の詰め替えで `instanceof AuthorizationError` は保てない）
+4. `webAppListFolder` がクライアント由来の `customerId` を検証する（担当外なら **`name === 'AuthorizationError'` かつ `reason === 'NO_CUSTOMER_ACCESS'`**、`permissionRows()` が1増える。**`code` で判定してはならない** ── `AuthorizationError.code` は必ず `null` で、`PERMISSION_DENIED` というコードは `src/` に存在しない。§6.1）
 5. `webAppRunImport` が転記シートを**新規作成**し、複製先の `customer.destinationSheetName` のシートで、`customer.headerRow` の次の行から最終行まで **`columnMapping` の `B`・`F`・`I`・`K`・`M`・`txId` の 6 列だけが空**であり、**それ以外の列の値と数式は残っている**（§8.2）。`headerRow` を 1 以外にした顧客でも回す
 5b. 同、複製先で `findEmptyRows(customer, 1, buildIndex(customer, {}))` が**1 行以上を返す** ── 6 列だけ消す設計は `customer.rowScanExcludedColumns`（顧客マスター AL列。`02_CustomerMaster.gs` 39 行）が勘定科目・消費税・残高の列を除外していて初めて成立する。`isDestinationRowEmpty`（`43_SheetWriter.gs` 20〜31 行）は `rowScanLastColumn` までの全列を見るので、AL列が未設定だと複製先の全行が「使用中」と判定され `expandTemplateRows` が空き行を増やせないまま繰り返す
 5c. 同、**行の値を全部消した場合との対照**：全部消すと `expandTemplateRows` が `templateSourceRow = null` になって `sheet.getMaxRows()` へ落ち、転記行に勘定科目の既定値も数式も入らない。**それでも `validateDestinationSchema` は `ok: true` を返し、取込は `WRITTEN` を返す**（2026-09-15 ハーネス実測）── 誰も止めないので、このテストが唯一の検出点である
@@ -893,10 +963,10 @@ var WEBAPP_DEADLINE_MS_ = 300000;      // 1回の呼出しの締切
 9. `webAppResolveReviews` が `WEBAPP_MAX_PER_CALL_` 件だけ処理し、`remaining` を返す
 10. 同、1件の失敗で全体が止まらず `errors` に載る
 11. 同、空の `partnerName` は `RESOLVE_WITHOUT_PARTNER` になる
-12. **第3引数の `customer` が効く**：`runImport` でシートA に立てた取引の要確認に対し、`resolveReview(reviewId, 'ADOPT_EXISTING_PARTNER', {partnerName: '甲社', learn: false, customer: シートB を指す customer})` を呼ぶと、**シートB の `tx.destinationRow` 行の F列が変わり、シートA の同じ行は無傷**である。判定はシートの現物を読んで行う ── 取引ログ AC・AD列は常に空なので判定材料にならない
-13. **§2.4 原理 4 の破壊を捕まえる**：シートA の15行目に取引1、シートB の15行目に取引9 を置き、`runImport` で両方を立てる。取引1 の要確認を **Web アプリ経由で**確定 → **シートA の15行目の F列だけが変わり、シートB の15行目は無傷**。第3引数に `customer` を載せない実装（＝`getCustomerById` をそのまま使う実装）はここで落ちる
+12. **`input.customer` は効かない**：`runImport` でシートA に立てた取引の要確認に対し、`resolveReview(reviewId, 'ADOPT_EXISTING_PARTNER', {partnerName: '甲社', learn: false, customer: シートB を指す customer})` を呼んでも、**シートA（要確認行の M列が指す先）の F列が変わり、シートB は無傷**である。`51` に `input.customer ||` という差し替え口を足した実装はここで落ちる（§8.5 の囲み）。判定はシートの現物を読んで行う ── 取引ログ AC・AD列は常に空なので判定材料にならない
+13. **§2.4 原理 4 の破壊を捕まえる**：シートA の15行目に取引1、シートB の15行目に取引9 を置き、`runImport` で両方を立てる。取引1 の要確認を **Web アプリ経由で**確定 → **シートA の15行目の F列だけが変わり、シートB の15行目は無傷**。`51` 123 行が `reviewWriteCustomer_(review)` になっていない実装（`getCustomerById` をそのまま使う実装）はここで落ちる
 14. 要確認の表が `PARTNER` だけを含み、他種別は件数だけになる
-15. **取消しが正しいシートを開く**：シートA の15行目に取引1、シートB の15行目に取引9。取引1 のファイルを `CANCEL_FILE` で取り消す → **シートA の15行目が空になり、シートB の15行目は無傷**。`52` 406 の `buildIndex` を雛形で作る実装はここで落ちる
+15. **取消しは第1段では直さない**（§8.5・K-W14）。`CANCEL_FILE` 可能な要確認（`FILE_CHANGED` 等）は M列・N列を持たないので、§12.1 の材料規律ではこのケースの材料が作れない。**第1段では書かない。**代わりに、**ファイル単位の要確認が M列を持たないこと自体**を固定する ── `runImport` で `FORMAT_UNKNOWN` を立て、`getReviewById(reviewId).destinationSpreadsheetId` が `null` であることを確かめる。K-W14 の前提が崩れたら（誰かが `70_ImportFlow.gs` 378〜392 行に転記先を渡したら）このテストが赤になり、**第1段の判断を見直す合図になる**
 16. **`51` の3操作すべてで差し替えが効く**：`ADOPT_EXISTING_PARTNER`・`FIX_DATE_AMOUNT`・`EXCLUDE` のそれぞれについて、シートA の取引を確定してシートB が無傷であること（3 レグ）
 17. **`input.learn` を渡さないと辞書が増える**（§7.4.2）：`resolveReview(reviewId, 'ADOPT_EXISTING_PARTNER', {partnerName: '甲社'})`（`learn` 未指定）で顧客別取引先辞書が 1 行増えることを固定する。**これは `src/` の挙動を固定するテストであって Web アプリのテストではない** ── 未指定が「学習する」であることを誰かが変えたら、§7.4.2 の 3 条件が全部無意味になる
 18. **正規化すると空になる店名では学習しない**（§7.4.2 判定 1）。**材料は店名が空欄の明細ではない** ── それはファイルごと `CUSTOMER_FIX_REQUIRED` になり要確認が 1 件も立たない（§12.1 の「材料は `runImport` で立てる」に従う限り到達できない）。**制御文字だけの店名**（`"\u0001"`）を使う。Web アプリ経由で確定 → 辞書が**増えず**、転記先 F列に取引先名が入り、要確認が `SETTLED` になる
@@ -909,8 +979,8 @@ var WEBAPP_DEADLINE_MS_ = 300000;      // 1回の呼出しの締切
 23. **恒等式が破れない**（§7.4）：後始末を1件失敗させ、`decisions.length ＝ resolved ＋（`reviewId` を持つ `errors` の数）＋ skippedByLease ＋ remaining` が成り立つことを固定する。`errors.length` を使う実装はここで落ちる
 24. **`webAppResolveReviews` は `decisions` が空でも認可を通す**（§4.4）。件ごとの認可しか無いと、空配列で呼ばれたとき**認可が 1 度も走らない** ── 入口で `authorize(ROLE.REVIEWER, String(customerId), {operation: 'WEBAPP:要確認を確定'})` を 1 回呼ぶ。空配列で `permissionRows()` が増えること（担当外の顧客 ID なら）を固定する
 25. **メニュー経由でも正しいシートへ書く**（§8.5 の要）：シートA に取引を 2 件取り込み、シートB を複製して別ファイルを取り込み、シートB の要確認を **`applyResolveDecision_` 経由で**確定 → **シートB の `tx.destinationRow` 行の F列が変わり、シートA の同じ行番号は無傷**。`96_Menu.gs` を 1 バイトも変えずに通ること。**`51` 123 行を `getCustomerById(review.customerId)` に戻すと赤になる**（実測：戻すとシートA の 2 行目が書き換わり、それでも `resolved:1, committed:1` が返る）
-26. **`52` 327 行（`UPDATE_PURPOSE`）も同じ**：シートB の取引に対して用途を更新 → シートB が変わり、シートA は無傷
-27. **`54` 272 行も同じ**：シートB の取引に整合性の要確認を立てて再検査 → `buildIndex` がシートB を開く。**`options.customer` と書いた実装はここで `ReferenceError` になる**
+26. **（削除）**`52` は第1段の変更対象から外した（§8.5）。なお `UPDATE_PURPOSE` は `input.fullTxId` で**旧ファイル**の取引を引き、`review` は**新しい重複ファイル**の `DUPLICATE` 要確認なので、M列が埋まっても `review` を材料にするのは誤りである
+27. **（削除）**`54` は第1段の変更対象から外した（§8.5）。`INTEGRITY` 要確認を登録する経路が `src/` に無いので、§12.1 の材料規律では材料が作れない
 28. 既存 950 テストが全件通る
 
 ---
@@ -920,8 +990,8 @@ var WEBAPP_DEADLINE_MS_ = 300000;      // 1回の呼出しの締切
 1. `node test/run-tests.js` が全件 PASS（既存 950 ＋ §12.3）。**ただし既存テスト `auth F-35`（`test/phase7-authorization.test.js` 683〜692 行）の期待値だけは更新する** ── このテストは `src/` の全 `.gs` を走査して認可を呼ぶファイルが 2 つちょうどであることを断定しており、§4.4 が `80_WebApp.gs` に認可を要求する以上**必ず赤になる**。期待値に `80_WebApp.gs` を1つ足し、**それ以外は1文字も変えない**。
 
    **赤を消すために `80_WebApp.gs` から認可を外してはならない。**このテストが守っているのは「認可を呼ぶファイルを増やさない」ことであり、本仕様は §4.4 でその増加を**意図して**決めた。期待値を1ファイル増やすのが正しい直し方で、認可を外すのは §4.4 の目的そのものを消す誤りである。テストの更新は `src/` の差分ではないので受入 2 に影響しない。
-2. `src/` の差分が次の **7 ファイルだけ**である：`src/appsscript.json`（§4.2）・新設 `80_WebApp.gs`・新設 `81_WebAppUi.html`・`51_ReviewResolution.gs`（3 箇所。123・162・266 行 ＋ `reviewWriteCustomer_` を末尾に 1 つ）・`52_FileResolution.gs`（**4 箇所**。209・270・327・398 行。**406 行には何も書かない**）・`54_IntegrityResolution.gs`（1 箇所。**272 行**）・`71_RunOrchestrator.gs`（1 箇所。208 行。§7.3.1）。**確かめ方は `git status --porcelain` である。`git diff --stat` を使ってはならない** ── 新設の `80_WebApp.gs`・`81_WebAppUi.html` は未追跡なので `git diff` に一切現れず、**7 ファイルのうち 2 つを数え落とす**（しかも「5 行だった、少ないから安全だ」と読めてしまう）。`git status --porcelain -- src/` の出力が**ちょうど 7 行**で、各行が上の 7 ファイルのいずれかであること。`appsscript.json` は `src/appsscript.json` なので `src/` に含まれる ── **リポジトリ直下に `appsscript.json` を作ってはならない。**作ると `clasp push` されないうえ、`-- src/ appsscript.json` のように直下も対象にすると**7 行のまま素通りする**。**`96_Menu.gs`・`97_Ops.gs`・`43`・`44`・`45`・`70` に 1 行の差分も無いこと。**
-2b. 上の 7 ファイル以外を守るのは「触らない」の列挙ではなく**この差分条件そのもの**である ── §10 の列挙は `10`〜`45`・`56`・`62`・`90` を挙げておらず、列挙だけで守ると `src/` の半分以上が無防備になる（`spec_menu_operations.md` 受入 7 が同じ理由で列挙を退けている）。
+2. `src/` の差分が次の **5 ファイルだけ**である：`src/appsscript.json`（§4.2）・新設 `80_WebApp.gs`・新設 `81_WebAppUi.html`・`51_ReviewResolution.gs`（3 箇所。123・162・266 行 ＋ `reviewWriteCustomer_` を末尾に 1 つ）・`71_RunOrchestrator.gs`（1 箇所。208 行。§7.3.1）。**`52`・`54` に 1 行の差分も無いこと**（§8.5 で外した）。**確かめ方は `git status --porcelain` である。`git diff --stat` を使ってはならない** ── 新設の `80_WebApp.gs`・`81_WebAppUi.html` は未追跡なので `git diff` に一切現れず、**5 ファイルのうち 2 つを数え落とす**（しかも「3 行だった、少ないから安全だ」と読めてしまう）。`git status --porcelain -- src/` の出力が**ちょうど 5 行**で、各行が上の 5 ファイルのいずれかであること。`appsscript.json` は `src/appsscript.json` なので `src/` に含まれる ── **リポジトリ直下に `appsscript.json` を作ってはならない。**作ると `clasp push` されないうえ、`-- src/ appsscript.json` のように直下も対象にすると**5 行のまま素通りする**。**`96_Menu.gs`・`97_Ops.gs`・`43`・`44`・`45`・`52`・`54`・`70` に 1 行の差分も無いこと。**
+2b. 上の 5 ファイル以外を守るのは「触らない」の列挙ではなく**この差分条件そのもの**である ── §10 の列挙は `10`〜`45`・`56`・`62`・`90` を挙げておらず、列挙だけで守ると `src/` の半分以上が無防備になる（`spec_menu_operations.md` 受入 7 が同じ理由で列挙を退けている）。
 3. `doGet` 以外に `access` を広げる設定が無い（**`src/appsscript.json`** が `MYSELF`。リポジトリ直下に `appsscript.json` が存在しないことも確かめる）
 4. 新設コードで `Session.getEffectiveUser` を呼んでいない
 5. **実機**：Web アプリの URL を開き、顧客一覧が出る
@@ -950,6 +1020,7 @@ var WEBAPP_DEADLINE_MS_ = 300000;      // 1回の呼出しの締切
 | K-W10 | `opsRecoverStuckFiles`（`97_Ops.gs` 770〜773 行）が雛形の索引で復旧する。**定期取込 tick の先頭で自動実行される** | 新しいシートに転記済みの取引を雛形へ二重に書き、取引ログの行番号を差し替える | **第1段は定期取込を止めてから Web アプリを使う**（`opsStopScheduledImport`）。第2段で差し替え口を足す（§8.7） |
 | K-W11 | **`runImport` は 1 ファイルを途中で切れない。**要確認が多いファイルは 6 分に当たる（40 件＝702 秒。§3.2 の実測範囲内） | 強制終了され、そのファイルが `WRITING`／`VALIDATING` のまま残る。K-W10 で復旧も止めているので誰も戻さない | 第2段で `registerPendingReviews` を次の呼出しへ繰り越す形にする。第1段は当たったことを画面に出す（付録B「処理中のまま停止」） |
 | K-W12 | **画面に「処理中のまま停止」を出しても、戻す手段が画面に無い** | 利用者は管理者へ連絡するしかない | 第2段。K-W10・K-W11 と同時に扱う |
+| K-W14 | **ファイル単位の要確認が転記先を持たない。**`70_ImportFlow.gs` 378〜392 行と `10_RescanManager.gs` 116〜134 行は M列・N列を渡さないので、`52_FileResolution.gs` は雛形を開き続ける | Web アプリが 2 枚目のシートを作った後にメニューからファイル単位の操作をすると、**`CANCEL_FILE` は 1 行も消せず取引ログだけ `CANCELED` になり**、`APPLY_FILE_DIFF`／`ADOPT_AS_NEW_TRANSACTION` は**追加分だけを雛形へ書いて 1 ファイルの取引を 2 枚に割る** | **第1段の運用上の制約**：Web アプリを使い始めたら、メニューのファイル単位の操作を押さない（§8.5）。Web アプリは §5.4 のとおりファイル単位の要確認を表に出さないので、Web アプリ経由では起きない。第2段で、ファイル単位の要確認にも転記先を持たせるか、ファイルの取引単位要確認から引く形にする |
 | K-W13 | `54_IntegrityResolution.gs` 39・85・150 行（整合性の受入・取消し）は `tx` しか手元に無く、要確認行の M列・N列を引けない。既存の `options.customer` の口はあるが、第1段で渡す呼出しが無い | 整合性の要確認を過去の転記シートに対して確定すると雛形を開く。第1段は整合性の要確認をメニューで扱う（§5.4・K-W2）ので、**Web アプリ経由では起きない** | 第2段。K-W2（他種別を表に統合）と同時に扱う |
 | K-W8 | 既存の定期取込（10分ごと）と Web アプリの「記帳を実行」が同じファイルを同時に触り得る | リースで守られるが、利用者には「なぜか取り込まれない」と見える | リース衝突の文言を画面に出す（§6.1）。定期取込を止めるかは運用判断 |
 
@@ -983,6 +1054,14 @@ var WEBAPP_DEADLINE_MS_ = 300000;      // 1回の呼出しの締切
 | Excel が開けない | `書き出し画面が開けませんでした。複数の Google アカウントにログインしている場合は、このシステムのアカウントだけでログインし直してからもう一度お試しください。` |
 | 担当者に登録が無い | `この顧客はあなたが担当者として登録されていません（顧客マスター Q列・R列）。` |
 | 処理中のまま停止 | `このファイルは処理中のまま止まっています。管理者へ連絡してください。` |
+| 取引の状態で確定できない | `この取引は既に取り消されたか除外されています（状態 {status}）。画面を再読み込みしてください。` |
+| 担当者が居ない顧客 | `この顧客の担当者が登録されていないため、記帳を実行できません（顧客マスター Q列・R列）。管理者へ連絡してください。` |
+| 設定が不正 | `システムの設定に不備があるため実行できません。管理者へ連絡してください。` |
+| ログ容量の上限 | `ログの容量が上限に達しているため実行できません。管理者へ連絡してください。` |
+| 整合性チェックで停止 | `この顧客の帳簿に不整合が見つかったため実行できません。管理者へ連絡してください。` |
+| 辞書に登録しない理由（店名が空） | `辞書に登録しません：この明細の店名は空です` |
+| 辞書に登録しない理由（同じ店名） | `辞書に登録しません：同じ店名に別の取引先名が入っています` |
+| 辞書に登録しない理由（カード名で決まる用途） | `辞書に登録しません：この用途の取引先はカード名で決まります` |
 
 **本文に文言を直書きしない。**同じ事象の正本を 2 つにすると片方だけが直る（§6.1 がリース衝突について同じことを定めている）。
 
@@ -994,11 +1073,12 @@ var WEBAPP_DEADLINE_MS_ = 300000;      // 1回の呼出しの締切
 
 | 値 | 現在 | 本文で当たる節 |
 |---|---|---|
-| `WEBAPP_ITEM_TRIPS_` | 70 | §3.2・§3.3・§7.4・§7.4.3・§8.5・§10・§11.3・§13 |
+| `WEBAPP_ITEM_TRIPS_` | 70 | §3.2・§3.3・§7.4・§7.4.1・§7.4.3・§8.5・§10・§11.3・§13 |
 | `WEBAPP_CLEANUP_TRIPS_` | 62 | §3.2・§3.3・§7.4・§7.4.1・§11.3・§13 |
-| `WEBAPP_MAX_PER_CALL_` | 1 | §3.3・§7.4.2・§11.3・§12.3・§13 |
+| `WEBAPP_MAX_PER_CALL_` | 1 | §3.3・§7.4.1・§7.4.2・§11.3・§12.3・§13 |
+| `WEBAPP_MAX_DECISIONS_` | 20 | §7.4.1・§11.3 |
 | `WEBAPP_TRIP_WORST_MS_` | 1600 | §3.2・§3.3・§5.4・§7.3・§7.4・§7.4.1・§11.3・§13 |
-| `WEBAPP_REVIEW_LIST_LIMIT_` | 15 | §3.3・§5.4・§7.4.1・§11.3 |
+| `WEBAPP_REVIEW_LIST_LIMIT_` | 15 | §3.3・§5.4・§7.4.1・§7.4.2・§11.3 |
 | `WEBAPP_DEADLINE_MS_` | 300000 | §1.1・§2.4・§3.1・§3.3・§7.3・§7.4・§11.3・§13・§14 |
 | `WEBAPP_IMPORT_BASE_TRIPS_` | 159 | §3.3・§7.3・§11.3 |
 | `WEBAPP_IMPORT_TRIPS_PER_REVIEW_` | 7 | §3.2・§3.3・§11.3 |
@@ -1007,15 +1087,14 @@ var WEBAPP_DEADLINE_MS_ = 300000;      // 1回の呼出しの締切
 | `resolveReview ADOPT` | 60 | §3.2・§3.3・§5.4・§7.4.2・§10 |
 | `getTransaction` | 4 | §2.4・§3.2・§5.4・§7.4.3・§8.5 |
 | `1 回に 1 ファイル` | ── | §3.3・§7.3・§7.3.1・§7.4・§7.4.1・§11.1・§14 |
-| `変更するのは 7 ファイルだけ` | ── | §8.2・§10・§12.2・§13 |
+| `変更するのは 5 ファイルだけ` | ── | §3.3・§7.4.1・§8.2・§8.5・§10・§12.2・§13 |
 | `消す 6 列 B/F/I/K/M/txId` | ── | §8.2・§12.2・§12.3 |
-| `転記先の正本＝要確認 M列・N列` | ── | §2.4・§3.2・§8.5・§8.7・§8.8・§8.9・§10・§12.3・§13・§14 |
-| `取引ログ AC・AD列は常に空` | ── | §2.4・§8.9・§12.3 |
+| `転記先の正本＝要確認 M列・N列` | ── | §2.4・§3.2・§7.4・§8.5・§8.7・§8.8・§8.9・§10・§12.3・§13・§14 |
+| `取引ログ AC・AD列は常に空` | ── | §2.4・§8.5・§8.9・§12.3 |
 | `71 は 208 行だけ` | ── | §7.3.1・§10・§13 |
-| `51 は 123・162・266 行` | ── | §8.5・§8.7・§8.8・§12.3・§13 |
-| `52 は 209・270・327・398 の 4 箇所` | ── | §8.5・§8.6・§8.7・§8.8・§10・§12.3・§13 |
-| `54 は 272 行` | ── | §8.5・§8.6・§8.7・§8.8・§10・§12.3・§13 |
-| `マニフェストは src/appsscript.json` | ── | §4.2・§10・§13 |
+| `51 は 123・162・266 の 3 箇所` | ── | §8.5・§8.7・§8.8・§12.3・§13 |
+| `52・54 は第1段では直さない` | ── | §8.5・§8.6・§8.7・§8.9・§10・§12.3・§14 |
+| `マニフェストは src/appsscript.json` | ── | §4.2・§8.5・§10・§13 |
 | `access: MYSELF` | ── | §4.2・§7.3.2・§7.4.1・§9.2・§13・§14 |
 | `executeAs: USER_DEPLOYING` | ── | §4.2・§7.3.2 |
 
@@ -1024,4 +1103,4 @@ var WEBAPP_DEADLINE_MS_ = 300000;      // 1回の呼出しの締切
 1. **値を変えるとき**：その行の節を全部開いて直す。1 つでも残ると、本文の中で 2 つの値が食い違ったまま Codex へ渡ることになる。
 2. **この表を疑うとき**：生成規則は「その値としての出現」を拾うよう書いたが、取りこぼしは有り得る。**表を信じる前に、変える値そのもので本文を検索する。**表は検索の代わりではなく、「検索しても気づけない当たり先」（別名で書かれている節）を思い出すための索引である。
 
-> **0.5 でこの表は働いたが、使い方が守られなかった。**`getTransaction` の行は当たり先として §8.5 を正しく挙げていたのに、§7.4.3 を足したとき §8.5 を開かなかった ── その結果、同じ文書の中で一方が「必ず呼べ」、他方が「呼んではならない」と書く版が出来た。**表を作ることと、表を使うことは別である。**
+> **この表は 2 度、作られたのに使われなかった。**0.5 では `getTransaction` の行が §8.5 を正しく挙げていたのに §8.5 を開かず、同じ文書の中で一方が「必ず呼べ」他方が「呼んではならない」と書く版が出来た。0.6 では `WEBAPP_ITEM_TRIPS_` の行から §7.4.1 が漏れていて、そこに旧値 64 が残った。**表を作ることと、表を使うことは別である。**
