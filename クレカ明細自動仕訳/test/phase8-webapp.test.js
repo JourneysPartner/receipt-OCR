@@ -1206,5 +1206,60 @@ module.exports = ({test, assert, gas}) => {
     });
   });
 
+  function seedDictionaryRow(customerId, options) {
+    const row = blank(18);
+    Object.assign(row, {
+      0: options.dictId, 1: options.original, 2: options.original,
+      3: options.partnerName, 4: 'exact_original', 5: 1, 6: customerId,
+      9: 'TRUE', 10: 'owner@example.com', 12: '2026-01-01T00:00:00+09:00',
+      13: 1, 14: 'TRUE', 15: options.conflict ? 'TRUE' : 'FALSE'
+    });
+    gas.stubs.getSpreadsheet('master').getSheetByName('顧客別取引先辞書').appendRow(row);
+  }
+
+  test('webapp 45b: opsExplainPartnerMatch names which condition blocked auto-adoption', () => {
+    requireWebFunction('opsExplainPartnerMatch');
+    // 「マスターに登録してあるのに要確認になる」の原因は3通りあり、見分けが
+    // つかないと直しようがない。診断が原因を取り違えると、判断そのものが狂う。
+
+    // (1) 取引先名は1つだが競合フラグで止められている（2026-09-16 の実機）。
+    // 実機と同じく、同じ取引先名の行が複数ある状態で作る ── 行が何個あっても
+    // **取引先名は 1 つ**と数えなければ、原因が「名前が複数」に化ける。
+    const flagged = setupWorld({});
+    [0, 1, 2].forEach((index) => {
+      seedDictionaryRow(flagged.customer.customerId, {dictId: `DICT_FLAG_${index}`,
+        original: 'AMAZON.CO.JP', partnerName: 'Amazon', conflict: true});
+    });
+    putCsv(flagged.customer, {fileId: 'conflict_flag',
+      rows: ['2025/12/10,AMAZON.CO.JP,5280,仕入れ']});
+    webImport(flagged.customer, {});
+    const flaggedReview = openReviewsFor(flagged.customer.customerId,
+      {fileId: 'conflict_flag'}).find((row) => row.reviewType === 'PARTNER');
+    assert.ok(flaggedReview, '競合フラグが立っていれば要確認になる');
+    const byFlag = call('opsExplainPartnerMatch', [flaggedReview.reviewId]);
+    assert.equal(byFlag.matchedBy, 'STEP1');
+    assert.equal(byFlag.blockedBy, 'CONFLICT_FLAG');
+    assert.equal(byFlag.candidateRows, 3);
+    assert.deepEqual(byFlag.distinctPartnerNames, ['Amazon']);
+
+    // (2) 取引先名が複数ある。フラグではなく名前が原因である。
+    const ambiguous = setupWorld({});
+    seedDictionaryRow(ambiguous.customer.customerId, {dictId: 'DICT_A',
+      original: 'RAKUTEN.CO.JP', partnerName: '楽天', conflict: false});
+    seedDictionaryRow(ambiguous.customer.customerId, {dictId: 'DICT_B',
+      original: 'RAKUTEN.CO.JP', partnerName: '楽天カード', conflict: false});
+    putCsv(ambiguous.customer, {fileId: 'two_names',
+      rows: ['2025/12/10,RAKUTEN.CO.JP,3300,仕入れ']});
+    webImport(ambiguous.customer, {});
+    const ambiguousReview = openReviewsFor(ambiguous.customer.customerId,
+      {fileId: 'two_names'}).find((row) => row.reviewType === 'PARTNER');
+    assert.ok(ambiguousReview);
+    const byNames = call('opsExplainPartnerMatch', [ambiguousReview.reviewId]);
+    assert.equal(byNames.blockedBy, 'MULTIPLE_PARTNER_NAMES');
+    assert.equal(byNames.distinctPartnerNames.length, 2);
+    // 同じ正規化表記の行を取引先名ごとに数える ── 競合の巻き込み元を見る欄。
+    assert.equal(byNames.normalizedGroup.length, 2);
+  });
+
   // Case 46 is the whole-suite acceptance condition, not an independent test.
 };
