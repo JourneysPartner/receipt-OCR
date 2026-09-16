@@ -1261,5 +1261,26 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(byNames.normalizedGroup.length, 2);
   });
 
+  test('webapp 45c: opsExplainPartnerReviews groups by merchant and explains one each', () => {
+    requireWebFunction('opsExplainPartnerReviews');
+    // エディタのプルダウンは引数を渡せないので、引数なしの入口が要る。
+    // 同じ店名が何件並んでいても、辞書を見るのは 1 回でよい。
+    const seeded = setupWorld({});
+    seedDictionaryRow(seeded.customer.customerId, {dictId: 'DICT_GROUPED',
+      original: 'AMAZON.CO.JP', partnerName: 'Amazon', conflict: true});
+    putCsv(seeded.customer, {fileId: 'grouped', rows: [
+      '2025/12/10,AMAZON.CO.JP,5280,仕入れ',
+      '2025/12/11,AMAZON.CO.JP,1200,仕入れ',
+      '2025/12/12,AMAZON.CO.JP,3400,仕入れ'
+    ]});
+    webImport(seeded.customer, {});
+    const summary = call('opsExplainPartnerReviews', []);
+    assert.equal(summary.openPartnerReviews, 3);
+    assert.equal(summary.distinctMerchants, 1, '同じ店名は 1 つにまとめる');
+    assert.equal(summary.explained, 1, '店名ごとに 1 件だけ辞書を見る');
+    assert.equal(summary.reports[0].blockedBy, 'CONFLICT_FLAG');
+    assert.equal(summary.reports[0].sameMerchantReviews, 3);
+  });
+
   // Case 46 is the whole-suite acceptance condition, not an independent test.
 };
