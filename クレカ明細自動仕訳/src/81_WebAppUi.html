@@ -1,0 +1,1216 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>記帳自動化システム</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172033;
+      --muted: #667085;
+      --line: #d9e0ea;
+      --panel: #ffffff;
+      --canvas: #f4f7fb;
+      --brand: #185abc;
+      --brand-soft: #e8f0fe;
+      --ok: #137333;
+      --warn: #b06000;
+      --danger: #b3261e;
+      --shadow: 0 8px 24px rgba(24, 39, 75, .08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 980px;
+      color: var(--ink);
+      background: var(--canvas);
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans JP", sans-serif;
+    }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: .52; }
+    .app-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 14px 22px;
+      color: #fff;
+      background: #123d79;
+    }
+    .app-title { margin: 0; font-size: 20px; letter-spacing: .02em; }
+    .actor { text-align: right; font-size: 13px; }
+    .actor small { display: block; color: #d9e7ff; }
+    .utility-nav {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 22px;
+      border-bottom: 1px solid var(--line);
+      background: #fff;
+    }
+    .utility-nav button {
+      border: 0;
+      border-radius: 6px;
+      padding: 7px 11px;
+      color: #344054;
+      background: transparent;
+    }
+    .utility-nav button.active { color: var(--brand); background: var(--brand-soft); font-weight: 700; }
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      padding: 12px 22px 4px;
+    }
+    .step {
+      border-top: 3px solid #cbd5e1;
+      padding: 7px 8px 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .step.current { border-color: var(--brand); color: var(--brand); font-weight: 700; }
+    .notice {
+      display: none;
+      margin: 12px 22px 0;
+      border: 1px solid var(--line);
+      border-left-width: 5px;
+      border-radius: 8px;
+      padding: 10px 12px;
+      white-space: pre-wrap;
+      background: #fff;
+    }
+    .notice.visible { display: block; }
+    .notice.info { border-left-color: var(--brand); }
+    .notice.success { border-left-color: var(--ok); }
+    .notice.warning { border-left-color: var(--warn); }
+    .notice.error { border-left-color: var(--danger); }
+    .notice ul { margin: 7px 0 0 20px; padding: 0; }
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(210px, .72fr) minmax(360px, 1.25fr) minmax(500px, 1.7fr);
+      gap: 12px;
+      padding: 12px 22px 24px;
+      min-height: calc(100vh - 165px);
+    }
+    .panel {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 52px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .panel-header h2 { margin: 0; font-size: 16px; }
+    .panel-body { padding: 12px 14px; }
+    .muted { color: var(--muted); }
+    .empty { padding: 28px 10px; color: var(--muted); text-align: center; }
+    .search { width: 100%; border: 1px solid #b8c3d2; border-radius: 7px; padding: 9px 10px; }
+    .customer-count { margin: 8px 0; color: var(--muted); font-size: 12px; }
+    .customer-list, .folder-list { display: grid; gap: 6px; }
+    .customer-item, .folder-item {
+      width: 100%;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      padding: 9px 10px;
+      color: var(--ink);
+      text-align: left;
+      background: transparent;
+    }
+    .customer-item:hover, .folder-item:hover { background: #f6f8fc; }
+    .customer-item.selected, .folder-item.selected { border-color: #9cbcf0; background: var(--brand-soft); }
+    .customer-name { display: block; font-weight: 700; }
+    .customer-meta { display: flex; gap: 6px; margin-top: 2px; color: var(--muted); font-size: 12px; }
+    .tag { display: inline-block; border-radius: 999px; padding: 1px 7px; background: #eef2f6; font-size: 11px; }
+    .tag.warning { color: #8a4b00; background: #fff1d6; }
+    .subheading { margin: 15px 0 7px; font-size: 13px; }
+    .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { padding: 8px; border-bottom: 1px solid #e8edf3; text-align: left; vertical-align: top; }
+    th { position: sticky; top: 0; z-index: 1; color: #475467; background: #f8fafc; white-space: nowrap; }
+    tr:last-child td { border-bottom: 0; }
+    tr.dimmed { color: #8a94a3; background: #fafafa; }
+    .file-name, .review-file { overflow-wrap: anywhere; }
+    .status-line { min-height: 21px; margin: 8px 0; color: var(--muted); }
+    .action-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+    .button {
+      border: 1px solid #a9b6c8;
+      border-radius: 7px;
+      padding: 8px 12px;
+      color: #24324a;
+      background: #fff;
+    }
+    .button.primary { border-color: var(--brand); color: #fff; background: var(--brand); }
+    .button.danger { border-color: var(--danger); color: #fff; background: var(--danger); }
+    .review-table input[type="text"] { width: 170px; border: 1px solid #adb9ca; border-radius: 6px; padding: 6px 7px; }
+    .candidate-list { min-width: 120px; color: #475467; }
+    .other-reviews { margin: 8px 0; padding: 8px 10px; border-radius: 7px; color: #5e4800; background: #fff7d6; }
+    .pager { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
+    .pager-controls { display: flex; gap: 6px; }
+    .excel-status { color: var(--ok); font-size: 12px; }
+    dialog {
+      width: min(760px, calc(100vw - 48px));
+      max-height: calc(100vh - 64px);
+      border: 0;
+      border-radius: 12px;
+      padding: 0;
+      box-shadow: 0 24px 80px rgba(15, 23, 42, .32);
+    }
+    dialog::backdrop { background: rgba(17, 24, 39, .55); }
+    .dialog-header { padding: 16px 18px; border-bottom: 1px solid var(--line); }
+    .dialog-header h2 { margin: 0; font-size: 18px; }
+    .dialog-body { max-height: 55vh; overflow: auto; padding: 16px 18px; }
+    .confirmation-list { margin: 12px 0 0; padding-left: 22px; }
+    .confirmation-list li { margin-bottom: 9px; }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px 16px; border-top: 1px solid var(--line); }
+    @media (max-width: 1120px) {
+      body { min-width: 760px; }
+      .workspace { grid-template-columns: 220px minmax(340px, 1fr); }
+      .panel.reviews { grid-column: 1 / -1; }
+    }
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <h1 class="app-title">記帳自動化システム</h1>
+    <div class="actor"><span id="actor">実行者: 読み込み中…</span><small id="version"></small></div>
+  </header>
+
+  <nav class="utility-nav" aria-label="機能">
+    <button type="button" class="active">クレカ取込・記帳</button>
+    <button type="button" data-coming-soon>取引一覧</button>
+    <button type="button" data-coming-soon>レポート</button>
+    <button type="button" data-coming-soon>マスタ管理</button>
+    <button type="button" data-coming-soon>設定</button>
+  </nav>
+
+  <div class="steps" aria-label="進捗">
+    <div class="step current" data-step="1">1. 顧客選定</div>
+    <div class="step" data-step="2">2. カード選択</div>
+    <div class="step" data-step="3">3. 記帳・要確認</div>
+    <div class="step" data-step="4">4. ダウンロード</div>
+  </div>
+
+  <section id="notice" class="notice" role="status" aria-live="polite"></section>
+
+  <main class="workspace">
+    <section class="panel customers" aria-labelledby="customers-heading">
+      <div class="panel-header"><h2 id="customers-heading">顧客一覧</h2></div>
+      <div class="panel-body">
+        <label for="customer-search" class="muted">検索</label>
+        <input id="customer-search" class="search" type="search" autocomplete="off" placeholder="顧客名で検索">
+        <div id="customer-count" class="customer-count">読み込み中…</div>
+        <div id="customer-list" class="customer-list"></div>
+      </div>
+    </section>
+
+    <section class="panel drive" aria-labelledby="drive-heading">
+      <div class="panel-header">
+        <h2 id="drive-heading">Drive フォルダ</h2>
+        <span id="selected-customer-name" class="muted"></span>
+      </div>
+      <div class="panel-body">
+        <div id="drive-empty" class="empty">左の一覧から顧客を選んでください。</div>
+        <div id="drive-content" hidden>
+          <h3 class="subheading">カードフォルダ</h3>
+          <div id="folder-list" class="folder-list"></div>
+          <h3 class="subheading">ファイル一覧</h3>
+          <div id="file-list"></div>
+          <div id="import-progress" class="status-line" aria-live="polite"></div>
+          <div id="import-disabled-reason" class="muted"></div>
+          <div class="action-row">
+            <button id="import-button" type="button" class="button primary" disabled>記帳を実行</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel reviews" aria-labelledby="reviews-heading">
+      <div class="panel-header">
+        <h2 id="reviews-heading">要確認 <span id="review-total">0</span> 件</h2>
+        <span id="review-window" class="muted"></span>
+      </div>
+      <div class="panel-body">
+        <div id="review-empty" class="empty">左の一覧から顧客を選んでください。</div>
+        <div id="review-content" hidden>
+          <div id="other-reviews"></div>
+          <div id="review-table"></div>
+          <div class="pager">
+            <span id="review-more" class="muted"></span>
+            <div class="pager-controls">
+              <button id="review-prev" type="button" class="button" disabled>前のページ</button>
+              <button id="review-next" type="button" class="button" disabled>次のページ</button>
+            </div>
+          </div>
+          <div id="resolve-progress" class="status-line" aria-live="polite"></div>
+          <div class="action-row">
+            <button id="resolve-button" type="button" class="button primary" disabled>選択した要確認を確定</button>
+            <button id="excel-button" type="button" class="button" disabled>Excel ダウンロード</button>
+            <span id="excel-status" class="excel-status"></span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title">
+    <div class="dialog-header"><h2 id="confirm-title">要確認の確定</h2></div>
+    <div class="dialog-body">
+      <div id="confirm-intro"></div>
+      <ol id="confirm-list" class="confirmation-list"></ol>
+    </div>
+    <div class="dialog-actions">
+      <button id="confirm-cancel" type="button" class="button">戻る</button>
+      <button id="confirm-submit" type="button" class="button danger">確定する</button>
+    </div>
+  </dialog>
+
+  <script>
+  (function() {
+    'use strict';
+
+    var TEXT = Object.freeze({
+      selectCustomer: '左の一覧から顧客を選んでください。',
+      selectFolder: 'カードフォルダを選んでください。',
+      noFiles: 'このフォルダに取り込めるファイルはありません。',
+      noReviews: '確定が必要な要確認はありません。',
+      processing: function(done, total) { return '処理中… ' + done + ' / ' + total; },
+      leaseConflict: '他の処理と重なりました。10 分ほど待ってからもう一度実行してください。',
+      timeBudget: 'いまは取り込めませんでした。もう一度「記帳を実行」を押してください。',
+      cloneValidation: function(code) {
+        return '転記シートの複製に失敗しました（' + code +
+          '）。雛形の構成を確認のうえ、管理者へ連絡してください。';
+      },
+      resolveStalled: function(count) {
+        return '残りの ' + count + ' 件は確定できませんでした。画面を再読み込みしてからやり直してください。';
+      },
+      tooMany: function(limit) { return '一度に確定できるのは ' + limit + ' 件までです。'; },
+      alreadySettled: 'この要確認はすでに確定済みです。画面を再読み込みしてください。',
+      reviewMismatch: 'この要確認は選択中の顧客のものではありません。画面を再読み込みしてからやり直してください。',
+      reviewMissing: 'この要確認は見つかりませんでした。他の担当者が確定したか、取り消された可能性があります。画面を再読み込みしてください。',
+      exportBlocked: '書き出し画面が開けませんでした。複数の Google アカウントにログインしている場合は、このシステムのアカウントだけでログインし直してからもう一度お試しください。',
+      notAssignee: 'この顧客はあなたが担当者として登録されていません（顧客マスター Q列・R列）。',
+      noCustomerStaff: 'この顧客の担当者が登録されていないため、記帳を実行できません（顧客マスター Q列・R列）。管理者へ連絡してください。',
+      stuckFile: 'このファイルは処理中のまま止まっています。管理者へ連絡してください。',
+      invalidSettings: 'システムの設定に不備があるため実行できません。管理者へ連絡してください。',
+      logCapacity: 'ログの容量が上限に達しているため実行できません。管理者へ連絡してください。',
+      integrityStop: 'この顧客の帳簿に不整合が見つかったため実行できません。管理者へ連絡してください。',
+      comingSoon: 'この画面は準備中です。',
+      oneFileOnly: '1回に確定できるのは、同じ元ファイルの要確認だけです。',
+      chooseReview: '確定する要確認を選んでください。',
+      unknownFailure: '処理に失敗しました。管理者へ連絡してください。',
+      learnEmpty: '辞書に登録しません：この店名は辞書の鍵にできません',
+      learnDifferent: '辞書に登録しません：同じ店名に別の取引先名が入っています',
+      learnDuplicate: '辞書に登録しません：同じ店名の 1 件目で登録します',
+      learnCard: '辞書に登録しません：この用途の取引先はカード名で決まります',
+      learnNone: '辞書に登録しません：取引先なしで確定します',
+      learnYes: '辞書に登録します'
+    });
+
+    var state = {
+      actor: '',
+      version: '',
+      customers: [],
+      selectedCustomerId: null,
+      selectedFolderId: null,
+      folders: [],
+      files: [],
+      reviews: [],
+      partnerTotal: 0,
+      otherCounts: {},
+      reviewOffset: 0,
+      reviewLimit: 0,
+      viewGeneration: 0,
+      folderRequest: 0,
+      reviewRequest: 0,
+      importRun: 0,
+      resolveRun: 0,
+      loadingFolders: false,
+      loadingFiles: false,
+      loadingReviews: false,
+      importBusy: false,
+      resolveBusy: false,
+      activeImportDestinationSpreadsheetId: null,
+      lastCompletedDestinationSpreadsheetId: null,
+      confirmPayload: null
+    };
+
+    var el = {};
+    [
+      'actor', 'version', 'notice', 'customer-search', 'customer-count', 'customer-list',
+      'selected-customer-name', 'drive-empty', 'drive-content', 'folder-list', 'file-list',
+      'import-progress', 'import-disabled-reason', 'import-button', 'review-total',
+      'review-window', 'review-empty', 'review-content', 'other-reviews', 'review-table',
+      'review-more', 'review-prev', 'review-next', 'resolve-progress', 'resolve-button',
+      'excel-button', 'excel-status', 'confirm-dialog', 'confirm-intro', 'confirm-list',
+      'confirm-cancel', 'confirm-submit'
+    ].forEach(function(id) { el[id] = document.getElementById(id); });
+
+    function gasCall(name, args) {
+      return new Promise(function(resolve, reject) {
+        var runner = google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);
+        if (name === 'webAppBootstrap') runner.webAppBootstrap();
+        else if (name === 'webAppListFolder') runner.webAppListFolder(args[0], args[1]);
+        else if (name === 'webAppListReviews') runner.webAppListReviews(args[0], args[1], args[2]);
+        else if (name === 'webAppRunImport') runner.webAppRunImport(args[0], args[1], args[2]);
+        else if (name === 'webAppResolveReviews') runner.webAppResolveReviews(args[0], args[1], args[2]);
+        else reject(new Error('Unknown server function'));
+      });
+    }
+
+    function failureMessage(error) {
+      return error && typeof error.message === 'string' && error.message ?
+        error.message : TEXT.unknownFailure;
+    }
+
+    function showNotice(message, kind, details) {
+      el.notice.textContent = '';
+      el.notice.className = 'notice visible ' + (kind || 'info');
+      var text = document.createElement('div');
+      text.textContent = String(message || '');
+      el.notice.appendChild(text);
+      if (details && details.length) {
+        var list = document.createElement('ul');
+        details.forEach(function(detail) {
+          var item = document.createElement('li');
+          item.textContent = detail;
+          list.appendChild(item);
+        });
+        el.notice.appendChild(list);
+      }
+    }
+
+    function clearNotice() {
+      el.notice.textContent = '';
+      el.notice.className = 'notice';
+    }
+
+    function selectedCustomer() {
+      return state.customers.find(function(customer) {
+        return String(customer.customerId) === String(state.selectedCustomerId);
+      }) || null;
+    }
+
+    function isMutationBusy() { return state.importBusy || state.resolveBusy; }
+
+    function categoryLabel(value) {
+      if (value === 'CORPORATE') return '法人';
+      if (value === 'INDIVIDUAL') return '個人事業主';
+      return String(value || '');
+    }
+
+    function reviewTypeLabel(value) {
+      var labels = {
+        DATE: '利用日', AMOUNT: '金額', ZERO_AMOUNT: '金額 0 円',
+        PRIOR_YEAR: '前年利用', INTEGRITY: '整合性', FORMAT_UNKNOWN: '形式不明',
+        DUPLICATE: '重複', FILE_CHANGED: 'ファイル変更'
+      };
+      return labels[value] || value;
+    }
+
+    function formatDate(value, withTime) {
+      if (value === null || value === undefined || value === '') return '—';
+      var raw = String(value);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw.replace(/-/g, '/');
+      var date = new Date(value);
+      if (isNaN(date.getTime())) return raw;
+      var options = withTime ?
+        {year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'} :
+        {year: 'numeric', month: '2-digit', day: '2-digit'};
+      return new Intl.DateTimeFormat('ja-JP', options).format(date);
+    }
+
+    function formatAmount(value) {
+      if (value === null || value === undefined || value === '') return '—';
+      var amount = Number(value);
+      return isFinite(amount) ? amount.toLocaleString('ja-JP') : String(value);
+    }
+
+    function formatSize(value) {
+      var bytes = Number(value || 0);
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function setStep() {
+      var step = 1;
+      if (state.selectedCustomerId) step = 2;
+      if (state.selectedFolderId) step = 3;
+      if (state.lastCompletedDestinationSpreadsheetId) step = 4;
+      document.querySelectorAll('[data-step]').forEach(function(node) {
+        node.classList.toggle('current', Number(node.getAttribute('data-step')) === step);
+      });
+    }
+
+    function renderCustomers() {
+      var query = el['customer-search'].value.trim().toLocaleLowerCase('ja-JP');
+      var rows = state.customers.filter(function(customer) {
+        return !query || String(customer.customerName || '').toLocaleLowerCase('ja-JP').indexOf(query) >= 0;
+      });
+      el['customer-count'].textContent = rows.length + ' / ' + state.customers.length + ' 件';
+      el['customer-list'].textContent = '';
+      rows.forEach(function(customer) {
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'customer-item' +
+          (String(customer.customerId) === String(state.selectedCustomerId) ? ' selected' : '');
+        button.disabled = isMutationBusy();
+        var name = document.createElement('span');
+        name.className = 'customer-name';
+        name.textContent = customer.customerName;
+        var meta = document.createElement('span');
+        meta.className = 'customer-meta';
+        var category = document.createElement('span');
+        category.className = 'tag';
+        category.textContent = categoryLabel(customer.customerCategory);
+        meta.appendChild(category);
+        if (!customer.canImport) {
+          var warning = document.createElement('span');
+          warning.className = 'tag warning';
+          warning.textContent = '記帳不可';
+          meta.appendChild(warning);
+        }
+        button.appendChild(name);
+        button.appendChild(meta);
+        button.addEventListener('click', function() { chooseCustomer(customer.customerId); });
+        el['customer-list'].appendChild(button);
+      });
+    }
+
+    function renderFolders() {
+      el['folder-list'].textContent = '';
+      if (state.loadingFolders) {
+        var loading = document.createElement('div');
+        loading.className = 'muted';
+        loading.textContent = '読み込み中…';
+        el['folder-list'].appendChild(loading);
+        return;
+      }
+      if (!state.folders.length) {
+        var none = document.createElement('div');
+        none.className = 'muted';
+        none.textContent = 'カードフォルダがありません。';
+        el['folder-list'].appendChild(none);
+        return;
+      }
+      state.folders.forEach(function(folder) {
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'folder-item' +
+          (String(folder.folderId) === String(state.selectedFolderId) ? ' selected' : '');
+        button.textContent = folder.folderName;
+        button.disabled = isMutationBusy();
+        button.addEventListener('click', function() { chooseFolder(folder.folderId); });
+        el['folder-list'].appendChild(button);
+      });
+    }
+
+    function renderFiles() {
+      el['file-list'].textContent = '';
+      if (!state.selectedFolderId) {
+        var prompt = document.createElement('div');
+        prompt.className = 'empty';
+        prompt.textContent = TEXT.selectFolder;
+        el['file-list'].appendChild(prompt);
+        return;
+      }
+      if (state.loadingFiles) {
+        var loading = document.createElement('div');
+        loading.className = 'empty';
+        loading.textContent = '読み込み中…';
+        el['file-list'].appendChild(loading);
+        return;
+      }
+      if (!state.files.length) {
+        var empty = document.createElement('div');
+        empty.className = 'empty';
+        empty.textContent = TEXT.noFiles;
+        el['file-list'].appendChild(empty);
+        return;
+      }
+      var wrap = document.createElement('div');
+      wrap.className = 'table-wrap';
+      var table = document.createElement('table');
+      var thead = document.createElement('thead');
+      var headRow = document.createElement('tr');
+      ['ファイル名', '更新日', 'サイズ', '状態'].forEach(function(label) {
+        var th = document.createElement('th');
+        th.textContent = label;
+        headRow.appendChild(th);
+      });
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+      var tbody = document.createElement('tbody');
+      state.files.forEach(function(file) {
+        var row = document.createElement('tr');
+        if (!file.importable) row.className = 'dimmed';
+        [file.fileName, formatDate(file.lastUpdated, true), formatSize(file.size), file.stateLabel]
+          .forEach(function(value, index) {
+            var td = document.createElement('td');
+            if (index === 0) td.className = 'file-name';
+            td.textContent = value;
+            row.appendChild(td);
+          });
+        tbody.appendChild(row);
+      });
+      table.appendChild(tbody);
+      wrap.appendChild(table);
+      el['file-list'].appendChild(wrap);
+    }
+
+    function renderOtherReviews() {
+      el['other-reviews'].textContent = '';
+      var entries = Object.keys(state.otherCounts || {}).filter(function(key) {
+        return Number(state.otherCounts[key] || 0) > 0;
+      });
+      if (!entries.length) return;
+      var box = document.createElement('div');
+      box.className = 'other-reviews';
+      box.textContent = entries.map(function(key) {
+        return reviewTypeLabel(key) + ' ' + state.otherCounts[key] + ' 件';
+      }).join('、') + '。これらはメニューから確定してください。';
+      el['other-reviews'].appendChild(box);
+    }
+
+    function candidateNames(review) {
+      return (Array.isArray(review.candidates) ? review.candidates : []).map(function(candidate) {
+        return candidate && candidate.partnerName ? String(candidate.partnerName) : '';
+      }).filter(Boolean);
+    }
+
+    function renderReviews() {
+      el['review-total'].textContent = String(state.partnerTotal || 0);
+      renderOtherReviews();
+      el['review-table'].textContent = '';
+      if (state.loadingReviews) {
+        var loading = document.createElement('div');
+        loading.className = 'empty';
+        loading.textContent = '読み込み中…';
+        el['review-table'].appendChild(loading);
+      } else if (!state.reviews.length) {
+        var empty = document.createElement('div');
+        empty.className = 'empty';
+        empty.textContent = TEXT.noReviews;
+        el['review-table'].appendChild(empty);
+      } else {
+        var wrap = document.createElement('div');
+        wrap.className = 'table-wrap';
+        var table = document.createElement('table');
+        table.className = 'review-table';
+        var thead = document.createElement('thead');
+        var headRow = document.createElement('tr');
+        ['', '利用日', '金額', '摘要（元店名）', '推測候補', '取引先', '元ファイル', '行']
+          .forEach(function(label) {
+            var th = document.createElement('th');
+            th.textContent = label;
+            headRow.appendChild(th);
+          });
+        thead.appendChild(headRow);
+        table.appendChild(thead);
+        var tbody = document.createElement('tbody');
+        state.reviews.forEach(function(review, index) {
+          var row = document.createElement('tr');
+          row.dataset.reviewId = String(review.reviewId);
+          row.dataset.fileId = String(review.fileId);
+          var selectCell = document.createElement('td');
+          var checkbox = document.createElement('input');
+          checkbox.type = 'checkbox';
+          checkbox.className = 'review-select';
+          checkbox.setAttribute('aria-label', String(review.merchantOriginal) + 'を確定対象にする');
+          checkbox.disabled = isMutationBusy();
+          checkbox.addEventListener('change', enforceOneFileSelection);
+          selectCell.appendChild(checkbox);
+          row.appendChild(selectCell);
+          [formatDate(review.usageDate, false), formatAmount(review.amount), review.merchantOriginal]
+            .forEach(function(value) {
+              var td = document.createElement('td');
+              td.textContent = value;
+              row.appendChild(td);
+            });
+          var candidatesCell = document.createElement('td');
+          candidatesCell.className = 'candidate-list';
+          var names = candidateNames(review);
+          candidatesCell.textContent = names.length ? names.join('、') : '—';
+          row.appendChild(candidatesCell);
+          var inputCell = document.createElement('td');
+          var input = document.createElement('input');
+          input.type = 'text';
+          input.className = 'partner-input';
+          input.placeholder = '空欄＝取引先なし';
+          input.disabled = isMutationBusy();
+          if (names.length) {
+            var listId = 'candidate-' + index + '-' + state.reviewRequest;
+            input.setAttribute('list', listId);
+            var dataList = document.createElement('datalist');
+            dataList.id = listId;
+            names.forEach(function(name) {
+              var option = document.createElement('option');
+              option.value = name;
+              dataList.appendChild(option);
+            });
+            inputCell.appendChild(dataList);
+          }
+          inputCell.appendChild(input);
+          row.appendChild(inputCell);
+          var fileCell = document.createElement('td');
+          fileCell.className = 'review-file';
+          fileCell.textContent = review.fileName || '（ファイル名不明）';
+          row.appendChild(fileCell);
+          var sourceCell = document.createElement('td');
+          sourceCell.textContent = review.sourceRow === null || review.sourceRow === undefined ? '—' : String(review.sourceRow);
+          row.appendChild(sourceCell);
+          tbody.appendChild(row);
+        });
+        table.appendChild(tbody);
+        wrap.appendChild(table);
+        el['review-table'].appendChild(wrap);
+      }
+      var start = state.partnerTotal ? state.reviewOffset + 1 : 0;
+      var end = Math.min(state.partnerTotal, state.reviewOffset + state.reviews.length);
+      el['review-window'].textContent = state.partnerTotal ? start + '–' + end + ' / ' + state.partnerTotal : '';
+      var after = Math.max(0, state.partnerTotal - end);
+      el['review-more'].textContent = after ? '他 ' + after + ' 件' : '';
+      if (state.reviewLimit > 0) {
+        el['review-prev'].textContent = '前の ' + state.reviewLimit + ' 件';
+        el['review-next'].textContent = '次の ' + state.reviewLimit + ' 件';
+      }
+      el['review-prev'].disabled = state.loadingReviews || isMutationBusy() || state.reviewOffset <= 0;
+      el['review-next'].disabled = state.loadingReviews || isMutationBusy() || end >= state.partnerTotal;
+      updateActionButtons();
+    }
+
+    function renderSelection() {
+      var customer = selectedCustomer();
+      var hasCustomer = Boolean(customer);
+      el['selected-customer-name'].textContent = hasCustomer ? customer.customerName : '';
+      el['drive-empty'].hidden = hasCustomer;
+      el['drive-content'].hidden = !hasCustomer;
+      el['review-empty'].hidden = hasCustomer;
+      el['review-content'].hidden = !hasCustomer;
+      if (hasCustomer && !customer.canImport) {
+        el['import-disabled-reason'].textContent = TEXT.notAssignee;
+      } else {
+        el['import-disabled-reason'].textContent = '';
+      }
+      renderCustomers();
+      renderFolders();
+      renderFiles();
+      renderReviews();
+      updateActionButtons();
+      setStep();
+    }
+
+    function updateActionButtons() {
+      var customer = selectedCustomer();
+      var selectedCount = document.querySelectorAll('.review-select:checked').length;
+      el['import-button'].disabled = !customer || !customer.canImport || !state.selectedFolderId ||
+        state.loadingFiles || isMutationBusy();
+      el['resolve-button'].disabled = !customer || selectedCount === 0 || isMutationBusy();
+      el['excel-button'].disabled = !state.lastCompletedDestinationSpreadsheetId || isMutationBusy();
+      renderCustomers();
+    }
+
+    function invalidateOperations() {
+      state.importRun += 1;
+      state.resolveRun += 1;
+      state.confirmPayload = null;
+    }
+
+    function chooseCustomer(customerId) {
+      if (isMutationBusy()) return;
+      state.viewGeneration += 1;
+      invalidateOperations();
+      state.selectedCustomerId = String(customerId);
+      state.selectedFolderId = null;
+      state.folders = [];
+      state.files = [];
+      state.reviews = [];
+      state.partnerTotal = 0;
+      state.otherCounts = {};
+      state.reviewOffset = 0;
+      state.activeImportDestinationSpreadsheetId = null;
+      state.lastCompletedDestinationSpreadsheetId = null;
+      el['excel-status'].textContent = '';
+      el['import-progress'].textContent = '';
+      el['resolve-progress'].textContent = '';
+      clearNotice();
+      renderSelection();
+      loadFolders(state.selectedCustomerId, state.viewGeneration);
+      loadReviews(state.selectedCustomerId, 0, state.viewGeneration);
+    }
+
+    async function loadFolders(customerId, generation) {
+      var request = ++state.folderRequest;
+      state.loadingFolders = true;
+      renderFolders();
+      try {
+        var result = await gasCall('webAppListFolder', [customerId, '']);
+        if (generation !== state.viewGeneration || request !== state.folderRequest ||
+            String(customerId) !== String(state.selectedCustomerId)) return;
+        state.folders = result && result.kind === 'FOLDERS' && Array.isArray(result.folders) ? result.folders : [];
+      } catch (error) {
+        if (generation !== state.viewGeneration || request !== state.folderRequest) return;
+        showNotice(failureMessage(error), 'error');
+      } finally {
+        if (generation === state.viewGeneration && request === state.folderRequest) {
+          state.loadingFolders = false;
+          renderFolders();
+        }
+      }
+    }
+
+    function chooseFolder(folderId) {
+      if (isMutationBusy()) return;
+      state.selectedFolderId = String(folderId);
+      state.files = [];
+      state.lastCompletedDestinationSpreadsheetId = null;
+      el['excel-status'].textContent = '';
+      el['import-progress'].textContent = '';
+      renderFolders();
+      renderFiles();
+      updateActionButtons();
+      setStep();
+      loadFiles(state.selectedCustomerId, state.selectedFolderId, state.viewGeneration);
+    }
+
+    async function loadFiles(customerId, folderId, generation) {
+      var request = ++state.folderRequest;
+      state.loadingFiles = true;
+      renderFiles();
+      try {
+        var result = await gasCall('webAppListFolder', [customerId, folderId]);
+        if (generation !== state.viewGeneration || request !== state.folderRequest ||
+            String(customerId) !== String(state.selectedCustomerId) ||
+            String(folderId) !== String(state.selectedFolderId)) return;
+        state.files = result && result.kind === 'FILES' && Array.isArray(result.files) ? result.files : [];
+      } catch (error) {
+        if (generation !== state.viewGeneration || request !== state.folderRequest) return;
+        showNotice(failureMessage(error), 'error');
+      } finally {
+        if (generation === state.viewGeneration && request === state.folderRequest) {
+          state.loadingFiles = false;
+          renderFiles();
+          updateActionButtons();
+        }
+      }
+    }
+
+    async function loadReviews(customerId, offset, generation) {
+      var request = ++state.reviewRequest;
+      state.loadingReviews = true;
+      renderReviews();
+      try {
+        var result = await gasCall('webAppListReviews', [customerId, null, offset]);
+        if (generation !== state.viewGeneration || request !== state.reviewRequest ||
+            String(customerId) !== String(state.selectedCustomerId)) return;
+        state.reviews = Array.isArray(result.reviews) ? result.reviews : [];
+        state.partnerTotal = Number(result.partnerTotal || 0);
+        state.otherCounts = result.otherCounts || {};
+        state.reviewOffset = Number(result.offset || 0);
+        state.reviewLimit = Number(result.limit || 0);
+      } catch (error) {
+        if (generation !== state.viewGeneration || request !== state.reviewRequest) return;
+        showNotice(failureMessage(error), 'error');
+      } finally {
+        if (generation === state.viewGeneration && request === state.reviewRequest) {
+          state.loadingReviews = false;
+          renderReviews();
+        }
+      }
+    }
+
+    function stoppedByMessage(code) {
+      var messages = {
+        LEASE_CONFLICT: TEXT.leaseConflict,
+        TIME_BUDGET: TEXT.timeBudget,
+        NO_AUTHORIZED_CUSTOMER: TEXT.noCustomerStaff,
+        SETTINGS_INVALID: TEXT.invalidSettings,
+        LOG_CAPACITY_EXCEEDED: TEXT.logCapacity,
+        INTEGRITY_STOP: TEXT.integrityStop
+      };
+      if (code === 'DESTINATION_SHEET_MISSING' ||
+          code === 'DESTINATION_SCHEMA_MISMATCH') {
+        return TEXT.cloneValidation(code);
+      }
+      return messages[code] || (code ? '処理を停止しました（' + code + '）。' : '');
+    }
+
+    function schemaValidationLines(result) {
+      var validation = result && result.schemaValidation;
+      if (!validation) return [];
+      function describe(entry) {
+        if (typeof entry === 'string') return entry;
+        if (!entry || typeof entry !== 'object') return String(entry || '');
+        var prefix = entry.item === null || entry.item === undefined ? '' :
+          '項目 ' + entry.item + ': ';
+        var detail = '';
+        if (entry.detail !== null && entry.detail !== undefined) {
+          detail = typeof entry.detail === 'string' ? entry.detail : JSON.stringify(entry.detail);
+        }
+        return prefix + String(entry.code || 'SCHEMA_VALIDATION') +
+          (detail ? '（' + detail + '）' : '');
+      }
+      return (Array.isArray(validation.problems) ? validation.problems : [])
+        .map(describe)
+        .concat((Array.isArray(validation.warnings) ? validation.warnings : []).map(describe))
+        .filter(Boolean);
+    }
+
+    async function startImport() {
+      var customer = selectedCustomer();
+      if (!customer) { showNotice(TEXT.selectCustomer, 'warning'); return; }
+      if (!state.selectedFolderId) { showNotice(TEXT.selectFolder, 'warning'); return; }
+      if (!customer.canImport) { showNotice(TEXT.notAssignee, 'warning'); return; }
+      if (isMutationBusy()) return;
+
+      var token = ++state.importRun;
+      var generation = state.viewGeneration;
+      var customerId = state.selectedCustomerId;
+      var folderId = state.selectedFolderId;
+      var cumulativeDone = 0;
+      var warnings = [];
+      state.importBusy = true;
+      state.activeImportDestinationSpreadsheetId = null;
+      state.lastCompletedDestinationSpreadsheetId = null;
+      el['excel-status'].textContent = '';
+      clearNotice();
+      el['import-progress'].textContent = TEXT.processing(0, 0);
+      renderSelection();
+
+      try {
+        while (true) {
+          var options = state.activeImportDestinationSpreadsheetId ?
+            {destinationSpreadsheetId: state.activeImportDestinationSpreadsheetId} : {};
+          var result = await gasCall('webAppRunImport', [customerId, folderId, options]);
+          if (token !== state.importRun || generation !== state.viewGeneration ||
+              String(customerId) !== String(state.selectedCustomerId) ||
+              String(folderId) !== String(state.selectedFolderId)) return;
+
+          if (result.destinationSpreadsheetId) {
+            state.activeImportDestinationSpreadsheetId = String(result.destinationSpreadsheetId);
+            state.lastCompletedDestinationSpreadsheetId = state.activeImportDestinationSpreadsheetId;
+          }
+          var done = Number(result.done || 0);
+          var remaining = Number(result.remaining || 0);
+          cumulativeDone += done;
+          el['import-progress'].textContent = TEXT.processing(cumulativeDone, cumulativeDone + remaining);
+          warnings = warnings.concat(schemaValidationLines(result));
+
+          if (remaining > 0 && !result.stoppedBy && done > 0) continue;
+
+          if (result.stoppedBy) {
+            showNotice(stoppedByMessage(result.stoppedBy), 'warning', warnings);
+          } else if (remaining > 0 && done === 0) {
+            var failed = Array.isArray(result.fileResults) && result.fileResults.some(function(file) {
+              return file && file.outcome === 'FAILED';
+            });
+            showNotice(failed ? TEXT.stuckFile : TEXT.timeBudget, 'warning', warnings);
+          } else if (cumulativeDone === 0) {
+            showNotice(TEXT.noFiles, 'info', warnings);
+          } else {
+            showNotice(cumulativeDone + ' 件を取り込みました。', 'success', warnings);
+          }
+          break;
+        }
+      } catch (error) {
+        if (token === state.importRun && generation === state.viewGeneration) {
+          showNotice(failureMessage(error), 'error');
+        }
+      } finally {
+        if (token === state.importRun && generation === state.viewGeneration) {
+          state.importBusy = false;
+          state.activeImportDestinationSpreadsheetId = null;
+          renderSelection();
+          loadFiles(customerId, folderId, generation);
+          loadReviews(customerId, 0, generation);
+        }
+      }
+    }
+
+    function enforceOneFileSelection(event) {
+      var changed = event.currentTarget;
+      var row = changed.closest('tr');
+      if (changed.checked) {
+        var selectedFile = row.dataset.fileId;
+        var conflict = Array.prototype.some.call(document.querySelectorAll('.review-select:checked'), function(box) {
+          return box !== changed && box.closest('tr').dataset.fileId !== selectedFile;
+        });
+        if (conflict) {
+          changed.checked = false;
+          showNotice(TEXT.oneFileOnly, 'warning');
+        }
+      }
+      updateActionButtons();
+    }
+
+    function collectSelectedReviews() {
+      var byId = new Map(state.reviews.map(function(review) {
+        return [String(review.reviewId), review];
+      }));
+      return Array.prototype.map.call(document.querySelectorAll('.review-select:checked'), function(box) {
+        var row = box.closest('tr');
+        var review = byId.get(String(row.dataset.reviewId));
+        return {
+          review: review,
+          reviewId: String(review.reviewId),
+          fileId: String(review.fileId),
+          partnerName: row.querySelector('.partner-input').value.trim(),
+          sameMerchantConflict: false,
+          conflictReason: null
+        };
+      });
+    }
+
+    function freezeSameMerchantConflict(items) {
+      var groups = new Map();
+      items.forEach(function(item) {
+        var key = item.review.merchantNormalized;
+        if (key === null || key === undefined || String(key) === '') return;
+        key = String(key);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(item);
+      });
+      groups.forEach(function(group) {
+        if (group.length < 2) return;
+        var names = new Set(group.map(function(item) { return item.partnerName; }));
+        if (names.size > 1) {
+          group.forEach(function(item) {
+            item.sameMerchantConflict = true;
+            item.conflictReason = 'DIFFERENT_PARTNER';
+          });
+          return;
+        }
+        group.forEach(function(item, index) {
+          if (index === 0) return;
+          item.sameMerchantConflict = true;
+          item.conflictReason = 'DUPLICATE_PARTNER';
+        });
+      });
+      return items;
+    }
+
+    function dictionaryMessage(item) {
+      if (item.conflictReason === 'DIFFERENT_PARTNER') return TEXT.learnDifferent;
+      if (!item.partnerName) return TEXT.learnNone;
+      if (item.review.learnBlockedBy === 'EMPTY_MERCHANT') return TEXT.learnEmpty;
+      if (item.review.learnBlockedBy === 'CARD_NAME_PURPOSE') return TEXT.learnCard;
+      if (item.conflictReason === 'DUPLICATE_PARTNER') return TEXT.learnDuplicate;
+      return TEXT.learnYes;
+    }
+
+    function openConfirmation() {
+      var items = collectSelectedReviews();
+      if (!items.length) { showNotice(TEXT.chooseReview, 'warning'); return; }
+      if (state.reviewLimit > 0 && items.length > state.reviewLimit) {
+        showNotice(TEXT.tooMany(state.reviewLimit), 'warning');
+        return;
+      }
+      if (new Set(items.map(function(item) { return item.fileId; })).size !== 1) {
+        showNotice(TEXT.oneFileOnly, 'warning');
+        return;
+      }
+      freezeSameMerchantConflict(items);
+      var payload = {
+        customerId: state.selectedCustomerId,
+        generation: state.viewGeneration,
+        items: items,
+        decisions: items.map(function(item) {
+          return {
+            reviewId: item.reviewId,
+            partnerName: item.partnerName,
+            sameMerchantConflict: item.sameMerchantConflict
+          };
+        })
+      };
+      state.confirmPayload = payload;
+      el['confirm-intro'].textContent = '次の ' + items.length + ' 件を確定します。取り消せません。';
+      el['confirm-list'].textContent = '';
+      items.forEach(function(item) {
+        var review = item.review;
+        var li = document.createElement('li');
+        var partner = item.partnerName || '取引先なし';
+        li.textContent = review.merchantOriginal + ' / ' + (review.fileName || '（ファイル名不明）') +
+          ' ' + review.sourceRow + ' 行目 → ' + partner + '（' + dictionaryMessage(item) + '）';
+        el['confirm-list'].appendChild(li);
+      });
+      if (typeof el['confirm-dialog'].showModal === 'function') el['confirm-dialog'].showModal();
+      else el['confirm-dialog'].setAttribute('open', 'open');
+    }
+
+    function closeConfirmation() {
+      if (typeof el['confirm-dialog'].close === 'function') el['confirm-dialog'].close();
+      else el['confirm-dialog'].removeAttribute('open');
+    }
+
+    function batchId() {
+      return 'web-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    }
+
+    function returnedErrorMessage(error) {
+      if (error && error.message) return String(error.message);
+      var code = error && error.code;
+      if (code === 'TOO_MANY_DECISIONS') return TEXT.tooMany(state.reviewLimit || '?');
+      if (code === 'ALREADY_SETTLED') return TEXT.alreadySettled;
+      if (code === 'REVIEW_CUSTOMER_MISMATCH') return TEXT.reviewMismatch;
+      if (code === 'REVIEW_NOT_FOUND') return TEXT.reviewMissing;
+      return 'この要確認は確定できませんでした（' + (code || 'RESOLVE_FAILED') + '）。管理者へ連絡してください。';
+    }
+
+    async function startResolve() {
+      var payload = state.confirmPayload;
+      closeConfirmation();
+      state.confirmPayload = null;
+      if (!payload || payload.generation !== state.viewGeneration ||
+          String(payload.customerId) !== String(state.selectedCustomerId) || isMutationBusy()) return;
+
+      var token = ++state.resolveRun;
+      var generation = payload.generation;
+      var customerId = payload.customerId;
+      var pending = payload.decisions.slice();
+      var total = pending.length;
+      var resolvedTotal = 0;
+      var seenErrorIds = new Set();
+      var resultErrors = [];
+      var fileErrors = new Set();
+      var stopped = false;
+      var clickBatchId = batchId();
+      state.resolveBusy = true;
+      clearNotice();
+      el['resolve-progress'].textContent = TEXT.processing(0, total);
+      renderSelection();
+
+      try {
+        while (pending.length) {
+          var result = await gasCall('webAppResolveReviews',
+            [customerId, pending, {batchId: clickBatchId}]);
+          if (token !== state.resolveRun || generation !== state.viewGeneration ||
+              String(customerId) !== String(state.selectedCustomerId)) return;
+
+          var resolvedIds = new Set((result.resolvedReviewIds || []).map(String));
+          var skippedIds = new Set((result.skippedByLeaseReviewIds || []).map(String));
+          var itemErrors = (result.errors || []).filter(function(error) { return error && error.reviewId; });
+          var newErrorIds = [];
+          itemErrors.forEach(function(error) {
+            var id = String(error.reviewId);
+            if (!seenErrorIds.has(id)) {
+              seenErrorIds.add(id);
+              newErrorIds.push(id);
+              resultErrors.push(error);
+            }
+          });
+          (result.errors || []).filter(function(error) { return error && !error.reviewId; })
+            .forEach(function(error) {
+              var key = String(error.fileId || '') + '|' + String(error.code || '') + '|' + String(error.message || '');
+              if (!fileErrors.has(key)) {
+                fileErrors.add(key);
+                resultErrors.push(error);
+              }
+            });
+
+          var removed = new Set();
+          resolvedIds.forEach(function(id) { removed.add(id); });
+          skippedIds.forEach(function(id) { removed.add(id); });
+          itemErrors.forEach(function(error) { removed.add(String(error.reviewId)); });
+          pending = pending.filter(function(decision) { return !removed.has(String(decision.reviewId)); });
+          resolvedTotal += Number(result.resolved || 0);
+          el['resolve-progress'].textContent = TEXT.processing(resolvedTotal, total);
+
+          var progressed = Number(result.resolved || 0) > 0 || newErrorIds.length > 0;
+          if (!pending.length) break;
+          if (!progressed) { stopped = true; break; }
+        }
+
+        var countedErrors = resultErrors.filter(function(error) {
+          return !(error && error.code === 'ALREADY_SETTLED');
+        });
+        var lines = resultErrors.map(returnedErrorMessage);
+        var summary = resolvedTotal + ' 件を確定しました。エラー: ' + countedErrors.length + ' 件';
+        if (stopped && pending.length) {
+          lines.unshift(TEXT.resolveStalled(pending.length));
+          showNotice(summary, 'warning', lines);
+        } else if (countedErrors.length) {
+          showNotice(summary, 'warning', lines);
+        } else {
+          showNotice(summary, 'success', lines);
+        }
+      } catch (error) {
+        if (token === state.resolveRun && generation === state.viewGeneration) {
+          showNotice(failureMessage(error), 'error');
+        }
+      } finally {
+        if (token === state.resolveRun && generation === state.viewGeneration) {
+          state.resolveBusy = false;
+          renderSelection();
+          loadReviews(customerId, state.reviewOffset, generation);
+        }
+      }
+    }
+
+    function downloadExcel() {
+      var id = state.lastCompletedDestinationSpreadsheetId;
+      if (!id) return;
+      var opened = window.open('https://docs.google.com/spreadsheets/d/' +
+        encodeURIComponent(id) + '/export?format=xlsx', '_blank');
+      if (opened === null) {
+        showNotice(TEXT.exportBlocked, 'warning');
+        return;
+      }
+      el['excel-status'].textContent = 'Excel作成済み ' + formatDate(new Date(), true);
+    }
+
+    async function bootstrap() {
+      var generation = ++state.viewGeneration;
+      try {
+        var result = await gasCall('webAppBootstrap', []);
+        if (generation !== state.viewGeneration) return;
+        state.actor = result.actor || '';
+        state.version = result.version || '';
+        state.customers = Array.isArray(result.customers) ? result.customers : [];
+        el.actor.textContent = '実行者: ' + state.actor;
+        el.version.textContent = state.version ? 'バージョン ' + state.version : '';
+        renderSelection();
+      } catch (error) {
+        if (generation !== state.viewGeneration) return;
+        el['customer-count'].textContent = '0 件';
+        showNotice(failureMessage(error), 'error');
+      }
+    }
+
+    el['customer-search'].addEventListener('input', renderCustomers);
+    el['import-button'].addEventListener('click', startImport);
+    el['resolve-button'].addEventListener('click', openConfirmation);
+    el['review-prev'].addEventListener('click', function() {
+      if (state.loadingReviews || isMutationBusy()) return;
+      loadReviews(state.selectedCustomerId, Math.max(0, state.reviewOffset - state.reviewLimit), state.viewGeneration);
+    });
+    el['review-next'].addEventListener('click', function() {
+      if (state.loadingReviews || isMutationBusy()) return;
+      loadReviews(state.selectedCustomerId, state.reviewOffset + state.reviewLimit, state.viewGeneration);
+    });
+    el['excel-button'].addEventListener('click', downloadExcel);
+    el['confirm-cancel'].addEventListener('click', function() {
+      state.confirmPayload = null;
+      closeConfirmation();
+    });
+    el['confirm-submit'].addEventListener('click', startResolve);
+    document.querySelectorAll('[data-coming-soon]').forEach(function(button) {
+      button.addEventListener('click', function() { showNotice(TEXT.comingSoon, 'info'); });
+    });
+
+    renderSelection();
+    bootstrap();
+  }());
+  </script>
+</body>
+</html>

@@ -272,10 +272,13 @@
 
 | 入口 | 認可 |
 |---|---|
-| 一覧の取得（顧客・フォルダ・ファイル・要確認） | `authorize(ROLE.REVIEWER, null, {operation: 'WEBAPP:一覧'})` |
-| 記帳の実行 | `authorize(ROLE.REVIEWER, customerId, {operation: 'WEBAPP:記帳'})` |
-| 要確認の確定 | `authorizeOperation(code, customerId, options)`（既存 §4 と同じ） |
-| Excel の書き出し | `authorize(ROLE.REVIEWER, customerId, {operation: 'WEBAPP:Excel'})` |
+| 顧客一覧（§7.1） | `authorize(ROLE.REVIEWER, **null**, {operation: 'WEBAPP:一覧'})` |
+| フォルダ・ファイル一覧（§7.3.0）／要確認一覧（§7.4.6） | `authorize(ROLE.REVIEWER, **String(customerId)**, {operation: 'WEBAPP:一覧'})` |
+| 記帳の実行 | `authorize(ROLE.REVIEWER, String(customerId), {operation: 'WEBAPP:記帳'})` |
+| 要確認の確定 | 入口で `authorize(ROLE.REVIEWER, String(customerId), …)`、件ごとに `authorizeOperation(code, review.customerId, {})`（§7.4.1） |
+| Excel の書き出し | **入口が無い**（§9.2。ブラウザが自分の資格で書き出し URL を直接開くので、サーバー関数を作らない） |
+
+> **`null` を渡してよいのは顧客一覧だけである。****顧客 ID を伴う一覧に `null` を渡すと、その ID が一度も `authorize` に届かず、拒否の監査行が 1 行も残らない**（§12.3 ケース 4 がこれを固定する）。
 
 **顧客 ID はクライアントから来る。**必ずサーバー側で `filterByScope_` に相当する絞込を掛け直すこと ── 画面が出した選択肢だけが送られてくるとは限らない。
 
@@ -590,7 +593,7 @@ var fileOutcome = processDiscoveredFile_(runId, writeCustomer, candidate, opts);
 - 1件の失敗で全体を止めず `errors` に積む（§6.2）
 - 後始末（`commitSettledTransactions_`・`completeFileIfFullyResolved_`）は「1件でも書込を試みたファイル」だけに行い、予算判定を掛けない
 
-戻り値は `{resolved, committed, unmet, completedFiles, rewoundFiles, deferredCommits, skippedByLease, notAttempted, errors, maxPerCall, remaining, **resolvedReviewIds, skippedByLeaseReviewIds**}`。前 10 鍵は `applyResolveDecision_` と同じ意味・同じ名前にする（`maxPerAction` だけ `maxPerCall` と呼ぶ）。
+戻り値は `{resolved, committed, unmet, completedFiles, rewoundFiles, deferredCommits, skippedByLease, notAttempted, errors, maxPerCall, remaining, **deferredByFile, resolvedReviewIds, skippedByLeaseReviewIds**}`。前 10 鍵は `applyResolveDecision_` と同じ意味・同じ名前にする（`maxPerAction` だけ `maxPerCall` と呼ぶ）。**`deferredByFile`**（§7.4.1）は `notAttempted` の内訳で、恒等式には別に数えない。
 
 > **末尾の 2 つは `applyResolveDecision_` には無い。足さなければ §7.4.4 が実装できない。**
 >
@@ -851,6 +854,7 @@ var fileOutcome = processDiscoveredFile_(runId, writeCustomer, candidate, opts);
 ### 8.2 手順
 
 1. `DriveApp.getFileById(customer.destinationSpreadsheetId).makeCopy(name, folder)`
+1b. **複製に `customer.destinationSheetName` のシートがあるかを、消す前に確かめる。**無ければ `{ok: false, code: 'DESTINATION_SHEET_MISSING'}` を返して止める（下の検証の項も参照）── **消してから気づく形にしてはならない。**
 2. 複製の **`customer.destinationSheetName` のシート**（`入力用シート` と決め打ちしない ── 顧客マスター H列の設定値である。`02_CustomerMaster.gs` 23 行。`src/*.gs` にこのリテラルは `97_Ops.gs` 260 行のテスト顧客登録にしか無い）について、**システムが所有する 6 列だけを消す** ── `customer.columnMapping` の `B`・`F`・`I`・`K`・`M`・`txId` を、`customer.headerRow`（顧客マスター AD列。`02` 32 行。**1 とは限らない**）の次の行から **`sheet.getLastRow()` まで** `clearContent()` する。**`getMaxRows()` を使ってはならない** ── 数式の無い空行まで走査して往復が無駄に増える。合計行が最下行にある場合でも、消すのは 6 列だけなので合計の数式は他の列にあり、**触らない。**
 3. **行全体を消してはならない。値を列ごと全部消してもならない。** ── それ以外の列には**勘定科目の既定値と消費税・残高の数式**が入っている（`43_SheetWriter.gs` 90〜103 行のコメント、`02_CustomerMaster.gs` 37〜39 行の AL列が存在する理由）。消すと 2 つ壊れる：(a) 転記された行に勘定科目も消費税も入らないまま freee へ渡る。(b) `45_DestinationIndex.gs` 143〜147 行は行を増やすときの複製元を「**数式を持つ空き行**」から選ぶので、数式が全滅すると `templateHint` が `null` になり `expandTemplateRows` が `sheet.getMaxRows()` へ落ちる ── そこは `43_SheetWriter.gs` 110〜114 行が「書式も数式も無い空行を複製してしまい、勘定科目の既定値・消費税式が新しい行に入らない ── **この関数が存在する理由そのものが満たされない**」と明示的に禁じた複製元である。
    **`validateDestinationSchema` はこの誤りを検出しない** ── 項目5（必要数式）は「既存データ行が 0 行なら合格」である（`42_SheetSchemaValidator.gs` 111〜117 行）。空にしたシートは検証を素通りする。
@@ -862,7 +866,14 @@ var fileOutcome = processDiscoveredFile_(runId, writeCustomer, candidate, opts);
 
 **したがって `partnerListSheetName` の参照元は雛形のまま据え置く** ── 差し替えるのは `destinationSpreadsheetId` だけで、取引先一覧を読むときは `getCustomerById` が返す元の `customer` を使う。§5.4 の推測候補と §7.4 の取引先入力はこちらを見る。
 
-**複製の直後に `validateDestinationSchema(newCustomer, buildIndex(newCustomer, {}))`（`42_SheetSchemaValidator.gs` 43 行）を通し、問題があれば書込を始めずにその内容を返して止める。**取込も同じ検証を `71_RunOrchestrator.gs` 426 行で行うが、そこで落ちるとファイルが `FAILED` になった後である。複製が壊れていることは複製した側で分かる。
+**複製の直後に検証を通し、問題があれば書込を始めずにその内容を返して止める。**手順は 2 段である：
+
+1. **`newCustomer.destinationSheetName` のシートが存在するかを先に確かめる。**無ければ `{ok: false, code: 'DESTINATION_SHEET_MISSING'}` を自分で組み立てて返す
+
+> **検証が `ok: false` で止まったとき、戻り値に `destinationSpreadsheetId` を載せてはならない。**載せるとクライアントが「その押下で作った転記シート」として保持し、**Excel のボタンが壊れた複製を書き出す**（§9.3）。複製は Drive に残るので、押し直すたびに増える。**壊れたものを「作れました」として渡さない**（§2.4 原理 1）。画面には付録B の「複製の検証に失敗」を出す。
+2. 存在すれば `validateDestinationSchema(newCustomer, buildIndex(newCustomer, {}))`（`42_SheetSchemaValidator.gs` 43 行）を通す
+
+**1 を省いて 2 だけを書いてはならない。**`buildIndex` は引数の評価で先に走るので、**シートが無いと `validateDestinationSchema` に入る前に例外が飛び、検証結果を返せない** ── 画面には「複製が壊れている」ではなく、生の例外が出る（2026-09-16 の実装で判明）。取込も同じ検証を `71_RunOrchestrator.gs` 426 行で行うが、そこで落ちるとファイルが `FAILED` になった後である。複製が壊れていることは複製した側で分かる。
 
 **止めるのは `ok === false` のときだけ**にする。`warnings` だけが立った複製は進め、戻り値に載せて画面に出す（`validateDestinationSchema` は `{ok, code, problems, warnings}` を返す。`42` 40〜43 行）。
 
@@ -886,7 +897,7 @@ var writeCustomer = Object.assign({}, customer,
   {destinationSpreadsheetId: newSpreadsheetId});
 ```
 
-### 8.5 要確認の確定 ── `51`・`52` に転記先を自分で引かせる（本仕様で最も重い変更）
+### 8.5 要確認の確定 ── `51` に転記先を自分で引かせる（本仕様で最も重い変更）
 
 取込と違い、**要確認を確定する経路は `customer` を引数で受け取らず、自分で `getCustomerById` を呼ぶ**：
 
@@ -1103,7 +1114,15 @@ window.open('https://docs.google.com/spreadsheets/d/' + id + '/export?format=xls
 
 **その押下で作った転記シートだけ**を出す。過去の分は出さない（取引一覧の画面が要る。§2.2 の非範囲）。
 
-**`destinationSpreadsheetId` を受け取っていないあいだ、Excel のボタンは無効にする。**取込候補が 0 本のとき（§7.3 手順 3）と取込ゲートが閉じたとき（手順 4）は ID が返らないので、**押せると壊れたように見える。**
+**Excel のボタンが指すのは「その押下で転記が完了した転記シート」だけである。**次の 3 つを区別すること：
+
+| 場面 | `destinationSpreadsheetId` | Excel ボタン |
+|---|---|---|
+| 取込が完了した | 返す | **有効にする** |
+| 取込ゲートが閉じた（手順 4） | **返す**（`options` で受けた既存 ID をそのまま。§7.3 手順 4 ── 消すと次の押下でもう 1 枚複製ができる） | **有効にしない**（まだ転記していない） |
+| 複製の検証が落ちた（§8.2） | **返さない** | 有効にしない |
+
+**「ID を受け取ったか」でボタンを決めてはならない。**ゲートが閉じた戻り値にも ID は載っているので、**転記が 1 行も起きていないのにボタンが有効になる。**クライアントは「`done > 0` で完了した押下の ID」だけを Excel 用に保持する。
 
 ---
 
@@ -1144,7 +1163,7 @@ window.open('https://docs.google.com/spreadsheets/d/' + id + '/export?format=xls
 | `doGet(e)` | 公開 | 読取 | `81_WebAppUi.html` を返す |
 | `webAppBootstrap_()` | `google.script.run` | 読取 | §7.1 |
 | `webAppListFolder_(customerId, folderId)` | 同 | 読取 | §7.2 |
-| `webAppListReviews_(customerId, limit)` | 同 | 読取 | §5.4 |
+| `webAppListReviews_(customerId, limit, offset)` | 同 | 読取 | §5.4・**§7.4.6**（戻り値の契約はそちら） |
 | `webAppRunImport_(customerId, folderId, options)` | 同 | **書込** | §7.3 |
 | `webAppResolveReviews_(customerId, decisions, options)` | 同 | **書込** | §7.4 |
 
@@ -1200,7 +1219,7 @@ var WEBAPP_DEADLINE_MS_ = 300000;      // 1回の呼出しの締切
 3. **`getParents` が無い。**`folders` を走査して当該 ID を `fileIds` に含むものを返す反復子にする。§7.3.2 の検証 2（親フォルダの一致）がこれを使う。
 4. **`Utilities.formatDate` が `yyyyMMdd-HHmm` を知らない。**既存スタブ（36〜47 行）は 3 パターンだけを持ち、**未対応の書式は `throw` する** ── §8.3 の名前を作る最初の 1 行で落ちる。書式を 1 つ足す。
 5. **`getFolderById(...).getFolders()` が無い**（`test/gas-stubs.js` 616〜622 行のハンドルは `getId`・`getFiles` だけ）。`folders` Map に親子関係を持たせ、子フォルダの反復子を返す形に足す。§5.3 のカードフォルダ一覧・§7.2 の子孫検証・ケース 3 がこれを使う。
-6. **`HtmlService.createTemplateFromFile` が無い。**§11.2 が `doGet` にこれを要求しているので、§12.2 が「使うなら足せ」と書いたのは弱すぎる。**必須である。**`.html` は `test/gas-harness.js` が自動で読み込まないので、テンプレートの中身はスタブ側で用意する。
+6. **`HtmlService.createTemplateFromFile` が無い。****引数のファイル名を無視する実装にしてはならない** ── 実機は存在しないファイル名で例外を投げるので、無視すると `doGet` の綴り間違いが**実機の初回表示まで出ない**（§13 受入 5 が唯一の網になる）。登録済みのテンプレート名以外を渡されたら投げること。§11.2 が `doGet` にこれを要求しているので、§12.2 が「使うなら足せ」と書いたのは弱すぎる。**必須である。**`.html` は `test/gas-harness.js` が自動で読み込まないので、テンプレートの中身はスタブ側で用意する。
 
 **`HtmlService` のスタブには、テンプレート本文を供給する口（`control.setHtmlTemplate` 相当）と、`reset()` でそれを消す処理も要る。**§12.2 は「中身はスタブ側で用意する」としか書いていないが、用意する経路そのものが無い。
 
@@ -1253,14 +1272,19 @@ var WEBAPP_DEADLINE_MS_ = 300000;      // 1回の呼出しの締切
 27. **（削除）**`54` は第1段の変更対象から外した（§8.5）。`INTEGRITY` 要確認を登録する経路が `src/` に無いので、§12.1 の材料規律では材料が作れない
 28. **§7.4.5 の停止条件**：解決し得ない件（取り消された取引の要確認）を 1 つ混ぜた押下で、**残りの正常な件が全部確定し、そのうえで止まる**ことを固定する。`resolved === 0` だけで止める実装はここで落ちる（1 回目で止まり、残りが 1 件も確定しない）
 29. **`webAppListReviews` の `learnBlockedBy` が 3 値を返す**：`null`（学習する）／`EMPTY_MERCHANT`（`merchantNormalized` が空）／`CARD_NAME_PURPOSE`（顧客マスター AN列の用途）。3 レグそれぞれを `runImport` で立てた材料で確かめる
-30. 同、**`limit` はサーバーが切る**：`webAppListReviews_(customerId, 500)` を呼んでも `reviews.length <= WEBAPP_REVIEW_LIST_LIMIT_` かつ `limit === 15` であること。**切らない実装は 1 件 4 往復なので 6 分に当たる**
+30. 同、**`limit` はサーバーが切る**：`webAppListReviews_(customerId, 500, 0)` を呼んでも `reviews.length <= WEBAPP_REVIEW_LIST_LIMIT_` かつ `limit === 15` であること。**切らない実装は 1 件 4 往復なので 6 分に当たる**
 31. 同、**`getTransaction` が `null` の件があっても表が出る**：取引ログの行を `supersede` して `null` を返させ、その件の `usageDate`・`amount` が `null` になるだけで**他の件が全部揃う**ことを固定する
 32. **`webAppBootstrap` が `canImport: false` を返す**：顧客マスター Q列・R列に実行者が居ない顧客を作り、`canImport` が `false`、他の顧客は `true` であること。**オーナーで実行しても `false` になる**（`getAuthorizedCustomers` はオーナーを特権化しない）
 33. **リースで弾かれるファイルでは複製を作らない**（§7.3）：`acquireLease` でファイルを掴んだ状態で `webAppRunImport` を呼び、**スプレッドシートが 1 枚も増えないこと**と `stoppedBy === 'LEASE_CONFLICT'` を固定する。複製を先に作る実装はここで落ちる
 34. **戻り値が確定できた件を名指しする**（§7.4）：リース中のファイルに `RESOLVE_WITHOUT_PARTNER` 2 件と `ADOPT_EXISTING_PARTNER` 1 件を送り、**`resolvedReviewIds`・`skippedByLeaseReviewIds`・`errors[].reviewId` の 3 つを合わせると送った 3 件がちょうど一度ずつ現れる**ことを固定する。件数だけを返す実装はここで落ちる ── クライアントがどの件を次から外すか決められない
 35. **表の窓が動く**（§7.4.6）：解決し得ない `PARTNER` 要確認を 15 件（＝`WEBAPP_REVIEW_LIST_LIMIT_`）作り、その後ろに確定できる件を置く。`offset` を進めると**16 件目以降が出る**ことを固定する。`offset` を受けない実装は 3 巡しても表が変わらない
 36. **2 回目の取込が同じシートへ入る**（§7.3 手順 8）：3 ファイルのフォルダで最後まで取り込み、**スプレッドシートが 1 枚しか増えていない**ことを固定する。`destinationSpreadsheetId` を渡し直さない実装は 3 枚作る
-37. 既存 950 テストが全件通る
+37. **取込は担当者登録を確かめてから複製する**（§7.3 手順 3）：顧客マスター Q列・R列に実行者が居ない顧客で `webAppRunImport` を呼び、**スプレッドシートが 1 枚も増えず**、`stoppedBy === 'NO_AUTHORIZED_CUSTOMER'` で `{done: 0, total: 0, remaining: 0}` が返ることを固定する。**サーバー側のゲートを潰しても赤にならない状態にしてはならない** ── 潰すと「取り込めないのに複製だけ作られ `remaining` が永久に 1」（§7.3 手順 3 の記録）に戻る
+38. **`TOO_MANY_DECISIONS`**（§7.4.1）：`WEBAPP_MAX_DECISIONS_` を超える `decisions` を送り、超えた分が `errors` に `{reviewId, code: 'TOO_MANY_DECISIONS'}` として載り、**恒等式が成り立つ**ことを固定する
+39. **`deferredByFile`**（§7.4.1）：2 ファイルに跨る `decisions` を送り、先頭ファイルの件だけが処理され、残りが `deferredByFile` かつ `remaining` に積まれることを固定する。**サーバー側の 1 ファイル制限を外しても赤にならない状態にしてはならない**
+40. **`ALREADY_SETTLED`**（§7.4.4）：確定済みの `reviewId` を送り、`errors` に `{reviewId, code: 'ALREADY_SETTLED'}` が載り、`resolveReview` が**呼ばれない**（転記先が変わらない）ことを固定する
+41. **`doGet` はテンプレート名を間違えたら落ちる**（§12.2）：スタブに登録していないテンプレート名を `createTemplateFromFile` へ渡すと例外になることを固定する。**スタブが引数を無視する実装だとここが赤にならない**
+42. 既存 950 テストが全件通る
 
 ---
 
@@ -1330,6 +1354,7 @@ var WEBAPP_DEADLINE_MS_ = 300000;      // 1回の呼出しの締切
 | 処理中 | `処理中… {done} / {total}` |
 | リース衝突（**戻り値用**） | `他の処理と重なりました。10 分ほど待ってからもう一度実行してください。` ── **`stoppedBy: 'LEASE_CONFLICT'` は戻り値なので `classifyMenuError_` を通らない。**この行が正本である |
 | リース衝突（例外用） | **この表に持たない。**正本は `classifyMenuError_` 1556〜1557 行（§6.1）|
+| 複製の検証に失敗 | `転記シートの複製に失敗しました（{code}）。雛形の構成を確認のうえ、管理者へ連絡してください。`（`DESTINATION_SHEET_MISSING` など。§8.2） |
 | 取込ゲートが閉じた | `いまは取り込めませんでした。もう一度「記帳を実行」を押してください。`（`stoppedBy: 'TIME_BUDGET'`） |
 | 確定が進まず停止 | `残りの {n} 件は確定できませんでした。画面を再読み込みしてからやり直してください。`（§7.4.5） |
 | 一度に送れる件数の上限 | `一度に確定できるのは 15 件までです。`（`TOO_MANY_DECISIONS`） |
@@ -1365,7 +1390,7 @@ var WEBAPP_DEADLINE_MS_ = 300000;      // 1回の呼出しの締切
 | `WEBAPP_ITEM_TRIPS_` | 74 | §3.2・§3.3・§7.4・§7.4.1・§7.4.3・§8.5・§11.3 |
 | `WEBAPP_CLEANUP_TRIPS_` | 62 | §3.2・§3.3・§7.4・§7.4.1・§11.3・§13 |
 | `WEBAPP_MAX_PER_CALL_` | 1 | §3.2・§3.3・§7.4・§7.4.2・§7.4.4・§11.3・§12.3・§13 |
-| `WEBAPP_MAX_DECISIONS_` | 15 | §3.3・§7.4.1・§11.3 |
+| `WEBAPP_MAX_DECISIONS_` | 15 | §3.3・§7.4.1・§11.3・§12.3 |
 | `WEBAPP_TRIP_WORST_MS_` | 1600 | §3.2・§3.3・§5.4・§7.3・§7.4・§7.4.1・§7.4.4・§11.3・§13 |
 | `WEBAPP_REVIEW_LIST_LIMIT_` | 15 | §3.3・§5.4・§7.4.1・§7.4.4・§7.4.6・§11.3・§12.3・付録B |
 | `WEBAPP_DEADLINE_MS_` | 300000 | §1.1・§2.4・§3.1・§3.3・§7.3・§7.4・§7.4.4・§7.4.6・§11.3・§12.3・§13・§14 |
@@ -1375,7 +1400,7 @@ var WEBAPP_DEADLINE_MS_ = 300000;      // 1回の呼出しの締切
 | `runImport` | 149 + 7×件数 | §3.2・§3.3・§11.3 |
 | `resolveReview ADOPT` | 60 | §3.2・§3.3・§7.4.1・§7.4.2・§7.4.6・§10・§12.2 |
 | `getTransaction` | 4 | §2.4・§3.2・§5.4・§7.4.3・§7.4.4・§7.4.6・§8.5・§12.3・§14 |
-| `1 回に 1 ファイル` | ── | §3.3・§7.3・§7.3.1・§7.4・§7.4.1・§11.1・§14 |
+| `1 回に 1 ファイル` | ── | §3.3・§7.3・§7.3.1・§7.4・§7.4.1・§11.1・§12.3・§14 |
 | `変更するのは 5 ファイルだけ` | ── | §3.3・§7.4.1・§8.2・§8.5・§10・§12.2・§13 |
 | `消す 6 列 B/F/I/K/M/txId` | ── | §3.3・§8.2・§12.2・§12.3 |
 | `転記先の正本＝要確認 M列・N列` | ── | §2.4・§3.2・§7.4・§8.5・§8.7・§8.8・§8.9・§10・§12.3・§13・§14 |

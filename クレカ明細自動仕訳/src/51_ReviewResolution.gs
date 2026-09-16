@@ -120,7 +120,7 @@ function adoptExistingPartner_(review, input, actor) {
   if (!input.partnerName) {
     throw new TypeError('ADOPT_EXISTING_PARTNER requires a partner name');
   }
-  var customer = getCustomerById(review.customerId);
+  var customer = reviewWriteCustomer_(review);
   var leaseId = acquireLease(review.customerId, review.fileId, input.runId || null,
     actor, LEASE_PURPOSE.WRITE_ONLY);
   try {
@@ -159,7 +159,7 @@ function fixDateAmount_(review, input, actor) {
   if (review.reviewType === REVIEW_TYPE.DATE && !input.correctedDate) {
     throw new TypeError('FIX_DATE_AMOUNT on a DATE review requires a corrected date');
   }
-  var customer = getCustomerById(review.customerId);
+  var customer = reviewWriteCustomer_(review);
   var leaseId = acquireLease(review.customerId, review.fileId, input.runId || null,
     actor, LEASE_PURPOSE.WRITE_ONLY);
   try {
@@ -263,7 +263,7 @@ function excludeTransaction_(review, operation, actor, input) {
     throw new StateTransitionError(
       'freee-imported transactions require an administrator decision: ' + review.fullTxId);
   }
-  var customer = getCustomerById(review.customerId);
+  var customer = reviewWriteCustomer_(review);
   var leaseId = acquireLease(review.customerId, review.fileId, input.runId || null,
     actor, LEASE_PURPOSE.WRITE_ONLY);
   try {
@@ -311,4 +311,24 @@ function settle_(review, operation, actor, context) {
   });
   var outcome = commitIfConditionsMet(review.fullTxId);
   return Object.assign({reviewId: review.reviewId, operation: operation}, outcome);
+}
+
+/**
+ * 要確認行が持つ転記先（M列・N列）を当てた customer を返す。
+ *
+ * 顧客マスター F列は「次に作るシートの雛形」であって、既存取引の書込先では
+ * ない。書込先は取引ごとに決まり、その正本は要確認行である
+ * （70_ImportFlow.gs が取込時の customer から書く）。
+ * getCustomerById をそのまま使うと、雛形の同じ行番号に居る無関係な取引を
+ * 上書きする ── 読取確認も同じ誤ったシートを読むので通ってしまう。
+ *
+ * M列が空なら雛形を返す（本仕様より前に立った要確認は雛形に居る）。
+ */
+function reviewWriteCustomer_(review) {
+  var customer = getCustomerById(review.customerId);
+  if (!review.destinationSpreadsheetId) return customer;
+  return Object.assign({}, customer, {
+    destinationSpreadsheetId: String(review.destinationSpreadsheetId),
+    destinationSheetName: String(review.destinationSheetName || customer.destinationSheetName)
+  });
 }
