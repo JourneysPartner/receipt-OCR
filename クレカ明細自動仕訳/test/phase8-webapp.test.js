@@ -1282,5 +1282,56 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(summary.reports[0].sameMerchantReviews, 3);
   });
 
+  function dictionaryRows() {
+    return gas.stubs.getSpreadsheet('master').getSheetByName('顧客別取引先辞書')
+      .getDataRange().getValues().slice(1)
+      .filter((row) => String(row[0] || '') !== '');
+  }
+
+  test('webapp 45d: merging partner name variants unblocks the rows they dragged in', () => {
+    requireWebFunction('opsMergePartnerNameVariants');
+    // 競合フラグは正規化表記の単位で立つので、1 行の表記ゆれが完全一致している
+    // 行まで巻き込む。実機は amazon 1 行が Amazon 30 行を止めていた。
+    const seeded = setupWorld({});
+    seedDictionaryRow(seeded.customer.customerId, {dictId: 'DICT_WIDE',
+      original: 'ＡＭＡＺＯＮ．ＣＯ．ＪＰ', partnerName: 'Amazon', conflict: true});
+    seedDictionaryRow(seeded.customer.customerId, {dictId: 'DICT_NARROW',
+      original: 'AMAZON.CO.JP', partnerName: 'amazon', conflict: true});
+    putCsv(seeded.customer, {fileId: 'variants',
+      rows: ['2025/12/10,ＡＭＡＺＯＮ．ＣＯ．ＪＰ,5280,仕入れ']});
+    webImport(seeded.customer, {});
+    const blocked = openReviewsFor(seeded.customer.customerId, {fileId: 'variants'})
+      .find((row) => row.reviewType === 'PARTNER');
+    assert.ok(blocked, '表記ゆれがある間は要確認になる');
+    assert.equal(call('opsExplainPartnerMatch', [blocked.reviewId]).blockedBy, 'CONFLICT_FLAG');
+
+    const merged = call('opsMergePartnerNameVariants', ['AMAZON.CO.JP', 'Amazon']);
+    assert.equal(merged.renamed.length, 1);
+    assert.equal(merged.renamed[0].from, 'amazon');
+    assert.equal(merged.clearedConflictRows.length, 2);
+    dictionaryRows().forEach((row) => {
+      assert.equal(row[3], 'Amazon', '取引先名が正へ寄る');
+      assert.equal(String(row[15]).toUpperCase(), 'FALSE', '競合フラグが外れる');
+    });
+    // 寄せた後は自動採用まで通ること ── フラグを外しただけで終わらせない。
+    assert.equal(call('opsExplainPartnerMatch', [blocked.reviewId]).autoConfirm, true);
+  });
+
+  test('webapp 45e: a genuinely different partner name is refused without writing', () => {
+    requireWebFunction('opsMergePartnerNameVariants');
+    // 別の取引先を指す競合をフラグだけ外して黙らせると、以後その店名は
+    // 誤った取引先で静かに自動確定される。書く前に止めなければ意味がない。
+    const seeded = setupWorld({});
+    seedDictionaryRow(seeded.customer.customerId, {dictId: 'DICT_ONE',
+      original: 'AMAZON.CO.JP', partnerName: 'Amazon', conflict: true});
+    seedDictionaryRow(seeded.customer.customerId, {dictId: 'DICT_TWO',
+      original: 'AMAZON.CO.JP', partnerName: 'Amazon Web Services', conflict: true});
+    const before = JSON.stringify(dictionaryRows());
+    const error = caught(() => gas.call('opsMergePartnerNameVariants',
+      ['AMAZON.CO.JP', 'Amazon']));
+    assert.match(String(error.message), /表記ゆれではない/);
+    assert.equal(JSON.stringify(dictionaryRows()), before, '1 行も書かない');
+  });
+
   // Case 46 is the whole-suite acceptance condition, not an independent test.
 };
