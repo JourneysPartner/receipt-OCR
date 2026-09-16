@@ -3,6 +3,10 @@
 # 先頭の / が必須 ── これが無いと test/fixtures/samples/ まで巻き込む。
 /samples/
 
+# Web アプリの動作確認に使う実明細（2026-09-16 に置いた 86 ファイル）。
+# Drive の「テスト2」フォルダの写しであって、リポジトリに入れる理由が無い。
+/テスト用クレカ明細/
+
 # OAuthクライアントの秘密。clasp run（Apps Script API実行）に使う。
 client_secret_*.json
 .clasprc.json
