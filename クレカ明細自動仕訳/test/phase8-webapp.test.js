@@ -584,8 +584,12 @@ module.exports = ({test, assert, gas}) => {
   test('webapp 09: resolving honors WEBAPP_MAX_PER_CALL and reports the remainder by ID', () => {
     requireWebFunction('webAppResolveReviews');
     const seeded = seedPartnerViaWeb({count: 2});
-    const result = webResolve(seeded.customer.customerId,
-      seeded.reviews.map((review) => decision(review, '株式会社テスト')));
+    // 上限を 1 に固定して呼ぶ。受入 12 で出荷値が 8 になったので、2 件では
+    // 残りが出ない ── 固定しないと、このケースは「上限が効くこと」ではなく
+    // 「出荷値がたまたま 1 であること」を見ていたことになる。
+    const result = withMocks({WEBAPP_MAX_PER_CALL_: 1}, () => webResolve(
+      seeded.customer.customerId,
+      seeded.reviews.map((review) => decision(review, '株式会社テスト'))));
     assert.equal(result.maxPerCall, 1);
     assert.equal(result.resolved, 1);
     assert.equal(result.remaining, 1);
@@ -791,7 +795,9 @@ module.exports = ({test, assert, gas}) => {
     const all = [decision(seeded.reviews[0], '甲社', true),
       decision(seeded.reviews[1], '乙社', true)];
     const before = dictionaryCount();
-    const first = webResolve(seeded.customer.customerId, all, 'first');
+    // 「2回目が残りだけを送る」場面を作るため、1回目の上限を 1 に固定する。
+    const first = withMocks({WEBAPP_MAX_PER_CALL_: 1},
+      () => webResolve(seeded.customer.customerId, all, 'first'));
     const finished = new Set(first.resolvedReviewIds || []);
     const remainder = all.filter((entry) => !finished.has(entry.reviewId));
     assert.equal(remainder.length, 1);
@@ -1143,5 +1149,62 @@ module.exports = ({test, assert, gas}) => {
     assert.match(error.message, /no_such_template/);
   });
 
-  // Case 42 is the whole-suite acceptance condition, not an independent test.
+  test('webapp 43: identical partner names collapse to one candidate in the listing', () => {
+    requireWebFunction('webAppListReviews');
+    const seeded = setupWorld({});
+    // 学習が重複を確かめずに積んだ辞書を作る（34_MerchantDictionary.gs 22行）。
+    // 実機では1件の要確認に同一の「Amazon」が30個並んだ（2026-09-16）。
+    // 競合フラグが立っているので自動採用されず、要確認として表に出る。
+    const dictionary = gas.stubs.getSpreadsheet('master')
+      .getSheetByName('顧客別取引先辞書');
+    for (let index = 0; index < 5; index += 1) {
+      const row = blank(18);
+      Object.assign(row, {
+        0: `DICT_DUP_${index}`, 1: 'AMAZON.CO.JP', 2: 'AMAZON.CO.JP', 3: 'Amazon',
+        4: 'exact_original', 5: 1, 6: seeded.customer.customerId, 9: 'TRUE',
+        10: 'owner@example.com', 12: '2026-01-01T00:00:00+09:00', 13: 1,
+        14: 'TRUE', 15: 'TRUE'
+      });
+      dictionary.appendRow(row);
+    }
+    putCsv(seeded.customer, {fileId: 'duplicate_dictionary',
+      rows: ['2025/12/10,AMAZON.CO.JP,5280,仕入れ']});
+    webImport(seeded.customer, {});
+    const listed = call('webAppListReviews', [seeded.customer.customerId, 15, 0]);
+    assert.equal(listed.reviews.length, 1);
+    assert.deepEqual(listed.reviews[0].candidates.map((row) => row.partnerName),
+      ['Amazon']);
+  });
+
+  test('webapp 44: the shipped budget constants keep a full call inside the deadline', () => {
+    // 受入 12（2026-09-16 実機）で置き直した値。ここを動かすときは
+    // 下の不等式ごと確かめること ── 上限だけ上げると6分に当たる。
+    assert.equal(gas.context.WEBAPP_TRIP_WORST_MS_, 400);
+    assert.equal(gas.context.WEBAPP_MAX_PER_CALL_, 8);
+    // 80_WebApp.gs 359行のゲートが通す最悪：上限いっぱいの件数を、
+    // 1件ぶんの実費＋事前走査で踏み、最後に後始末が乗る。
+    const worstMs = gas.context.WEBAPP_TRIP_WORST_MS_ *
+      (gas.context.WEBAPP_MAX_PER_CALL_ * (gas.context.WEBAPP_ITEM_TRIPS_ + 2) +
+        gas.context.WEBAPP_CLEANUP_TRIPS_ + 2);
+    assert.ok(worstMs < gas.context.WEBAPP_DEADLINE_MS_,
+      `worst case ${worstMs} ms must stay under ${gas.context.WEBAPP_DEADLINE_MS_} ms`);
+  });
+
+  test('webapp 45: the deadline gate stops the loop even when the cap would allow more', () => {
+    requireWebFunction('webAppResolveReviews');
+    // 上限 8 で運用する以上、6分に当たらせないのは締切ゲートの仕事である。
+    // ケース 39 は単価を 0 にしてゲートを無効化したうえで上限を見ているので、
+    // ゲート自体はどの変異でも赤にならなかった（2026-09-16 に実測）。
+    const seeded = seedPartnerViaWeb({count: 2});
+    const decisions = seeded.reviews.map((review) => decision(review, '株式会社テスト'));
+    const result = withMocks({WEBAPP_MAX_PER_CALL_: 5, WEBAPP_TRIP_WORST_MS_: 100000},
+      () => webResolve(seeded.customer.customerId, decisions));
+    assert.equal(result.resolved, 0);
+    assert.equal(result.remaining, 2);
+    seeded.reviews.forEach((review) => {
+      assert.equal(reviewById(review.reviewId).status, 'OPEN');
+    });
+  });
+
+  // Case 46 is the whole-suite acceptance condition, not an independent test.
 };
