@@ -205,7 +205,10 @@ function runImport(options) {
         // 1ファイルの所要時間を報告に残す。6分上限に当たったとき、どの
         // ファイルのどの段階で溶けたのかを知る材料がこれしかない。
         var fileStartedAt = Date.now();
-        var fileOutcome = processDiscoveredFile_(runId, customer, candidate, opts);
+        var writeCustomer = opts.destinationSpreadsheetId ?
+          Object.assign({}, customer,
+            {destinationSpreadsheetId: String(opts.destinationSpreadsheetId)}) : customer;
+        var fileOutcome = processDiscoveredFile_(runId, writeCustomer, candidate, opts);
         fileOutcome.elapsedMs = Date.now() - fileStartedAt;
         customerReport.files.push(fileOutcome);
       });

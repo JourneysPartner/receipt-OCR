@@ -40,6 +40,9 @@ function formatDate(date, timezone, pattern) {
   const parts = zonedParts(date, timezone);
   if (pattern === 'yyyy') return parts.year;
   if (pattern === 'yyyy-MM-dd') return `${parts.year}-${parts.month}-${parts.day}`;
+  if (pattern === 'yyyyMMdd-HHmm') {
+    return `${parts.year}${parts.month}${parts.day}-${parts.hour}${parts.minute}`;
+  }
   if (pattern === "yyyy-MM-dd'T'HH:mm:ssXXX") {
     return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}${timezoneOffset(date, timezone, parts)}`;
   }
@@ -398,6 +401,7 @@ class MemoryDriveFile {
   getName() { return this.name; }
   setName(name) { if (!this.renameAllowed) throw new Error('Drive rename denied'); this.name = String(name); return this; }
   getBlob() { return this.utilities.newBlob(this.bytes, this.contentType, this.name); }
+  getMimeType() { return this.contentType; }
   getSize() { return this.bytes.length; }
   getLastUpdated() { return new Date(this.lastUpdated.getTime()); }
 }
@@ -418,6 +422,7 @@ class MemoryScriptLock {
 function createGasStubs() {
   const Utilities = createUtilitiesStub();
   const spreadsheets = new Map(); const files = new Map(); const folders = new Map(); const properties = new Map();
+  let spreadsheetCopyCounter = 0;
   let sheetsBatchGetFailures = [];
   let getScriptPropertiesFailures = [];
   const triggers = [];
@@ -428,7 +433,116 @@ function createGasStubs() {
   const propertyCallCounts = {getProperty: 0, setProperty: 0, deleteProperty: 0, getProperties: 0};
   const propertyWrites = [];
   let uiAvailable = true; const uiEvents = []; const menus = []; let promptResponses = []; let alertResponses = [];
+  const htmlTemplates = new Map();
   const openSpreadsheet = (id) => { const value = spreadsheets.get(String(id)); if (!value) throw new Error(`Spreadsheet not found: ${id}`); return value; };
+  const iteratorFor = (items) => {
+    let index = 0;
+    return {hasNext: () => index < items.length, next: () => items[index++]};
+  };
+  const cloneProtection = (protection) => {
+    const sourceRange = protection && typeof protection.getRange === 'function' ?
+      protection.getRange() : null;
+    const startColumn = sourceRange && typeof sourceRange.getColumn === 'function' ?
+      Number(sourceRange.getColumn()) : null;
+    const lastColumn = sourceRange && typeof sourceRange.getLastColumn === 'function' ?
+      Number(sourceRange.getLastColumn()) : startColumn;
+    const warningOnly = protection && typeof protection.isWarningOnly === 'function' ?
+      protection.isWarningOnly() : false;
+    const editable = protection && typeof protection.canEdit === 'function' ?
+      protection.canEdit() : true;
+    return {
+      getRange: () => sourceRange === null ? null : ({
+        getColumn: () => startColumn,
+        getLastColumn: () => lastColumn
+      }),
+      isWarningOnly: () => warningOnly,
+      canEdit: () => editable
+    };
+  };
+  const cloneSpreadsheet = (source, id, name) => {
+    const clone = new MemorySpreadsheet(id, {
+      name: String(name || source.getName()), ownerEmail: source.ownerEmail, sheets: []
+    });
+    source.getSheets().forEach((sourceSheet) => {
+      const clonedSheet = clone.insertSheet(sourceSheet.getName(), {
+        hidden: sourceSheet.hidden,
+        maxRows: sourceSheet.maxRows,
+        maxColumns: sourceSheet.maxColumns
+      });
+      // 値と数式を setValues/setFormulas 経由で写すと、空数式が値を消す。
+      // 複製は内部配列を直接、かつ Date も別インスタンスにして差し替える。
+      clonedSheet.values = sourceSheet.values.map((row) => row.map(cloneCellValue));
+      clonedSheet.formulas = sourceSheet.formulas.map((row) => row.map(cloneCellValue));
+      clonedSheet.formats = sourceSheet.formats ? Object.fromEntries(
+        Object.entries(sourceSheet.formats).map(([key, value]) => [key, cloneCellValue(value)])) : undefined;
+      clonedSheet.protections = sourceSheet.protections ?
+        sourceSheet.protections.map(cloneProtection) : undefined;
+    });
+    if (source.activeSheet) {
+      const activeIndex = source.sheets.indexOf(source.activeSheet);
+      if (activeIndex >= 0) clone.activeSheet = clone.sheets[activeIndex];
+    }
+    return clone;
+  };
+  let folderHandle;
+  let driveFileHandle;
+  const parentFolderHandles = (id) => Array.from(folders.values())
+    .filter((folder) => (folder.fileIds || []).map(String).indexOf(String(id)) >= 0)
+    .map((folder) => folderHandle(folder));
+  const spreadsheetFileHandle = (spreadsheet) => ({
+    getId: () => spreadsheet.getId(),
+    getName: () => spreadsheet.getName(),
+    setName(name) { spreadsheet.name = String(name); return this; },
+    getParents: () => iteratorFor(parentFolderHandles(spreadsheet.getId())),
+    getMimeType: () => 'application/vnd.google-apps.spreadsheet',
+    makeCopy(name, destinationFolder) {
+      let copyName = name;
+      let targetFolder = destinationFolder;
+      if (name && typeof name !== 'string') {
+        targetFolder = name;
+        copyName = spreadsheet.getName();
+      }
+      spreadsheetCopyCounter += 1;
+      let copyId = `copy_${spreadsheet.getId()}_${spreadsheetCopyCounter}`;
+      while (spreadsheets.has(copyId) || files.has(copyId)) {
+        spreadsheetCopyCounter += 1;
+        copyId = `copy_${spreadsheet.getId()}_${spreadsheetCopyCounter}`;
+      }
+      const copy = cloneSpreadsheet(spreadsheet, copyId,
+        copyName === undefined || copyName === null ? spreadsheet.getName() : String(copyName));
+      spreadsheets.set(copyId, copy);
+      if (targetFolder) {
+        const folderId = typeof targetFolder.getId === 'function' ?
+          targetFolder.getId() : targetFolder.id;
+        const folder = folders.get(String(folderId));
+        if (!folder || folder.readAllowed === false) {
+          spreadsheets.delete(copyId);
+          throw new Error(`Folder not found or denied: ${folderId}`);
+        }
+        if (folder.fileIds.map(String).indexOf(copyId) < 0) folder.fileIds.push(copyId);
+      }
+      return spreadsheetFileHandle(copy);
+    }
+  });
+  driveFileHandle = (id) => {
+    const key = String(id);
+    const file = files.get(key);
+    if (file) {
+      file.getParents = () => iteratorFor(parentFolderHandles(key));
+      return file;
+    }
+    const spreadsheet = spreadsheets.get(key);
+    return spreadsheet ? spreadsheetFileHandle(spreadsheet) : null;
+  };
+  folderHandle = (folder) => ({
+    getId: () => folder.id,
+    getName: () => folder.name,
+    getFiles: () => iteratorFor((folder.fileIds || [])
+      .map((id) => driveFileHandle(id)).filter(Boolean)),
+    getFolders: () => iteratorFor((folder.subFolderIds || [])
+      .map((id) => folders.get(String(id))).filter((item) => item && item.readAllowed !== false)
+      .map((item) => folderHandle(item)))
+  });
   const sheetAndRange = (spreadsheetId, a1) => {
     const spreadsheet = openSpreadsheet(spreadsheetId); const parsed = parseA1(a1);
     const sheet = parsed.sheetName ? spreadsheet.getSheetByName(parsed.sheetName) : spreadsheet.getSheets()[0];
@@ -496,6 +610,16 @@ function createGasStubs() {
         getWidth: () => width,
         getHeight: () => height,
         getTitle: () => title
+      };
+    },
+    createTemplateFromFile(fileName) {
+      const templateName = String(fileName);
+      if (!htmlTemplates.has(templateName)) {
+        throw new Error(`HTML template not found: ${templateName}`);
+      }
+      const htmlTemplate = htmlTemplates.get(templateName);
+      return {
+        evaluate() { return HtmlService.createHtmlOutput(htmlTemplate); }
       };
     }
   };
@@ -612,13 +736,14 @@ function createGasStubs() {
     }
   }};
   const DriveApp = {
-    getFileById(id) { const file = files.get(String(id)); if (!file) throw new Error(`File not found: ${id}`); return file; },
+    getFileById(id) {
+      const file = driveFileHandle(id);
+      if (!file) throw new Error(`File not found: ${id}`);
+      return file;
+    },
     getFolderById(id) {
       const folder = folders.get(String(id)); if (!folder || folder.readAllowed === false) throw new Error(`Folder not found or denied: ${id}`);
-      return {getId: () => folder.id, getFiles: () => {
-        let index = 0; const selected = folder.fileIds.map((fileId) => files.get(fileId)).filter(Boolean);
-        return {hasNext: () => index < selected.length, next: () => selected[index++]};
-      }};
+      return folderHandle(folder);
     }
   };
   // Drive Advanced Service（v3）。copy はXLSX→Googleシート変換だけを模す。
@@ -767,7 +892,20 @@ function createGasStubs() {
     getTriggers: () => triggers.slice(),
     createSpreadsheet(id, options = {}) { const ss = new MemorySpreadsheet(id, options); spreadsheets.set(String(id), ss); if (!activeSpreadsheetId) activeSpreadsheetId = String(id); return ss; },
     createFile(id, options = {}) { const file = new MemoryDriveFile(id, options, Utilities); files.set(String(id), file); return file; },
-    createFolder(id, options = {}) { const folder = {id: String(id), name: options.name || String(id), fileIds: (options.fileIds || []).slice(), subFolderIds: (options.subFolderIds || []).slice(), readAllowed: options.readAllowed !== false}; folders.set(String(id), folder); return folder; },
+    createFolder(id, options = {}) {
+      const folder = {id: String(id), name: options.name || String(id),
+        fileIds: (options.fileIds || []).map(String),
+        subFolderIds: (options.subFolderIds || []).map(String),
+        readAllowed: options.readAllowed !== false};
+      folders.set(folder.id, folder);
+      const parentIds = options.parentIds ||
+        (options.parentId === undefined || options.parentId === null ? [] : [options.parentId]);
+      parentIds.map(String).forEach((parentId) => {
+        const parent = folders.get(parentId);
+        if (parent && parent.subFolderIds.indexOf(folder.id) < 0) parent.subFolderIds.push(folder.id);
+      });
+      return folder;
+    },
     setDriveListFailures(failures) { driveListFailures = failures.slice(); },
     addProtection(spreadsheetId, sheetName, options = {}) {
       const sheet = openSpreadsheet(spreadsheetId).getSheetByName(sheetName);
@@ -806,6 +944,10 @@ function createGasStubs() {
       target.hidden = true;
     },
     setUiAvailable(value) { uiAvailable = Boolean(value); },
+    setHtmlTemplate(value, fileName = '81_WebAppUi') {
+      htmlTemplates.set(String(fileName),
+        String(value === undefined || value === null ? '' : value));
+    },
     setPromptResponses(responses) { promptResponses = (responses || []).slice(); },
     setAlertResponses(responses) { alertResponses = (responses || []).slice(); },
     getUiEvents: () => uiEvents.slice(),
@@ -825,7 +967,7 @@ function createGasStubs() {
     roundTrips() { return {rangeReads: roundTrips.rangeReads, rangeWrites: roundTrips.rangeWrites, flushes: roundTrips.flushes}; },
     resetRoundTrips() { roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; },
     resetApiCallCounts() { apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; },
-    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptLock.reset(); sheetsBatchGetFailures = []; getScriptPropertiesFailures = []; activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; effectiveUserEmail = 'tester@example.com'; mailQuota = 100; mailFailures = []; sentMails.length = 0; propertyWrites.length = 0; Object.keys(propertyCallCounts).forEach((key) => { propertyCallCounts[key] = 0; }); uiAvailable = true; uiEvents.length = 0; menus.length = 0; promptResponses = []; alertResponses = []; apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; driveListFailures = []; triggers.length = 0; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; }
+    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptLock.reset(); sheetsBatchGetFailures = []; getScriptPropertiesFailures = []; spreadsheetCopyCounter = 0; htmlTemplates.clear(); activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; effectiveUserEmail = 'tester@example.com'; mailQuota = 100; mailFailures = []; sentMails.length = 0; propertyWrites.length = 0; Object.keys(propertyCallCounts).forEach((key) => { propertyCallCounts[key] = 0; }); uiAvailable = true; uiEvents.length = 0; menus.length = 0; promptResponses = []; alertResponses = []; apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; driveListFailures = []; triggers.length = 0; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; }
   };
   return {Utilities, SpreadsheetApp, Sheets, DriveApp, Drive, Logger, LockService, Session,
     PropertiesService, ScriptApp, MailApp, HtmlService, control};

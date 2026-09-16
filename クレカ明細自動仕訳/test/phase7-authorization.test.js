@@ -688,7 +688,7 @@ module.exports = ({test, assert, gas}) => {
         .replace(/^\s*\/\/.*$/gm, '');
       return /\bauthorize(?:Operation)?\s*\(/.test(source);
     }).sort();
-    assert.deepEqual(callers, ['03_Authorization.gs', '96_Menu.gs']);
+    assert.deepEqual(callers, ['03_Authorization.gs', '80_WebApp.gs', '96_Menu.gs']);
   });
 
   test('auth G-36: schedules notifications ops and runImport never traverse authorization', () => {
