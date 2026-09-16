@@ -1,20 +1,27 @@
 /**
  * Web アプリから呼ぶ関数だけは Apps Script の制約により末尾に `_` を付けない。
  *
- * 次の 3 値は実機受入で測り直す。
- * - WEBAPP_MAX_PER_CALL_
- * - WEBAPP_TRIP_WORST_MS_
+ * 次の 2 値は 2026-09-16 の実機受入 12 で測り直した（§13）。
+ * `webAppResolveReviews` を 1 件で呼び、13.787 秒 ÷ 108 往復 ＝ **128 ms**。
+ * 一覧側の最悪も 223 ms（15.136 秒 ÷ 68 往復）で、worst に 400 ms を採ると
+ * 実測の約 3 倍の余裕がある。上限 8 件は 8×74＋36＝628 往復で、worst を
+ * 踏んでも 251 秒 ── 締切ゲート（245.6 秒で停止）のほうが先に効く。
+ * - WEBAPP_MAX_PER_CALL_  1 → 8
+ * - WEBAPP_TRIP_WORST_MS_ 1600 → 400
+ *
+ * 次の 1 値はまだ実機で測れていない（受入 11。取込が 6 分に当たって
+ * 完走しなかった ── K-W11）。
  * - WEBAPP_IMPORT_BASE_TRIPS_
  */
 var WEBAPP_MAX_DECISIONS_ = 15;
-var WEBAPP_MAX_PER_CALL_ = 1;
+var WEBAPP_MAX_PER_CALL_ = 8;
 var WEBAPP_ITEM_TRIPS_ = 74;
 var WEBAPP_CLEANUP_TRIPS_ = 62;
 var WEBAPP_REVIEW_LIST_LIMIT_ = 15;
 var WEBAPP_IMPORT_BASE_TRIPS_ = 164;
 var WEBAPP_IMPORT_TRIPS_PER_REVIEW_ = 7;
 var WEBAPP_CLONE_TRIPS_ = 3;
-var WEBAPP_TRIP_WORST_MS_ = 1600;
+var WEBAPP_TRIP_WORST_MS_ = 400;
 var WEBAPP_DEADLINE_MS_ = 300000;
 
 /** Web アプリの HTML を返す。 */
@@ -135,7 +142,7 @@ function webAppListReviews(customerId, limit, offset) {
         sourceRow: review.sourceRow,
         merchantOriginal: webAppDisplayMerchant_(review.merchantOriginal),
         merchantNormalized: review.merchantNormalized,
-        candidates: menuReviewCandidates_(review),
+        candidates: webAppUniquePartners_(menuReviewCandidates_(review)),
         usageDate: planned ? planned.b : null,
         amount: planned ? planned.m : null,
         learnBlockedBy: learnBlockedBy
@@ -524,6 +531,33 @@ function webAppDisplayMerchant_(merchant) {
   var raw = String(merchant === null || merchant === undefined ? '' : merchant);
   var visible = raw.replace(/[\u0000-\u001f\u007f]/g, '').trim();
   return visible ? raw : '（店名を表示できません）';
+}
+
+/**
+ * 候補を取引先名で一意にする。**表示のためだけの重複排除である。**
+ *
+ * `merchantCandidates_`（33_MerchantMatcher.gs 98行）は一致した辞書の行を
+ * 1行1候補にして返す。同じ取引先名の行が辞書に何行あっても、担当者に
+ * 見せるべき選択肢は1つである ── 2026-09-16 の実機で、1件の要確認に
+ * 同一の「Amazon」が30個並んだ。
+ *
+ * 根は `learnFromResolution`（34_MerchantDictionary.gs 22行）が重複を
+ * 確かめずに `appendRow` することで、確定のたびに同じ行が積まれる。
+ * **ここはその症状を画面から隠すだけで、辞書そのものは直さない**（K-W17）。
+ * 推測（STEP5）で同名の規則が複数当たる場合にも同じ形になるので、
+ * 辞書を直した後もこの重複排除は要る。
+ *
+ * 先頭を残す ── `sortMerchantRules_` が優先度順に並べた後なので、
+ * 残るのは最も優先される行である。
+ */
+function webAppUniquePartners_(candidates) {
+  var seen = Object.create(null);
+  return (candidates || []).filter(function(candidate) {
+    var name = String(candidate && candidate.partnerName);
+    if (seen[name]) return false;
+    seen[name] = true;
+    return true;
+  });
 }
 
 /** クライアントが渡した既存転記先を 4 条件で検証する。 */
