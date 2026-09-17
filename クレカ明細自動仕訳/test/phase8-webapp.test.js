@@ -1458,6 +1458,8 @@ module.exports = ({test, assert, gas}) => {
     const cloneRowsBefore = txIdRowsIn(clone, customerId);
     assert.equal(cloneRowsBefore.length, 3, '3 件とも複製に転記済み');
     assert.deepEqual(txIdRowsIn(template, customerId), [], '雛形には何も無い');
+    const rowBefore = seeded.reviews.map((review) => Number(transactionFor(review).destinationRow));
+    assert.ok(rowBefore.every((row) => row >= 1), '3 件とも置き場を持っている');
 
     const recovered = call('opsRecoverStuckFiles', []);
     assert.equal(recovered.length, 1, JSON.stringify(recovered));
@@ -1493,6 +1495,27 @@ module.exports = ({test, assert, gas}) => {
     });
     const committed = transactionFor(seeded.reviews[0]);
     assert.equal(committed.transactionStatus, 'COMMITTED', '確定済みは触らない');
+
+    // 再合流の上書きが置き場を消してはならない。消えると採用が
+    // 「positive row or rowNumber」で落ちる（2026-09-18 の実機）。
+    [1, 2].forEach((index) => {
+      const tx = transactionFor(seeded.reviews[index]);
+      assert.equal(Number(tx.destinationRow), Number(rowBefore[index]),
+        `再取込後も行番号を保つ（tx${index}）`);
+    });
+
+    // 要確認が戻っただけでは直っていない。採用まで通って同じ行に F 列が書かれ、
+    // 確定して初めて直ったと言える。
+    const adopted = call('opsAutoAdoptPartners', []);
+    assert.equal(adopted.errors, 0, JSON.stringify(adopted.results));
+    const fColumn = Number(call('getCustomerById', [customerId]).columnMapping.F);
+    [1, 2].forEach((index) => {
+      const tx = transactionFor(seeded.reviews[index]);
+      assert.equal(tx.transactionStatus, 'COMMITTED', `採用で確定する（tx${index}）`);
+      assert.equal(destinationValue(clone, rowBefore[index], fColumn), '株式会社テスト',
+        `同じ行の F 列に取引先が入る（tx${index}）`);
+    });
+    assert.deepEqual(txIdRowsIn(clone, customerId), cloneRowsBefore, '採用でも行は増えない');
   });
 
   test('webapp 45i: recovery refuses when the review rows point at a sheet the rows are not in', () => {
