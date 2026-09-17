@@ -175,6 +175,43 @@ module.exports = ({test, assert, gas}) => {
       ['C001', 'file1', 'RUN_1', 'reviewer@example.com', 'WRITE_ONLY']));
   });
 
+  test('INV-20: a detected but not-yet-releasable lease says how long to wait', () => {
+    // 検出は HEARTBEAT_TIMEOUT_SECONDS（300）、強制解放は
+    // LEASE_FORCE_RELEASE_MIN_SECONDS（600）。**その 5 分間に呼ぶと必ず拒まれる。**
+    // それは失敗ではなく「まだ早い」である。英文の例外をそのまま返すと
+    // 運用者は壊れたと読んで別の手を探しに行く ── 2026-09-16 の実機で、
+    // 実際に3回空振りし、そのぶん取込の再開が遅れた。
+    setup('COMPLETED');
+    gas.call('acquireLease',
+      ['C001', 'file1', 'RUN_1', 'reviewer@example.com', 'WRITE_ONLY']);
+    const sheet = gas.stubs.getSpreadsheet('master').getSheetByName('処理リース');
+    sheet.getRange(2, 8).setValue(new Date(Date.now() - 400 * 1000).toISOString());
+    gas.stubs.setActiveUser('admin@example.com');
+
+    const results = plain(gas.call('opsReleaseStalledLeases', []));
+    assert.equal(results.length, 1, '300秒を超えているので検出はされる');
+    assert.equal(results[0].released, false);
+    assert.equal(results[0].notYet, true);
+    assert.ok(results[0].secondsUntilReleasable > 0 &&
+      results[0].secondsUntilReleasable <= 200,
+      `残り秒数が妥当であること: ${results[0].secondsUntilReleasable}`);
+    assert.match(results[0].reason, /まだ解放できません/);
+    assert.doesNotMatch(results[0].reason, /threshold/,
+      '英文の例外をそのまま通さないこと');
+  });
+
+  test('INV-20: a lease past the force-release threshold still reports released', () => {
+    // 上の「まだ早い」分岐を足したせいで、本来解放できるものまで
+    // notYet に落ちてはならない。
+    setup('COMPLETED');
+    strandLease('WRITE_ONLY');
+    gas.stubs.setActiveUser('admin@example.com');
+    const results = plain(gas.call('opsReleaseStalledLeases', []));
+    assert.equal(results.length, 1);
+    assert.equal(results[0].released, true);
+    assert.equal(results[0].notYet, undefined);
+  });
+
   test('INV-20: force release still requires the administrator role', () => {
     setup('REVIEW_WAIT');
     const leaseId = strandLease('WRITE_ONLY');
