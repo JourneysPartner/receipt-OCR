@@ -1362,7 +1362,7 @@ module.exports = ({test, assert, gas}) => {
     const file = report[0];
     assert.equal(file.destinationSpreadsheetId, seeded.destinationSpreadsheetId,
       '複製を開くこと');
-    assert.notEqual(file.destinationSpreadsheetId, seeded.customer.destinationSpreadsheetId,
+    assert.notEqual(file.destinationSpreadsheetId, seeded.customer.destinationId,
       '雛形ではないこと');
     assert.equal(file.destinationFromReviewRow, true);
     assert.equal(file.transactions, 2);
@@ -1393,6 +1393,169 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(file.unfinished[0].status, 'REVIEW_REQUIRED');
     assert.deepEqual(file.unfinished[0].reviews, ['PARTNER:RESOLVED'],
       '解決済みの要確認も見せる ── 「未解決が無い」と「要確認が無い」は別である');
+  });
+
+  function reviewSheet() {
+    return gas.stubs.getSpreadsheet('master').getSheetByName('要確認');
+  }
+
+  function eachReviewRow(reviewIds, fn) {
+    const wanted = new Set(reviewIds.map(String));
+    const values = reviewSheet().getDataRange().getValues();
+    let found = 0;
+    for (let index = 1; index < values.length; index += 1) {
+      if (wanted.has(String(values[index][0]))) { fn(index + 1); found += 1; }
+    }
+    assert.equal(found, wanted.size, '要確認シートに全部の行があること');
+  }
+
+  /** 「要確認が登録される前に殺された」を作る ── 行ごと空にする。 */
+  function blankReviewRows(reviewIds) {
+    eachReviewRow(reviewIds, (rowNumber) => {
+      reviewSheet().getRange(rowNumber, 1, 1, 32).setValues([blank(32)]);
+    });
+  }
+
+  /** 要確認行の M列（転記先）を書き換える ── K-W10 の状況を作る。 */
+  function setReviewDestination(reviewIds, spreadsheetId) {
+    eachReviewRow(reviewIds, (rowNumber) => {
+      reviewSheet().getRange(rowNumber, 13).setValue(spreadsheetId);
+    });
+  }
+
+  /** 転記先で取引IDを持つ行番号。増えたら二重転記である。 */
+  function txIdRowsIn(spreadsheetId, customerId) {
+    const customer = call('getCustomerById', [customerId]);
+    const column = Number(customer.columnMapping.txId) - 1;
+    const values = gas.stubs.getSpreadsheet(spreadsheetId)
+      .getSheetByName('入力用シート').getDataRange().getValues();
+    const rows = [];
+    values.forEach((row, index) => {
+      if (String(row[column] || '').indexOf('TX_') === 0) rows.push(index + 1);
+    });
+    return rows;
+  }
+
+  function fileStateOf(fileId) {
+    const values = gas.stubs.getSpreadsheet('master')
+      .getSheetByName('恒久ファイルインデックス').getDataRange().getValues();
+    const hit = values.find((row) => String(row[0]) === String(fileId));
+    return hit ? String(hit[3]) : null;
+  }
+
+  test('webapp 45h: recovery of a web-imported stuck file uses the clone and re-import adds no rows', () => {
+    requireWebFunction('opsRecoverStuckFiles');
+    // 2026-09-16 の実機そのもの：取込が 6 分で殺され、1 件は要確認が解決済み、
+    // 2 件は転記はされたが要確認が登録される前に殺された。K-W10 のまま回復すると
+    // 雛形の索引で動き、複製に居る取引を雛形へもう一度書く。
+    const seeded = seedPartnerViaWeb({count: 3});
+    const customerId = seeded.customer.customerId;
+    const clone = seeded.destinationSpreadsheetId;
+    const template = seeded.customer.destinationId;
+    webResolve(customerId, [decision(seeded.reviews[0], '株式会社テスト')]);
+    blankReviewRows([seeded.reviews[1].reviewId, seeded.reviews[2].reviewId]);
+    forceFileState(seeded.fileId, 'WRITING');
+    const cloneRowsBefore = txIdRowsIn(clone, customerId);
+    assert.equal(cloneRowsBefore.length, 3, '3 件とも複製に転記済み');
+    assert.deepEqual(txIdRowsIn(template, customerId), [], '雛形には何も無い');
+
+    const recovered = call('opsRecoverStuckFiles', []);
+    assert.equal(recovered.length, 1, JSON.stringify(recovered));
+    assert.equal(recovered[0].destinationSource, 'REVIEW_ROW', '解決済みの要確認から複製を引く');
+    assert.equal(recovered[0].error, undefined, JSON.stringify(recovered[0]));
+    assert.equal(recovered[0].rewound, true, '行を持つ取引しか無いので回復は空振りし、発見へ戻す');
+    assert.deepEqual(txIdRowsIn(template, customerId), [], '雛形には 1 行も書かない');
+    assert.equal(fileStateOf(seeded.fileId), 'DISCOVERED');
+
+    // 同じ複製へ取り込み直す。行は増えず、殺された 2 件は要確認を取り戻す。
+    const before = spreadsheetIds();
+    const reimport = webImport(seeded.customer, {destinationSpreadsheetId: clone});
+    assert.deepEqual(createdIds(before), [], '新しい複製を作らない');
+    assert.deepEqual(txIdRowsIn(clone, customerId), cloneRowsBefore, '複製の行が増えない');
+    assert.deepEqual(txIdRowsIn(template, customerId), []);
+    const partners = openReviewsFor(customerId, {fileId: seeded.fileId})
+      .filter((row) => row.reviewType === 'PARTNER');
+    const statuses = seeded.reviews.map((review) => {
+      const tx = transactionFor(review);
+      return `${tx.transactionStatus}/${tx.partnerResolutionStatus}/F=${JSON.stringify(
+        tx.planned && tx.planned.f)}`;
+    });
+    const everyReview = call('allReviewRecords_', [])
+      .filter((row) => String(row.fileId || '') === String(seeded.fileId))
+      .map((row) => `${row.reviewType}:${row.status}:${String(row.fullTxId || '').slice(0, 12)}`);
+    assert.equal(partners.length, 2,
+      `殺された 2 件だけが要確認に戻る。実際: 要確認 ${partners.length} 件、取引 ${JSON.stringify(statuses)}、` +
+      `ファイル状態 ${fileStateOf(seeded.fileId)}、要確認行(全状態) ${JSON.stringify(everyReview)}、` +
+      `再取込 ${JSON.stringify({done: reimport.done, remaining: reimport.remaining,
+        files: importFileResults(reimport).map((f) => ({fileId: f.fileId, code: f.code}))})}`);
+    partners.forEach((review) => {
+      assert.equal(review.destinationSpreadsheetId, clone, '要確認の転記先も複製のまま');
+    });
+    const committed = transactionFor(seeded.reviews[0]);
+    assert.equal(committed.transactionStatus, 'COMMITTED', '確定済みは触らない');
+  });
+
+  test('webapp 45i: recovery refuses when the review rows point at a sheet the rows are not in', () => {
+    requireWebFunction('opsRecoverStuckFiles');
+    // 要確認行の M列が雛形を指すのに、行は複製にある ── K-W10 が起きる形。
+    // 転記先を選んだあとの検算が無いと、雛形の索引で回復して二重転記になる。
+    const seeded = seedPartnerViaWeb({count: 2});
+    const customerId = seeded.customer.customerId;
+    const template = seeded.customer.destinationId;
+    setReviewDestination(seeded.reviews.map((review) => review.reviewId), template);
+    forceFileState(seeded.fileId, 'WRITING');
+
+    const recovered = call('opsRecoverStuckFiles', []);
+    assert.equal(recovered.length, 1);
+    assert.match(String(recovered[0].error), /DESTINATION_MISMATCH/);
+    assert.equal(recovered[0].misplaced.length, 2);
+    assert.equal(recovered[0].rewound, undefined, '書かないし戻さない');
+    assert.deepEqual(txIdRowsIn(template, customerId), [], '雛形には 1 行も書かない');
+    assert.equal(fileStateOf(seeded.fileId), 'WRITING', '状態も動かさない');
+  });
+
+  test('webapp 45j: a file with no reviews is assumed to be in the template, and the row check catches it if not', () => {
+    requireWebFunction('opsRecoverStuckFiles');
+    // 要確認が 1 件も無いファイルは雛形と仮定する（定期取込で検証中に止まった
+    // ファイルは要確認を持たず、雛形に居るのが正しい ── notify 1b）。
+    // 仮定が外れる形＝Web アプリで取り込んで要確認が立つ前に殺されたファイルは、
+    // 行の検算で止まらなければならない。雛形の索引にその行は無い。
+    const seeded = seedPartnerViaWeb({count: 2});
+    const customerId = seeded.customer.customerId;
+    const template = seeded.customer.destinationId;
+    blankReviewRows(seeded.reviews.map((review) => review.reviewId));
+    forceFileState(seeded.fileId, 'WRITING');
+
+    const recovered = call('opsRecoverStuckFiles', []);
+    assert.equal(recovered.length, 1);
+    assert.equal(recovered[0].destinationSource, 'TEMPLATE_ASSUMED');
+    assert.match(String(recovered[0].error), /DESTINATION_MISMATCH/, '仮定が外れたら検算が止める');
+    assert.equal(recovered[0].rewound, undefined);
+    assert.deepEqual(txIdRowsIn(template, customerId), [], '雛形には 1 行も書かない');
+    assert.equal(fileStateOf(seeded.fileId), 'WRITING');
+  });
+
+  test('webapp 45k: re-joining a file whose review is still open adds no second review', () => {
+    requireWebFunction('opsRecoverStuckFiles');
+    // 45h の直し（再合流で REVIEW_REQUIRED の取引は要確認を作り直す）が、
+    // 普通の再合流 ── 要確認がまだ OPEN のまま ── で要確認を二重に作っては
+    // ならない。作り直しは registerReview の抑止で冪等でなければならない。
+    const seeded = seedPartnerViaWeb({count: 2});
+    const customerId = seeded.customer.customerId;
+    const clone = seeded.destinationSpreadsheetId;
+    forceFileState(seeded.fileId, 'WRITING');
+    const recovered = call('opsRecoverStuckFiles', []);
+    assert.equal(recovered[0].error, undefined, JSON.stringify(recovered[0]));
+    assert.equal(recovered[0].rewound, true);
+    const rowsBefore = txIdRowsIn(clone, customerId);
+
+    webImport(seeded.customer, {destinationSpreadsheetId: clone});
+    assert.deepEqual(txIdRowsIn(clone, customerId), rowsBefore, '複製の行が増えない');
+    const partners = openReviewsFor(customerId, {fileId: seeded.fileId})
+      .filter((row) => row.reviewType === 'PARTNER');
+    assert.equal(partners.length, 2, '要確認は元の 2 件のまま。二重に作らない');
+    assert.deepEqual(partners.map((row) => row.reviewId).sort(),
+      seeded.reviews.map((row) => row.reviewId).sort(), '同じ要確認行が生きている');
   });
 
   // Case 46 is the whole-suite acceptance condition, not an independent test.
