@@ -1333,5 +1333,67 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(JSON.stringify(dictionaryRows()), before, '1 行も書かない');
   });
 
+  function forceFileState(fileId, state) {
+    const sheet = gas.stubs.getSpreadsheet('master').getSheetByName('恒久ファイルインデックス');
+    const values = sheet.getDataRange().getValues();
+    for (let index = 1; index < values.length; index += 1) {
+      if (String(values[index][0]) === String(fileId)) {
+        sheet.getRange(index + 1, 4).setValue(state);
+        return;
+      }
+    }
+    assert.fail(`恒久ファイルインデックスに ${fileId} が無い`);
+  }
+
+  test('webapp 45f: the stuck-file report reads the clone, not the template', () => {
+    requireWebFunction('opsExplainStuckFileTransactions');
+    // opsInspectStuckFiles は customer.destinationSpreadsheetId＝雛形を開くので、
+    // 複製へ書いた取引を「1 行も書けていない」と報告する（K-W18）。実機では
+    // COMMITTED 29 件に対して rowsCarryingTxId: 0 と出た。ここは要確認行の
+    // M列を正本にするので、同じ取引が見えなければならない。
+    const seeded = seedPartnerViaWeb({count: 2});
+    // 1 件だけ確定させる ── 実機の 202502.xlsx は 32 件中 29 件が確定済みで、
+    // 報告に並ぶべきは残りの 3 件だけだった。全件が未終端の固定データでは、
+    // 終端を外す絞り込みが効いていなくても同じ結果になる。
+    webResolve(seeded.customer.customerId, [decision(seeded.reviews[0], '株式会社テスト')]);
+    forceFileState(seeded.fileId, 'WRITING');
+    const report = call('opsExplainStuckFileTransactions', []);
+    assert.equal(report.length, 1);
+    const file = report[0];
+    assert.equal(file.destinationSpreadsheetId, seeded.destinationSpreadsheetId,
+      '複製を開くこと');
+    assert.notEqual(file.destinationSpreadsheetId, seeded.customer.destinationSpreadsheetId,
+      '雛形ではないこと');
+    assert.equal(file.destinationFromReviewRow, true);
+    assert.equal(file.transactions, 2);
+    assert.equal(file.unfinishedCount, 1, '確定した取引は並べない');
+    file.unfinished.forEach((tx) => {
+      assert.equal(tx.status, 'REVIEW_REQUIRED');
+      assert.deepEqual(tx.reviews, ['PARTNER:OPEN']);
+      assert.equal(tx.rowCarriesTxId, true, '複製の転記行に取引IDが入っている');
+    });
+  });
+
+  test('webapp 45g: a transaction left without any review is visible as such', () => {
+    requireWebFunction('opsExplainStuckFileTransactions');
+    // 実機の K-W19：要確認 0 件のまま REVIEW_REQUIRED が 3 件残った。
+    // 要確認が在るのか無いのかで、要るのが登録なのか確定なのかが変わる。
+    const seeded = seedPartnerViaWeb({count: 1});
+    const reviewSheet = gas.stubs.getSpreadsheet('master').getSheetByName('要確認');
+    const values = reviewSheet.getDataRange().getValues();
+    for (let index = 1; index < values.length; index += 1) {
+      if (String(values[index][0]) === String(seeded.reviews[0].reviewId)) {
+        reviewSheet.getRange(index + 1, 2).setValue('RESOLVED');
+        break;
+      }
+    }
+    forceFileState(seeded.fileId, 'WRITING');
+    const file = call('opsExplainStuckFileTransactions', [])[0];
+    assert.equal(file.unfinishedCount, 1);
+    assert.equal(file.unfinished[0].status, 'REVIEW_REQUIRED');
+    assert.deepEqual(file.unfinished[0].reviews, ['PARTNER:RESOLVED'],
+      '解決済みの要確認も見せる ── 「未解決が無い」と「要確認が無い」は別である');
+  });
+
   // Case 46 is the whole-suite acceptance condition, not an independent test.
 };
