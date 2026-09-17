@@ -88,7 +88,7 @@ function getTxIndexSheet(customerId, year, createIfMissing) {
   return sheet;
 }
 
-function registerPrepared(txs, runId) {
+function registerPrepared(txs, runId, existingByIdHint) {
   if (!Array.isArray(txs)) throw new TypeError('txs must be an array');
   return withScriptLock_(function() {
     var logSheet = transactionLogSheet_();
@@ -97,7 +97,10 @@ function registerPrepared(txs, runId) {
     });
     // 既存行の照会は1回にまとめる。取引ごとに引くと、取引ログのキー列の
     // 全読みが件数ぶん走る（`settleWrittenTransactions`と同じ理由）。
-    var existingById = activeTransactionRecordsByIds_(ids);
+    // 8-10の橋渡しが同じ照会を先に済ませていれば、それを受け取って読み直さない
+    // （同じファイルの取引IDを作れるのは同じファイルの取込だけで、それは
+    // ファイルのリースが直列化している）。
+    var existingById = existingByIdHint || activeTransactionRecordsByIds_(ids);
     var appends = [];
 
     txs.forEach(function(tx, position) {

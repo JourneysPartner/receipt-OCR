@@ -87,8 +87,30 @@ function runPreValidationBlock(input) {
   // `UNRESOLVED`のまま、**解決すべき要確認行が存在しない**。担当者は
   // `ADOPT_EXISTING_PARTNER`も`RESOLVE_WITHOUT_PARTNER`も起動できず、
   // 取引は永久に確定不能になる。
+  //
+  // **再合流では、辞書が自動確定できるようになっていても要確認を作り直す。**
+  // 取引ログに既に`REVIEW_REQUIRED`かつ`UNRESOLVED`で載っている取引は、
+  // 前回の実行が9-8の前で殺されたものである（転記行は持つ）。ここで
+  // 自動確定扱いにして要確認を作らないと、その取引は書込対象でもない
+  // （9-3が書くのはPREPARED/WRITINGだけ）ので、**F列も確定も誰も行わない**
+  // ── 2026-09-17、辞書を直した直後の再取込がこの形で止まった。要確認を
+  // 作り直せば、採用操作が同じ行へF列を書いて確定する（既存の経路）。
+  // 既にOPENの要確認があれば`registerReview`が同じ鍵で抑止するので冪等。
+  //
+  // 既存行の照会は1回にまとめ、8-13の`registerPrepared`にも渡す（二重読みを
+  // 避ける）。ロックの外で引くが、同じファイルの取引IDを作れるのは同じ
+  // ファイルの取込だけで、それはファイルのリースが直列化している。
+  var parsedIds = (input.transactions || []).map(function(tx) {
+    return String(tx.fullTxId || tx.transactionId || '');
+  }).filter(function(id) { return id !== ''; });
+  var existingById = parsedIds.length ?
+    activeTransactionRecordsByIds_(parsedIds) : Object.create(null);
   (input.transactions || []).forEach(function(tx) {
-    if (tx.partnerResolutionStatus !== PARTNER_STATUS.UNRESOLVED) return;
+    var existing = existingById[String(tx.fullTxId || tx.transactionId || '')];
+    var rejoinedUnresolved = Boolean(existing) &&
+      existing.transactionStatus === TX_STATUS.REVIEW_REQUIRED &&
+      existing.partnerResolutionStatus === PARTNER_STATUS.UNRESOLVED;
+    if (tx.partnerResolutionStatus !== PARTNER_STATUS.UNRESOLVED && !rejoinedUnresolved) return;
     var match = tx.partnerMatch || {};
     pendingReviews.push({
       reviewType: REVIEW_TYPE.PARTNER,
@@ -156,7 +178,7 @@ function runPreValidationBlock(input) {
   // 加算を永続化しないと、継続トリガーで再開したときに0から数え直し、
   // 上限がいくらでも超えられる（4.31）。
   if (transactions.length) {
-    registerPrepared(transactions, input.runId);
+    registerPrepared(transactions, input.runId, existingById);
     if (input.runId) incrementRunTransactionCount(input.runId, transactions.length);
   }
 
