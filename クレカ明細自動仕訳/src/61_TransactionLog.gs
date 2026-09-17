@@ -130,6 +130,22 @@ function registerPrepared(txs, runId, existingByIdHint) {
         updatedRow[9] = status;                       // 状態は据え置く
         updatedRow[43] = current.registeredAt;        // 登録日時は初回の値を保つ
         updatedRow[44] = nowIso_();
+        // **解析では分からない列は既存行から引き継ぐ。**再合流の解析結果は
+        // 「どこへ書いたか」「読み返して何が入っていたか」を持たない。
+        // 組み直した行でそこを空にすると、転記済みの`REVIEW_REQUIRED`が
+        // 置き場を失い、採用操作が「positive row or rowNumber」で落ちる
+        // （2026-09-18 の実機。回復をもう一度掛けて索引から行を引き直した）。
+        // 読取確認値を失うと4.24検査3が「予定値あり・読取確認値なし」を
+        // 手動変更と誤検知する（INV-01）。
+        var carried = current._values || [];
+        [28, 29, 30].forEach(function(column) {          // 転記先ID・シート名・行
+          if (updatedRow[column] === '' && carried[column] !== undefined) {
+            updatedRow[column] = carried[column];
+          }
+        });
+        [23, 24, 25, 26, 27, 46].forEach(function(column) { // 読取確認値 b/f/i/k/m/g
+          if (carried[column] !== undefined) updatedRow[column] = carried[column];
+        });
         logSheet.getRange(current._rowNumber, 1, 1, TRANSACTION_LOG_WIDTH_)
           .setValues([updatedRow]);
         return;
