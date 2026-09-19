@@ -1581,5 +1581,84 @@ module.exports = ({test, assert, gas}) => {
       seeded.reviews.map((row) => row.reviewId).sort(), '同じ要確認行が生きている');
   });
 
+  /** `settle_` が確定の手前で殺された状態を作る（6分上限は finally を待たない）。 */
+  function settleWithoutCommitting(customerId, review, partnerName = '株式会社テスト') {
+    return withMocks({
+      commitIfConditionsMet: () => ({committed: false, unmetConditions: [], openReviewTypes: []})
+    }, () => webResolve(customerId, [decision(review, partnerName)]));
+  }
+
+  test('webapp 45l: a transaction settled but never committed is picked up', () => {
+    requireWebFunction('opsCommitSettledTransactions');
+    // 要確認は解決済み・取引先も解決済み・取引だけ REVIEW_REQUIRED。
+    // **未解決の要確認が無いので誰も再訪しない** ── 解決操作も自動採用も
+    // openReviews を起点にする。2026-09-17 の実機で 1 件出た。
+    const seeded = seedPartnerViaWeb({count: 1});
+    const customerId = seeded.customer.customerId;
+    settleWithoutCommitting(customerId, seeded.reviews[0]);
+
+    const orphan = transactionFor(seeded.reviews[0]);
+    assert.equal(orphan.transactionStatus, 'REVIEW_REQUIRED', '確定だけ走っていない');
+    assert.equal(orphan.partnerResolutionStatus, 'RESOLVED_WITH_PARTNER');
+    assert.equal(openReviewsFor(customerId, {fileId: seeded.fileId}).length, 0,
+      '未解決の要確認が無い ── これが「誰も再訪しない」の正体');
+    assert.equal(fileStateOf(seeded.fileId), 'REVIEW_WAIT', 'ファイルは完了できないまま');
+
+    const picked = call('opsCommitSettledTransactions', []);
+    assert.equal(picked.committed.length, 1, JSON.stringify(picked));
+    assert.equal(picked.committed[0].fullTxId, orphan.fullTxId);
+    assert.equal(transactionFor(seeded.reviews[0]).transactionStatus, 'COMMITTED');
+  });
+
+  test('webapp 45m: auto-adoption picks up the orphan and lets the file finish', () => {
+    requireWebFunction('opsAutoAdoptPartners');
+    // 自動採用が前回の取りこぼしを拾わないと、確定だけ未実行の取引が
+    // ファイルの完了を永久に止める。拾う位置は完了パスの**前**でなければ
+    // その回では完了しない。
+    const seeded = seedPartnerViaWeb({count: 1});
+    settleWithoutCommitting(seeded.customer.customerId, seeded.reviews[0]);
+    assert.equal(fileStateOf(seeded.fileId), 'REVIEW_WAIT');
+
+    const summary = call('opsAutoAdoptPartners', []);
+    assert.equal(summary.settledLate.length, 1, JSON.stringify(summary));
+    assert.deepEqual(summary.completedFiles, [seeded.fileId], '同じ回で完了まで行く');
+    assert.equal(fileStateOf(seeded.fileId), 'COMPLETED');
+  });
+
+  test('webapp 45n: a transaction whose partner is unresolved is not even asked about', () => {
+    requireWebFunction('opsCommitSettledTransactions');
+    // 取引先が未解決の取引は要確認が立っている（または K-W19 の型で、それは
+    // 回復の仕事）。判定器へ渡す前に外す ── 渡すと blocked が件数ぶん膨らみ、
+    // 本当に拾うべき取引が埋もれる。
+    const seeded = seedPartnerViaWeb({count: 2});
+    const picked = call('opsCommitSettledTransactions', []);
+    assert.deepEqual(picked.committed, []);
+    assert.deepEqual(picked.blocked, [], '判定器へ渡さない');
+    seeded.reviews.forEach((review) => {
+      assert.equal(transactionFor(review).transactionStatus, 'REVIEW_REQUIRED');
+    });
+  });
+
+  test('webapp 45o: a completed file is not scanned for orphans', () => {
+    requireWebFunction('opsCommitSettledTransactions');
+    // 終端のファイルに `REVIEW_REQUIRED` は無いので結果は変わらない ── だから
+    // 結果だけを見るテストでは絞り込みを外しても緑のままになる。守っているのは
+    // 読取の量で、完了済みファイルは顧客の履歴ぶん増え続ける（実機で既に 35 件）。
+    const seeded = seedPartnerViaWeb({count: 1});
+    settleWithoutCommitting(seeded.customer.customerId, seeded.reviews[0]);
+    call('opsAutoAdoptPartners', []);
+    assert.equal(fileStateOf(seeded.fileId), 'COMPLETED');
+
+    const scanned = [];
+    const real = gas.context.getTransactionsByStatus;
+    withMocks({
+      getTransactionsByStatus(fileId, statuses) {
+        scanned.push(String(fileId));
+        return real(fileId, statuses);
+      }
+    }, () => call('opsCommitSettledTransactions', []));
+    assert.deepEqual(scanned, [], '終端のファイルは 1 度も読まない');
+  });
+
   // Case 46 is the whole-suite acceptance condition, not an independent test.
 };
