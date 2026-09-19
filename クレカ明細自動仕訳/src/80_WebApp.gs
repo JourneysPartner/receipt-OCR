@@ -232,6 +232,12 @@ function webAppRunImport(customerId, folderId, options) {
       fileIds: candidates.map(function(candidate) { return String(candidate.fileId); }),
       maxFilesPerCustomer: 1,
       destinationSpreadsheetId: destinationSpreadsheetId,
+      // 監査ログ連鎖の検証は**1押下につき1回**にする。1呼出し1ファイルなので、
+      // 毎回やると 41 秒（500行のSHA-256。2026-09-20 実測）をファイルの数だけ
+      // 払う ── 12ファイルで 8 分がこれだけに消える。押下の2回目以降は
+      // クライアントが前回の転記先を渡してくるので、それを「同じ押下の続き」の
+      // 印として使う（§7.3.1）。**押下ごとには必ず走る。**
+      verifyAuditChain: !suppliedDestinationId,
       now: now
     });
     var fileResults = [];

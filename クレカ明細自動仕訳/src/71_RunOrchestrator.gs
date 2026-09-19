@@ -174,9 +174,21 @@ function runImport(options) {
       var index = buildIndex(customer, {});
       var integrity = runCustomerIntegrityCheck_(customer, index);
       customerReport.integrity = integrity;
-      var audit = verifyChain('RECENT');
-      if (audit && audit.ok === false) {
-        customerReport.auditChain = 'BROKEN_NOTIFY_ONLY';
+
+      // 監査ログ連鎖の検証は**往復ではなく計算**である ── 直近500行の
+      // SHA-256 を数え直すので、実機で 41 秒かかる（2026-09-20 実測）。
+      // そして結果は通知に載るだけで、取込の判断を1つも変えない
+      // （`integrity.stop` と違い、ここで止まることはない）。
+      //
+      // 1ファイルにつき1回払うと、12ファイルで 8 分をこれだけに使う。
+      // **呼出側が頻度を決める。**既定は従来どおり毎回で、Web アプリだけが
+      // 「1押下の最初の呼出し」に絞る（80_WebApp）── 押下ごとには必ず
+      // 走るので、破損の発見が実質的に遅れることはない。
+      if (opts.verifyAuditChain !== false) {
+        var audit = verifyChain('RECENT');
+        if (audit && audit.ok === false) {
+          customerReport.auditChain = 'BROKEN_NOTIFY_ONLY';
+        }
       }
       if (integrity.stop) {
         customerReport.skipped = 'INTEGRITY_STOP';

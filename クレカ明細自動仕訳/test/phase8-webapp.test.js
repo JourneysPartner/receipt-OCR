@@ -1709,5 +1709,43 @@ module.exports = ({test, assert, gas}) => {
     assert.deepEqual(txIdRowsIn(clone, customerId), cloneRowsBefore, '複製の行も増えない');
   });
 
+  test('webapp 45q: the audit chain is verified once per press, not once per file', () => {
+    requireWebFunction('webAppRunImport');
+    // 監査ログ連鎖の検証は往復ではなく計算で、実機で 41 秒かかる（500行の
+    // SHA-256。2026-09-20 実測）。結果は通知に載るだけで取込の判断を変えない。
+    // 1呼出し1ファイルなので、毎回やると 12 ファイルで 8 分をこれに使う。
+    // **押下ごとには必ず走らせる** ── 走らせないと破損の発見が遅れる。
+    const seeded = setupWorld({});
+    seedDictionaryRow(seeded.customer.customerId, {dictId: 'DICT_AC',
+      original: '連鎖店', partnerName: '連鎖先', conflict: false});
+    let verified = 0;
+    const real = gas.context.verifyChain;
+    const counting = {verifyChain(scope) { verified += 1; return real(scope); }};
+
+    ['ac1', 'ac2'].forEach((fileId) => putCsv(seeded.customer,
+      {fileId, rows: ['2025/12/10,連鎖店,1500,仕入れ']}));
+
+    let destId = null;
+    withMocks(counting, () => {
+      const first = call('webAppRunImport',
+        [seeded.customer.customerId, seeded.customer.cardId, {}]);
+      destId = first.destinationSpreadsheetId;
+    });
+    assert.equal(verified, 1, '押下の最初の呼出しでは検査する');
+
+    withMocks(counting, () => {
+      call('webAppRunImport', [seeded.customer.customerId, seeded.customer.cardId,
+        {destinationSpreadsheetId: destId}]);
+    });
+    assert.equal(verified, 1, '同じ押下の続きでは検査しない（ここが 41 秒）');
+
+    // 次の押下＝転記先を渡さない呼出しでは、また検査する。
+    putCsv(seeded.customer, {fileId: 'ac3', rows: ['2025/12/12,連鎖店,1700,仕入れ']});
+    withMocks(counting, () => {
+      call('webAppRunImport', [seeded.customer.customerId, seeded.customer.cardId, {}]);
+    });
+    assert.equal(verified, 2, '新しい押下では必ず検査する');
+  });
+
   // Case 46 is the whole-suite acceptance condition, not an independent test.
 };
