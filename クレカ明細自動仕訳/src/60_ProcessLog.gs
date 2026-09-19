@@ -298,7 +298,12 @@ function setPermanentIndexTargetSheet(fileId, sheetName) {
     if (!record) {
       throw new IntegrityError(null, 'Permanent file index row not found: ' + fileId);
     }
-    permanentFileIndexSheet_().getRange(record.rowNumber, 13).setValue(String(sheetName));
+    // 恒久ファイルインデックスは Sheets API でしか書かない
+    // （01 の `SHEETS_API_ONLY_SHEETS_`）。`flush 1` が見張っている。
+    Sheets.Spreadsheets.Values.batchUpdate({valueInputOption: 'RAW', data: [{
+      range: a1Range_(permanentFileIndexSheet_().getName(), record.rowNumber, 13, 13),
+      values: [[String(sheetName)]]
+    }]}, masterSpreadsheet_().getId());
   });
 }
 

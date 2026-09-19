@@ -154,4 +154,63 @@ module.exports = ({test, assert, gas}) => {
     const trips = measure(3);
     assert.ok(trips <= 200, `1ファイルの固定往復が${trips}回。予算200回を超えた`);
   });
+
+  test('flush 1: the sheets that skip the pre-read flush are never written through SpreadsheetApp', () => {
+    // `sheetsReadRanges_` は `SHEETS_API_ONLY_SHEETS_` のシートで
+    // 読取前の `flush()` を省く。省ける根拠は「そのシートを
+    // SpreadsheetApp で書く箇所が1つも無い」ことだけである。
+    // 1行でも `setValue` を足すと、**flushを省いた全経路が古い行を読み始め**、
+    // 古い値を書き戻す（2026-09-02 の実機事故と同型）。人の記憶では守れない。
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const srcDir = path.join(process.cwd(), 'src');
+    const accessors = {
+      'クレカ処理ログ': 'processLogSheet_',
+      '恒久ファイルインデックス': 'permanentFileIndexSheet_'
+    };
+    // **宣言したシートは必ず検査対象にする。**この確認が無いと、
+    // `SHEETS_API_ONLY_SHEETS_` へ1枚足すだけで、そのシートは
+    // 「flushを省くのに誰も見張らない」状態になる。
+    (gas.context.SHEETS_API_ONLY_SHEETS_ || []).forEach((name) => {
+      assert.ok(accessors[name],
+        `${name} の取得関数がこの表に無い。SHEETS_API_ONLY_SHEETS_ へ足すなら、` +
+        'その書込を機械で見張れるようにここへも足すこと');
+    });
+    const offenders = [];
+    fs.readdirSync(srcDir).filter((name) => name.endsWith('.gs')).forEach((name) => {
+      const text = fs.readFileSync(path.join(srcDir, name), 'utf8');
+      text.split('\n').forEach((line, index) => {
+        Object.values(accessors).forEach((accessor) => {
+          if (line.indexOf(accessor + '()') < 0) return;
+          if (!/\.(setValue|setValues|appendRow|insertRowBefore|insertRowsAfter|deleteRow|clear)\s*\(/.test(line)) return;
+          offenders.push(`${name}:${index + 1}  ${line.trim().slice(0, 90)}`);
+        });
+      });
+    });
+    assert.deepEqual(offenders, [],
+      'flushを省いたシートへ SpreadsheetApp で書いている。' +
+      'Sheets API（Sheets.Spreadsheets.Values.batchUpdate）へ寄せるか、' +
+      '01 の SHEETS_API_ONLY_SHEETS_ から外すこと:\n' + offenders.join('\n'));
+  });
+
+  test('flush 2: reading the process log no longer forces a recalculation', () => {
+    // 効果の実測。1ファイルの取込で処理ログと恒久索引は合わせて30回前後
+    // 読まれ、以前はそのたびに flush していた（往復の4割）。
+    measure(3);
+    const after = gas.stubs.roundTrips();
+
+    const saved = gas.context.SHEETS_API_ONLY_SHEETS_;
+    gas.context.SHEETS_API_ONLY_SHEETS_ = [];
+    try {
+      measure(3);
+    } finally {
+      gas.context.SHEETS_API_ONLY_SHEETS_ = saved;
+    }
+    const before = gas.stubs.roundTrips();
+
+    assert.equal(after.rangeReads, before.rangeReads, '読取の回数は変えていない');
+    assert.ok(after.flushes < before.flushes - 20,
+      `flushが${before.flushes}回から${after.flushes}回にしかならない。` +
+      '省けているか（SHEETS_API_ONLY_SHEETS_ が効いているか）を見よ');
+  });
 };

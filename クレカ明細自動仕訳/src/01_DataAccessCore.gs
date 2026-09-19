@@ -68,6 +68,18 @@ function withScriptLock_(callback) {
 }
 
 /**
+ * **SpreadsheetApp では書かないと決めたシート。**読取前のflushを省ける。
+ *
+ * ここへ足すのは「そのシートへの `setValue`／`setValues`／`appendRow` が
+ * `src/` に1つも無い」と確かめた場合だけである。`flush 1` がそれを機械で
+ * 確かめ続ける。
+ */
+var SHEETS_API_ONLY_SHEETS_ = Object.freeze([
+  CONFIG.SHEET_NAMES.PROCESS_LOG,
+  CONFIG.SHEET_NAMES.PERMANENT_FILE_INDEX
+]);
+
+/**
  * マスター系シートの読取はSheets APIで行う（4.23 flush規則2）。
  *
  * 処理ログ・恒久ファイルインデックス等はSheets APIで**書く**が、
@@ -75,9 +87,21 @@ function withScriptLock_(callback) {
  * 「直前に作った行が見えない」「古い状態を読んで書き戻す」が実際に起きた。
  * Sheets APIの読取は自らの書込を必ず見る。読取前の`flush()`は、逆方向
  * （appendRow等のSpreadsheetApp書込）をAPIから見える状態にするためにある。
+ *
+ * **そのSpreadsheetApp書込が存在しないシートでは、flushは払い損である。**
+ * `flush()`は保留中の書込を全部吐き出させ、転記先の残高数式まで再計算
+ * させる。処理ログと恒久ファイルインデックスは1ファイルの取込で合わせて
+ * 30回前後読まれるので、そのたびの再計算が往復の4割を占めていた
+ * （2026-09-20の計測：1ファイル120往復のうち読取59・flush50）。
+ *
+ * この2枚は Sheets API でしか書かない（`SHEETS_API_ONLY_SHEETS_`）。
+ * 唯一の例外は `ensureRowExists_` の `insertRowsAfter` だが、あれは
+ * **自分で直後にflushする**ので、戻った時点で API から見えている。
+ * 不変条件は `flush 1` が守る ── 破ると古い行を読んで書き戻す
+ * （2026-09-02の実機事故と同型）。
  */
 function sheetsReadRanges_(sheet, ranges) {
-  SpreadsheetApp.flush();
+  if (SHEETS_API_ONLY_SHEETS_.indexOf(String(sheet.getName())) < 0) SpreadsheetApp.flush();
   var lastError = null;
   for (var attempt = 0; attempt <= 4; attempt += 1) {
     try {

@@ -106,7 +106,13 @@ function renewHeartbeat(leaseId) {
     var lease = matches[0]; var process = getProcessLogRecord_(lease.fileId);
     if (!process || [FILE_STATE.VALIDATING, FILE_STATE.WRITING].indexOf(String(process.values[16])) < 0) return;
     var now = nowIso_(); leaseSheet_().getRange(lease._rowNumber, 8).setValue(now);
-    processLogSheet_().getRange(process.rowNumber, 30).setValue(now);
+    // 処理ログは Sheets API でしか書かない（01 の `SHEETS_API_ONLY_SHEETS_`）。
+    // ここを `setValue` に戻すと、読取前の flush を省いた全経路が古い行を
+    // 読み始める。`flush 1` が見張っている。
+    Sheets.Spreadsheets.Values.batchUpdate({valueInputOption: 'RAW', data: [{
+      range: a1Range_(processLogSheet_().getName(), process.rowNumber, 30, 30),
+      values: [[now]]
+    }]}, masterSpreadsheet_().getId());
   });
 }
 
