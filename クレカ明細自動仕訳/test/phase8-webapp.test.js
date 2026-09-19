@@ -1333,16 +1333,26 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(JSON.stringify(dictionaryRows()), before, '1 行も書かない');
   });
 
+  /** 恒久索引と処理ログの**両方**を動かす ── 片方だけだと比較更新が落ちる。 */
   function forceFileState(fileId, state) {
-    const sheet = gas.stubs.getSpreadsheet('master').getSheetByName('恒久ファイルインデックス');
+    const master = gas.stubs.getSpreadsheet('master');
+    [['恒久ファイルインデックス', 1, 4], ['クレカ処理ログ', 8, 17]].forEach(
+      ([name, idColumn, stateColumn]) => {
+        const sheet = master.getSheetByName(name);
+        const values = sheet.getDataRange().getValues();
+        const index = values.findIndex((row) => String(row[idColumn - 1]) === String(fileId));
+        assert.ok(index > 0, `${name} に ${fileId} が無い`);
+        sheet.getRange(index + 1, stateColumn).setValue(state);
+      });
+  }
+
+  /** 「行を予約する前に殺された」取引を作る ── 回復が書く対象になる。 */
+  function clearDestinationRow(fullTxId) {
+    const sheet = gas.stubs.getSpreadsheet('master').getSheetByName('クレカ取引ログ');
     const values = sheet.getDataRange().getValues();
-    for (let index = 1; index < values.length; index += 1) {
-      if (String(values[index][0]) === String(fileId)) {
-        sheet.getRange(index + 1, 4).setValue(state);
-        return;
-      }
-    }
-    assert.fail(`恒久ファイルインデックスに ${fileId} が無い`);
+    const index = values.findIndex((row) => String(row[0]) === String(fullTxId));
+    assert.ok(index > 0, `取引ログに ${fullTxId} が無い`);
+    sheet.getRange(index + 1, 31).setValue('');
   }
 
   test('webapp 45f: the stuck-file report reads the clone, not the template', () => {
@@ -1454,18 +1464,22 @@ module.exports = ({test, assert, gas}) => {
     const template = seeded.customer.destinationId;
     webResolve(customerId, [decision(seeded.reviews[0], '株式会社テスト')]);
     blankReviewRows([seeded.reviews[1].reviewId, seeded.reviews[2].reviewId]);
+    const rowBefore = seeded.reviews.map((review) => Number(transactionFor(review).destinationRow));
+    assert.ok(rowBefore.every((row) => row >= 1), '3 件とも置き場を持っている');
+    // 1 件は行の予約より前で殺されたことにする ── 回復に書くものを与えないと、
+    // 転記先を引く枝そのものが走らない（行を持つ取引だけなら回復は空振りする）。
+    clearDestinationRow(seeded.reviews[1].fullTxId);
     forceFileState(seeded.fileId, 'WRITING');
     const cloneRowsBefore = txIdRowsIn(clone, customerId);
     assert.equal(cloneRowsBefore.length, 3, '3 件とも複製に転記済み');
     assert.deepEqual(txIdRowsIn(template, customerId), [], '雛形には何も無い');
-    const rowBefore = seeded.reviews.map((review) => Number(transactionFor(review).destinationRow));
-    assert.ok(rowBefore.every((row) => row >= 1), '3 件とも置き場を持っている');
 
     const recovered = call('opsRecoverStuckFiles', []);
     assert.equal(recovered.length, 1, JSON.stringify(recovered));
     assert.equal(recovered[0].destinationSource, 'REVIEW_ROW', '解決済みの要確認から複製を引く');
     assert.equal(recovered[0].error, undefined, JSON.stringify(recovered[0]));
-    assert.equal(recovered[0].rewound, true, '行を持つ取引しか無いので回復は空振りし、発見へ戻す');
+    assert.equal(recovered[0].recovered.length, 1, '行を失った 1 件を複製の索引から拾う');
+    assert.equal(recovered[0].rewound, true, '発見へ戻す');
     assert.deepEqual(txIdRowsIn(template, customerId), [], '雛形には 1 行も書かない');
     assert.equal(fileStateOf(seeded.fileId), 'DISCOVERED');
 
@@ -1526,12 +1540,13 @@ module.exports = ({test, assert, gas}) => {
     const customerId = seeded.customer.customerId;
     const template = seeded.customer.destinationId;
     setReviewDestination(seeded.reviews.map((review) => review.reviewId), template);
+    clearDestinationRow(seeded.reviews[0].fullTxId);   // 回復に書くものを与える
     forceFileState(seeded.fileId, 'WRITING');
 
     const recovered = call('opsRecoverStuckFiles', []);
     assert.equal(recovered.length, 1);
     assert.match(String(recovered[0].error), /DESTINATION_MISMATCH/);
-    assert.equal(recovered[0].misplaced.length, 2);
+    assert.equal(recovered[0].misplaced.length, 1, '行を保っている方が食い違いとして出る');
     assert.equal(recovered[0].rewound, undefined, '書かないし戻さない');
     assert.deepEqual(txIdRowsIn(template, customerId), [], '雛形には 1 行も書かない');
     assert.equal(fileStateOf(seeded.fileId), 'WRITING', '状態も動かさない');
@@ -1547,6 +1562,7 @@ module.exports = ({test, assert, gas}) => {
     const customerId = seeded.customer.customerId;
     const template = seeded.customer.destinationId;
     blankReviewRows(seeded.reviews.map((review) => review.reviewId));
+    clearDestinationRow(seeded.reviews[0].fullTxId);   // 回復に書くものを与える
     forceFileState(seeded.fileId, 'WRITING');
 
     const recovered = call('opsRecoverStuckFiles', []);
@@ -1658,6 +1674,39 @@ module.exports = ({test, assert, gas}) => {
       }
     }, () => call('opsCommitSettledTransactions', []));
     assert.deepEqual(scanned, [], '終端のファイルは 1 度も読まない');
+  });
+
+  test('webapp 45p: a stuck file with nothing to write is completed without needing a destination', () => {
+    requireWebFunction('opsRecoverStuckFiles');
+    // 辞書が全件自動確定した取込は要確認を1件も立てない。書き終えた直後に
+    // 6分で殺されると、転記先を要確認行から引けず雛形と仮定され、行の検算が
+    // 必ず食い違う ── 書くものは無いのに永久に WRITING のまま残る
+    // （2026-09-19 の実機。46件すべて確定済みの 202511.xlsx）。
+    const seeded = setupWorld({});
+    const customerId = seeded.customer.customerId;
+    const template = seeded.customer.destinationId;
+    seedDictionaryRow(customerId, {dictId: 'DICT_AUTO',
+      original: '自動確定店', partnerName: '自動確定先', conflict: false});
+    putCsv(seeded.customer, {fileId: 'no_reviews',
+      rows: ['2025/12/10,自動確定店,1200,仕入れ']});
+    const result = webImport(seeded.customer, {});
+    const clone = result.destinationSpreadsheetId;
+    assert.equal(openReviewsFor(customerId, {fileId: 'no_reviews'}).length, 0,
+      '要確認が 1 件も立たない取込であること');
+    forceFileState('no_reviews', 'WRITING');
+    const cloneRowsBefore = txIdRowsIn(clone, customerId);
+    assert.equal(cloneRowsBefore.length, 1);
+
+    const recovered = call('opsRecoverStuckFiles', []);
+    assert.equal(recovered.length, 1, JSON.stringify(recovered));
+    assert.equal(recovered[0].nothingToRecover, true, '書くものが無いと見抜く');
+    assert.equal(recovered[0].error, undefined,
+      `転記先を要求してはならない: ${JSON.stringify(recovered[0])}`);
+    assert.equal(recovered[0].destinationSource, undefined, '転記先を決めようとすらしない');
+    assert.equal(recovered[0].rewound, true, '発見へ戻す（完了させるのは再取込の仕事）');
+    assert.equal(fileStateOf('no_reviews'), 'DISCOVERED');
+    assert.deepEqual(txIdRowsIn(template, customerId), [], '雛形には 1 行も書かない');
+    assert.deepEqual(txIdRowsIn(clone, customerId), cloneRowsBefore, '複製の行も増えない');
   });
 
   // Case 46 is the whole-suite acceptance condition, not an independent test.

@@ -477,6 +477,30 @@ function plannedValuesMatch_(planned, current) {
  * どちらも`REVIEW_REQUIRED`になる。遷移表に自分自身への遷移は無いので、
  * 素直に呼ぶと回復そのものが弾かれる。
  */
+/**
+ * 11.3 の回復が書き直す対象（Step 1）。
+ *
+ * **転記行を持たない`REVIEW_REQUIRED`も対象にする。** 通常の流れでは
+ * 要確認つきの取引も転記されている（F列を空欄で書き、解決操作がそこを
+ * 書き換える）ので、行を持たない`REVIEW_REQUIRED`は不整合である。
+ * 実機では、この状態の取引に`ADOPT_EXISTING_PARTNER`を実行すると
+ * 行番号0で書こうとして落ちた（2026-09-03）。解決操作からは直せない
+ * ── 行を確保して書くのは11.3 Step5の仕事である。
+ *
+ * 呼出側が**書くものが有るかを先に知る**ために切り出してある。空なら
+ * 転記先も索引も要らない ── `buildIndex` は転記先を丸ごと読むので、
+ * 書かないと分かっている回でそれを払うのは無駄であり、そのうえ転記先を
+ * 決められないファイル（要確認が1件も立たなかった取込）を永久に
+ * 止めてしまう（`opsRecoverStuckFiles`。2026-09-19 の実機）。
+ */
+function recoveryTargetsFor_(fileId) {
+  return getTransactionsByStatus(fileId, [TX_STATUS.PREPARED, TX_STATUS.WRITING])
+    .concat(getTransactionsByStatus(fileId, [TX_STATUS.REVIEW_REQUIRED])
+      .filter(function(tx) {
+        return !Number.isInteger(Number(tx.destinationRow)) || Number(tx.destinationRow) < 1;
+      }));
+}
+
 function recordRecoveredLocation_(tx, rowNumber) {
   // 転記先には行があるのに取引ログのAE列が空、という食い違いが起こり得る
   // （書込の途中で止まった場合）。回復の機会に揃えておかないと、以後の
@@ -517,18 +541,7 @@ function recoverPartialFailure(fileId, runId, index, leaseId, options) {
   }
 
   // Step 1: 対象取引の抽出（INV-03。有効=TRUEのみ）。
-  //
-  // **転記行を持たない`REVIEW_REQUIRED`も対象にする。** 通常の流れでは
-  // 要確認つきの取引も転記されている（F列を空欄で書き、解決操作がそこを
-  // 書き換える）ので、行を持たない`REVIEW_REQUIRED`は不整合である。
-  // 実機では、この状態の取引に`ADOPT_EXISTING_PARTNER`を実行すると
-  // 行番号0で書こうとして落ちた（2026-09-03）。解決操作からは直せない
-  // ── 行を確保して書くのは11.3 Step5の仕事である。
-  var targets = getTransactionsByStatus(fileId, [TX_STATUS.PREPARED, TX_STATUS.WRITING])
-    .concat(getTransactionsByStatus(fileId, [TX_STATUS.REVIEW_REQUIRED])
-      .filter(function(tx) {
-        return !Number.isInteger(Number(tx.destinationRow)) || Number(tx.destinationRow) < 1;
-      }));
+  var targets = recoveryTargetsFor_(fileId);
 
   for (var n = 0; n < targets.length; n += 1) {
     var tx = targets[n];
