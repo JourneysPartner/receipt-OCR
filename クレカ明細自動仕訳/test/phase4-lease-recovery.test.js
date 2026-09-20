@@ -219,4 +219,96 @@ module.exports = ({test, assert, gas}) => {
       [leaseId, 'x', 'reviewer@example.com']),
       (error) => error && /administrator/i.test(String(error.message)));
   });
+
+  test('INV-20: what the list calls releasable is what the release path releases', () => {
+    // **同じ判定を2箇所に書くと、いつか食い違う。**実際に食い違っていた ──
+    // 一覧は経過時間だけで「解放可」と出し、解放側は状態も見ていたので、
+    // `COMPLETED` のファイルに残ったリースが「解放可」と表示され続け、
+    // 何度解放しても消えなかった（2026-09-21に実機で確認）。運用者は
+    // 壊れたと読み、別の種を探しに行くことになる。
+    setup('COMPLETED');
+    strandLease('PROCESS');
+    const status = plain(gas.evaluate('collectLeaseStatus_({now: Date.now()})'));
+    const detected = plain(gas.call('detectStalledLeases', []))
+      .map((lease) => lease.leaseId).sort();
+    const shown = status.filter((lease) => lease.detectable)
+      .map((lease) => lease.leaseId).sort();
+    assert.deepEqual(shown, detected,
+      '一覧が「検出可」と言うリースと、解放側が拾うリースが食い違っている。\n' +
+      '一覧: ' + JSON.stringify(shown) + '\n解放側: ' + JSON.stringify(detected));
+    assert.deepEqual(status.filter((lease) => lease.releasable)
+      .map((lease) => lease.leaseId), [],
+      'COMPLETED のファイルのリースを「解放可」と表示している');
+  });
+
+  test('INV-20: a lease that is not mid-import says why, and what to do next', () => {
+    // 「解放できない」とだけ言われても、次に何をすればよいのか分からない。
+    setup('COMPLETED');
+    strandLease('PROCESS');
+    const status = plain(gas.evaluate('collectLeaseStatus_({now: Date.now()})'));
+    const stuck = status.filter((lease) => !lease.detectable && lease.blockedReason);
+    assert.equal(stuck.length, 1, '理由つきで残るリースが1件のはず');
+    assert.ok(/opsReleaseInvestigatedLease/.test(stuck[0].blockedReason),
+      `理由に次の手が書かれていない: ${stuck[0].blockedReason}`);
+    assert.ok(/COMPLETED/.test(stuck[0].blockedReason),
+      `理由にファイルの状態が書かれていない: ${stuck[0].blockedReason}`);
+  });
+
+  test('INV-20: a lease that should not exist can be released after investigating', () => {
+    // `forceReleaseLease` はこの形を**わざと拒む**（状態の食い違いを黙って
+    // 消さないため）。その判断は正しいが、拒むだけだと調べ終えた運用者に
+    // 打つ手が無く、そのファイルは二度と取り込めない。
+    setup('COMPLETED');
+    const leaseId = strandLease('PROCESS');
+    const out = plain(gas.call('releaseInvestigatedLease',
+      [leaseId, '転記先を確認済み', 'admin@example.com']));
+    assert.equal(out.released, true, JSON.stringify(out));
+    assert.equal(out.fileState, 'COMPLETED');
+    assert.ok(gas.call('acquireLease',
+      ['C001', 'file1', 'RUN_2', 'reviewer@example.com', 'PROCESS']),
+      '解放の目的は、そのファイルが再び動けること');
+  });
+
+  test('INV-20: the deliberate release is no weaker than the sweep', () => {
+    // 名指しの解放口が一括より弱ければ、そちらが抜け道になる。
+    setup('COMPLETED');
+    const leaseId = strandLease('PROCESS');
+    assert.throws(() => gas.call('releaseInvestigatedLease',
+      [leaseId, '確認済み', 'reviewer@example.com']),
+      (error) => error && /administrator/.test(String(error.message)),
+      '管理者でなくても解放できてしまう');
+    assert.throws(() => gas.call('releaseInvestigatedLease',
+      [leaseId, '', 'admin@example.com']),
+      (error) => error && /reason/.test(String(error.message)),
+      '理由なしで解放できてしまう');
+    assert.throws(() => gas.call('releaseInvestigatedLease',
+      ['NO_SUCH_LEASE', '確認済み', 'admin@example.com']),
+      (error) => error && /Lease not found/.test(String(error.message)),
+      '存在しないリースが通る');
+  });
+
+  test('INV-20: a fresh lease on a completed file is not released either', () => {
+    // 心拍が新しいなら持ち主が居る。状態が食い違っていても奪ってはならない。
+    setup('COMPLETED');
+    const leaseId = gas.call('acquireLease',
+      ['C001', 'file1', 'RUN_1', 'reviewer@example.com', 'PROCESS']);
+    assert.throws(() => gas.call('releaseInvestigatedLease',
+      [leaseId, '確認済み', 'admin@example.com']),
+      (error) => error && /threshold/.test(String(error.message)),
+      '心拍が新しいのに解放できてしまう');
+  });
+
+  test('INV-20: a lease that is still mid-import belongs to the other release path', () => {
+    // 2つは排他でなければならない ── 両方が受けると、どちらの前提も守られない。
+    setup('WRITING');
+    const leaseId = strandLease('PROCESS');
+    assert.throws(() => gas.call('releaseInvestigatedLease',
+      [leaseId, '確認済み', 'admin@example.com']),
+      (error) => error && /still in progress/.test(String(error.message)),
+      '取込中のリースまで受けてしまう');
+    gas.call('forceReleaseLease', [leaseId, 'stalled', 'admin@example.com']);
+    assert.equal(plain(gas.call('detectStalledLeases', [])).length, 0,
+      'forceReleaseLease 側が受け持てていない');
+  });
+
 };

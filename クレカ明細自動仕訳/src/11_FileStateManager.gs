@@ -193,16 +193,95 @@ function forceReleaseLease(leaseId, reason, actor) {
  * **検出も解放もできず、以後そのファイルの全解決操作がLEASE_CONFLICTに
  * なる** ── INV-20の根拠文が予言した状態そのものである。
  */
+/**
+ * 停滞リースとして自動で拾える条件。**表示と解放で必ずこれを使うこと。**
+ *
+ * 以前は同じ判定を2箇所に別々に書いていた ── 一覧は経過時間だけで
+ * 「解放可」と出し、解放側は状態も見ていた。その食い違いのせいで、
+ * **`COMPLETED` のファイルに残ったリースが「解放可」と表示され続け、
+ * 何度解放しても消えない**という形になる（2026-09-21に実機で確認。
+ * 運用者は壊れたと読み、別の種を探しに行くことになる）。
+ *
+ * 拾えない場合は**理由を返す。**「解放できない」とだけ言われても、
+ * 次に何をすればよいのか分からない。
+ *
+ * @param {Object=} knownProcess 呼出側が既に読んだ処理ログの行（読み直さない）。
+ */
+function leaseStallCheck_(lease, now, knownProcess) {
+  var elapsed = (now - new Date(lease.lastHeartbeat).getTime()) / 1000;
+  if (!isFinite(elapsed) || elapsed <= SETTINGS.HEARTBEAT_TIMEOUT_SECONDS) {
+    return {detectable: false, elapsed: elapsed, blockedReason: null};
+  }
+  if (lease.purpose === LEASE_PURPOSE.WRITE_ONLY) {
+    return {detectable: true, elapsed: elapsed, blockedReason: null};
+  }
+  var process = knownProcess === undefined ? getProcessLogRecord_(lease.fileId) : knownProcess;
+  // 処理ログ行を持たないリースは孤児。見逃すと、そのファイルが止まって
+  // いる理由に運用者が辿り着けない（実機で28時間気づけなかった）。
+  if (!process) return {detectable: true, elapsed: elapsed, blockedReason: null};
+  var state = String(process.values[16]);
+  if ([FILE_STATE.VALIDATING, FILE_STATE.WRITING].indexOf(state) >= 0) {
+    return {detectable: true, elapsed: elapsed, blockedReason: null};
+  }
+  return {
+    detectable: false, elapsed: elapsed,
+    blockedReason: '取込中でない状態（' + state + '）のファイルにリースが残っている。' +
+      '状態の食い違いなので自動では解放しない ── 転記先とファイル名を確かめたうえで、' +
+      'opsReleaseInvestigatedLease でリースIDを指定して解放すること'
+  };
+}
+
 function detectStalledLeases() {
   var now = Date.now();
   return activeLeases_().filter(function(lease) {
-    var elapsed = (now - new Date(lease.lastHeartbeat).getTime()) / 1000;
-    if (!isFinite(elapsed) || elapsed <= SETTINGS.HEARTBEAT_TIMEOUT_SECONDS) return false;
-    if (lease.purpose === LEASE_PURPOSE.WRITE_ONLY) return true;
+    return leaseStallCheck_(lease, now).detectable;
+  });
+}
+
+/**
+ * **調べたうえで**、あるべきでないリースを1件だけ解放する。
+ *
+ * `forceReleaseLease` は取込の途中で持ち主が落ちたリースのためのもので、
+ * ファイルが `VALIDATING`/`WRITING` でなければ**わざと拒む** ── 状態の
+ * 食い違いを黙って消さないためである。その判断は正しいが、拒むだけだと
+ * **調べ終えた運用者に打つ手が無い。**そのファイルは二度と取り込めない。
+ *
+ * だからこちらは、`forceReleaseLease` が拒む場合**だけ**を受け持つ。
+ * 2つは排他であり、どちらも心拍の閾値・管理者・監査記録を要求する。
+ * 一括では走らせない ── **リースIDを名指しさせる**ことが「調べた」の証である。
+ */
+function releaseInvestigatedLease(leaseId, reason, actor) {
+  if (!leaseId) throw new TypeError('releaseInvestigatedLease requires a leaseId');
+  if (!reason) throw new TypeError('releaseInvestigatedLease requires a reason');
+  return withScriptLock_(function() {
+    var lease = activeLeases_().filter(function(item) {
+      return item.leaseId === String(leaseId);
+    })[0];
+    if (!lease) throw new StateTransitionError('Lease not found: ' + leaseId);
+    if (lease.purpose === LEASE_PURPOSE.WRITE_ONLY) {
+      throw new StateTransitionError('WRITE_ONLY leases are released by forceReleaseLease');
+    }
     var process = getProcessLogRecord_(lease.fileId);
-    // 処理ログ行を持たないリースは孤児。見逃すと、そのファイルが止まって
-    // いる理由に運用者が辿り着けない（実機で28時間気づけなかった）。
-    if (!process) return true;
-    return [FILE_STATE.VALIDATING, FILE_STATE.WRITING].indexOf(String(process.values[16])) >= 0;
+    if (!process) {
+      throw new StateTransitionError('Orphan leases are released by forceReleaseLease');
+    }
+    var state = String(process.values[16]);
+    if ([FILE_STATE.VALIDATING, FILE_STATE.WRITING].indexOf(state) >= 0) {
+      throw new StateTransitionError('Lease is still in progress; use forceReleaseLease');
+    }
+    var customer = getCustomerById(lease.customerId);
+    if (customer.admins.indexOf(String(actor).toLowerCase()) < 0) {
+      throw new AuthorizationError('System administrator role is required');
+    }
+    var elapsed = (Date.now() - new Date(lease.lastHeartbeat).getTime()) / 1000;
+    if (!isFinite(elapsed) || elapsed <= SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS) {
+      throw new StateTransitionError('Heartbeat has not exceeded the force-release threshold');
+    }
+    appendAuditUnlocked_({type: 'LEASE_RELEASE_INVESTIGATED', actor: actor, targetType: 'LEASE',
+      targetId: lease.leaseId, customerId: lease.customerId,
+      before: {state: LEASE_STATE.ACTIVE, fileState: state}, after: {state: null},
+      reason: String(reason)}, false);
+    leaseSheet_().deleteRow(lease._rowNumber);
+    return {leaseId: lease.leaseId, fileId: lease.fileId, fileState: state, released: true};
   });
 }
