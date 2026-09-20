@@ -348,9 +348,11 @@ function isTransactionCommittable(fullTxId) {
  */
 function isFileFullyResolved(fileId) {
   var terminal = [TX_STATUS.COMMITTED, TX_STATUS.CANCELED, TX_STATUS.DELETED_ACCEPTED];
-  var settled = getTransactionsByStatus(fileId, terminal);
-  var outstanding = getTransactionsByStatus(fileId,
-    [TX_STATUS.PREPARED, TX_STATUS.WRITING, TX_STATUS.REVIEW_REQUIRED]);
+  var pending = [TX_STATUS.PREPARED, TX_STATUS.WRITING, TX_STATUS.REVIEW_REQUIRED];
+  // **1回読んで2通りに絞る。**状態ごとに呼ぶと同じ行を2度読む（4往復）。
+  var rows = getTransactionsForFile_(fileId);
+  var settled = rows.filter(function(row) { return terminal.indexOf(row.transactionStatus) >= 0; });
+  var outstanding = rows.filter(function(row) { return pending.indexOf(row.transactionStatus) >= 0; });
 
   // 条件1：終端に至っていない取引が1件でもあれば偽。
   if (outstanding.length) return false;

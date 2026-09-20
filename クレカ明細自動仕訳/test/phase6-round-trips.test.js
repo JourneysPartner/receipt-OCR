@@ -424,7 +424,8 @@ module.exports = ({test, assert, gas}) => {
     // 同じ表を12回読む。読取クォータ（60回/分/ユーザー）が取込の天井なので、
     // これはそのまま待ち時間になる。
     measure(2);
-    gas.evaluate('runScopedMasters_ = {purposeRules: null, commonPartners: null};');
+    // 覚えるのは取込のあいだだけなので、その区間を開いてから測る。
+    gas.evaluate('beginRunScopedReads_();');
 
     gas.stubs.resetRoundTrips();
     gas.context.__cold = gas.evaluate(
@@ -447,12 +448,184 @@ module.exports = ({test, assert, gas}) => {
   test('masters 2: pointing at another master throws the remembered tables away', () => {
     // 覚えるのは1回の押下の中だけだが、マスターを向け直したら無効である。
     measure(2);
+    gas.evaluate('beginRunScopedReads_();');
     gas.evaluate('purposeRulesForRun_(); commonPartnersForRun_();');
     gas.call('setMasterSpreadsheetId', ['master']);
     gas.stubs.resetRoundTrips();
     gas.evaluate('purposeRulesForRun_(); commonPartnersForRun_();');
     assert.equal(gas.stubs.roundTrips().rangeReads, 2,
       '向け直したのに古い表を使っている');
+  });
+
+
+  /**
+   * **枠を消費する読取だけを数える。**
+   *
+   * 読取には2種類ある ── `Sheets.Spreadsheets.Values.batchGet` は
+   * `Read requests per minute per user`（60回/分）を消費し、`SpreadsheetApp`
+   * の読取は消費しない。取込の天井を決めるのは前者だけなので、往復の総数では
+   * なくこちらを見る（v1.7）。
+   */
+  function apiReads(body) {
+    let count = 0;
+    gas.stubs.onRoundTrip((kind) => {
+      if (kind !== 'rangeReads') return;
+      if (/batchGet/.test((new Error()).stack)) count += 1;
+    });
+    try { body(); } finally { gas.stubs.onRoundTrip(null); }
+    return count;
+  }
+
+  /**
+   * 枠を消費する読取を**シート別に**数える。
+   *
+   * 合計だけを見ていると、1〜2回の増減は上限の余白に隠れてしまう ──
+   * 「実行中に変わらない表を読み直していないか」は、その表を何回読んだかで
+   * 見るしかない。読取は `sheetsBatchGetPaced_` に一本化されているので、
+   * そこを包めば範囲がそのまま取れる。
+   */
+  function apiRangeCounts(body) {
+    gas.evaluate(
+      '__ranges = [];' +
+      '__realPacedForTest = sheetsBatchGetPaced_;' +
+      'sheetsBatchGetPaced_ = function(id, req) {' +
+      '  __ranges.push((req.ranges || [])[0] || "");' +
+      '  return __realPacedForTest(id, req);' +
+      '};');
+    try { body(); } finally {
+      gas.evaluate('sheetsBatchGetPaced_ = __realPacedForTest;');
+    }
+    const counts = {};
+    plain(gas.evaluate('__ranges')).forEach((range) => {
+      const sheet = String(range).split('!')[0].replace(/'/g, '');
+      counts[sheet] = (counts[sheet] || 0) + 1;
+    });
+    return counts;
+  }
+
+  test('budget 1: the quota-consuming reads per file stay within budget', () => {
+    // 12ヶ月の取込にかかる時間を決めるのは**1ファイル増やすごとの費用**である
+    // （固定費は1回きり）。2026-09-20 実測：固定費12回＋1ファイル37回。
+    // 12ファイル＝456回、60回/分なので**7.6分がクォータだけで要る。**
+    const one = apiReads(() => measure(20, 1));
+    const two = apiReads(() => measure(20, 2));
+    const perFile = two - one;
+    const twelve = one + perFile * 11;
+    assert.ok(perFile <= 38,
+      `1ファイル増やすごとに枠を${perFile}回消費している（上限40）。` +
+      `12ファイルなら${twelve}回＝${(twelve / 60).toFixed(1)}分がクォータだけで要る`);
+  });
+
+  test('budget 2: the quota-consuming reads do not grow with the number of transactions', () => {
+    assert.equal(apiReads(() => measure(40, 1)), apiReads(() => measure(4, 1)),
+      '明細の件数で枠の消費が変わる。大きなファイルほどクォータに当たる');
+  });
+
+  test('cache 1: within one import the unchanging masters are read once, not once per file', () => {
+    // カード形式マスター・取引先辞書・使用用途補完・共通取引先一覧は、
+    // 取込が書く先ではない。それでもファイルごとに読み直していた
+    // （1ファイルあたり6回）。12ファイルなら72回ぶんの枠をこれだけに使う。
+    const counts = apiRangeCounts(() => measure(20, 4));
+    const once = ['カード形式マスター', '共通取引先辞書', '顧客別取引先辞書',
+      '使用用途補完マスター', '共通取引先一覧'];
+    const offenders = once.filter((name) => (counts[name] || 0) > 1)
+      .map((name) => `${name}=${counts[name]}回`);
+    assert.deepEqual(offenders, [],
+      '4ファイルの取込で、実行のあいだ変わらない表を複数回読んでいる: ' +
+      offenders.join(', ') + '（1回のはず）');
+    assert.ok((counts['カード形式マスター'] || 0) === 1,
+      'カード形式マスターを一度も読んでいない。数え方が壊れている');
+  });
+
+  test('cache 2: outside an import nothing is remembered, so a master edit takes effect at once', () => {
+    // 画面からの操作やメニューの個別処理は、人がマスターを直した直後に
+    // 走ることがある。古い表で判断すると**直したはずの設定が効かない。**
+    measure(2);
+    gas.evaluate('endRunScopedReads_();');
+    const before = plain(gas.evaluate('loadFormatDefinitions({}).length'));
+
+    const row = blank(34);
+    Object.assign(row, {0: 'another_format', 1: '別形式', 2: 'active', 3: 'TRUE', 4: '["csv"]',
+      6: 1, 7: 2, 8: 'A', 9: 'B', 10: 'C', 11: 'D', 17: 'generic', 18: 1,
+      19: 'admin@example.com', 21: '2026-01-01T00:00:00+09:00', 29: 'NEW',
+      33: '2026-01-01T00:00:00+09:00'});
+    gas.context.__row = row;
+    gas.evaluate(
+      'SpreadsheetApp.openById("master").getSheetByName("カード形式マスター")' +
+      '.appendRow(__row)');
+
+    assert.equal(plain(gas.evaluate('loadFormatDefinitions({}).length')), before + 1,
+      '取込の外なのに古い形式定義を使っている。直した設定が効かない');
+  });
+
+  test('dict 1: every dictionary write goes through the accessor that forgets the cache', () => {
+    // 辞書は取込のあいだ覚えるが、**書く経路がある**（学習・パターン登録・
+    // 共通への昇格・巻き戻し・無効化）。読みのほうの取得口で書くと、
+    // 覚えた行が古いまま残る。人の記憶では守れない。
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const srcDir = path.join(process.cwd(), 'src');
+    const offenders = [];
+    fs.readdirSync(srcDir).filter((name) => name.endsWith('.gs')).forEach((name) => {
+      fs.readFileSync(path.join(srcDir, name), 'utf8').split('\n').forEach((line, index) => {
+        if (line.indexOf('dictionarySheet_(') < 0) return;
+        if (/function dictionar(y|yWrite)Sheet_/.test(line)) return;
+        if (line.indexOf('dictionaryWriteSheet_(') >= 0) return;
+        if (!/\.(setValue|setValues|appendRow|insertRow|deleteRow|clear)\s*\(/.test(line) &&
+            !/var sheet = dictionarySheet_/.test(line)) return;
+        offenders.push(`${name}:${index + 1}  ${line.trim().slice(0, 90)}`);
+      });
+    });
+    assert.deepEqual(offenders, [],
+      '辞書を読みの取得口で書いている。dictionaryWriteSheet_ を使うこと' +
+      '（覚えた行を捨てる）:\n' + offenders.join('\n'));
+  });
+
+  test('tx 1: deciding whether a file is fully resolved reads its transactions once', () => {
+    // `findRowsByColumnValue_` は鍵列の走査と一致行の取得で2往復かかる。
+    // 状態違いで2度呼べば同じ行を2度読む ── 1ファイルで4往復だった。
+    measure(4);
+    gas.context.__fid = 'fileA';
+    const reads = apiReads(() => gas.evaluate('isFileFullyResolved(__fid)'));
+    assert.ok(reads <= 2,
+      `解決済みかの判定に${reads}往復かかっている（2往復のはず）。` +
+      '状態ごとに読み直している');
+  });
+
+
+  test('dict 2: writing the dictionary during an import makes the next read see it', () => {
+    // 取込のあいだ辞書を覚えるが、**書く経路がある。**捨て忘れると、
+    // 学習した取引先がその押下のあいだ効かない。
+    measure(2);
+    gas.evaluate('beginRunScopedReads_();');
+    try {
+      const before = plain(gas.evaluate('readDictionary_(false).length'));
+      gas.evaluate(
+        'learnFromResolution("C001", "ﾆｭｰﾃﾝﾎ", normalizeMerchant("ﾆｭｰﾃﾝﾎ"),' +
+        ' "株式会社ニュー店舗", "admin@example.com")');
+      const after = plain(gas.evaluate('readDictionary_(false).length'));
+      assert.equal(after, before + 1,
+        '書いた辞書がその押下のあいだ見えない。覚えた行を捨てていない');
+    } finally {
+      gas.evaluate('endRunScopedReads_();');
+    }
+  });
+
+  test('tx 2: transactions that are no longer active are not counted', () => {
+    // 1回の読取にまとめたとき、有効行の絞り込みを落とすと
+    // 取消済みの取引まで「未解決」に数えてしまい、ファイルが完了しなくなる。
+    measure(4);
+    gas.context.__out = gas.evaluate(
+      '(function() {' +
+      '  var all = getTransactionsForFile_("fileA");' +
+      '  var sheet = transactionLogSheet_();' +
+      '  var first = findRowsByColumnValue_(sheet, 5, "fileA", TRANSACTION_LOG_WIDTH_)[0];' +
+      '  sheet.getRange(first.rowNumber, 42, 1, 1).setValues([[false]]);' +  // 有効フラグ
+      '  return {before: all.length, after: getTransactionsForFile_("fileA").length};' +
+      '})()');
+    const out = plain(gas.context.__out);
+    assert.equal(out.after, out.before - 1,
+      `有効でない取引が数に残っている（${out.before}→${out.after}）`);
   });
 
   test('pace 1: every Sheets read goes through the pacer', () => {

@@ -38,10 +38,23 @@ function getTransaction(fullTxId) {
   return matches.length ? matches[0] : null;
 }
 
+/**
+ * そのファイルの有効な取引を全部。**状態で絞る前の1回の読取。**
+ *
+ * `findRowsByColumnValue_` は鍵列の走査と一致行の取得で**2往復**かかる。
+ * 状態違いで2度呼べば同じ行を2度読むことになり、`isFileFullyResolved` が
+ * まさにそれをしていた（1ファイルで4往復）。読取クォータ（60回/分/ユーザー）が
+ * 取込の天井なので、絞り込みは読んでから行う（v1.7）。
+ */
+function getTransactionsForFile_(fileId) {
+  return findRowsByColumnValue_(transactionLogSheet_(), 5, fileId, TRANSACTION_LOG_WIDTH_)
+    .map(txLogFromRecord_).filter(function(row) { return row.active; });
+}
+
 function getTransactionsByStatus(fileId, statuses) {
   var wanted = statuses.map(String);
-  return findRowsByColumnValue_(transactionLogSheet_(), 5, fileId, TRANSACTION_LOG_WIDTH_).map(txLogFromRecord_).filter(function(row) {
-    return row.active && wanted.indexOf(row.transactionStatus) >= 0;
+  return getTransactionsForFile_(fileId).filter(function(row) {
+    return wanted.indexOf(row.transactionStatus) >= 0;
   });
 }
 
