@@ -101,17 +101,160 @@ var SHEETS_API_ONLY_SHEETS_ = Object.freeze([
  * 不変条件は `flush 1` が守る ── 破ると古い行を読んで書き戻す
  * （2026-09-02の実機事故と同型）。
  */
-/** 再試行で待った時間。実行ごとに初期化される（GASのグローバル）。 */
-var apiBackoff_ = {count: 0, quotaCount: 0, ms: 0};
+/** 再試行と先回りで待った時間。実行ごとに初期化される（GASのグローバル）。 */
+var apiBackoff_ = {count: 0, quotaCount: 0, ms: 0, paceCount: 0, paceMs: 0, paceWorstMs: 0};
 
-function resetApiBackoff_() { apiBackoff_ = {count: 0, quotaCount: 0, ms: 0}; }
+function resetApiBackoff_() {
+  apiBackoff_ = {count: 0, quotaCount: 0, ms: 0, paceCount: 0, paceMs: 0, paceWorstMs: 0};
+}
+
+/**
+ * **上限に当たる前に、自分から待つ。**
+ *
+ * Sheets API の読取は60回/分/ユーザーで、これが取込の天井である（v1.6）。
+ * いまは上限へ突っ込んでから罰として眠っていた ── `sheetsReadRanges_` の
+ * 再試行は20秒・40秒・60秒と待つ。**当たってから待つのは、当たる前に待つより
+ * ずっと高い。**実機のAmazonカード11ヶ月は81分かかったが、読取回数から出る
+ * 下限は11.5分だった。7倍の差はほぼ全部この罰である（実働16%）。
+ *
+ * 直前1分に出した要求の時刻を覚えておき、枠に近づいたら**最も古い要求が
+ * 1分の窓から出るまで**待つ。連続して測りながら進むので、待ちは数秒ずつの
+ * 小さなものになる ── 貯めてから60秒眠るのとは総量が違う。
+ *
+ * 数えられるのは**この実行が出した要求だけ**である。前の実行や他の利用者ぶんは
+ * 見えないので、枠は上限より低く取る。それでも当たったときは、枠を実測に
+ * 合わせて下げる（`READ_QUOTA_FLOOR_` まで）。
+ */
+var READ_QUOTA_PER_MINUTE_ = 60;
+var READ_QUOTA_FLOOR_ = 20;
+var apiReadWindow_ = [];
+var apiReadBudget_ = 55;
+var apiReadLastAt_ = 0;
+/**
+ * この実行で先回りに待った合計。**窓と同じ寿命**である ── `apiBackoff_` は
+ * ファイルごとに初期化されるので（PHASES はファイル単位で見る）、実行全体の
+ * 待ち時間をあちらに置くと、2ファイル目で0に戻ってしまう。
+ */
+var apiReadPacedTotalMs_ = 0;
+
+/**
+ * **取込のあいだは1回ずつ間隔を空ける。**
+ *
+ * 窓の上限だけを見ると、枠を使い切るまで全速で走り、そこで**1回だけ長く**
+ * 眠ることになる（実測：1ファイル56回の読取で、56回目に22秒）。取込は
+ * 1ファイルで1分ぶんの枠をほぼ使い切るので、この長い眠りは**ファイルの
+ * 途中に落ちる** ── 書込の最中に眠れば、6分の実行上限に当たって中断される。
+ * 待つなら、細かく、均して待つ。
+ *
+ * 総時間は変わらない（枠で決まる）。変わるのは**1回の待ちの長さ**である。
+ * 均せば1.1秒ずつになり、中断の危険が消える。
+ *
+ * 画面から呼ぶ操作では**切っておく。**Webアプリの1回の呼出しは読取8回
+ * 程度で、枠には遠い。そこで1.1秒ずつ待たせたら操作が使い物にならない
+ * （§3.2 の往復予算）。上限に当たりそうなときだけ窓が止める。
+ */
+var apiReadSmoothing_ = false;
+
+function setReadQuotaSmoothing_(on) {
+  apiReadSmoothing_ = Boolean(on);
+}
+
+/**
+ * 窓を空にする。**本番では呼ばない** ── GASの実行ごとにグローバルは
+ * 初期化されるので、実行の頭では既に空である。ファイルごとに初期化しては
+ * ならない（`resetApiBackoff_` とは寿命が違う）。窓は1回の押下のあいだ
+ * 続かなければ、直前1分を数えたことにならない。テストのためにある。
+ */
+/**
+ * ペーサーの時計。**待ちの長さを検証するにはここを差し替えるしかない。**
+ * 実際に眠って測るテストは、1ファイルぶんで1分かかる。
+ */
+function apiClockNow_() { return Date.now(); }
+
+function resetApiReadWindow_() {
+  apiReadWindow_ = [];
+  apiReadBudget_ = 55;
+  apiReadLastAt_ = 0;
+  apiReadPacedTotalMs_ = 0;
+  apiReadSmoothing_ = false;
+}
+
+function trimApiReadWindow_(now) {
+  var cutoff = now - 60000;
+  while (apiReadWindow_.length && apiReadWindow_[0] <= cutoff) apiReadWindow_.shift();
+}
+
+/**
+ * 読取要求を1回出す前に呼ぶ。枠が埋まっていれば空くまで待つ。
+ * @return {number} 待ったミリ秒（0なら待っていない）。
+ */
+function paceSheetsRead_() {
+  var now = apiClockNow_();
+  trimApiReadWindow_(now);
+  var waitMs = 0;
+
+  // 均し：前回から一定の間隔を空ける（取込のあいだだけ）。
+  if (apiReadSmoothing_ && apiReadLastAt_) {
+    var interval = Math.ceil(60000 / Math.max(1, apiReadBudget_));
+    var earliest = apiReadLastAt_ + interval;
+    if (earliest > now) waitMs = earliest - now;
+  }
+
+  // 窓の上限：均しを切っていても、ここは必ず守る。
+  // 最も古い要求が窓から出れば1枠空く。250msは時計のずれの余白。
+  if (apiReadWindow_.length >= apiReadBudget_) {
+    var clearMs = (apiReadWindow_[0] + 60000) - now + 250;
+    if (clearMs > waitMs) waitMs = clearMs;
+  }
+
+  var waited = 0;
+  if (waitMs > 0) {
+    apiBackoff_.paceCount += 1;
+    apiBackoff_.paceMs += waitMs;
+    // **最悪の1回**を残す。合計だけでは「均せているか」が分からない ──
+    // 総時間は枠で決まるのでどちらも同じになり、違うのは1回の長さだけである。
+    if (waitMs > apiBackoff_.paceWorstMs) apiBackoff_.paceWorstMs = waitMs;
+    apiReadPacedTotalMs_ += waitMs;
+    Utilities.sleep(waitMs);
+    waited = waitMs;
+    now = apiClockNow_();
+    trimApiReadWindow_(now);
+  }
+  apiReadWindow_.push(now);
+  apiReadLastAt_ = now;
+  return waited;
+}
+
+/**
+ * クォータに当たったことを記録する。**当たったのなら窓が実態を映していない。**
+ * 枠を下げて、残りの実行では手前で止まるようにする。
+ */
+function noteSheetsQuotaExceeded_() {
+  apiReadBudget_ = Math.max(READ_QUOTA_FLOOR_, apiReadBudget_ - 5);
+}
+
+/**
+ * Sheets API の読取はすべてここを通る。**数えられていない読取があると
+ * ペーシングは意味を失う** ── 枠を守っている側だけが待たされ、
+ * 当たるのは避けられない。
+ */
+function sheetsBatchGetPaced_(spreadsheetId, request) {
+  paceSheetsRead_();
+  return Sheets.Spreadsheets.Values.batchGet(spreadsheetId, request);
+}
+
+/** 読取クォータに当たった種類のエラーか。 */
+function isSheetsQuotaError_(error) {
+  var status = Number(error && (error.code || error.status));
+  return status === 429 || /Quota exceeded/i.test(String(error && error.message || ''));
+}
 
 function sheetsReadRanges_(sheet, ranges) {
   if (SHEETS_API_ONLY_SHEETS_.indexOf(String(sheet.getName())) < 0) SpreadsheetApp.flush();
   var lastError = null;
   for (var attempt = 0; attempt <= 4; attempt += 1) {
     try {
-      var response = Sheets.Spreadsheets.Values.batchGet(sheet.getParent().getId(), {
+      var response = sheetsBatchGetPaced_(sheet.getParent().getId(), {
         ranges: ranges,
         valueRenderOption: 'UNFORMATTED_VALUE',
         dateTimeRenderOption: 'SERIAL_NUMBER',
@@ -122,7 +265,8 @@ function sheetsReadRanges_(sheet, ranges) {
       lastError = error;
       var status = Number(error && (error.code || error.status));
       var message = String(error && error.message || '');
-      var quotaExceeded = status === 429 || /Quota exceeded/i.test(message);
+      var quotaExceeded = isSheetsQuotaError_(error);
+      if (quotaExceeded) noteSheetsQuotaExceeded_();
       var transientFailure = quotaExceeded || status === 500 || status === 503 ||
         /(?:^|\D)(?:500|503)(?:\D|$)/.test(message);
       if (!transientFailure || attempt === 4) throw error;

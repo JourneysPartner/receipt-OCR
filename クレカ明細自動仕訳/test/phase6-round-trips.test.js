@@ -57,7 +57,7 @@ module.exports = ({test, assert, gas}) => {
   }
 
   /** 明細`txCount`件のCSV1本を取り込み、その実行で使った往復回数を返す。 */
-  function measure(txCount) {
+  function measure(txCount, fileCount) {
     gas.stubs.reset();
     gas.stubs.createSpreadsheet('master', {sheets: [
       {name: '顧客マスター', values: [sheetHeader(37, '顧客ID'), customerRow()]},
@@ -92,19 +92,25 @@ module.exports = ({test, assert, gas}) => {
     for (let i = 0; i < txCount; i += 1) {
       csv += `2025/12/${String((i % 28) + 1).padStart(2, '0')},ローソン,${1000 + i},仕入れ\n`;
     }
-    gas.stubs.createFile('fileA', {
-      name: '三井住友カード202601.csv', bytes: Buffer.from(csv, 'utf8'),
-      lastUpdated: new Date(Date.now() - 3600 * 1000),
-      createdTime: '2026-08-01T00:00:00Z', contentType: 'text/csv'
-    });
-    gas.stubs.createFolder('folder1', {fileIds: ['fileA']});
+    const fileIds = [];
+    for (let f = 0; f < (fileCount || 1); f += 1) {
+      const id = f === 0 ? 'fileA' : 'file' + f;
+      gas.stubs.createFile(id, {
+        name: `三井住友カード2026${String(f + 1).padStart(2, '0')}.csv`,
+        bytes: Buffer.from(csv, 'utf8'),
+        lastUpdated: new Date(Date.now() - 3600 * 1000),
+        createdTime: '2026-08-01T00:00:00Z', contentType: 'text/csv'
+      });
+      fileIds.push(id);
+    }
+    gas.stubs.createFolder('folder1', {fileIds: fileIds});
 
     gas.stubs.resetRoundTrips();
     const report = plain(gas.call('runImport', [{}]));
     const trips = gas.stubs.roundTrips();
     const file = report.customers[0].files[0];
     assert.equal(file.outcome, 'WRITTEN', JSON.stringify(file));
-    assert.equal(file.written, txCount);
+    if (!fileCount || fileCount === 1) assert.equal(file.written, txCount);
     return trips.rangeReads + trips.rangeWrites + trips.flushes;
   }
 
@@ -447,5 +453,187 @@ module.exports = ({test, assert, gas}) => {
     gas.evaluate('purposeRulesForRun_(); commonPartnersForRun_();');
     assert.equal(gas.stubs.roundTrips().rangeReads, 2,
       '向け直したのに古い表を使っている');
+  });
+
+  test('pace 1: every Sheets read goes through the pacer', () => {
+    // 数えられていない読取が1つでもあれば、ペーシングは意味を失う ──
+    // 枠を守っている経路だけが待たされ、上限に当たるのは避けられない。
+    // 読取の経路は3つある（01・43・45）。人の記憶では守れない。
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const srcDir = path.join(process.cwd(), 'src');
+    const offenders = [];
+    fs.readdirSync(srcDir).filter((name) => name.endsWith('.gs')).forEach((name) => {
+      fs.readFileSync(path.join(srcDir, name), 'utf8').split('\n').forEach((line, index) => {
+        if (line.indexOf('Sheets.Spreadsheets.Values.batchGet') < 0) return;
+        // 通し場所（01 の sheetsBatchGetPaced_）だけが直接呼んでよい
+        if (/function sheetsBatchGetPaced_/.test(line)) return;
+        if (name === '01_DataAccessCore.gs' &&
+            /return Sheets\.Spreadsheets\.Values\.batchGet\(spreadsheetId, request\);/.test(line)) return;
+        offenders.push(`${name}:${index + 1}  ${line.trim().slice(0, 90)}`);
+      });
+    });
+    assert.deepEqual(offenders, [],
+      'Sheets API の読取をペーサーを通さずに呼んでいる。' +
+      'sheetsBatchGetPaced_ 経由にすること（01）:\n' + offenders.join('\n'));
+  });
+
+  test('pace 2: the pacer waits before the quota is spent, not after', () => {
+    // 当たってから待つのは、当たる前に待つよりずっと高い ──
+    // 再試行は20秒・40秒・60秒と眠る。実機のAmazonカード11ヶ月は81分
+    // かかったが、読取回数から出る下限は11.5分だった（実働16%）。
+    gas.evaluate('resetApiReadWindow_(); resetApiBackoff_();');
+
+    // 枠の手前までは待たない
+    gas.context.__a = gas.evaluate(
+      '(function() { var waits = []; for (var i = 0; i < apiReadBudget_; i += 1) ' +
+      '{ waits.push(paceSheetsRead_()); } return waits; })()');
+    const before = plain(gas.context.__a);
+    assert.deepEqual(before.filter((w) => w > 0), [],
+      `枠の手前で待っている（${before.filter((w) => w > 0).length}回）`);
+
+    // 枠に達したら待つ。待つのは「最も古い要求が1分の窓から出るまで」
+    const wait = gas.evaluate('paceSheetsRead_()');
+    assert.ok(wait > 55000 && wait <= 61000,
+      `枠に達しても${wait}msしか待たない。1分の窓が空くまで待つはず`);
+    assert.equal(plain(gas.evaluate('apiBackoff_.paceCount')), 1, '先回りの待ちが数えられていない');
+  });
+
+  test('pace 3: requests older than a minute stop counting', () => {
+    // 窓は「直前1分」である。1分より前の要求を数え続けたら、
+    // 何もしていない実行でも待ち始める。
+    gas.evaluate('resetApiReadWindow_(); resetApiBackoff_();');
+    gas.evaluate(
+      '(function() { var old = Date.now() - 61000;' +
+      '  for (var i = 0; i < apiReadBudget_ + 5; i += 1) apiReadWindow_.push(old); })()');
+    assert.equal(plain(gas.evaluate('paceSheetsRead_()')), 0,
+      '1分より前の要求で待たされている');
+    assert.equal(plain(gas.evaluate('apiReadWindow_.length')), 1,
+      '古い要求が窓から落ちていない');
+  });
+
+  test('pace 4: actually hitting the quota lowers the budget, down to a floor', () => {
+    // 当たったのなら窓が実態を映していない（前の実行や他の利用者ぶんは
+    // 見えない）。枠を実測へ寄せる。ただし下限は置く ── 0まで下がったら
+    // 何も読めなくなる。
+    gas.evaluate('resetApiReadWindow_();');
+    const start = plain(gas.evaluate('apiReadBudget_'));
+    gas.evaluate('noteSheetsQuotaExceeded_()');
+    assert.equal(plain(gas.evaluate('apiReadBudget_')), start - 5, '枠が下がっていない');
+    gas.evaluate('for (var i = 0; i < 50; i += 1) noteSheetsQuotaExceeded_();');
+    assert.equal(plain(gas.evaluate('apiReadBudget_')), plain(gas.evaluate('READ_QUOTA_FLOOR_')),
+      '下限を割っている');
+  });
+
+  /**
+   * 仮想時計。**待った分だけ進む。**
+   *
+   * ハーネスの `Utilities.sleep` は何もしないので、実時計のままでは
+   * 「眠ったあと枠が空く」ことを再現できない。ペーサーが記録した待ち時間
+   * （`apiBackoff_.paceMs`）を時計の進みとして使えば、眠った通りに時間が
+   * 経った世界になる ── 実際に眠らせるテストは1ファイルぶんで1分かかる。
+   */
+  function withVirtualClock(body) {
+    const saved = gas.context.apiClockNow_;
+    // 進めるのは**実行全体の**待ち合計で数える。`apiBackoff_` はファイルごとに
+    // 初期化されるので、あれを使うと2ファイル目で時計が巻き戻る。
+    gas.evaluate('apiClockNow_ = function() { return 1000000 + apiReadPacedTotalMs_; };');
+    try { return body(); } finally { gas.context.apiClockNow_ = saved; }
+  }
+
+  function pacedWaits(count, smoothing) {
+    gas.evaluate('resetApiReadWindow_(); resetApiBackoff_();');
+    gas.evaluate('setReadQuotaSmoothing_(' + (smoothing ? 'true' : 'false') + ');');
+    gas.context.__waits = gas.evaluate(
+      '(function() { var waits = [];' +
+      '  for (var i = 0; i < ' + count + '; i += 1) waits.push(paceSheetsRead_());' +
+      '  return waits; })()');
+    return plain(gas.context.__waits).map(Number);
+  }
+
+  test('pace 5: while importing, no single wait is long enough to lose a write', () => {
+    // 均さないと、枠を使い切るまで全速で走って**1回だけ長く**眠る。その眠りは
+    // ファイルの途中に落ちる ── 書込の最中に眠れば6分の実行上限に当たって
+    // 中断され、書きかけが残る。総時間は枠で決まるので変わらない。
+    // 変えるのは**1回の待ちの長さ**である。
+    withVirtualClock(() => {
+      const smoothed = pacedWaits(200, true).filter((w) => w > 0);
+      const bursty = pacedWaits(200, false).filter((w) => w > 0);
+      assert.ok(smoothed.length > 0 && bursty.length > 0, '待ちが1回も出ていない');
+
+      const interval = Math.ceil(60000 / plain(gas.evaluate('apiReadBudget_')));
+      const worstSmoothed = Math.max(...smoothed);
+      const worstBursty = Math.max(...bursty);
+
+      assert.ok(worstSmoothed <= interval + 250,
+        `均しても1回${worstSmoothed}msまで待っている（間隔${interval}ms）。` +
+        'ファイルの途中で長く眠れば6分の上限に当たる');
+      assert.ok(worstBursty > 10000,
+        `均さない場合の最悪が${worstBursty}msしかない。` +
+        'この差がペーシングの効き目なので、無くなったなら測り方が壊れている');
+
+      // 総量は枠で決まる ── 均しても遅くならない（速くもならない）。
+      const sum = (list) => list.reduce((a, b) => a + b, 0);
+      const ratio = sum(smoothed) / sum(bursty);
+      assert.ok(ratio > 0.8 && ratio < 1.25,
+        `均すと総待ち時間が${(ratio * 100).toFixed(0)}%になる。` +
+        '枠で決まるはずなので、どちらかの数え方が違う');
+    });
+  });
+
+  test('pace 6: screen operations are not slowed down by the pacer', () => {
+    // Webアプリの1回の呼出しは読取8回程度で枠には遠い。ここで1.1秒ずつ
+    // 待たせたら操作が使い物にならない（§3.2 の往復予算）。
+    withVirtualClock(() => {
+      assert.deepEqual(pacedWaits(8, false).filter((w) => w > 0), [],
+        '画面の操作で待たされている');
+    });
+  });
+
+
+  test('pace 8: one file is not slowed down; two files are smoothed', () => {
+    // 1ファイルの読取は約47回でクォータ（60回/分）に収まる ── 待つ理由が無い。
+    // 均してしまうと1ファイルの取込に50秒の無駄な待ちが乗る（実測）。
+    // 2ファイル以上なら必ず超えるので、そこからは均す。
+    //
+    // **見るのは待ちの合計ではなく最悪の1回である。**合計は枠で決まるので
+    // 均しても均さなくても同じになる（約10分）。違うのは1回の長さだけで、
+    // 均さないと60秒眠り、それがファイルの途中に落ちて6分の上限に当たる。
+    withVirtualClock(() => {
+      gas.evaluate('resetApiReadWindow_(); resetApiBackoff_();');
+      measure(20, 1);
+      assert.equal(plain(gas.evaluate('apiBackoff_.paceCount')), 0,
+        '1ファイルの取込で待っている。枠に収まるのに均している');
+
+      gas.evaluate('resetApiReadWindow_(); resetApiBackoff_();');
+      measure(20, 2);
+      const worst = plain(gas.evaluate('apiBackoff_.paceWorstMs'));
+      assert.ok(worst > 0, '2ファイルの取込で一度も待っていない');
+      // 実測（2026-09-20）：均して 9.0秒、均さないと 60.3秒。
+      //
+      // 均しても0にはならない。ファイル数が分かるのは走査のあとなので、
+      // 走査・前検査・監査連鎖の約9回は均さずに走る ── その分を窓から
+      // 追い出すのに一度だけ待つ。1ファイルの取込に10秒の無駄を足すより、
+      // ここで9秒待つほうが安い（1ファイルが普段の使い方である）。
+      //
+      // 上限は安全余裕（SAFETY_MARGIN_SECONDS=60秒）に対して十分小さい値を
+      // 置く。書込の途中で眠っても6分の上限には当たらない長さであること。
+      assert.ok(worst <= 15000,
+        `2ファイルの取込で1回${worst}msまで待っている。` +
+        '均していないので枠を使い切った瞬間に60秒眠る ── ' +
+        'それがファイルの途中に落ちれば6分の実行上限に当たり、書きかけが残る');
+    });
+  });
+
+  test('pace 7: the import turns smoothing off again when it is done', () => {
+    // 切り忘れたら、次の画面操作が1.1秒刻みになる。
+    // **均しが入る取込で確かめること** ── 1ファイルでは元から切れているので、
+    // 戻し忘れがあっても分からない。
+    withVirtualClock(() => {
+      gas.evaluate('resetApiReadWindow_(); resetApiBackoff_();');
+      measure(20, 2);
+      assert.equal(plain(gas.evaluate('apiReadSmoothing_')), false,
+        '取込のあと均しが切れていない。次の画面操作が1.1秒刻みになる');
+    });
   });
 };
