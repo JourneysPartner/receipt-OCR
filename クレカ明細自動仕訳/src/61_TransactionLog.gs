@@ -7,6 +7,42 @@ const TX_INDEX_WIDTH_ = 11;
 
 function transactionLogSheet_() { return requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.TRANSACTION_LOG); }
 
+/**
+ * この取込で**自分が追記した**取引ログの行の位置。
+ *
+ * 1ファイルの取込で取引ログを4回引き、そのたびに鍵列を全走査していた ──
+ * `findRowsByColumnValue_` は走査と取得で2往復なので**8往復**である。
+ * 読取クォータ（60回/分/ユーザー）が取込の天井なので、走査を省けばその分
+ * 速くなる（v1.7）。
+ *
+ * **覚えてよい根拠は、自分が書いたからである。**取引ログは追記のみで行は
+ * 動かず、同じファイルへ追記できるのは**リースを持つこの実行だけ**である。
+ * だから「この位置にある」だけでなく「他には無い」も言える。
+ *
+ * 逆に、**自分が追記したのではない行については何も言えない。**だから
+ * 覚えていないファイルは今までどおり全走査する（取り込み直しや、前の実行が
+ * 残した行がある）。読むときは鍵列を検算し、外れたら捨てて全走査に落ちる。
+ *
+ * 取込の区間の外では覚えない（`beginRunScopedReads_`）。
+ */
+var appendedTxRows_ = {byFile: Object.create(null), byTxId: Object.create(null)};
+
+function forgetAppendedTxRows_() {
+  appendedTxRows_ = {byFile: Object.create(null), byTxId: Object.create(null)};
+}
+
+function rememberAppendedTxRows_(rows, startRow) {
+  if (!runScopedReads_) return;
+  rows.forEach(function(row, offset) {
+    var rowNumber = startRow + offset;
+    var fullTxId = String(row[0]);
+    var fileId = String(row[4]);
+    appendedTxRows_.byTxId[fullTxId] = rowNumber;
+    if (!appendedTxRows_.byFile[fileId]) appendedTxRows_.byFile[fileId] = [];
+    appendedTxRows_.byFile[fileId].push(rowNumber);
+  });
+}
+
 function txIndexSpreadsheet_() {
   if (!SETTINGS.TX_INDEX_SPREADSHEET_ID) throw new LogCapacityError('LOG_CAPACITY_EXCEEDED', 'TX_INDEX_SPREADSHEET_ID is not configured');
   return SpreadsheetApp.openById(SETTINGS.TX_INDEX_SPREADSHEET_ID);
@@ -47,8 +83,15 @@ function getTransaction(fullTxId) {
  * 取込の天井なので、絞り込みは読んでから行う（v1.7）。
  */
 function getTransactionsForFile_(fileId) {
-  return findRowsByColumnValue_(transactionLogSheet_(), 5, fileId, TRANSACTION_LOG_WIDTH_)
-    .map(txLogFromRecord_).filter(function(row) { return row.active; });
+  var sheet = transactionLogSheet_();
+  var remembered = runScopedReads_ ? appendedTxRows_.byFile[String(fileId)] : null;
+  var records = remembered ?
+    readRowsByNumbers_(sheet, remembered, 5, [String(fileId)], TRANSACTION_LOG_WIDTH_) : null;
+  if (!records) {
+    if (remembered) delete appendedTxRows_.byFile[String(fileId)];
+    records = findRowsByColumnValue_(sheet, 5, fileId, TRANSACTION_LOG_WIDTH_);
+  }
+  return records.map(txLogFromRecord_).filter(function(row) { return row.active; });
 }
 
 function getTransactionsByStatus(fileId, statuses) {
@@ -192,8 +235,10 @@ function registerPrepared(txs, runId, existingByIdHint) {
       appends.push({row: row, indexSheet: indexSheet, indexRow: indexRow});
     });
 
-    appendRowsBatched_(logSheet, appends.map(function(a) { return a.row; }),
-      TRANSACTION_LOG_WIDTH_);
+    var logRows = appends.map(function(a) { return a.row; });
+    var appended = appendRowsBatched_(logSheet, logRows, TRANSACTION_LOG_WIDTH_);
+    // 書いた位置を覚える。次に引くとき鍵列の全走査を省ける。
+    if (appended) rememberAppendedTxRows_(logRows, appended.startRow);
     // 恒久取引インデックスは顧客×年で分かれる。シートごとにまとめる。
     var byIndexSheet = [];
     appends.forEach(function(append) {
@@ -208,6 +253,33 @@ function registerPrepared(txs, runId, existingByIdHint) {
 }
 
 /**
+ * 覚えている位置だけで全部の取引IDをまかなえるなら、そこだけ読む。
+ * 1つでも覚えていなければ`null`を返す ── 混ぜると「見つからなかった」のか
+ * 「覚えていないだけ」なのか区別できなくなる。
+ */
+function rememberedTxRecordsByIds_(fullTxIds) {
+  if (!runScopedReads_) return null;
+  var ids = (fullTxIds || []).map(String);
+  if (!ids.length) return null;
+  var rowNumbers = [];
+  for (var i = 0; i < ids.length; i += 1) {
+    var rowNumber = appendedTxRows_.byTxId[ids[i]];
+    if (!rowNumber) return null;
+    rowNumbers.push(rowNumber);
+  }
+  var rows = readRowsByNumbers_(transactionLogSheet_(), rowNumbers, 1, ids,
+    TRANSACTION_LOG_WIDTH_);
+  if (!rows) {
+    ids.forEach(function(id) { delete appendedTxRows_.byTxId[id]; });
+    return null;
+  }
+  var found = Object.create(null);
+  ids.forEach(function(id) { found[id] = []; });
+  rows.forEach(function(row) { found[String(row.values[0])].push(row); });
+  return found;
+}
+
+/**
  * 複数行を1回の`batchUpdate`で追記する。
  *
  * `appendRow`を行数ぶん呼ぶと書込の往復が行数に比例する。追記先の行番号は
@@ -215,7 +287,7 @@ function registerPrepared(txs, runId, existingByIdHint) {
  * 越しで、Sheets APIで足したばかりの行を数え落とす。
  */
 function appendRowsBatched_(sheet, rows, width) {
-  if (!rows || !rows.length) return;
+  if (!rows || !rows.length) return null;
   var startRow = apiLastDataRow_(sheet, width) + 1;
   ensureRowExists_(sheet, startRow + rows.length - 1);
   var values = rows.map(function(row) { return padRowValues_(row, width); });
@@ -224,6 +296,7 @@ function appendRowsBatched_(sheet, rows, width) {
       columnLetter_(width) + (startRow + rows.length - 1),
     values: values
   }]}, sheet.getParent().getId());
+  return {startRow: startRow, count: rows.length};
 }
 
 /**
@@ -280,7 +353,8 @@ function updateWrittenValues(fullTxId, planned, verified) {
 
 /** 取引IDの集合に対する有効行を、キー列1回＋一致行1回の読取で引く。 */
 function activeTransactionRecordsByIds_(fullTxIds) {
-  var found = findRowsByColumnValues_(transactionLogSheet_(), 1, fullTxIds, TRANSACTION_LOG_WIDTH_);
+  var found = rememberedTxRecordsByIds_(fullTxIds);
+  if (!found) found = findRowsByColumnValues_(transactionLogSheet_(), 1, fullTxIds, TRANSACTION_LOG_WIDTH_);
   var records = Object.create(null);
   Object.keys(found).forEach(function(id) {
     var active = found[id].map(txLogFromRecord_).filter(function(row) { return row.active; });
