@@ -293,10 +293,25 @@ function updateProcessLog(fileId, fields, knownRecord) {
   });
 }
 
+/**
+ * 版の列だけを組み立てる。**書込とは分けておく。**
+ *
+ * 同じ行への書込が続くなら1回にまとめたい ── `updateProcessLog` は
+ * 書く前に行を読むので、2回に分けると読取も2回になる。読取クォータ
+ * （60回/分/ユーザー）が取込の天井なので、それがそのまま遅さである（v1.8）。
+ */
+function versionFields_(versions) {
+  return {
+    codeVersion: versions.codeVersion || versions.code,
+    formatVersion: versions.formatVersion || versions.format,
+    dictionaryVersion: versions.dictionaryVersion || versions.dictionary,
+    hashVersion: versions.hashVersion || versions.hash,
+    sheetSchemaVersion: versions.sheetSchemaVersion || versions.sheetSchema
+  };
+}
+
 function recordVersions(fileId, versions) {
-  updateProcessLog(fileId, {codeVersion: versions.codeVersion || versions.code, formatVersion: versions.formatVersion || versions.format,
-    dictionaryVersion: versions.dictionaryVersion || versions.dictionary, hashVersion: versions.hashVersion || versions.hash,
-    sheetSchemaVersion: versions.sheetSchemaVersion || versions.sheetSchema});
+  return updateProcessLog(fileId, versionFields_(versions));
 }
 
 function recordError(fileId, errorRecord) {

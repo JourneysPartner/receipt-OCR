@@ -511,8 +511,8 @@ module.exports = ({test, assert, gas}) => {
 
   test('budget 1: the quota-consuming reads per file stay within budget', () => {
     // 12ヶ月の取込にかかる時間を決めるのは**1ファイル増やすごとの費用**である
-    // （固定費は1回きり）。2026-09-21 実測：固定費12回＋1ファイル31回。
-    // 12ファイル＝384回、60回/分なので**6.4分がクォータだけで要る。**
+    // （固定費は1回きり）。2026-09-21 実測：固定費12回＋1ファイル29回。
+    // 12ファイル＝360回、60回/分なので**6.0分がクォータだけで要る。**
     const one = apiReads(() => measure(20, 1));
     const two = apiReads(() => measure(20, 2));
     const perFile = two - one;
@@ -520,8 +520,8 @@ module.exports = ({test, assert, gas}) => {
     // **上限は実測値そのものに置く。**余白を持たせると、1回増えた変更が
     // 黙って通る（実際に3つの変異がすり抜けた）。枠の読取を1回増やすのは
     // 12ファイルで12回＝12秒ぶんの決定なので、記録に残して上げること。
-    assert.ok(perFile <= 31,
-      `1ファイル増やすごとに枠を${perFile}回消費している（上限31）。` +
+    assert.ok(perFile <= 29,
+      `1ファイル増やすごとに枠を${perFile}回消費している（上限29）。` +
       `12ファイルなら${twelve}回＝${(twelve / 60).toFixed(1)}分がクォータだけで要る`);
   });
 
@@ -778,6 +778,28 @@ module.exports = ({test, assert, gas}) => {
       '取込のあとに覚えた位置が残っている');
     assert.equal(plain(gas.evaluate('Object.keys(appendedTxRows_.byTxId).length')), 0,
       '取込のあとに覚えた取引IDが残っている');
+  });
+
+
+  test('versions 1: the import records which code and format produced the file', () => {
+    // **どの版が書いたのかは、後から検証する唯一の手がかりである。**
+    // 形式定義やパーサーを直したあと「この行はどちらで作られたのか」を
+    // 答えられなければ、再導出の要否を判断できない（INV-07 と 12.2）。
+    //
+    // この列は書込をまとめたときに落としやすい ── 実際、まとめた書込から
+    // 版を外す変異が**1つも赤にならなかった**（2026-09-21）。
+    measure(4);
+    gas.context.__row = gas.evaluate('getProcessLogRecord_("fileA").values');
+    const values = plain(gas.context.__row);
+    const columns = plain(gas.evaluate('PROCESS_FIELD_COLUMNS_'));
+    ['codeVersion', 'formatVersion', 'hashVersion', 'sheetSchemaVersion'].forEach((name) => {
+      const value = String(values[columns[name] - 1] || '');
+      assert.ok(value !== '', `${name}（${columns[name]}列）が空のまま`);
+    });
+    assert.equal(String(values[columns.codeVersion - 1]),
+      String(plain(gas.evaluate('VERSIONS.CODE'))), 'コード版が違う');
+    assert.equal(String(values[columns.sheetSchemaVersion - 1]),
+      String(plain(gas.evaluate('VERSIONS.SHEET_SCHEMA'))), 'シート様式版が違う');
   });
 
   test('pace 1: every Sheets read goes through the pacer', () => {

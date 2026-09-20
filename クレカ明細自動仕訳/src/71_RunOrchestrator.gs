@@ -517,7 +517,10 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
           // 取引インデックスのシートが未作成の初回実行では候補なしとする。
           validation.purposeRevision = {candidate: false};
         }
-        updateProcessLog(fileId, {
+        // **版の列も同じ書込に入れる。**分けると同じ行をもう一度読むことになる
+        // （`updateProcessLog` は書く前に行を読む）。読取クォータが取込の
+        // 天井なので、続けて同じ行へ書くなら1回にまとめる（v1.8）。
+        updateProcessLog(fileId, Object.assign({
           formatId: cardFormat.formatId,
           sourceSheetName: resolvedSheet.name === null ? '' : String(resolvedSheet.name),
           submittedContentHash: contentHash,
@@ -527,9 +530,8 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
           billingEvidence: JSON.stringify(billing),
           excludedCount: parsed.excludedRows.length,
           readCount: parsed.txs.length
-        });
-        recordVersions(fileId, {codeVersion: VERSIONS.CODE, formatVersion: cardFormat.version,
-          hashVersion: VERSIONS.HASH, sheetSchemaVersion: VERSIONS.SHEET_SCHEMA});
+        }, versionFields_({codeVersion: VERSIONS.CODE, formatVersion: cardFormat.version,
+          hashVersion: VERSIONS.HASH, sheetSchemaVersion: VERSIONS.SHEET_SCHEMA})));
         // 恒久ファイルインデックスF列（明細内容ハッシュ・提出時点で不変）を
         // 同期する。ここが空のままだと、同一内容の再提出が重複として
         // 検出できない（仕様12.2は本シートだけで完結する。INV-05）。
@@ -622,13 +624,16 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
 
     phase('processFile');
     // 9-12・9-13：`nextState`へ遷移（遷移がリース解放と名称変更を行う）。
+    var transitioned = null;
     if (result.nextState && result.nextState !== stateNow) {
-      transitionFileState(fileId, stateNow, result.nextState, runId);
+      transitioned = transitionFileState(fileId, stateNow, result.nextState, runId);
       stateNow = result.nextState;
     }
+    // 遷移が書いた行をそのまま使う（行の位置を知るためだけに使う）。
     updateProcessLog(fileId, {endedAt: nowIso_(),
       reviewCount: (result.preValidation.pendingReviews || []).length,
-      autoCount: (result.write && result.write.written || []).length});
+      autoCount: (result.write && result.write.written || []).length},
+      transitioned ? transitioned.process : undefined);
 
     phase('finish');
     // 段階ごとの時間はログにも出す。戻り値は呼出側で入れ子が省略されるので
