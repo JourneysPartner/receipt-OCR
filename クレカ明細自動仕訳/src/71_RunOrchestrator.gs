@@ -80,10 +80,33 @@ function detectionKeywordUnion_(definitions) {
 }
 
 /** 6.1 step 4：事前整合性チェック（顧客単位・ファイルごとの3者照合）。 */
-function runCustomerIntegrityCheck_(customer, index) {
+/**
+ * 取込の前検査（step 4）。**この呼出しが影響し得るファイルだけを見る。**
+ *
+ * 顧客の全履歴を毎回見ていた ── 実機で47ファイルになり、1ファイルにつき
+ * 取引ログと処理ログを読むので**固定費221秒**をここで使っていた
+ * （2026-09-20 実測。存在しないファイルIDで呼んで測った）。ファイルは
+ * 増える一方なので、取込は使うほど遅くなる。
+ *
+ * 見る範囲は「今回取り込む候補」＋「終端に至っていないファイル」である。
+ * この検査の目的は**壊れた転記先へ書き足さないこと**であり、今回触らない
+ * 完了済みのファイルは、この実行では壊しようがない。
+ *
+ * **過去ぶんの検査を捨てたわけではない。**人が古い行を書き換えた場合の
+ * 発見は、取込の前ではなく別の定期実行の仕事である ── そしてそれは
+ * K-W9（索引が雛形1枚しか見ない）を直してからでないと意味がない。
+ * いま複製に居る取引を雛形の索引と突き合わせても、何も見つからない。
+ */
+function runCustomerIntegrityCheck_(customer, index, fileIdsInScope) {
   var findings = [];
+  var inScope = Object.create(null);
+  (fileIdsInScope || []).forEach(function(fileId) { inScope[String(fileId)] = true; });
+  var unfinished = [FILE_STATE.VALIDATING, FILE_STATE.WRITING, FILE_STATE.REVIEW_WAIT];
   permanentIndexRowsForScan_()
-    .filter(function(row) { return row.customerId === customer.customerId; })
+    .filter(function(row) {
+      if (row.customerId !== customer.customerId) return false;
+      return Boolean(inScope[String(row.fileId)]) || unfinished.indexOf(row.state) >= 0;
+    })
     .forEach(function(row) {
       var txLogs = getTransactionsByStatus(row.fileId, [
         TX_STATUS.PREPARED, TX_STATUS.WRITING, TX_STATUS.COMMITTED,
@@ -170,9 +193,25 @@ function runImport(options) {
       // step 7：名称変更の再試行。1件の例外で顧客ループを中断しない。
       retryPendingRenames(customer.customerId);
 
+      // step 5：未処理ファイル検索（モード1）。**step 4 より先に行う** ──
+      // 前検査は「今回触るファイル」を知らないと範囲を絞れない。走査は
+      // 読むだけなので、前検査が止めた場合に無駄になるのは走査の2秒だけである。
+      var candidates = scanUnprocessedFiles(customer.customerId, {now: opts.now});
+      // step 6：担当者のファイル選択（メニュー）。指定があれば絞る。
+      if (Array.isArray(opts.fileIds) && opts.fileIds.length) {
+        candidates = candidates.filter(function(candidate) {
+          return opts.fileIds.indexOf(candidate.fileId) >= 0;
+        });
+      }
+      var maxFiles = Number(opts.maxFilesPerCustomer);
+      if (Number.isInteger(maxFiles) && maxFiles > 0) {
+        candidates = candidates.slice(0, maxFiles);
+      }
+
       // step 4：事前整合性チェック（監査ログ連鎖は通知のみ。INV-29）。
       var index = buildIndex(customer, {});
-      var integrity = runCustomerIntegrityCheck_(customer, index);
+      var integrity = runCustomerIntegrityCheck_(customer, index,
+        candidates.map(function(candidate) { return candidate.fileId; }));
       customerReport.integrity = integrity;
 
       // 監査ログ連鎖の検証は**往復ではなく計算**である ── 直近500行の
@@ -193,19 +232,6 @@ function runImport(options) {
       if (integrity.stop) {
         customerReport.skipped = 'INTEGRITY_STOP';
         return;
-      }
-
-      // step 5：未処理ファイル検索（モード1）。
-      var candidates = scanUnprocessedFiles(customer.customerId, {now: opts.now});
-      // step 6：担当者のファイル選択（メニュー）。指定があれば絞る。
-      if (Array.isArray(opts.fileIds) && opts.fileIds.length) {
-        candidates = candidates.filter(function(candidate) {
-          return opts.fileIds.indexOf(candidate.fileId) >= 0;
-        });
-      }
-      var maxFiles = Number(opts.maxFilesPerCustomer);
-      if (Number.isInteger(maxFiles) && maxFiles > 0) {
-        candidates = candidates.slice(0, maxFiles);
       }
 
       // step 8以降：ファイルループ。
