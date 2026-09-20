@@ -273,6 +273,18 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
   var leaseId = null;
   var stateNow = null;
 
+  // 段階ごとの所要時間。**6分に当たったとき、どの段階で溶けたのかを知る
+  // 材料がこれしかない。**合計だけでは「件数に比例しない定数がある」ことは
+  // 分かっても、それがどこかは分からない ── 2026-09-20、取引8件のファイルが
+  // 2分37秒かかる理由を突き止めるのに、推測を3回外した。
+  outcome.phases = {};
+  var phaseAt = Date.now();
+  function phase(name) {
+    var now = Date.now();
+    outcome.phases[name] = (outcome.phases[name] || 0) + (now - phaseAt);
+    phaseAt = now;
+  }
+
   try {
     // 8-1：リース取得。
     leaseId = acquireLease(customer.customerId, fileId, runId,
@@ -283,9 +295,11 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
   }
 
   try {
+    phase('lease');
     var definitions = loadFormatDefinitions({status: 'active', enabled: true});
     var validDefinitions = definitions.filter(function(row) { return row.valid === true; });
     var invalidDefinitions = definitions.filter(function(row) { return row.valid !== true; });
+    phase('formats');
 
     // 8-2：読取。失敗コードは区分2の材料として`processFile`へ渡す。
     var read = null;
@@ -303,7 +317,9 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
         throw error;
       }
     }
+    phase('read');
     var binaryHash = read ? sha256Hex(read.bytes) : '';
+    phase('binaryHash');
 
     // 処理ログ・恒久ファイルインデックスへ登録し、`VALIDATING`にする。
     var existing = getProcessLogRecord_(fileId);
@@ -318,6 +334,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
     });
     stateNow = FILE_STATE.VALIDATING;
     updateFilePrefix(fileId);
+    phase('register');
 
     var validation = {};
     var transactions = [];
@@ -350,6 +367,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
           detail: invalidDefinitions.map(function(row) { return row.formatId; }).join(',')});
       }
 
+      phase('detect');
       if (aggregated.status !== 'RESOLVED') {
         validation.format = {ok: false, code: aggregated.status, detail: aggregated.detail};
       } else {
@@ -391,6 +409,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
             'Display id collision: ' + collisions[0].display);
         }
 
+        phase('parse');
         // 8-5：使用用途補完（元ファイル名で判定する。5.4）。
         var purposeOutcome = resolvePurposes(transactions, fileName, purposeRulesForRun_());
         transactions = purposeOutcome.txs;
@@ -417,6 +436,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
         validation.priorYear = checkPriorYearUsage(transactions, customer,
           blankedDateTransactionIds(yearInference, validation.dateTriage));
 
+        phase('enrich');
         // 8-8：重複・修正版候補。
         var contentHash = generateContentHash(transactions,
           resolvedSheet.name === null ? '' : String(resolvedSheet.name));
@@ -462,9 +482,11 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
         // 検出できない（仕様12.2は本シートだけで完結する。INV-05）。
         syncPermanentContentHash(fileId, contentHash);
 
+        phase('duplicate');
         // 8-7：転記先構成検証（`WRITING`遷移前）。
         var destinationIndex = buildIndex(customer, {});
         validation.destinationSchema = validateDestinationSchema(customer, destinationIndex);
+        phase('destinationIndex');
 
         // 8-10：店名正規化・取引先判定（メモリ上のみ。登録は9-8）。
         var dictionary = buildDictionaryIndex(customer.customerId, {
@@ -472,6 +494,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
           common: readDictionary_(true),
           commonPartners: commonPartnersForRun_()
         });
+        phase('dictionary');
         // 年会費のように、明細の店名にカード会社が現れない取引がある
         // （実装差戻し#31）。そのファイルがどのカードのものかは形式が知って
         // いるので、1度だけ解決して照合キーに使う。取れない形式では null。
@@ -521,6 +544,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
             originalPurpose: tx.purpose
           });
         });
+        phase('match');
       }
     }
 
@@ -529,6 +553,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
       customer: customer,
       file: {id: fileId, name: fileName, originalFileName: fileName},
       runId: runId,
+      phase: phase,
       leaseId: leaseId,
       cardFormat: cardFormat,
       transactions: transactions,
@@ -542,6 +567,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
       }
     });
 
+    phase('processFile');
     // 9-12・9-13：`nextState`へ遷移（遷移がリース解放と名称変更を行う）。
     if (result.nextState && result.nextState !== stateNow) {
       transitionFileState(fileId, stateNow, result.nextState, runId);
@@ -550,6 +576,13 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
     updateProcessLog(fileId, {endedAt: nowIso_(),
       reviewCount: (result.preValidation.pendingReviews || []).length,
       autoCount: (result.write && result.write.written || []).length});
+
+    phase('finish');
+    // 段階ごとの時間はログにも出す。戻り値は呼出側で入れ子が省略されるので
+    // （`clasp run` の表示も `[Object]` になる）、**6分に当たった後で
+    // 読み返せる場所**に残さないと、材料として役に立たない。
+    // 明細内容は含めない ── 出すのは段階名と所要ミリ秒だけである。
+    Logger.log('PHASES ' + JSON.stringify({file: fileName, total: 0, phases: outcome.phases}));
 
     outcome.outcome = result.wroteToDestination ? 'WRITTEN' : 'NO_WRITE';
     outcome.nextState = stateNow;

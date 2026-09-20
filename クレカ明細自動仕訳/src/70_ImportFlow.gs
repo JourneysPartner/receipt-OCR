@@ -63,6 +63,7 @@ function runPreValidationBlock(input) {
     validation.inputLimit =
       checkRunTransactionLimit(input.runId, (input.transactions || []).length);
   }
+  markPhase(input, 'pre:validate');
   var classification = classifyValidationResult(validation);
   var category = classification.category;
 
@@ -105,6 +106,7 @@ function runPreValidationBlock(input) {
   }).filter(function(id) { return id !== ''; });
   var existingById = parsedIds.length ?
     activeTransactionRecordsByIds_(parsedIds) : Object.create(null);
+  markPhase(input, 'pre:existing');
   (input.transactions || []).forEach(function(tx) {
     var existing = existingById[String(tx.fullTxId || tx.transactionId || '')];
     var rejoinedUnresolved = Boolean(existing) &&
@@ -145,6 +147,7 @@ function runPreValidationBlock(input) {
       }
     });
   });
+  markPhase(input, 'pre:bridge');
   var reviewedTxIds = {};
   pendingReviews.forEach(function(entry) {
     if (entry.fullTxId && isTransactionScopedReviewType(entry.reviewType)) {
@@ -177,9 +180,12 @@ function runPreValidationBlock(input) {
   // 既存行の扱いは「再合流時の取引再登録」に従う（A-28。61_TransactionLog）。
   // 加算を永続化しないと、継続トリガーで再開したときに0から数え直し、
   // 上限がいくらでも超えられる（4.31）。
+  markPhase(input, 'pre:plannedStatus');
   if (transactions.length) {
     registerPrepared(transactions, input.runId, existingById);
+    markPhase(input, 'pre:register');
     if (input.runId) incrementRunTransactionCount(input.runId, transactions.length);
+    markPhase(input, 'pre:runCount');
   }
 
   return preValidationResult_(category, classification.code, transactions,
@@ -247,6 +253,7 @@ function runWriteBlock(input) {
   // 判定は4.21の`guardFileUnchanged`に委ねる。呼出側が用意した真偽値を
   // 信じる形にすると、呼出側が未実装のあいだガードが存在しないまま動く。
   var guard = evaluateFileGuard_(input);
+  markPhase(input, 'write:guard');
   if (guard && guard.ok === false) {
     result.fileChanged = true;
     result.guardReason = guard.reason;
@@ -269,6 +276,7 @@ function runWriteBlock(input) {
     // 9-3：空き行判定・テンプレート拡張・行予約を単一の排他区間で行う（INV-06）。
     var reservation = reserveDestinationRows(customer,
       batch.map(function(tx) { return tx.fullTxId; }), fileId, leaseId);
+    markPhase(input, 'write:reserve');
 
     // 取引IDで引く。添字一致に頼ると、空き行が非連続に見つかったときに
     // 取引が別の行へ紐づく。
@@ -303,13 +311,16 @@ function runWriteBlock(input) {
       // 既に電話番号として解釈されてしまった後では元に戻らない。
       // 4.23 flush規則3の順序（複製→flush→書式→値書込→読取確認）に従う。
       applyPlainTextFormat(customer, rowWrites.map(function(w) { return w.rowNumber; }));
+      markPhase(input, 'write:format');
       writeStarted = true;
       writeTransactionRows(customer, rowWrites, leaseId, fileId);
       valuesWritten = true;
       result.wroteToDestination = true;
+      markPhase(input, 'write:values');
 
       // 9-6：読取確認。取引ごとに個別照合する（仕様11.4）。
       var verified = verifyWrittenValues(customer, rowWrites);
+      markPhase(input, 'write:verify');
       var toSettle = [];
       verified.forEach(function(v, i) {
         var tx = batch[i];
@@ -332,6 +343,7 @@ function runWriteBlock(input) {
       // **成功してから`settled`を立てる** ── 確定が弾かれたとき、書いた行は
       // どの取引からも指されていないので、`finally`が空き行へ戻すのが正しい。
       settleWrittenTransactions(toSettle);
+      markPhase(input, 'write:settle');
       toSettle.forEach(function(entry) {
         settled[entry.destinationRow] = true;
         result.written.push(entry.fullTxId);
@@ -373,8 +385,14 @@ function runWriteBlock(input) {
     }));
     result.reviewsRegistered = outcome.registered;
   }
+  markPhase(input, 'write:reviews');
 
   return result;
+}
+
+/** 呼出側が記録先を持っていれば、そこへ段階の所要時間を足す。 */
+function markPhase(input, name) {
+  if (input && typeof input.phase === 'function') input.phase(name);
 }
 
 /**
@@ -384,7 +402,13 @@ function runWriteBlock(input) {
  * 返した場合、書込ブロックへ進まない。
  */
 function processFile(input) {
+  // 段階ごとの所要時間は呼出側（71）の記録先へ足す。**同じ地図の上に
+  // 載せないと、どこが重いのかは分からない** ── 2026-09-20、取引9件の
+  // ファイルの101秒のうち62秒がこの関数だと分かったが、中の割り方が
+  // 無かったのでそこで止まった。
+  var phase = typeof input.phase === 'function' ? input.phase : function() {};
   var pre = runPreValidationBlock(input);
+  phase('pre:total');
 
   if (pre.category === 1 || pre.category === 2) {
     // 無書込で差し戻す。転記先にも取引ログにも触れない。
@@ -426,7 +450,7 @@ function processFile(input) {
   if (typeof input.beforeWriteBlock === 'function') {
     input.beforeWriteBlock(pre);
   }
-  var write = runWriteBlock(Object.assign({}, input, {preValidation: pre}));
+  var write = runWriteBlock(Object.assign({}, input, {preValidation: pre, phase: phase}));
 
   // 9-12：INV-17の3条件で判定する。**要確認の件数では判定しない。**
   var nextState;

@@ -221,6 +221,33 @@ module.exports = ({test, assert, gas}) => {
       '完了済みで今回触らないファイルを、取込のたびに読み直している');
   });
 
+  test('round trips 3: opening spreadsheets does not scale with the number of transactions', () => {
+    // **`SpreadsheetApp.openById` は実機ではサーバー往復で、実測 約2.9秒。**
+    // ところが**この計器はそれを数えていなかった** ── スタブでは Map の検索
+    // なので `rangeReads/Writes/flushes` のどれにも現れない。そのせいで
+    // 「往復は件数に比例しない」という上のテストが通り続けたまま、
+    // `registerPrepared` が取引ごとに取引インデックスを開いていた
+    // （34件のファイルで99.6秒、取込全体の64%。2026-09-20 実測）。
+    //
+    // 数え落としている往復があるなら、それを数えるテストを足すしかない。
+    function opens(txCount) {
+      let count = 0;
+      const real = gas.context.SpreadsheetApp.openById;
+      gas.context.SpreadsheetApp.openById = function(id) {
+        count += 1;
+        return real.apply(this, arguments);
+      };
+      try { measure(txCount); } finally { gas.context.SpreadsheetApp.openById = real; }
+      return count;
+    }
+    const few = opens(2);
+    const many = opens(22);
+    assert.ok(many <= few + 2,
+      `2件で${few}回、22件で${many}回 openById している。件数に比例して開いている ── ` +
+      '実機では1回あたり数秒かかるので、大きなファイルは必ず6分の上限に当たる。' +
+      '取引ごとに開いている箇所（getTxIndexSheet・masterSpreadsheet_）を見よ。');
+  });
+
   test('flush 1: the sheets that skip the pre-read flush are never written through SpreadsheetApp', () => {
     // `sheetsReadRanges_` は `SHEETS_API_ONLY_SHEETS_` のシートで
     // 読取前の `flush()` を省く。省ける根拠は「そのシートを

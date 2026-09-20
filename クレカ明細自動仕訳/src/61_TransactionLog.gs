@@ -103,6 +103,27 @@ function registerPrepared(txs, runId, existingByIdHint) {
     var existingById = existingByIdHint || activeTransactionRecordsByIds_(ids);
     var appends = [];
 
+    // 取引インデックスのシートは**この呼出しの中で1回だけ引く。**
+    //
+    // `getTxIndexSheet` は `SpreadsheetApp.openById` を通り、実機では
+    // **1回あたり約2.9秒のサーバー往復**である（2026-09-20 実測）。以前は
+    // 取引1件につき1回呼んでいたので、34件のファイルで99.6秒 ── 取込全体
+    // 156秒の64%をここだけで使っていた。転記先への書込は同じファイルで
+    // 1.7秒、読取確認は0.3秒である。
+    //
+    // **ハーネスの往復カウンタは `openById` を数えない**（スタブでは Map の
+    // 検索）。だから「往復は件数に比例しない」テストは通り続け、実機だけが
+    // 比例して遅くなっていた。`round trips 3` がその穴を見張る。
+    //
+    // 覚えるのはこの呼出しの中だけである。実行をまたいで持つと、別の
+    // マスターへ向け直した後も古い台帳を掴む。
+    var indexSheetByKey = Object.create(null);
+    function indexSheetFor(customerId, year) {
+      var key = String(customerId) + '_' + String(year);
+      if (!indexSheetByKey[key]) indexSheetByKey[key] = getTxIndexSheet(customerId, year, true);
+      return indexSheetByKey[key];
+    }
+
     txs.forEach(function(tx, position) {
       var id = ids[position];
       var existing = existingById[id] ? [existingById[id]] : [];
@@ -152,7 +173,7 @@ function registerPrepared(txs, runId, existingByIdHint) {
       }
 
       var now = nowIso_(); var row = makeTransactionRow_(tx, runId, now);
-      var year = Number(now.slice(0, 4)); var indexSheet = getTxIndexSheet(row[3], year, true);
+      var year = Number(now.slice(0, 4)); var indexSheet = indexSheetFor(row[3], year);
       var indexRow = [row[0], row[3], row[4], Number(txInput_(tx, ['occurrenceIndex', 'appearanceOrder'], 0)), row[38],
         txInput_(tx, ['contentHash', 'submittedContentHash'], ''), row[40], row[12], true, now, now];
       appends.push({row: row, indexSheet: indexSheet, indexRow: indexRow});
