@@ -393,10 +393,31 @@ function formatRowFromValues_(values, rowNumber) {
  * @param {!Object=} filter {status, enabled, formatId, version}
  * @return {!Array<!Object>}
  */
+/**
+ * カード形式マスターの生の行。**この実行のあいだだけ覚える。**
+ *
+ * 形式定義を書くのは初期設定だけで、取込は読むだけである。それでも
+ * `loadFormatDefinitions` はファイルごとに2回呼ばれ（判定と `pinFormatVersion`）、
+ * そのたびにシートを読んでいた ── 読取クォータ（60回/分/ユーザー）が取込の
+ * 天井なので、12ファイルなら24回ぶんの枠をこれだけに使う（v1.7）。
+ *
+ * **覚えるのは生の行だけで、組み立て直した定義は覚えない。**呼出側は
+ * 返った定義を持ち回る（`cardFormat`）ので、同じ物を配ると一方の書き換えが
+ * もう一方に見えてしまう。組み立ては計算であって往復ではない。
+ */
+var formatRowValuesCache_ = null;
+
+function forgetFormatDefinitions_() { formatRowValuesCache_ = null; }
+
 function loadFormatDefinitions(filter) {
   var query = filter || {};
-  var sheet = requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.CARD_FORMAT_MASTER);
-  return readSheetRows_(sheet, CARD_FORMAT_COLUMNS_)
+  var rows = runScopedReads_ ? formatRowValuesCache_ : null;
+  if (!rows) {
+    var sheet = requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.CARD_FORMAT_MASTER);
+    rows = readSheetRows_(sheet, CARD_FORMAT_COLUMNS_);
+    if (runScopedReads_) formatRowValuesCache_ = rows;
+  }
+  return rows
     .filter(function(row) {
       return String(row.values[0] || '') !== '';
     })

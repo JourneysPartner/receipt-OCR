@@ -15,15 +15,45 @@ function dictionaryRow_(record) {
     conflict: toBool(values[15]), conflictGroupId: values[16] || null, invalidatedAt: values[17] || null, _rowNumber: record.rowNumber};
 }
 
+/**
+ * 辞書の生の行。**この実行のあいだだけ覚える。**
+ *
+ * 取込はファイルごとに共通辞書と顧客辞書を読み直していた ── 12ファイルで
+ * 24回ぶんの枠を使う（読取60回/分/ユーザー、v1.7）。辞書の中身は1回の
+ * 押下のあいだ変わらない……**ただし書く経路がある**（学習・パターン登録・
+ * 共通への昇格・巻き戻し・無効化）。だから書くときは必ず捨てる。
+ *
+ * 書込は `dictionaryWriteSheet_` を通すこと。`dict 1` が源を見張る ──
+ * 読みのほうの `dictionarySheet_` で書くと、覚えた行が古いまま残る。
+ */
+var dictionaryRowsCache_ = {common: null, customer: null};
+
+function forgetDictionaryCache_() {
+  dictionaryRowsCache_ = {common: null, customer: null};
+}
+
+/** 辞書を**書く**ときの取得口。取ると同時に覚えた行を捨てる。 */
+function dictionaryWriteSheet_(common) {
+  forgetDictionaryCache_();
+  return dictionarySheet_(common);
+}
+
 function readDictionary_(common) {
-  return readSheetRows_(dictionarySheet_(common), DICTIONARY_WIDTH_).map(dictionaryRow_);
+  var key = common ? 'common' : 'customer';
+  var rows = runScopedReads_ ? dictionaryRowsCache_[key] : null;
+  if (!rows) {
+    rows = readSheetRows_(dictionarySheet_(common), DICTIONARY_WIDTH_);
+    if (runScopedReads_) dictionaryRowsCache_[key] = rows;
+  }
+  // 組み立て直して返す。呼出側が触っても覚えた行は変わらない。
+  return rows.map(dictionaryRow_);
 }
 
 function learnFromResolution(customerId, original, normalized, partnerName, actor) {
   var expected = normalizeMerchant(original);
   if (String(normalized) !== expected) throw new MasterDataError('Normalized merchant must equal normalizeMerchant(original)');
   var dictId = generateId('DICT'); var now = nowIso_();
-  dictionarySheet_(false).appendRow([dictId, String(original), expected, String(partnerName), 'exact_normalized', '',
+  dictionaryWriteSheet_(false).appendRow([dictId, String(original), expected, String(partnerName), 'exact_normalized', '',
     String(customerId), '', '', false, String(actor), '', now, 1, true, false, '', '']);
   appendAudit({type: 'DICT_REGISTER', actor: actor, targetType: 'DICT', targetId: dictId, customerId: customerId,
     before: null, after: {B: String(original), C: expected, D: String(partnerName), E: 'exact_normalized', O: true}});
@@ -55,7 +85,7 @@ function registerDictionaryPattern(customerId, pattern, partnerName, matchMethod
   }
   var dictId = generateId('DICT');
   var now = nowIso_();
-  dictionarySheet_(false).appendRow([dictId, String(pattern), normalized, String(partnerName),
+  dictionaryWriteSheet_(false).appendRow([dictId, String(pattern), normalized, String(partnerName),
     matchMethod, '', String(customerId), '', '', true, String(actor), String(actor), now, 1,
     true, false, '', '']);
   appendAudit({type: 'DICT_REGISTER', actor: actor, approver: actor, targetType: 'DICT',
@@ -71,7 +101,7 @@ function promoteToCommon(dictId, approver) {
   var item = source[0]; var existing = readDictionary_(true).filter(function(row) { return row.dictId === String(dictId) && row.active; });
   if (existing.length) return;
   var now = nowIso_();
-  dictionarySheet_(true).appendRow([item.dictId, item.original, normalizeMerchant(item.original), item.partnerName, item.matchMethod,
+  dictionaryWriteSheet_(true).appendRow([item.dictId, item.original, normalizeMerchant(item.original), item.partnerName, item.matchMethod,
     item.priority === null ? '' : item.priority, '', item.validFrom || '', item.validTo || '', item.approved,
     item.registeredBy, String(approver), now, 1, true, false, '', '']);
   appendAudit({type: 'APPROVE', actor: approver, approver: approver, targetType: 'DICT', targetId: item.dictId,
@@ -98,7 +128,8 @@ function detectDictionaryConflicts(scope) {
   });
   var assignments = Object.create(null);
   groups.forEach(function(group) { group.rows.forEach(function(row) { assignments[row._rowNumber] = group.groupId; }); });
-  var sheet = dictionarySheet_(common);
+  // 競合フラグ（P・Q列）は覚えた行の一部である。書いたら捨てる。
+  var sheet = dictionaryWriteSheet_(common);
   rows.forEach(function(row) {
     sheet.getRange(row._rowNumber, 16, 1, 2).setValues([[Boolean(assignments[row._rowNumber]), assignments[row._rowNumber] || '']]);
   });
@@ -110,7 +141,7 @@ function rollbackDictionary(dictId, approver) {
   if (!approver) throw new AuthorizationError('Approver is required');
   var candidates = readDictionary_(true).filter(function(row) { return row.dictId === String(dictId); }).sort(function(a, b) { return b.version - a.version; });
   if (candidates.length < 2 || !candidates[0].active) return;
-  var current = candidates[0]; var previous = candidates[1]; var sheet = dictionarySheet_(true); var now = nowIso_();
+  var current = candidates[0]; var previous = candidates[1]; var sheet = dictionaryWriteSheet_(true); var now = nowIso_();
   sheet.getRange(current._rowNumber, 15).setValue(false); sheet.getRange(current._rowNumber, 18).setValue(now);
   sheet.getRange(previous._rowNumber, 15).setValue(true); sheet.getRange(previous._rowNumber, 18).setValue('');
   appendAudit({type: 'ROLLBACK', actor: approver, approver: approver, targetType: 'DICT', targetId: dictId,
@@ -118,7 +149,7 @@ function rollbackDictionary(dictId, approver) {
 }
 
 function invalidateLearnedEntries(dictIds, reason, actor) {
-  var wanted = dictIds.map(String); var sheet = dictionarySheet_(false); var now = nowIso_(); var changed = [];
+  var wanted = dictIds.map(String); var sheet = dictionaryWriteSheet_(false); var now = nowIso_(); var changed = [];
   readDictionary_(false).forEach(function(row) {
     if (wanted.indexOf(row.dictId) >= 0 && row.active) {
       sheet.getRange(row._rowNumber, 15).setValue(false); sheet.getRange(row._rowNumber, 18).setValue(now); changed.push(row.dictId);

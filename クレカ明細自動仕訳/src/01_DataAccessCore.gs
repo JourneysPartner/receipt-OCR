@@ -30,6 +30,39 @@ function masterSpreadsheet_() {
   return active;
 }
 
+/**
+ * **実行中に変わらないマスターを覚えてよい区間。**
+ *
+ * 使用用途補完・共通取引先一覧・カード形式・取引先辞書は、取込のあいだ
+ * 変わらない。ファイルごとに読み直すと12ファイルで数十回ぶんの枠を
+ * これだけに使う（読取60回/分/ユーザーが取込の天井、v1.7）。
+ *
+ * **覚えてよいのは取込のあいだだけである。**画面からの操作やメニューの
+ * 個別処理では覚えない ── そちらは人がマスターを直した直後に走ることが
+ * あり、古い表で判断すると**直したはずの設定が効かない。**取込は1回の
+ * 押下のあいだ同じ表で通すほうが筋が通る（ファイルごとに規則が変わらない）。
+ *
+ * 区間の外では常に読み直す。だから「覚えた表が残っていて次の操作に
+ * 効いてしまう」ことが起きない。
+ */
+var runScopedReads_ = false;
+
+function forgetRunScopedReads_() {
+  runScopedMasters_ = {purposeRules: null, commonPartners: null};
+  forgetFormatDefinitions_();
+  forgetDictionaryCache_();
+}
+
+function beginRunScopedReads_() {
+  forgetRunScopedReads_();
+  runScopedReads_ = true;
+}
+
+function endRunScopedReads_() {
+  runScopedReads_ = false;
+  forgetRunScopedReads_();
+}
+
 /** マスタースプレッドシートIDを保存する（4.6 設定検証から呼ぶ）。 */
 function setMasterSpreadsheetId(spreadsheetId) {
   if (!spreadsheetId) throw new TypeError('setMasterSpreadsheetId requires an id');
@@ -37,7 +70,7 @@ function setMasterSpreadsheetId(spreadsheetId) {
     .setProperty('MASTER_SPREADSHEET_ID', String(spreadsheetId));
   // 別のマスターに向け直したら、覚えている行番号も表も意味を失う（60・71）。
   forgetFileRowNumbers_();
-  runScopedMasters_ = {purposeRules: null, commonPartners: null};
+  forgetRunScopedReads_();
 }
 
 function requireSheet_(spreadsheet, name) {

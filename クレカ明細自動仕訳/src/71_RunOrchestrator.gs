@@ -59,9 +59,10 @@ var runScopedMasters_ = {purposeRules: null, commonPartners: null};
 
 /** 使用用途補完マスターを読む（2.1.3）。 */
 function purposeRulesForRun_() {
-  if (runScopedMasters_.purposeRules) return runScopedMasters_.purposeRules;
-  runScopedMasters_.purposeRules = readPurposeRules_();
-  return runScopedMasters_.purposeRules;
+  if (runScopedReads_ && runScopedMasters_.purposeRules) return runScopedMasters_.purposeRules;
+  var rows = readPurposeRules_();
+  if (runScopedReads_) runScopedMasters_.purposeRules = rows;
+  return rows;
 }
 
 function readPurposeRules_() {
@@ -76,9 +77,10 @@ function readPurposeRules_() {
 
 /** 共通取引先一覧を読む（2.1.4）。 */
 function commonPartnersForRun_() {
-  if (runScopedMasters_.commonPartners) return runScopedMasters_.commonPartners;
-  runScopedMasters_.commonPartners = readCommonPartners_();
-  return runScopedMasters_.commonPartners;
+  if (runScopedReads_ && runScopedMasters_.commonPartners) return runScopedMasters_.commonPartners;
+  var rows = readCommonPartners_();
+  if (runScopedReads_) runScopedMasters_.commonPartners = rows;
+  return rows;
 }
 
 function readCommonPartners_() {
@@ -223,6 +225,7 @@ function runImport(options) {
   //
   // 切り忘れると画面の操作が1.1秒刻みになるので、`finally` で必ず戻す（01）。
   var filesPlanned = 0;
+  beginRunScopedReads_();
   try {
   customers.forEach(function(customer) {
     var customerReport = {customerId: customer.customerId, files: [], skipped: null};
@@ -297,6 +300,7 @@ function runImport(options) {
   });
   } finally {
     setReadQuotaSmoothing_(false);
+    endRunScopedReads_();
   }
 
   return report;
