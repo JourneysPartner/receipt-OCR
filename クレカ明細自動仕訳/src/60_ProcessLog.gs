@@ -88,13 +88,17 @@ function fileProperty_(file, names, fallback) {
   return fallback;
 }
 
-function createOrUpdateProcessLog(runId, customer, file) {
+/**
+ * @param {Object=} knownProcess 呼出側が直前に読んだ処理ログの行。
+ *   渡されたときは読み直さない（同じ行を2回読まないため、v1.7）。
+ */
+function createOrUpdateProcessLog(runId, customer, file, knownProcess) {
   var fileId = String(fileProperty_(file, ['getId', 'fileId', 'id'], ''));
   if (!fileId) throw new TypeError('fileId is required');
   return withScriptLock_(function() {
     var processSheet = processLogSheet_();
     var indexSheet = permanentFileIndexSheet_();
-    var process = getProcessLogRecord_(fileId);
+    var process = knownProcess === undefined ? getProcessLogRecord_(fileId) : knownProcess;
     var permanent = getPermanentFileIndexRecord_(fileId);
     var now = nowIso_();
     var originalName = String(fileProperty_(file, ['originalFileName', 'getName', 'name'], ''));
@@ -125,8 +129,14 @@ function createOrUpdateProcessLog(runId, customer, file) {
 
     // 追記行はSheets APIの読取で数える。getLastRow()はSheets APIで足した
     // 行を数え落とし、2ファイル目が1ファイル目の行を上書きし得る。
-    var processRowNumber = process ? process.rowNumber : apiLastDataRow_(processSheet, PROCESS_LOG_WIDTH_) + 1;
-    var indexRowNumber = permanent ? permanent.rowNumber : apiLastDataRow_(indexSheet, FILE_INDEX_WIDTH_) + 1;
+    // 2枚とも新規なら末尾行は1回の要求でそろえる（同じスプレッドシート）。
+    var needLast = [];
+    if (!process) needLast.push({sheet: processSheet, columns: PROCESS_LOG_WIDTH_});
+    if (!permanent) needLast.push({sheet: indexSheet, columns: FILE_INDEX_WIDTH_});
+    var lastRows = needLast.length ? apiLastDataRows_(needLast) : [];
+    var cursor = 0;
+    var processRowNumber = process ? process.rowNumber : lastRows[cursor++] + 1;
+    var indexRowNumber = permanent ? permanent.rowNumber : lastRows[cursor++] + 1;
     ensureRowExists_(processSheet, processRowNumber); ensureRowExists_(indexSheet, indexRowNumber);
     Sheets.Spreadsheets.Values.batchUpdate({valueInputOption: 'RAW', data: [
       {range: a1Range_(processSheet.getName(), processRowNumber, 1, PROCESS_LOG_WIDTH_), values: [processRow]},

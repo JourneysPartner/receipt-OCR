@@ -354,11 +354,46 @@ function readSheetRows_(sheet, columns) {
  * 数え落として**既存行を上書きする**行番号を返し得る。
  */
 function apiLastDataRow_(sheet, columns) {
-  var range = quoteSheetName_(sheet.getName()) + '!A1:' + columnLetter_(columns);
-  var rows = sheetsReadRanges_(sheet, [range])[0];
-  var last = rows.length;
-  while (last > 0 && !rowHasAnyValue_(rows[last - 1])) last -= 1;
-  return last;
+  return apiLastDataRows_([{sheet: sheet, columns: columns}])[0];
+}
+
+/**
+ * 複数のシートの末尾データ行を**1回の要求で**そろえる。
+ *
+ * クォータが数えるのは読んだ行数でも範囲の数でもなく、**要求の回数**である
+ * （読取60回/分/ユーザー、v1.7）。同じスプレッドシートの範囲は1回の
+ * `batchGet` にまとめれば枠は1つしか減らない。処理ログと恒久ファイル
+ * インデックスは**必ず一緒に追記する**ので、別々に数えると往復を1つ損する。
+ *
+ * まとめられるのは同じスプレッドシート内だけ。違うものが混ざっていたら
+ * 分けて読む（呼出側が気にしなくてよいように、ここで面倒を見る）。
+ */
+function apiLastDataRows_(targets) {
+  var bySpreadsheet = [];
+  targets.forEach(function(target, index) {
+    var id = target.sheet.getParent().getId();
+    var group = null;
+    for (var i = 0; i < bySpreadsheet.length; i += 1) {
+      if (bySpreadsheet[i].id === id) { group = bySpreadsheet[i]; break; }
+    }
+    if (!group) { group = {id: id, sheet: target.sheet, items: []}; bySpreadsheet.push(group); }
+    group.items.push({index: index, target: target});
+  });
+  var out = [];
+  bySpreadsheet.forEach(function(group) {
+    var ranges = group.items.map(function(item) {
+      return quoteSheetName_(item.target.sheet.getName()) + '!A1:' +
+        columnLetter_(item.target.columns);
+    });
+    var read = sheetsReadRanges_(group.sheet, ranges);
+    group.items.forEach(function(item, position) {
+      var rows = read[position] || [];
+      var last = rows.length;
+      while (last > 0 && !rowHasAnyValue_(rows[last - 1])) last -= 1;
+      out[item.index] = last;
+    });
+  });
+  return out;
 }
 
 /**
