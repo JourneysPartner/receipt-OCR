@@ -306,4 +306,109 @@ module.exports = ({test, assert, gas}) => {
       `flushが${before.flushes}回から${after.flushes}回にしかならない。` +
       '省けているか（SHEETS_API_ONLY_SHEETS_ が効いているか）を見よ');
   });
+
+  /**
+   * 状態記帳の読取を数える。
+   *
+   * 処理ログと恒久ファイルインデックスの行を読むのは
+   * `cachedFileRecord_` だけなので、そこを通った読取を数えれば
+   * 「1ファイルの取込で状態の行を何回読んだか」がそのまま出る。
+   */
+  function bookkeepingReads(txCount) {
+    let inside = 0;
+    gas.stubs.onRoundTrip((kind) => {
+      if (kind !== 'rangeReads') return;
+      if (/cachedFileRecord_/.test((new Error()).stack)) inside += 1;
+    });
+    try { measure(txCount); } finally { gas.stubs.onRoundTrip(null); }
+    return inside;
+  }
+
+  test('reads 1: the state rows are not read again once they have been written', () => {
+    // 読取クォータ（60回/分/ユーザー）が取込の天井である。1ファイルの読取は
+    // 約59回で、1分ぶんの枠をほぼ使い切る ── 12ファイル連続なら必ず
+    // バックオフに当たり、当たれば20秒以上眠る（v1.6）。だから
+    // **同じ行を読み直さないことが、そのまま速さである。**
+    //
+    // この仕掛けで実測（2026-09-20）：**28回 → 15回**。
+    // `transitionFileState` → `updateProcessLog` → `updateFilePrefix` が
+    // 同じ2行を読み直していた分である。
+    const reads = bookkeepingReads(3);
+    assert.ok(reads <= 16,
+      `状態の行を${reads}回読んでいる（上限16、この仕掛けを入れる前は28回）。` +
+      '書いた行を呼出側へ返して読み直しを省く経路' +
+      '（writtenRecords_・createOrUpdateProcessLogの戻り値・updateFilePrefixのknown）' +
+      'が切れていないかを見よ。読取はクォータ60回/分の枠をそのまま食う。');
+    assert.ok(reads >= 1, '数えられていない。onRoundTripの掛け方を見よ');
+  });
+
+  test('reads 2: the state rows do not get read more often for a bigger file', () => {
+    // 件数に比例したら、大きなファイルはいつか必ずクォータに当たる。
+    assert.equal(bookkeepingReads(20), bookkeepingReads(3),
+      '明細の件数で状態の読取が変わる');
+  });
+
+  test('prefix 1: the rename after a transition uses the new prefix, not the one it replaced', () => {
+    // `updateFilePrefix` は書込の戻り値を受け取って読み直しを省く。
+    // 戻り値が**書いた値を当てていなければ**、古い接頭辞で改名してしまう
+    // ── 読み直しを省いた代償が、状態と名前の食い違いになる。
+    measure(2);
+    gas.context.__out = gas.evaluate(
+      '(function() {' +
+      '  var before = DriveApp.getFileById("fileA").getName();' +
+      '  var record = getProcessLogRecord_("fileA");' +
+      '  var written = updateProcessLog("fileA", {expectedPrefix: "【新】"}, record);' +
+      '  updateFilePrefix("fileA", written);' +
+      '  return {before: before, after: DriveApp.getFileById("fileA").getName()};' +
+      '})()');
+    const out = plain(gas.context.__out);
+    assert.equal(out.before, '【済】三井住友カード202601.csv', out.before);
+    assert.equal(out.after, '【新】三井住友カード202601.csv',
+      `改名が「${out.after}」になっている。書込の戻り値が古い行のままで、` +
+      'いま書いた接頭辞が反映されていない（writtenRecords_ を見よ）');
+  });
+
+  test('prefix 2: a rename that still needs repair is repaired', () => {
+    // 成功経路では `OK` の行へ `OK` を書き直さない（往復の無駄）。
+    // その代わり、**まだ `OK` でない行は必ず直す**こと。
+    measure(2);
+    gas.context.__out = gas.evaluate(
+      '(function() {' +
+      '  updateProcessLog("fileA", {renameState: RENAME_STATE.PENDING_RETRY, renameRetryCount: 2});' +
+      '  updateFilePrefix("fileA");' +
+      '  var after = getProcessLogRecord_("fileA");' +
+      '  return {state: String(after.values[31]), count: Number(after.values[32])};' +
+      '})()');
+    const out = plain(gas.context.__out);
+    assert.equal(out.state, 'OK',
+      `改名待ちの行が「${out.state}」のまま直っていない。` +
+      '同じ値を書き直さない条件が、直すべき行まで飛ばしている');
+    // 回数は0へ戻さず**そのまま書き戻す**（元からの挙動）。だから
+    // 「状態がOKで回数が0でない行」が残り得る ── 同じ値を書き直さない
+    // 条件が回数も見ているのはそのためである。
+    assert.equal(out.count, 2, '再試行回数は直した後もそのまま残る');
+  });
+
+  test('hash 1: the submitted content hash stays immutable even when the caller hands over a row', () => {
+    // 呼出側が読んだ行を渡せるようにしたが、**INV-07 の判定にだけは
+    // 渡された行を使わない**。あの不変条件は「現在の値が空か、同じ値か」で
+    // 判定するので、空だった頃の行で判定すれば書き換えを通してしまう。
+    measure(2);
+    gas.context.__out = gas.evaluate(
+      '(function() {' +
+      '  clearSubmittedContentHash("fileA");' +
+      '  var stale = getProcessLogRecord_("fileA");' +   // ハッシュが空の頃の行
+      '  updateProcessLog("fileA", {submittedContentHash: "HASH_A"});' +
+      '  try {' +
+      '    updateProcessLog("fileA", {submittedContentHash: "HASH_B"}, stale);' +
+      '    return {threw: false, value: String(getProcessLogRecord_("fileA").values[12])};' +
+      '  } catch (error) {' +
+      '    return {threw: true, value: String(getProcessLogRecord_("fileA").values[12])};' +
+      '  }' +
+      '})()');
+    const out = plain(gas.context.__out);
+    assert.equal(out.threw, true,
+      '古い行を渡すと提出時点の内容ハッシュを書き換えられてしまう（INV-07）');
+    assert.equal(out.value, 'HASH_A', 'ハッシュが書き換わっている');
+  });
 };

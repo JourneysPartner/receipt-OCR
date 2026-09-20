@@ -326,7 +326,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
 
     // 処理ログ・恒久ファイルインデックスへ登録し、`VALIDATING`にする。
     var existing = getProcessLogRecord_(fileId);
-    createOrUpdateProcessLog(runId, customer, {
+    var registered = createOrUpdateProcessLog(runId, customer, {
       id: fileId,
       originalFileName: fileName,
       binaryHash: binaryHash,
@@ -336,7 +336,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
       updatedAt: candidate.modifiedTime || ''
     });
     stateNow = FILE_STATE.VALIDATING;
-    updateFilePrefix(fileId);
+    updateFilePrefix(fileId, registered);
     phase('register');
 
     var validation = {};

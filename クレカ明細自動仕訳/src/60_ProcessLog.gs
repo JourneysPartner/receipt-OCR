@@ -132,6 +132,20 @@ function createOrUpdateProcessLog(runId, customer, file) {
       {range: a1Range_(processSheet.getName(), processRowNumber, 1, PROCESS_LOG_WIDTH_), values: [processRow]},
       {range: a1Range_(indexSheet.getName(), indexRowNumber, 1, FILE_INDEX_WIDTH_), values: [indexRow]}
     ]}, masterSpreadsheet_().getId());
+
+    // 追記したばかりの行番号を覚える。覚えなければ次の読取が鍵列を全走査する。
+    // 覚えても検算は残る（`cachedFileRecord_`）ので、誤った位置を信じたままには
+    // ならない。
+    fileRowNumberCache_.process[String(fileId)] = processRowNumber;
+    fileRowNumberCache_.index[String(fileId)] = indexRowNumber;
+
+    // **いま書いた行をそのまま返す。**直後に `updateFilePrefix` が同じ2行を
+    // 読み直していた ── 読取クォータ（60回/分）が取込の天井なので、
+    // 読み直しは1ファイルで処理できる量をそのまま削る（v1.6）。
+    return {
+      process: {rowNumber: processRowNumber, values: processRow},
+      permanent: {rowNumber: indexRowNumber, values: indexRow}
+    };
   });
 }
 
@@ -143,8 +157,16 @@ function createOrUpdateProcessLog(runId, customer, file) {
  * インデックスと食い違って`PERMANENT_INDEX_DESYNC`になった）。
  * 列単位の書込なら、読取が古くても壊れるのは書こうとした列だけである。
  */
-function updateProcessLogUnlocked_(fileId, fields) {
-    var record = getProcessLogRecord_(fileId);
+function updateProcessLogUnlocked_(fileId, fields, knownRecord) {
+    // **呼出側が今読んだ行を渡せる。**同じ行を同じ処理の中で読み直さないため。
+    // `transitionFileState` は1回で処理ログを5回読んでいた ── 読取クォータ
+    // （60回/分）が取込の天井なので、読み直しはそのまま遅さになる（v1.6）。
+    //
+    // **提出時点の内容ハッシュを書くときは渡された行を使わない。**あの列の
+    // 不変条件は「現在の値が空か、同じ値か」で判定するので、古い値で判定すると
+    // 書き換えを通してしまう（INV-07）。
+    var record = (knownRecord && fields && fields.submittedContentHash === undefined) ?
+      knownRecord : getProcessLogRecord_(fileId);
     if (!record) throw makeCatalogError_('REQUIRED_LOG_WRITE_FAILED', 'Process log not found: ' + fileId);
     var rowNumber = record.rowNumber;
     var current = record.values;
@@ -160,15 +182,44 @@ function updateProcessLogUnlocked_(fileId, fields) {
       data.push({range: a1Range_(sheetName, rowNumber, column, column),
         values: [[fields[name]]]});
     });
+    var permanent = null;
     if (fields.internalState !== undefined) {
-      var permanent = getPermanentFileIndexRecord_(fileId);
+      permanent = getPermanentFileIndexRecord_(fileId);
       if (!permanent) throw makeCatalogError_('REQUIRED_LOG_WRITE_FAILED', 'Permanent file index not found: ' + fileId);
       var indexName = permanentFileIndexSheet_().getName();
       data.push({range: a1Range_(indexName, permanent.rowNumber, 4, 4), values: [[fields.internalState]]});
       data.push({range: a1Range_(indexName, permanent.rowNumber, 12, 12), values: [[nowIso_()]]});
     }
-    if (!data.length) return;
-    Sheets.Spreadsheets.Values.batchUpdate({valueInputOption: 'RAW', data: data}, masterSpreadsheet_().getId());
+    if (data.length) {
+      Sheets.Spreadsheets.Values.batchUpdate({valueInputOption: 'RAW', data: data}, masterSpreadsheet_().getId());
+    }
+    return writtenRecords_(record, permanent, fields);
+}
+
+/**
+ * 書き終えた行を、書いた値を当てた形で返す。
+ *
+ * 呼出側が**同じ行を読み直さないため**にある。`updateFilePrefix` は
+ * `transitionFileState` の直後に呼ばれ、処理ログと恒久索引の同じ行を
+ * もう一度読んでいた ── 読取クォータ（60回/分）が取込の天井なので、
+ * 読み直しは1ファイルあたりの上限をそのまま削る（v1.6）。
+ *
+ * 返すのは**複製**である。呼出側が触っても行番号キャッシュの中身や
+ * 他の呼出の見え方は変わらない。
+ */
+function writtenRecords_(process, permanent, fields) {
+  var processValues = process.values.slice();
+  Object.keys(fields || {}).forEach(function(name) {
+    var column = PROCESS_FIELD_COLUMNS_[name];
+    if (column) processValues[column - 1] = fields[name];
+  });
+  var out = {process: {rowNumber: process.rowNumber, values: processValues}, permanent: null};
+  if (permanent) {
+    var indexValues = permanent.values.slice();
+    indexValues[3] = fields.internalState;
+    out.permanent = {rowNumber: permanent.rowNumber, values: indexValues};
+  }
+  return out;
 }
 
 /**
@@ -226,8 +277,10 @@ function syncPermanentContentHash(fileId, contentHash) {
   });
 }
 
-function updateProcessLog(fileId, fields) {
-  return withScriptLock_(function() { return updateProcessLogUnlocked_(fileId, fields); });
+function updateProcessLog(fileId, fields, knownRecord) {
+  return withScriptLock_(function() {
+    return updateProcessLogUnlocked_(fileId, fields, knownRecord);
+  });
 }
 
 function recordVersions(fileId, versions) {

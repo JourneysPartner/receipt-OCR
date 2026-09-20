@@ -32,8 +32,11 @@ function transitionFileState(fileId, fromState, toState, runId) {
   var record = getProcessLogRecord_(fileId);
   if (!record || String(record.values[16]) !== String(fromState)) throw new StateTransitionError('File compare-and-set failed');
   if (runId !== undefined && runId !== null && String(record.values[0]) !== String(runId)) throw new StateTransitionError('Run ID mismatch');
-  updateProcessLog(fileId, {internalState: toState, expectedPrefix: STATE_TO_PREFIX[toState]});
-  updateFilePrefix(fileId);
+  // いま読んだ行を渡す。比較更新のために読んだばかりで、同じ実行の中で
+  // 他者がこの行を書くことはない（ファイルはリースで直列化されている）。
+  var written = updateProcessLog(fileId,
+    {internalState: toState, expectedPrefix: STATE_TO_PREFIX[toState]}, record);
+  updateFilePrefix(fileId, written);
   if (toState !== FILE_STATE.VALIDATING && toState !== FILE_STATE.WRITING) releaseLease(fileId, runId, 'STATE_TRANSITION:' + toState);
 }
 
@@ -45,9 +48,13 @@ function removableStatePrefixRegex_() {
   return new RegExp('^(?:' + prefixes.join('|') + ')');
 }
 
-function updateFilePrefix(fileId) {
-  var process = getProcessLogRecord_(fileId);
-  var permanent = getPermanentFileIndexRecord_(fileId);
+/**
+ * @param {Object=} known 直前の書込が返した行（`writtenRecords_`）。
+ *   渡されたときは読み直さない。渡さなければ今までどおり自分で読む。
+ */
+function updateFilePrefix(fileId, known) {
+  var process = (known && known.process) || getProcessLogRecord_(fileId);
+  var permanent = (known && known.permanent) || getPermanentFileIndexRecord_(fileId);
   if (!process || !permanent) return {ok: false, reason: 'FILE_NOT_REGISTERED'};
   var expected = String(process.values[30] || '');
   var baseName = String(permanent.values[2] || '').replace(removableStatePrefixRegex_(), '');
@@ -55,12 +62,19 @@ function updateFilePrefix(fileId) {
     var file = DriveApp.getFileById(fileId);
     var expectedName = expected + baseName;
     if (file.getName() !== expectedName) file.setName(expectedName);
-    updateProcessLog(fileId, {renameState: RENAME_STATE.OK, renameRetryCount: Number(process.values[32] || 0)});
+    // **同じ値を書き直さない。**この関数は1ファイルの取込で3回呼ばれ、成功経路は
+    // 既に `OK` の行へ `OK` を書いていた ── 書込1往復と、その前の読取1往復を
+    // 毎回払っていた。読取クォータ（60回/分）が取込の天井なので、値の変わらない
+    // 書込は**速さをそのまま食う**（v1.6）。
+    var retryCount = Number(process.values[32] || 0);
+    if (String(process.values[31]) !== RENAME_STATE.OK || retryCount !== 0) {
+      updateProcessLog(fileId, {renameState: RENAME_STATE.OK, renameRetryCount: retryCount}, process);
+    }
     return {ok: true, reason: null};
   } catch (error) {
     var retry = Number(process.values[32] || 0) + 1;
     updateProcessLog(fileId, {renameState: retry >= SETTINGS.MAX_RENAME_RETRIES ? RENAME_STATE.FAILED_MAX_RETRY : RENAME_STATE.PENDING_RETRY,
-      renameRetryCount: retry});
+      renameRetryCount: retry}, process);
     return {ok: false, reason: /not found/i.test(error.message) ? 'FILE_NOT_FOUND' : 'PENDING_RETRY'};
   }
 }
@@ -69,7 +83,8 @@ function retryPendingRenames(customerId) {
   var sheet = processLogSheet_();
   findRowsByColumnValue_(sheet, 6, customerId, PROCESS_LOG_WIDTH_).forEach(function(record) {
     if (String(record.values[31]) !== RENAME_STATE.PENDING_RETRY || Number(record.values[32] || 0) >= SETTINGS.MAX_RENAME_RETRIES) return;
-    try { updateFilePrefix(String(record.values[7])); } catch (ignored) { /* one file must not stop the loop */ }
+    // 走査で読んだ処理ログの行をそのまま使う（恒久索引だけ読ませる）。
+    try { updateFilePrefix(String(record.values[7]), {process: record}); } catch (ignored) { /* one file must not stop the loop */ }
   });
 }
 
