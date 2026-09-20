@@ -35,8 +35,9 @@ function setMasterSpreadsheetId(spreadsheetId) {
   if (!spreadsheetId) throw new TypeError('setMasterSpreadsheetId requires an id');
   PropertiesService.getScriptProperties()
     .setProperty('MASTER_SPREADSHEET_ID', String(spreadsheetId));
-  // 別のマスターに向け直したら、覚えている行番号は意味を失う（60）。
+  // 別のマスターに向け直したら、覚えている行番号も表も意味を失う（60・71）。
   forgetFileRowNumbers_();
+  runScopedMasters_ = {purposeRules: null, commonPartners: null};
 }
 
 function requireSheet_(spreadsheet, name) {
