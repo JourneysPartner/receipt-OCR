@@ -511,8 +511,8 @@ module.exports = ({test, assert, gas}) => {
 
   test('budget 1: the quota-consuming reads per file stay within budget', () => {
     // 12ヶ月の取込にかかる時間を決めるのは**1ファイル増やすごとの費用**である
-    // （固定費は1回きり）。2026-09-20 実測：固定費12回＋1ファイル34回。
-    // 12ファイル＝420回、60回/分なので**7.0分がクォータだけで要る。**
+    // （固定費は1回きり）。2026-09-21 実測：固定費12回＋1ファイル31回。
+    // 12ファイル＝384回、60回/分なので**6.4分がクォータだけで要る。**
     const one = apiReads(() => measure(20, 1));
     const two = apiReads(() => measure(20, 2));
     const perFile = two - one;
@@ -520,8 +520,8 @@ module.exports = ({test, assert, gas}) => {
     // **上限は実測値そのものに置く。**余白を持たせると、1回増えた変更が
     // 黙って通る（実際に3つの変異がすり抜けた）。枠の読取を1回増やすのは
     // 12ファイルで12回＝12秒ぶんの決定なので、記録に残して上げること。
-    assert.ok(perFile <= 34,
-      `1ファイル増やすごとに枠を${perFile}回消費している（上限34）。` +
+    assert.ok(perFile <= 31,
+      `1ファイル増やすごとに枠を${perFile}回消費している（上限31）。` +
       `12ファイルなら${twelve}回＝${(twelve / 60).toFixed(1)}分がクォータだけで要る`);
   });
 
@@ -688,6 +688,96 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(out.after, out.before,
       `空行を足したら末尾行が${out.before}→${out.after}に動いた（グリッドは${out.maxRows}行）。` +
       '追記が空行の向こう側へ飛ぶ');
+  });
+
+
+  test('txrow 1: looking up the transactions this run appended skips the key scan', () => {
+    // `findRowsByColumnValue_` は鍵列の走査と一致行の取得で2往復かかる。
+    // 自分が追記した行は位置が分かっているので、走査は要らない。
+    measure(4);
+    gas.evaluate('beginRunScopedReads_();');
+    try {
+      gas.evaluate('registerPrepared([], "RUN_X");');   // 区間を開いた状態を作る
+      const scanned = apiReads(() => gas.evaluate('getTransactionsForFile_("fileA")'));
+      assert.equal(scanned, 2, `覚えていないファイルで${scanned}往復（走査2往復のはず）`);
+
+      // 覚えている状態を作る：いま走査で分かった位置を覚えさせる
+      gas.evaluate(
+        '(function() {' +
+        '  var rows = findRowsByColumnValue_(transactionLogSheet_(), 5, "fileA",' +
+        '    TRANSACTION_LOG_WIDTH_);' +
+        '  appendedTxRows_.byFile["fileA"] = rows.map(function(r) { return r.rowNumber; });' +
+        '})()');
+      const remembered = apiReads(() => gas.evaluate('getTransactionsForFile_("fileA")'));
+      assert.equal(remembered, 1,
+        `覚えている位置なのに${remembered}往復かかっている（1往復のはず）`);
+    } finally {
+      gas.evaluate('endRunScopedReads_();');
+    }
+  });
+
+  test('txrow 2: a remembered position that no longer holds that file falls back to the scan', () => {
+    // **覚えた位置が誤っていたら、呼出側はそこへ書く。**だから読むたびに
+    // 鍵列を検算し、外れたら捨てて全走査に落ちる。速さのために正しさを
+    // 落とさないことが、この仕掛けを入れてよい条件である。
+    measure(4);
+    gas.evaluate('beginRunScopedReads_();');
+    try {
+      gas.context.__truth = gas.evaluate('getTransactionsForFile_("fileA").length');
+      const truth = Number(plain(gas.context.__truth));
+      assert.ok(truth > 0, '前提：取引がある');
+
+      // 誤った位置を覚えさせる（ヘッダ行を指す）
+      gas.evaluate('appendedTxRows_.byFile["fileA"] = [1];');
+      gas.context.__after = gas.evaluate('getTransactionsForFile_("fileA").length');
+      assert.equal(Number(plain(gas.context.__after)), truth,
+        '誤った位置を覚えたまま返している。鍵列の検算が効いていない');
+      assert.equal(plain(gas.evaluate('String(appendedTxRows_.byFile["fileA"])')), 'undefined',
+        '外れた位置を捨てていない。次も同じ誤りを繰り返す');
+    } finally {
+      gas.evaluate('endRunScopedReads_();');
+    }
+  });
+
+  test('txrow 3: rows this run did not append are still found', () => {
+    // 検算できるのは「その位置に何があるか」だけで、「他に無いか」ではない。
+    // **自分が追記したのではない行については何も言えない**ので、覚えて
+    // いないファイルは今までどおり全走査する（取り込み直しや、前の実行が
+    // 残した行がある）。ここを落とすと取引を取りこぼす。
+    measure(4);
+    gas.context.__truth = gas.evaluate('getTransactionsForFile_("fileA").length');
+    const truth = Number(plain(gas.context.__truth));
+
+    gas.evaluate('beginRunScopedReads_();');
+    try {
+      // 「この実行では1行だけ追記した」状態を作る ── 残りは前の実行のもの
+      gas.evaluate(
+        '(function() {' +
+        '  var rows = findRowsByColumnValue_(transactionLogSheet_(), 5, "fileA",' +
+        '    TRANSACTION_LOG_WIDTH_);' +
+        '  forgetAppendedTxRows_();' +
+        '  appendedTxRows_.byFile["fileA"] = [rows[0].rowNumber];' +
+        '})()');
+      gas.context.__partial = gas.evaluate('getTransactionsForFile_("fileA").length');
+      assert.equal(Number(plain(gas.context.__partial)), 1,
+        'この実行が追記した行だけを覚えている前提が崩れている');
+    } finally {
+      gas.evaluate('endRunScopedReads_();');
+    }
+
+    // 区間の外では覚えないので、全部見える
+    assert.equal(Number(plain(gas.evaluate('getTransactionsForFile_("fileA").length'))), truth,
+      '取込の外なのに覚えた位置で絞っている');
+  });
+
+  test('txrow 4: the remembered positions do not survive the import', () => {
+    // 行の位置は動かないが、**次の押下で何が追記済みかは分からない。**
+    // 持ち越すと「この実行が追記した行」という根拠が消える。
+    measure(20, 2);
+    assert.equal(plain(gas.evaluate('Object.keys(appendedTxRows_.byFile).length')), 0,
+      '取込のあとに覚えた位置が残っている');
+    assert.equal(plain(gas.evaluate('Object.keys(appendedTxRows_.byTxId).length')), 0,
+      '取込のあとに覚えた取引IDが残っている');
   });
 
   test('pace 1: every Sheets read goes through the pacer', () => {

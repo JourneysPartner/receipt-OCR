@@ -51,6 +51,7 @@ function forgetRunScopedReads_() {
   runScopedMasters_ = {purposeRules: null, commonPartners: null};
   forgetFormatDefinitions_();
   forgetDictionaryCache_();
+  forgetAppendedTxRows_();
 }
 
 function beginRunScopedReads_() {
@@ -446,6 +447,52 @@ function findRowsByColumnValue_(sheet, column, value, width) {
  *
  * @return {!Object<string, !Array<{rowNumber:number, values:!Array<*>}>>}
  */
+/**
+ * **覚えた行番号だけを読む。**鍵列の全走査を省くための口。
+ *
+ * `findRowsByColumnValue_` は鍵列の走査と一致行の取得で**2往復**かかる。
+ * 位置が分かっているなら走査は要らず、1往復で済む ── 読取クォータ
+ * （60回/分/ユーザー）が取込の天井なので、これがそのまま速さである（v1.7）。
+ *
+ * **読んだ行の鍵列を必ず検算する。**覚えた位置が誤っていたら、呼出側は
+ * そこへ書く。1行でも食い違ったら`null`を返し、呼出側は全走査へ落ちる。
+ *
+ * 検算できるのは「その位置に何があるか」だけで、「他に無いか」ではない。
+ * **取りこぼしの心配が無い場面でしか使ってはならない** ── いま使っているのは
+ * 自分が追記した行を自分で読み直すところだけで、同じファイルへ追記できるのは
+ * リースを持つこの実行だけである。
+ *
+ * @return {?Array<{rowNumber: number, values: Array}>} 検算に通れば行、外れたら null
+ */
+function readRowsByNumbers_(sheet, rowNumbers, keyColumn, expectedKeys, width) {
+  if (!rowNumbers || !rowNumbers.length) return [];
+  var sorted = rowNumbers.slice().sort(function(a, b) { return a - b; });
+  var groups = groupConsecutiveRows(sorted.map(function(rowNumber) {
+    return {rowNumber: rowNumber};
+  }));
+  var name = quoteSheetName_(sheet.getName());
+  var ranges = groups.map(function(group) {
+    return name + '!A' + group.startRow + ':' + columnLetter_(width) + group.endRow;
+  });
+  var fetched = sheetsReadRanges_(sheet, ranges);
+  var wanted = Object.create(null);
+  (expectedKeys || []).forEach(function(key) { wanted[String(key)] = true; });
+  var byRow = Object.create(null);
+  groups.forEach(function(group, index) {
+    var rows = fetched[index] || [];
+    for (var row = group.startRow; row <= group.endRow; row += 1) {
+      byRow[row] = padRowValues_(rows[row - group.startRow], width);
+    }
+  });
+  var out = [];
+  for (var i = 0; i < sorted.length; i += 1) {
+    var values = byRow[sorted[i]];
+    if (!values || !wanted[String(values[keyColumn - 1])]) return null;
+    out.push({rowNumber: sorted[i], values: values});
+  }
+  return out;
+}
+
 function findRowsByColumnValues_(sheet, column, values, width) {
   var wanted = Object.create(null);
   (values || []).forEach(function(value) { wanted[String(value)] = true; });
