@@ -100,6 +100,11 @@ var SHEETS_API_ONLY_SHEETS_ = Object.freeze([
  * 不変条件は `flush 1` が守る ── 破ると古い行を読んで書き戻す
  * （2026-09-02の実機事故と同型）。
  */
+/** 再試行で待った時間。実行ごとに初期化される（GASのグローバル）。 */
+var apiBackoff_ = {count: 0, quotaCount: 0, ms: 0};
+
+function resetApiBackoff_() { apiBackoff_ = {count: 0, quotaCount: 0, ms: 0}; }
+
 function sheetsReadRanges_(sheet, ranges) {
   if (SHEETS_API_ONLY_SHEETS_.indexOf(String(sheet.getName())) < 0) SpreadsheetApp.flush();
   var lastError = null;
@@ -123,7 +128,15 @@ function sheetsReadRanges_(sheet, ranges) {
       // 毎分クォータ（読取60件/分/ユーザー）は数秒の指数バックオフでは
       // 回復しない。クォータ超過は分の窓が空くまで長めに待つ ── これが
       // 多段の運用操作を自然に上限内へペーシングする。
-      Utilities.sleep(quotaExceeded ? 20000 * (attempt + 1) : computeBackoffMs(attempt + 1));
+      var waitMs = quotaExceeded ? 20000 * (attempt + 1) : computeBackoffMs(attempt + 1);
+      // **待った時間を記録する。**段階ごとの計時は壁時計なので、クォータ待ちが
+      // そのまま「その処理が重い」ように見える ── 2026-09-20、99.6秒を
+      // `getTxIndexSheet` のせいだと読み違えかけた。読取は1ファイル約59回で、
+      // 60回/分の割当をほぼ使い切るため、連続取込では必ず当たる。
+      apiBackoff_.count += 1;
+      apiBackoff_.ms += waitMs;
+      if (quotaExceeded) apiBackoff_.quotaCount += 1;
+      Utilities.sleep(waitMs);
     }
   }
   throw lastError;

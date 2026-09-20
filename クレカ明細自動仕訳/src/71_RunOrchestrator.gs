@@ -278,6 +278,9 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
   // 分かっても、それがどこかは分からない ── 2026-09-20、取引8件のファイルが
   // 2分37秒かかる理由を突き止めるのに、推測を3回外した。
   outcome.phases = {};
+  // 再試行の待ち時間は**段階の時間に紛れ込む**（計時は壁時計）。分けて出さないと、
+  // クォータ待ちを「その処理が重い」と読み違える（2026-09-20 に実際にやりかけた）。
+  resetApiBackoff_();
   var phaseAt = Date.now();
   function phase(name) {
     var now = Date.now();
@@ -582,7 +585,10 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
     // （`clasp run` の表示も `[Object]` になる）、**6分に当たった後で
     // 読み返せる場所**に残さないと、材料として役に立たない。
     // 明細内容は含めない ── 出すのは段階名と所要ミリ秒だけである。
-    Logger.log('PHASES ' + JSON.stringify({file: fileName, total: 0, phases: outcome.phases}));
+    outcome.backoff = {count: apiBackoff_.count, quotaCount: apiBackoff_.quotaCount,
+      ms: apiBackoff_.ms};
+    Logger.log('PHASES ' + JSON.stringify({file: fileName, backoff: outcome.backoff,
+      phases: outcome.phases}));
 
     outcome.outcome = result.wroteToDestination ? 'WRITTEN' : 'NO_WRITE';
     outcome.nextState = stateNow;
