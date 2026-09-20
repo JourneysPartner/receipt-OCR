@@ -213,6 +213,17 @@ function runImport(options) {
     startedAt + Math.max(1, budgetSeconds - Number(SETTINGS.SAFETY_MARGIN_SECONDS || 0)) * 1000 :
     null;
 
+  // **枠を超える取込のときだけ、読取の間隔を均す。**
+  //
+  // 1ファイルの読取は約47回で、クォータ（60回/分）に収まる ── 待つ理由が
+  // 無い。均してしまうと1ファイルの取込に50秒の無駄な待ちが乗る（実測）。
+  // 2ファイル以上なら必ず超えるので、そこからは均す ── 均さないと枠を
+  // 使い切った瞬間に**1回60秒**眠り、それがファイルの途中に落ちて6分の
+  // 実行上限に当たる。均せば最悪1.3秒になる（実測、総時間はどちらも約10分）。
+  //
+  // 切り忘れると画面の操作が1.1秒刻みになるので、`finally` で必ず戻す（01）。
+  var filesPlanned = 0;
+  try {
   customers.forEach(function(customer) {
     var customerReport = {customerId: customer.customerId, files: [], skipped: null};
     report.customers.push(customerReport);
@@ -262,6 +273,8 @@ function runImport(options) {
       }
 
       // step 8以降：ファイルループ。
+      filesPlanned += candidates.length;
+      setReadQuotaSmoothing_(filesPlanned > 1);
       candidates.forEach(function(candidate) {
         if (deadline && Date.now() >= deadline) {
           customerReport.files.push({fileId: candidate.fileId, outcome: 'DEFERRED_TIME_BUDGET'});
@@ -282,6 +295,9 @@ function runImport(options) {
       customerReport.error = String(error && error.message);
     }
   });
+  } finally {
+    setReadQuotaSmoothing_(false);
+  }
 
   return report;
 }
@@ -613,6 +629,8 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
     // 読み返せる場所**に残さないと、材料として役に立たない。
     // 明細内容は含めない ── 出すのは段階名と所要ミリ秒だけである。
     outcome.backoff = {count: apiBackoff_.count, quotaCount: apiBackoff_.quotaCount,
+      paceCount: apiBackoff_.paceCount, paceMs: apiBackoff_.paceMs,
+      paceWorstMs: apiBackoff_.paceWorstMs, budget: apiReadBudget_,
       ms: apiBackoff_.ms};
     Logger.log('PHASES ' + JSON.stringify({file: fileName, backoff: outcome.backoff,
       phases: outcome.phases}));

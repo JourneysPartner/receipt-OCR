@@ -3,13 +3,15 @@
 function destinationRangeValues_(spreadsheetId, range, renderOption) {
   for (var attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      var response = Sheets.Spreadsheets.Values.batchGet(spreadsheetId, {
+      // 読取クォータはこの経路ぶんも減る。数えないとペーシングが狂う（01）。
+      var response = sheetsBatchGetPaced_(spreadsheetId, {
         ranges: [range], valueRenderOption: renderOption, dateTimeRenderOption: 'SERIAL_NUMBER', majorDimension: 'ROWS'
       });
       return response.valueRanges && response.valueRanges[0] && response.valueRanges[0].values || [];
     } catch (error) {
       var status = Number(error && (error.code || error.status));
       var transientFailure = status === 429 || status === 500 || status === 503 || /(?:429|500|503)/.test(String(error && error.message));
+      if (isSheetsQuotaError_(error)) noteSheetsQuotaExceeded_();
       if (!transientFailure) throw error;
       if (attempt === 3) throw makeCatalogError_('TRANSIENT_SHEETS_ERROR', error.message);
       Utilities.sleep(computeBackoffMs(attempt));

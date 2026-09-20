@@ -436,7 +436,8 @@ function readDestinationRows_(customer, rowNumbers, index) {
   var ranges = unique.map(function(rowNumber) {
     return a1Range_(customer.destinationSheetName, rowNumber, 1, customer.rowScanLastColumn);
   });
-  var response = Sheets.Spreadsheets.Values.batchGet(customer.destinationSpreadsheetId, {
+  // 読取クォータはこの経路ぶんも減る。数えないとペーシングが狂う（01）。
+  var response = sheetsBatchGetPaced_(customer.destinationSpreadsheetId, {
     ranges: ranges,
     valueRenderOption: 'UNFORMATTED_VALUE',
     dateTimeRenderOption: 'SERIAL_NUMBER'
