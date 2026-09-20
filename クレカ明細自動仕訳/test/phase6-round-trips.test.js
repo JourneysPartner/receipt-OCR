@@ -155,6 +155,72 @@ module.exports = ({test, assert, gas}) => {
     assert.ok(trips <= 200, `1ファイルの固定往復が${trips}回。予算200回を超えた`);
   });
 
+  /** 前検査（step 4）が何件のファイルを見たかだけを数える。 */
+  function countPreflightChecks(fn) {
+    let calls = 0;
+    const real = gas.context.runIntegrityCheck;
+    gas.context.runIntegrityCheck = function() { calls += 1; return real.apply(this, arguments); };
+    try { fn(); } finally { gas.context.runIntegrityCheck = real; }
+    return calls;
+  }
+
+  /** 恒久索引と処理ログの状態を揃えて動かす（片方だけだと同期検査が鳴る）。 */
+  function setFileState(fileId, state) {
+    const master = gas.stubs.getSpreadsheet('master');
+    [['恒久ファイルインデックス', 1, 4], ['クレカ処理ログ', 8, 17]].forEach(
+      ([name, idColumn, stateColumn]) => {
+        const sheet = master.getSheetByName(name);
+        const values = sheet.getDataRange().getValues();
+        const index = values.findIndex((row) => String(row[idColumn - 1]) === String(fileId));
+        assert.ok(index > 0, `${name} に ${fileId} が無い`);
+        sheet.getRange(index + 1, stateColumn).setValue(state);
+      });
+  }
+
+  test('scope 1: the pre-flight check looks at what this call can touch, not the whole history', () => {
+    // 顧客の全履歴を毎回見ていた ── 実機で47ファイル、固定費221秒
+    // （2026-09-20 実測）。ファイルは増える一方なので、使うほど遅くなる。
+    // 見るのは「今回の候補」＋「終端でないファイル」だけでよい。
+    // **絞りすぎてもいけない** ── 今回触るファイルと、書きかけで残った
+    // ファイルを外したら、壊れた転記先へ書き足す。
+    measure(3);
+    setFileState('fileA', 'DISCOVERED');   // 取り込み直す ＝ 今回の候補になる
+    gas.call('clearSubmittedContentHash', ['fileA']);
+    assert.equal(countPreflightChecks(() => gas.call('runImport', [{}])), 1,
+      '今回取り込むファイルを前検査から外している');
+  });
+
+  test('scope 3: a file left unfinished is checked even when this run does not touch it', () => {
+    // 書きかけで残ったファイルは、次に同じ転記先へ書くときの危険そのもの。
+    // 「今回の候補だけ」に絞ると、これを見落とす。
+    measure(3);
+    setFileState('fileA', 'REVIEW_WAIT');
+    assert.equal(
+      countPreflightChecks(() => gas.call('runImport', [{fileIds: ['NO_SUCH_FILE']}])), 1,
+      '終端に至っていないファイルを前検査から外している');
+  });
+
+  test('scope 2: a completed file the run does not touch is not re-checked', () => {
+    // 完了済みで今回触らないファイルは、この実行では壊しようがない。
+    // 見続けると、ファイル数に比例して取込が遅くなる。
+    measure(3);   // fileA を取り込んで終端まで進める
+
+    const scanned = [];
+    const real = gas.context.getTransactionsByStatus;
+    gas.context.getTransactionsByStatus = function(fileId) {
+      scanned.push(String(fileId));
+      return real.apply(this, arguments);
+    };
+    try {
+      // 候補が1件も無い実行。前検査だけが走る。
+      gas.call('runImport', [{fileIds: ['NO_SUCH_FILE']}]);
+    } finally {
+      gas.context.getTransactionsByStatus = real;
+    }
+    assert.deepEqual(scanned.filter((id) => id === 'fileA'), [],
+      '完了済みで今回触らないファイルを、取込のたびに読み直している');
+  });
+
   test('flush 1: the sheets that skip the pre-read flush are never written through SpreadsheetApp', () => {
     // `sheetsReadRanges_` は `SHEETS_API_ONLY_SHEETS_` のシートで
     // 読取前の `flush()` を省く。省ける根拠は「そのシートを
