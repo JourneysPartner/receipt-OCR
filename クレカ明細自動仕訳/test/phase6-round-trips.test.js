@@ -411,4 +411,41 @@ module.exports = ({test, assert, gas}) => {
       '古い行を渡すと提出時点の内容ハッシュを書き換えられてしまう（INV-07）');
     assert.equal(out.value, 'HASH_A', 'ハッシュが書き換わっている');
   });
+
+  test('masters 1: a table that cannot change during a run is read once, not once per file', () => {
+    // 使用用途補完マスターと共通取引先一覧は取込が書く先ではない（書くのは
+    // 初期設定だけ）。それでもファイルごとに読み直していた ── 12ファイルなら
+    // 同じ表を12回読む。読取クォータ（60回/分/ユーザー）が取込の天井なので、
+    // これはそのまま待ち時間になる。
+    measure(2);
+    gas.evaluate('runScopedMasters_ = {purposeRules: null, commonPartners: null};');
+
+    gas.stubs.resetRoundTrips();
+    gas.context.__cold = gas.evaluate(
+      '[purposeRulesForRun_(), commonPartnersForRun_()]');
+    const cold = gas.stubs.roundTrips().rangeReads;
+
+    gas.stubs.resetRoundTrips();
+    gas.context.__warm = gas.evaluate(
+      '[purposeRulesForRun_(), commonPartnersForRun_()]');
+    const warm = gas.stubs.roundTrips().rangeReads;
+
+    assert.equal(cold, 2, `初回に${cold}回読んでいる（2つの表で2回のはず）`);
+    assert.equal(warm, 0,
+      `2回目にも${warm}回読んでいる。実行のあいだ変わらない表を` +
+      'ファイルごとに読み直している（71 の runScopedMasters_ を見よ）');
+    assert.deepEqual(plain(gas.context.__warm), plain(gas.context.__cold),
+      '覚えた値が読み直した値と食い違う');
+  });
+
+  test('masters 2: pointing at another master throws the remembered tables away', () => {
+    // 覚えるのは1回の押下の中だけだが、マスターを向け直したら無効である。
+    measure(2);
+    gas.evaluate('purposeRulesForRun_(); commonPartnersForRun_();');
+    gas.call('setMasterSpreadsheetId', ['master']);
+    gas.stubs.resetRoundTrips();
+    gas.evaluate('purposeRulesForRun_(); commonPartnersForRun_();');
+    assert.equal(gas.stubs.roundTrips().rangeReads, 2,
+      '向け直したのに古い表を使っている');
+  });
 };

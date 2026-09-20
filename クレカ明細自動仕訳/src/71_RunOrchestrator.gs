@@ -42,8 +42,29 @@ function checkLogCapacityForRun_() {
   return {ok: exceeded.length === 0, exceeded: exceeded};
 }
 
+/**
+ * 実行のあいだ変わらないマスターを覚えておく場所。
+ *
+ * 使用用途補完マスターと共通取引先一覧は、取込が書く先ではない
+ * （書くのは初期設定だけ）。それでも**ファイルごとに読み直して**いた ──
+ * 12ファイルなら同じ表を12回読むことになる。読取クォータ（60回/分/
+ * ユーザー）が取込の天井なので、これはそのまま待ち時間になる（v1.6）。
+ *
+ * GASの実行ごとにグローバルは初期化されるので、実行をまたいで残らない。
+ * つまり**1回の押下の中でだけ**同じ値を使う ── 途中で誰かがマスターを
+ * 直しても、その押下は始めた時点の値で最後まで通る。ファイルごとに
+ * 違う規則で処理されるよりそのほうが筋が通る。
+ */
+var runScopedMasters_ = {purposeRules: null, commonPartners: null};
+
 /** 使用用途補完マスターを読む（2.1.3）。 */
 function purposeRulesForRun_() {
+  if (runScopedMasters_.purposeRules) return runScopedMasters_.purposeRules;
+  runScopedMasters_.purposeRules = readPurposeRules_();
+  return runScopedMasters_.purposeRules;
+}
+
+function readPurposeRules_() {
   return readSheetRows_(
     requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.PURPOSE_COMPLEMENT), 10)
     .filter(function(row) { return String(row.values[0] || '') !== ''; })
@@ -55,6 +76,12 @@ function purposeRulesForRun_() {
 
 /** 共通取引先一覧を読む（2.1.4）。 */
 function commonPartnersForRun_() {
+  if (runScopedMasters_.commonPartners) return runScopedMasters_.commonPartners;
+  runScopedMasters_.commonPartners = readCommonPartners_();
+  return runScopedMasters_.commonPartners;
+}
+
+function readCommonPartners_() {
   return readSheetRows_(
     requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.COMMON_PARTNER_LIST), 6)
     .filter(function(row) { return String(row.values[0] || '') !== ''; })
