@@ -88,12 +88,15 @@ module.exports = ({test, assert, gas}) => {
     `);
     gas.stubs.setActiveUser('admin@example.com');
 
-    let csv = '利用日,利用店名,金額,使用用途\n';
-    for (let i = 0; i < txCount; i += 1) {
-      csv += `2025/12/${String((i % 28) + 1).padStart(2, '0')},ローソン,${1000 + i},仕入れ\n`;
-    }
     const fileIds = [];
     for (let f = 0; f < (fileCount || 1); f += 1) {
+      // **ファイルごとに中身を変える。**同じ明細のままだと2本目が重複として
+      // 弾かれ、「1ファイル増やす費用」を測っているつもりで測れていない
+      // （実際、これに気づくまで変異3つがすり抜けた）。
+      let csv = '利用日,利用店名,金額,使用用途\n';
+      for (let i = 0; i < txCount; i += 1) {
+        csv += `2025/12/${String((i % 28) + 1).padStart(2, '0')},ローソン,${1000 + f * 1000 + i},仕入れ\n`;
+      }
       const id = f === 0 ? 'fileA' : 'file' + f;
       gas.stubs.createFile(id, {
         name: `三井住友カード2026${String(f + 1).padStart(2, '0')}.csv`,
@@ -308,8 +311,11 @@ module.exports = ({test, assert, gas}) => {
     const before = gas.stubs.roundTrips();
 
     assert.equal(after.rangeReads, before.rangeReads, '読取の回数は変えていない');
-    assert.ok(after.flushes < before.flushes - 20,
-      `flushが${before.flushes}回から${after.flushes}回にしかならない。` +
+    // **割合で見る。**読取そのものを減らせば省ける回数も減るので、
+    // 「差が何回あるか」で固定すると、速くしたときに落ちる。
+    assert.ok(after.flushes < before.flushes * 0.7,
+      `flushが${before.flushes}回から${after.flushes}回にしかならない` +
+      `（${Math.round(after.flushes / before.flushes * 100)}%）。` +
       '省けているか（SHEETS_API_ONLY_SHEETS_ が効いているか）を見よ');
   });
 
@@ -505,14 +511,17 @@ module.exports = ({test, assert, gas}) => {
 
   test('budget 1: the quota-consuming reads per file stay within budget', () => {
     // 12ヶ月の取込にかかる時間を決めるのは**1ファイル増やすごとの費用**である
-    // （固定費は1回きり）。2026-09-20 実測：固定費12回＋1ファイル37回。
-    // 12ファイル＝456回、60回/分なので**7.6分がクォータだけで要る。**
+    // （固定費は1回きり）。2026-09-20 実測：固定費12回＋1ファイル34回。
+    // 12ファイル＝420回、60回/分なので**7.0分がクォータだけで要る。**
     const one = apiReads(() => measure(20, 1));
     const two = apiReads(() => measure(20, 2));
     const perFile = two - one;
     const twelve = one + perFile * 11;
-    assert.ok(perFile <= 38,
-      `1ファイル増やすごとに枠を${perFile}回消費している（上限40）。` +
+    // **上限は実測値そのものに置く。**余白を持たせると、1回増えた変更が
+    // 黙って通る（実際に3つの変異がすり抜けた）。枠の読取を1回増やすのは
+    // 12ファイルで12回＝12秒ぶんの決定なので、記録に残して上げること。
+    assert.ok(perFile <= 34,
+      `1ファイル増やすごとに枠を${perFile}回消費している（上限34）。` +
       `12ファイルなら${twelve}回＝${(twelve / 60).toFixed(1)}分がクォータだけで要る`);
   });
 
@@ -626,6 +635,59 @@ module.exports = ({test, assert, gas}) => {
     const out = plain(gas.context.__out);
     assert.equal(out.after, out.before - 1,
       `有効でない取引が数に残っている（${out.before}→${out.after}）`);
+  });
+
+
+  test('batch 1: last-row lookups in one spreadsheet cost one request, not one each', () => {
+    // クォータが数えるのは読んだ行数でも範囲の数でもなく**要求の回数**である。
+    // 処理ログと恒久ファイルインデックスは必ず一緒に追記するので、
+    // 別々に数えると1ファイルにつき往復を1つ損する。
+    measure(2);
+    const same = apiReads(() => gas.evaluate(
+      'apiLastDataRows_([{sheet: processLogSheet_(), columns: PROCESS_LOG_WIDTH_},' +
+      ' {sheet: permanentFileIndexSheet_(), columns: FILE_INDEX_WIDTH_}])'));
+    assert.equal(same, 1,
+      `同じスプレッドシートの2枚で${same}回の要求を出している（1回のはず）`);
+
+    // 違うスプレッドシートは**まとめられない**。分けて読むこと。
+    const across = apiReads(() => gas.evaluate(
+      'apiLastDataRows_([{sheet: processLogSheet_(), columns: PROCESS_LOG_WIDTH_},' +
+      ' {sheet: requireSheet_(SpreadsheetApp.openById("dest1"), "入力用シート"), columns: 8}])'));
+    assert.equal(across, 2,
+      `別のスプレッドシートを${across}回でまとめようとしている。` +
+      'batchGet は1つのスプレッドシートしか読めない');
+
+    // 値そのものが合っていること（回数だけ合っても意味がない）
+    gas.context.__last = gas.evaluate(
+      '[apiLastDataRows_([{sheet: processLogSheet_(), columns: PROCESS_LOG_WIDTH_}])[0],' +
+      ' apiLastDataRow_(processLogSheet_(), PROCESS_LOG_WIDTH_)]');
+    const [batched, single] = plain(gas.context.__last).map(Number);
+    assert.equal(batched, single, 'まとめて数えた末尾行が単独のときと違う');
+    assert.ok(batched >= 2, '末尾行が取れていない');
+  });
+
+
+  test('batch 2: the append row is the end of the data, not the end of the grid', () => {
+    // 末尾行は「値のある最後の行」である。グリッドの高さを返すと、
+    // 追記が**空行の向こう側**に飛び、その行は鍵列の走査で見つからなくなる。
+    measure(2);
+    gas.context.__out = gas.evaluate(
+      '(function() {' +
+      '  var sheet = processLogSheet_();' +
+      '  var before = apiLastDataRow_(sheet, PROCESS_LOG_WIDTH_);' +
+      '  sheet.insertRowsAfter(sheet.getMaxRows(), 5);' +   // 末尾に空行を足す
+      '  SpreadsheetApp.flush();' +
+      '  return {before: before, after: apiLastDataRow_(sheet, PROCESS_LOG_WIDTH_),' +
+      '    maxRows: sheet.getMaxRows()};' +
+      '})()');
+    const out = plain(gas.context.__out);
+    // **空行が本当にできたことを先に確かめる。**できていなければ、この検査は
+    // 何も見ていないのに通る（変異が1つすり抜けた）。
+    assert.ok(out.maxRows > out.before,
+      `末尾に空行ができていない（データ${out.before}行・グリッド${out.maxRows}行）`);
+    assert.equal(out.after, out.before,
+      `空行を足したら末尾行が${out.before}→${out.after}に動いた（グリッドは${out.maxRows}行）。` +
+      '追記が空行の向こう側へ飛ぶ');
   });
 
   test('pace 1: every Sheets read goes through the pacer', () => {

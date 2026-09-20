@@ -373,6 +373,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
 
     // 処理ログ・恒久ファイルインデックスへ登録し、`VALIDATING`にする。
     var existing = getProcessLogRecord_(fileId);
+    // いま読んだ行を渡す。登録の中でもう一度読ませない。
     var registered = createOrUpdateProcessLog(runId, customer, {
       id: fileId,
       originalFileName: fileName,
@@ -381,7 +382,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
       state: FILE_STATE.VALIDATING,
       revision: candidate.revisionId || '',
       updatedAt: candidate.modifiedTime || ''
-    });
+    }, existing);
     stateNow = FILE_STATE.VALIDATING;
     updateFilePrefix(fileId, registered);
     phase('register');
@@ -400,7 +401,9 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
       }
     } else {
       // 8-3：形式判定（全シート個別→集約→版ピン留め）。
-      var permanent = getPermanentFileIndexRecord_(fileId);
+      // 登録が返した行を使う。M列（対象シート名）は登録では書かないので、
+      // 読み直しても同じ値である。
+      var permanent = registered.permanent;
       var targetSheetName = permanent ? String(permanent.values[12] || '') : '';
       var detections = read.sheets.map(function(sheet) {
         return {
