@@ -115,28 +115,12 @@ ignored_paths: []
 # whether the project is in read-only mode
 # If set to true, all editing tools will be disabled and attempts to use them will result in an error
 # Added on 2025-04-18
-read_only: true
+read_only: false
 
 # list of tool names to exclude.
 # This extends the existing exclusions (e.g. from the global configuration)
 # Find the list of tools here: https://oraios.github.io/serena/01-about/035_tools.html
-excluded_tools:
-- create_text_file
-- replace_content
-- replace_in_files
-- replace_symbol_body
-- insert_after_symbol
-- insert_before_symbol
-- rename_symbol
-- safe_delete_symbol
-- write_memory
-- read_memory
-- list_memories
-- delete_memory
-- rename_memory
-- edit_memory
-- execute_shell_command
-- onboarding
+excluded_tools: []
 
 # list of tools to include that would otherwise be disabled (particularly optional tools that are disabled by default).
 # This extends the existing inclusions (e.g. from the global configuration).
