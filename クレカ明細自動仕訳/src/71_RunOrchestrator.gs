@@ -372,6 +372,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
   // 時間なので、読取の多い段階に偏って乗る。段階の時間から待ちを引いたものが
   // **実際に働いた時間**であり、ここから先を速くするならそちらを見る（v1.9）。
   resetApiBackoff_();
+  resetSteps_();
   outcome.waits = {};
   var phaseAt = Date.now();
   var phaseWaitedAt = apiBackoff_.paceMs + apiBackoff_.ms;
@@ -712,7 +713,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
       paceWorstMs: apiBackoff_.paceWorstMs, budget: apiReadBudget_,
       ms: apiBackoff_.ms};
     Logger.log('PHASES ' + JSON.stringify({file: fileName, backoff: outcome.backoff,
-      waits: outcome.waits,
+      waits: outcome.waits, steps: stepTimes_,
       phases: outcome.phases}));
 
     outcome.outcome = result.wroteToDestination ? 'WRITTEN' : 'NO_WRITE';

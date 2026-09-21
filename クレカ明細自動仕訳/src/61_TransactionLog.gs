@@ -156,7 +156,9 @@ function registerPrepared(txs, runId, existingByIdHint) {
     // 8-10の橋渡しが同じ照会を先に済ませていれば、それを受け取って読み直さない
     // （同じファイルの取引IDを作れるのは同じファイルの取込だけで、それは
     // ファイルのリースが直列化している）。
+    stepAt_ = Date.now();
     var existingById = existingByIdHint || activeTransactionRecordsByIds_(ids);
+    step_('reg:existing');
     var appends = [];
 
     // 取引インデックスのシートは**この呼出しの中で1回だけ引く。**
@@ -235,8 +237,10 @@ function registerPrepared(txs, runId, existingByIdHint) {
       appends.push({row: row, indexSheet: indexSheet, indexRow: indexRow});
     });
 
+    step_('reg:build');
     var logRows = appends.map(function(a) { return a.row; });
     var appended = appendRowsBatched_(logSheet, logRows, TRANSACTION_LOG_WIDTH_);
+    step_('reg:appendLog');
     // 書いた位置を覚える。次に引くとき鍵列の全走査を省ける。
     if (appended) rememberAppendedTxRows_(logRows, appended.startRow);
     // 恒久取引インデックスは顧客×年で分かれる。シートごとにまとめる。
@@ -249,6 +253,7 @@ function registerPrepared(txs, runId, existingByIdHint) {
     byIndexSheet.forEach(function(bucket) {
       appendRowsBatched_(bucket.sheet, bucket.rows, TX_INDEX_WIDTH_);
     });
+    step_('reg:appendIndex');
   });
 }
 

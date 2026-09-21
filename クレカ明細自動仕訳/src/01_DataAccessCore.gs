@@ -204,6 +204,31 @@ function setReadQuotaSmoothing_(on) {
  * ペーサーの時計。**待ちの長さを検証するにはここを差し替えるしかない。**
  * 実際に眠って測るテストは、1ファイルぶんで1分かかる。
  */
+/**
+ * **段階の中の内訳。**
+ *
+ * 段階ごとの計時（71）で「どこが重いか」までは分かるが、1つの段階が5秒
+ * あってもその中身は分からない。`read` は Drive からの取得・xlsx の変換・
+ * シートの読取・後片付けの合計であり、`pre:register` は照会・行の組立・
+ * 追記2回の合計である。**どれが重いかで打ち手がまったく違う。**
+ *
+ * 待ちを分けたのと同じ理屈である ── 合計だけ見て「その処理が重い」と
+ * 読み違えるのを避けるために計器を足す。2026-09-20 に3回外している。
+ */
+var stepTimes_ = {};
+var stepAt_ = 0;
+
+function resetSteps_() {
+  stepTimes_ = {};
+  stepAt_ = Date.now();
+}
+
+function step_(name) {
+  var now = Date.now();
+  stepTimes_[name] = (stepTimes_[name] || 0) + (now - stepAt_);
+  stepAt_ = now;
+}
+
 function apiClockNow_() { return Date.now(); }
 
 function resetApiReadWindow_() {
