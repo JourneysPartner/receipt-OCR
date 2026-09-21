@@ -482,8 +482,10 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
           return tx.amountBillingJpy === null ?
             Object.assign({}, tx, {amountBillingJpy: 0}) : tx;
         });
+        // 登録が返した行を使う。ここが見るのは**管理者の承認列**だけで、
+        // 承認は人の別操作なので、登録から今までの間に付くことはない。
         validation.countsTotals = verifyCountsAndTotals(
-          reconcilable, cardFormat, resolvedSheet, getProcessLogRecord_(fileId));
+          reconcilable, cardFormat, resolvedSheet, registered.process);
 
         // 8-6'：前年利用日（INDIVIDUALのみ。空欄化対象を除外する。INV-40）。
         validation.priorYear = checkPriorYearUsage(transactions, customer,
@@ -613,6 +615,21 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
       cardFormat: cardFormat,
       transactions: transactions,
       validation: validation,
+      // 9-2の番人が比べる**期待値**は、8-2の解析時にこちらが記録した値そのもの
+      // である（登録で書いた）。渡さないと番人が処理ログを読み直すだけで、
+      // 比べる中身は変わらない ── 読取クォータが取込の天井なので、
+      // 分かっている値は渡す（v1.8）。
+      //
+      // **見張りは弱まらない。**番人が見るのは「いま Drive にあるファイル」と
+      // この期待値の差であり、いま読み直すのは `fetchFileRecord` のほうである。
+      // **登録が処理ログへ書いた値をそのまま渡す。**手元の `binaryHash` を
+      // 渡してもいまの経路では同じだが、処理ログは値が空のとき前の行の値を
+      // 残すので、両者は一致するとは限らない。読み直しを省くために、
+      // 比べる中身が変わってはならない。
+      processLog: {
+        fileRevision: registered.process.values[PROCESS_FIELD_COLUMNS_.fileRevision - 1],
+        binaryHash: registered.process.values[PROCESS_FIELD_COLUMNS_.binaryHash - 1]
+      },
       fetchFileRecord: function(id) {
         return {binaryHash: sha256Hex(DriveApp.getFileById(id).getBlob().getBytes())};
       },
