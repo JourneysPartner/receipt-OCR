@@ -57,6 +57,45 @@ function checkLogCapacityForRun_() {
  */
 var runScopedMasters_ = {purposeRules: null, commonPartners: null};
 
+/**
+ * 転記先シートの**形**（列の並び・ヘッダー）の確認結果。顧客ごとに1回。
+ *
+ * 確認のために転記先を丸ごと読み直す（`buildIndex` は値と数式で2往復）。
+ * 1ファイルごとにやると12ヶ月で24往復 ── 読取クォータ（60回/分/ユーザー）が
+ * 取込の天井なので、そのまま待ち時間になる（v1.9）。
+ *
+ * **形は取込のあいだ変わらない。**変えられるのは人がシートを直したときだけで、
+ * それは1回の押下（6分）の中では起こらない前提に立つ。
+ *
+ * **その前提が外れたときに何が守るか。**書込の直前、行を確保する処理が
+ * ロックの中で転記先をもう一度読む（`reserveDestinationRows`）── 列が
+ * 壊れていればそこで止まる。ここで失うのは「1ファイル早く気づけたはず」
+ * という猶予だけである。
+ *
+ * 結果は**複製して返す。**呼出側はファイルごとの検証結果として持ち回るので、
+ * 同じ物を配ると一方の書き換えが他のファイルの記録に混ざる。
+ */
+var runScopedDestinationSchema_ = Object.create(null);
+
+function forgetDestinationSchema_() {
+  runScopedDestinationSchema_ = Object.create(null);
+}
+
+function destinationSchemaForRun_(customer) {
+  var key = String(customer.customerId) + '\u0000' + String(customer.destinationSpreadsheetId) +
+    '\u0000' + String(customer.destinationSheetName);
+  var cached = runScopedReads_ ? runScopedDestinationSchema_[key] : null;
+  if (!cached) {
+    cached = validateDestinationSchema(customer, buildIndex(customer, {}));
+    if (runScopedReads_) runScopedDestinationSchema_[key] = cached;
+  }
+  return {
+    ok: cached.ok, code: cached.code,
+    problems: (cached.problems || []).slice(),
+    warnings: (cached.warnings || []).slice()
+  };
+}
+
 /** 使用用途補完マスターを読む（2.1.3）。 */
 function purposeRulesForRun_() {
   if (runScopedReads_ && runScopedMasters_.purposeRules) return runScopedMasters_.purposeRules;
@@ -325,14 +364,26 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
   // 分かっても、それがどこかは分からない ── 2026-09-20、取引8件のファイルが
   // 2分37秒かかる理由を突き止めるのに、推測を3回外した。
   outcome.phases = {};
-  // 再試行の待ち時間は**段階の時間に紛れ込む**（計時は壁時計）。分けて出さないと、
+  // 待ち時間は**段階の時間に紛れ込む**（計時は壁時計）。分けて出さないと、
   // クォータ待ちを「その処理が重い」と読み違える（2026-09-20 に実際にやりかけた）。
+  //
+  // **段階ごとに、そのうち何ミリ秒が待ちだったかも出す。**総量だけを分けても
+  // 「どの処理が重いのか」は分からない ── 待ちはクォータの枠が空くまでの
+  // 時間なので、読取の多い段階に偏って乗る。段階の時間から待ちを引いたものが
+  // **実際に働いた時間**であり、ここから先を速くするならそちらを見る（v1.9）。
   resetApiBackoff_();
+  outcome.waits = {};
   var phaseAt = Date.now();
+  var phaseWaitedAt = apiBackoff_.paceMs + apiBackoff_.ms;
   function phase(name) {
     var now = Date.now();
+    var waited = apiBackoff_.paceMs + apiBackoff_.ms;
     outcome.phases[name] = (outcome.phases[name] || 0) + (now - phaseAt);
+    if (waited > phaseWaitedAt) {
+      outcome.waits[name] = (outcome.waits[name] || 0) + (waited - phaseWaitedAt);
+    }
     phaseAt = now;
+    phaseWaitedAt = waited;
   }
 
   try {
@@ -541,8 +592,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
 
         phase('duplicate');
         // 8-7：転記先構成検証（`WRITING`遷移前）。
-        var destinationIndex = buildIndex(customer, {});
-        validation.destinationSchema = validateDestinationSchema(customer, destinationIndex);
+        validation.destinationSchema = destinationSchemaForRun_(customer);
         phase('destinationIndex');
 
         // 8-10：店名正規化・取引先判定（メモリ上のみ。登録は9-8）。
@@ -662,6 +712,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
       paceWorstMs: apiBackoff_.paceWorstMs, budget: apiReadBudget_,
       ms: apiBackoff_.ms};
     Logger.log('PHASES ' + JSON.stringify({file: fileName, backoff: outcome.backoff,
+      waits: outcome.waits,
       phases: outcome.phases}));
 
     outcome.outcome = result.wroteToDestination ? 'WRITTEN' : 'NO_WRITE';
