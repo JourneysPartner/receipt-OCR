@@ -1,0 +1,30 @@
+# ==== Serena MCP (managed block, added 2026-09-21) ====
+# Official docs: https://oraios.github.io/serena/02-usage/030_clients.html
+# Project-scoped on purpose: Serena loads only for this repository.
+# --project is pinned to an absolute path because the Codex app does not start
+# its session in the project directory (--project-from-cwd fails there).
+# enabled_tools is a read-only allow-list: Serena cannot modify files.
+[mcp_servers.serena]
+command = 'C:\Users\ko-ch\.local\bin\serena.exe'
+args = [
+  "start-mcp-server",
+  "--project", 'C:\Users\ko-ch\Desktop\仕事\Receipt OCR',
+  "--context=codex",
+  "--add-mode", "no-onboarding",
+  "--add-mode", "no-memories",
+]
+startup_timeout_sec = 60
+tool_timeout_sec = 120
+enabled_tools = [
+  "activate_project",
+  "get_current_config",
+  "initial_instructions",
+  "get_symbols_overview",
+  "find_symbol",
+  "find_referencing_symbols",
+  "find_implementations",
+  "find_declaration",
+  "search_for_pattern",
+  "get_diagnostics_for_file",
+]
+# ==== end Serena MCP managed block ====
