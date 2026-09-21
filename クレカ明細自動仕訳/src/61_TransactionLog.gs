@@ -239,7 +239,7 @@ function registerPrepared(txs, runId, existingByIdHint) {
 
     step_('reg:build');
     var logRows = appends.map(function(a) { return a.row; });
-    var appended = appendRowsBatched_(logSheet, logRows, TRANSACTION_LOG_WIDTH_);
+    var appended = appendRowsBatched_(logSheet, logRows, TRANSACTION_LOG_WIDTH_, 'log');
     step_('reg:appendLog');
     // 書いた位置を覚える。次に引くとき鍵列の全走査を省ける。
     if (appended) rememberAppendedTxRows_(logRows, appended.startRow);
@@ -251,7 +251,7 @@ function registerPrepared(txs, runId, existingByIdHint) {
       bucket.rows.push(append.indexRow);
     });
     byIndexSheet.forEach(function(bucket) {
-      appendRowsBatched_(bucket.sheet, bucket.rows, TX_INDEX_WIDTH_);
+      appendRowsBatched_(bucket.sheet, bucket.rows, TX_INDEX_WIDTH_, 'idx');
     });
     step_('reg:appendIndex');
   });
@@ -291,16 +291,20 @@ function rememberedTxRecordsByIds_(fullTxIds) {
  * `apiLastDataRow_`で決める ── `getLastRow()`はSpreadsheetAppのキャッシュ
  * 越しで、Sheets APIで足したばかりの行を数え落とす。
  */
-function appendRowsBatched_(sheet, rows, width) {
+function appendRowsBatched_(sheet, rows, width, label) {
   if (!rows || !rows.length) return null;
+  var tag = label ? 'append:' + label + ':' : null;
   var startRow = apiLastDataRow_(sheet, width) + 1;
+  if (tag) step_(tag + 'last');
   ensureRowExists_(sheet, startRow + rows.length - 1);
+  if (tag) step_(tag + 'grow');
   var values = rows.map(function(row) { return padRowValues_(row, width); });
   Sheets.Spreadsheets.Values.batchUpdate({valueInputOption: 'RAW', data: [{
     range: quoteSheetName_(sheet.getName()) + '!A' + startRow + ':' +
       columnLetter_(width) + (startRow + rows.length - 1),
     values: values
   }]}, sheet.getParent().getId());
+  if (tag) step_(tag + 'write');
   return {startRow: startRow, count: rows.length};
 }
 

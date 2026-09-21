@@ -656,4 +656,94 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(result.txs[0].amountOriginal, 19);
     assert.equal(result.txs[0].exchangeRate, 168.932);
   });
+
+  test('explain 1: the explanation never disagrees with the actual detection', () => {
+    // **説明側に判定を書き直すと、いつか食い違う。**同じ日（2026-09-21）に
+    // リースの一覧と解放でそれが起きていた ── 一覧は「解放可」と言うのに
+    // 解放されない。形式判定でも同じことをすれば、運用者は診断を見て
+    // 「合っているはずだ」と考え、実際は弾かれ続ける。
+    const profile = JSON.stringify({minColumns: 11, maxColumns: 11, sampleRows: 5, columns: [
+      {index: 0, type: 'date', required: true},
+      {index: 4, type: 'number', required: true}
+    ]});
+    setupMaster([
+      formatRowValues({columnProfile: profile}),
+      formatRowValues({formatId: 'narrow', columnProfile: JSON.stringify(
+        {minColumns: 6, maxColumns: 6, sampleRows: 5, columns: [
+          {index: 0, type: 'date', required: true}]})}),
+      formatRowValues({formatId: 'csvonly', fileTypes: '["csv"]'}),
+      // 壊れた定義。判定は候補から外すので、説明も○と言ってはならない。
+      formatRowValues({formatId: 'broken', dateColumn: '', dateAltColumn: ''})
+    ]);
+    const defs = gas.call('loadFormatDefinitions', [{}]);
+
+    const narrowSheet = {name: 'S', rows: [
+      ['利用日', '利用店名・商品名', '利用者', '支払方法', '利用金額', '使用用途'],
+      ['2025/10/24', '楽天ビック', '本人', '1回払い', 1000, '仕入れ']
+    ]};
+    const noKeywords = {name: 'S', rows: [['ご利用日', 'データ処理日', 'ご利用内容', '金額']]};
+
+    [[rakutenSheet, 'xlsx'], [rakutenSheet, 'csv'], [narrowSheet, 'xlsx'],
+     [noKeywords, 'xlsx']].forEach(([sheet, fileType]) => {
+      const hits = plain(gas.call('detectFormatWith', [defs, sheet, fileType, 'x.' + fileType]))
+        .map((c) => c.formatId).sort();
+      const said = [];
+      plain(defs).forEach((def, i) => {
+        gas.context.__def = defs[i];
+        gas.context.__sheet = sheet;
+        const verdict = String(gas.evaluate(
+          'explainFormatVerdict_(__def, __sheet, ' + JSON.stringify(fileType) + ')'));
+        if (verdict.charAt(0) === '○') said.push(def.formatId);
+      });
+      assert.deepEqual(said.sort(), hits,
+        `説明と判定が食い違う（${sheet.rows[0].length}列/${fileType}）。\n` +
+        `説明: ${JSON.stringify(said)}\n判定: ${JSON.stringify(hits)}`);
+    });
+  });
+
+  test('explain 2: a keyword shortfall names the keyword that is missing', () => {
+    // 楽天の実ファイルで起きた形 ── 顧客が見出しのセルに使用用途の「値」を
+    // 書いてしまい、見出しが `使用用途` でなくなった（2026-09-21）。
+    setupMaster([formatRowValues({})]);
+    const defs = gas.call('loadFormatDefinitions', [{}]);
+    const renamed = {name: 'S', rows: [
+      ['利用日', '利用店名・商品名', '利用者', '支払方法', '利用金額',
+       '手数料', '支払総額', '9月支払金額', '10月繰越残高', '新規サイン', 'ツール代'],
+      ['2025/08/21', 'ﾎﾟｹﾓﾝｾﾝﾀ-', '本人', '1回払い', 13550, 0, 13550, 13550, 0, '*', '仕入']
+    ]};
+    assert.equal(plain(gas.call('detectFormatWith', [defs, renamed, 'xlsx', 'a.xlsx'])).length, 0,
+      '前提：この形は判定で落ちる');
+    gas.context.__def = defs[0];
+    gas.context.__sheet = renamed;
+    const verdict = String(gas.evaluate('explainFormatVerdict_(__def, __sheet, "xlsx")'));
+    assert.ok(/キーワード不足/.test(verdict), verdict);
+    assert.ok(/無\[[^\]]*使用用途/.test(verdict),
+      `足りないキーワードを名指ししていない: ${verdict}`);
+    assert.ok(/有\[[^\]]*利用日/.test(verdict),
+      `一致したキーワードを示していない: ${verdict}`);
+  });
+
+  test('explain 3: a width mismatch names the actual and the expected width', () => {
+    // au・ペイペイの実ファイルで起きた形 ── 同じカードの月違いで列が1つ
+    // 少なく、登録済みの形式（7列版・13列版）に当たらない。列数は
+    // 同一発行元の変種を分ける唯一の手がかりなので、ここが分かれば
+    // 「何列版を登録すればよいか」が即座に決まる。
+    const profile = JSON.stringify({minColumns: 11, maxColumns: 11, sampleRows: 5, columns: [
+      {index: 0, type: 'date', required: true}
+    ]});
+    setupMaster([formatRowValues({columnProfile: profile})]);
+    const defs = gas.call('loadFormatDefinitions', [{}]);
+    const narrow = {name: 'S', rows: [
+      ['利用日', '利用店名・商品名', '利用金額', '使用用途'],
+      ['2025/10/24', '楽天ビック', 1000, '仕入れ']
+    ]};
+    assert.equal(plain(gas.call('detectFormatWith', [defs, narrow, 'xlsx', 'a.xlsx'])).length, 0,
+      '前提：この形は判定で落ちる');
+    gas.context.__def = defs[0];
+    gas.context.__sheet = narrow;
+    const verdict = String(gas.evaluate('explainFormatVerdict_(__def, __sheet, "xlsx")'));
+    assert.ok(/列数が 4/.test(verdict), `実際の列数を出していない: ${verdict}`);
+    assert.ok(/11〜11/.test(verdict), `期待する列数を出していない: ${verdict}`);
+  });
+
 };
