@@ -306,12 +306,15 @@ function readFile(fileId, fileName, options) {
     throw new TypeError('readFile supports only .csv/.xlsx: ' + fileName);
   }
 
+  stepAt_ = Date.now();
   var bytes = DriveApp.getFileById(fileId).getBlob().getBytes();
+  step_('read:blob');
   checkInputLimits(fileId, bytes.length, null, null);
 
   if (fileType === 'csv') {
     var detection = detectEncoding(bytes, opts.expectedKeywords || []);
     var parsed = parseCsv(detection.text);
+    step_('read:decode');
     checkInputLimits(fileId, null, 1, parsed.rows.length);
     return {
       sheets: [{name: null, rows: parsed.rows, recordStarts: parsed.recordStarts}],
@@ -323,6 +326,7 @@ function readFile(fileId, fileName, options) {
   }
 
   var temp = convertXlsxToTemp(fileId);
+  step_('read:convert');
   try {
     var sheetObjects = temp.spreadsheet.getSheets();
     checkInputLimits(fileId, null, sheetObjects.length, null);
@@ -335,6 +339,7 @@ function readFile(fileId, fileName, options) {
       checkInputLimits(fileId, null, null, values.length);
       return {name: sheet.getName(), rows: values, recordStarts: null};
     });
+    step_('read:sheets');
     return {
       sheets: sheets,
       encoding: null,
@@ -344,5 +349,6 @@ function readFile(fileId, fileName, options) {
     };
   } finally {
     disposeTemp(temp.tempFileId);
+    step_('read:dispose');
   }
 }
