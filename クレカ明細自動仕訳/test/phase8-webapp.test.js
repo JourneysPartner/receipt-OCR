@@ -320,6 +320,20 @@ module.exports = ({test, assert, gas}) => {
     return Array.isArray(result.fileResults) ? result.fileResults : [];
   }
 
+
+  /** クライアントの関数を1つ取り出して呼ぶ（`clientStoppedByMessage` と同じ手）。 */
+  function clientEval(expression) {
+    const scriptMatch = /<script>([\s\S]*?)<\/script>/.exec(WEBAPP_UI_SOURCE);
+    assert.ok(scriptMatch, 'Web app script must exist');
+    const eventNeedle = "    el['customer-search'].addEventListener";
+    assert.ok(scriptMatch[1].includes(eventNeedle), 'client probe insertion point must exist');
+    const probe = `    globalThis.__probe = (${expression});\n` + '    return;\n';
+    const source = scriptMatch[1].replace(eventNeedle, probe + eventNeedle);
+    const sandbox = {document: {getElementById() { return {}; }}};
+    vm.runInNewContext(source, sandbox);
+    return sandbox.__probe;
+  }
+
   function clientStoppedByMessage(code) {
     const scriptMatch = /<script>([\s\S]*?)<\/script>/.exec(WEBAPP_UI_SOURCE);
     assert.ok(scriptMatch, 'Web app script must exist');
@@ -1748,4 +1762,95 @@ module.exports = ({test, assert, gas}) => {
   });
 
   // Case 46 is the whole-suite acceptance condition, not an independent test.
+
+  test('webapp 46: decisions spanning several files all get resolved by repeating the call', () => {
+    // クライアントは残りが無くなるまで呼び直す。サーバーは1回に1ファイルしか
+    // 触らないので、**跨いで選んでも1回あたりの重さは変わらない** ──
+    // 変わるのは押下全体の所要時間だけである。
+    // 跨げないと、6ファイルに散った12件が12回の押下になる（2026-09-21、実機）。
+    requireWebFunction('webAppResolveReviews');
+    const seeded = seedPartnerViaWeb({fileId: 'span_one', merchant: '第一の店'});
+    const second = putCsv(seeded.customer, {fileId: 'span_two',
+      rows: ['2025/12/20,第二の店,2200,仕入れ']});
+    const third = putCsv(seeded.customer, {fileId: 'span_three',
+      rows: ['2025/12/21,第三の店,3300,仕入れ']});
+    // 取込は1回の呼出しで全部は終わらない。残りが無くなるまで呼ぶ。
+    for (let pass = 0; pass < 5; pass += 1) {
+      const report = webImport(seeded.customer,
+        {destinationSpreadsheetId: seeded.destinationSpreadsheetId});
+      if (!Number(report.remaining || 0)) break;
+    }
+    const others = [second, third].map((fileId) =>
+      openReviewsFor(seeded.customer.customerId, {fileId})
+        .find((row) => row.reviewType === 'PARTNER'));
+    others.forEach((review, index) =>
+      assert.ok(review, `${index + 2}本目のファイルが取り込まれていない`));
+
+    let pending = [seeded.reviews[0]].concat(others).map((review) => decision(review, ''));
+    const wanted = pending.length;
+    let resolved = 0;
+    let calls = 0;
+    // クライアントと同じ繰り返し：片付いた件を残りから除いて呼び直す。
+    while (pending.length && calls < 10) {
+      calls += 1;
+      const before = pending.length;
+      const result = withMocks({WEBAPP_TRIP_WORST_MS_: 0},
+        () => webResolve(seeded.customer.customerId, pending, String(calls)));
+      const done = new Set((result.resolvedReviewIds || []).map(String));
+      (result.skippedByLeaseReviewIds || []).forEach((id) => done.add(String(id)));
+      (result.errors || []).filter((error) => error && error.reviewId)
+        .forEach((error) => done.add(String(error.reviewId)));
+      resolved += Number(result.resolved || 0);
+      pending = pending.filter((item) => !done.has(String(item.reviewId)));
+      if (pending.length === before) break;   // 進まなければ止める
+    }
+    assert.equal(resolved, wanted,
+      `${wanted}件のうち${resolved}件しか確定していない（呼出し${calls}回）`);
+    assert.deepEqual(pending, [], '残りが片付いていない');
+    assert.ok(calls <= wanted, `呼出しが${calls}回。1ファイル1回で足りるはず`);
+  });
+
+  test('webapp 47: a first file held by a lease does not strand the files behind it', () => {
+    // `RESOLVE_WITHOUT_PARTNER` はリースを取れないファイルで飛ばされる。
+    // 「確定できた件数」で進捗を見ると、先頭が全部飛ばされた時点で止まり、
+    // **後ろのファイルに一度も手が付かない。**
+    requireWebFunction('webAppResolveReviews');
+    const seeded = seedPartnerViaWeb({fileId: 'held_one', merchant: '押さえられた店'});
+    const second = putCsv(seeded.customer, {fileId: 'held_two',
+      rows: ['2025/12/20,後ろの店,2200,仕入れ']});
+    webImport(seeded.customer, {destinationSpreadsheetId: seeded.destinationSpreadsheetId});
+    const behind = openReviewsFor(seeded.customer.customerId, {fileId: second})
+      .find((row) => row.reviewType === 'PARTNER');
+    assert.ok(behind);
+    // 先頭のファイルにリースを掛ける（取込が動いている状態）
+    gas.call('acquireLease', [seeded.customer.customerId, seeded.fileId, 'RUN_HELD',
+      'admin@example.com', 'PROCESS']);
+
+    let pending = [decision(seeded.reviews[0], ''), decision(behind, '')];
+    const first = withMocks({WEBAPP_TRIP_WORST_MS_: 0},
+      () => webResolve(seeded.customer.customerId, pending));
+    assert.equal(first.resolved, 0, '前提：先頭はリースで確定できない');
+    const skipped = new Set((first.skippedByLeaseReviewIds || []).map(String));
+    (first.errors || []).filter((e) => e && e.reviewId).forEach((e) => skipped.add(String(e.reviewId)));
+    assert.ok(skipped.size > 0, '前提：先頭が飛ばされる');
+
+    // **飛ばされた件も残りから除くので、残りは減る** ── だから次へ進める。
+    const before = pending.length;
+    pending = pending.filter((item) => !skipped.has(String(item.reviewId)));
+    assert.ok(clientEval(`madeProgress(${before}, ${pending.length})`),
+      '残りが減ったのに「進んでいない」と判断している ── 後ろのファイルが取り残される');
+
+    const next = withMocks({WEBAPP_TRIP_WORST_MS_: 0},
+      () => webResolve(seeded.customer.customerId, pending, '2'));
+    assert.equal(next.resolved, 1, '後ろのファイルが確定できていない');
+    assert.equal(reviewById(behind.reviewId).status, 'RESOLVED');
+  });
+
+  test('webapp 48: progress is judged by what is left, not by what succeeded', () => {
+    // 1件も確定できなくても、飛ばした件が残りから消えていれば前へ進んでいる。
+    assert.equal(clientEval('madeProgress(3, 2)'), true, '減ったのに進んでいない扱い');
+    assert.equal(clientEval('madeProgress(2, 2)'), false, '減っていないのに進んだ扱い（止まらなくなる）');
+    assert.equal(clientEval('madeProgress(1, 0)'), true, '最後の1件で止まっている');
+  });
+
 };

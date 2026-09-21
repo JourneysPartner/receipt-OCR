@@ -306,7 +306,6 @@
       logCapacity: 'ログの容量が上限に達しているため実行できません。管理者へ連絡してください。',
       integrityStop: 'この顧客の帳簿に不整合が見つかったため実行できません。管理者へ連絡してください。',
       comingSoon: 'この画面は準備中です。',
-      oneFileOnly: '1回に確定できるのは、同じ元ファイルの要確認だけです。',
       chooseReview: '確定する要確認を選んでください。',
       unknownFailure: '処理に失敗しました。管理者へ連絡してください。',
       learnEmpty: '辞書に登録しません：この店名は辞書の鍵にできません',
@@ -629,7 +628,7 @@
           checkbox.className = 'review-select';
           checkbox.setAttribute('aria-label', String(review.merchantOriginal) + 'を確定対象にする');
           checkbox.disabled = isMutationBusy();
-          checkbox.addEventListener('change', enforceOneFileSelection);
+          checkbox.addEventListener('change', onReviewSelectionChanged);
           selectCell.appendChild(checkbox);
           row.appendChild(selectCell);
           [formatDate(review.usageDate, false), formatAmount(review.amount), review.merchantOriginal]
@@ -938,20 +937,37 @@
       }
     }
 
-    function enforceOneFileSelection(event) {
-      var changed = event.currentTarget;
-      var row = changed.closest('tr');
-      if (changed.checked) {
-        var selectedFile = row.dataset.fileId;
-        var conflict = Array.prototype.some.call(document.querySelectorAll('.review-select:checked'), function(box) {
-          return box !== changed && box.closest('tr').dataset.fileId !== selectedFile;
-        });
-        if (conflict) {
-          changed.checked = false;
-          showNotice(TEXT.oneFileOnly, 'warning');
-        }
-      }
+    /**
+     * **元ファイルを跨いで選べる。**
+     *
+     * 以前は1回の押下を同じ元ファイルの要確認だけに限っていた。根拠は
+     * 「2ファイルだと経過時間0でも1件目が始まらない」だったが、実機で
+     * 1往復128msと分かって上限を400msに置き直した時点で成り立たなくなって
+     * いる（v1.1 で仕様書自身がそう記録し、規則だけを残していた）。
+     *
+     * **1回の呼出しが触るファイルは、いまも必ず1つである**
+     * （`80_WebApp.gs` が `firstFileId` 以外を次回送りにする）。だから
+     * 後始末の最悪値は選んだファイル数に関係なく1ファイル分で、
+     * 締切の見積もりは何も変わらない。変わるのは押下全体の所要時間だけで、
+     * 件数の上限（`WEBAPP_MAX_DECISIONS_`）が今までどおりそれを抑える。
+     *
+     * 跨げないと、6ファイルに散った12件が12回の押下になる（2026-09-21、
+     * 実際にそうなった）。
+     */
+    function onReviewSelectionChanged() {
       updateActionButtons();
+    }
+
+    /**
+     * 繰り返しを続けてよいか。**残りが減ったかどうかで見る。**
+     *
+     * 確定できた件数で見ると、先頭のファイルがリースで全部飛ばされたときに
+     * 「進んでいない」と判断して止まり、**残りのファイルに一度も手が付かない。**
+     * 飛ばした件も残りから除くので、この判定なら止まらなくなることはない
+     * （残りは必ず減るか、減らずにそこで終わる）。
+     */
+    function madeProgress(pendingBefore, pendingAfter) {
+      return pendingAfter < pendingBefore;
     }
 
     function collectSelectedReviews() {
@@ -1014,10 +1030,6 @@
       if (!items.length) { showNotice(TEXT.chooseReview, 'warning'); return; }
       if (state.reviewLimit > 0 && items.length > state.reviewLimit) {
         showNotice(TEXT.tooMany(state.reviewLimit), 'warning');
-        return;
-      }
-      if (new Set(items.map(function(item) { return item.fileId; })).size !== 1) {
-        showNotice(TEXT.oneFileOnly, 'warning');
         return;
       }
       freezeSameMerchantConflict(items);
@@ -1122,11 +1134,16 @@
           resolvedIds.forEach(function(id) { removed.add(id); });
           skippedIds.forEach(function(id) { removed.add(id); });
           itemErrors.forEach(function(error) { removed.add(String(error.reviewId)); });
+          var pendingBefore = pending.length;
           pending = pending.filter(function(decision) { return !removed.has(String(decision.reviewId)); });
           resolvedTotal += Number(result.resolved || 0);
           el['resolve-progress'].textContent = TEXT.processing(resolvedTotal, total);
 
-          var progressed = Number(result.resolved || 0) > 0 || newErrorIds.length > 0;
+          // **残りが減ったかどうかで進んだと見る。**確定した件数で見ると、
+          // 先頭のファイルがリースで全部飛ばされたときに「進んでいない」と
+          // 判断して止まり、**残りのファイルに一度も手が付かない。**
+          // 残りは飛ばした件も除くので必ず減る ── 止まらなくなることはない。
+          var progressed = madeProgress(pendingBefore, pending.length);
           if (!pending.length) break;
           if (!progressed) { stopped = true; break; }
         }
