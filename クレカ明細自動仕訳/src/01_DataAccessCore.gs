@@ -52,6 +52,7 @@ function forgetRunScopedReads_() {
   forgetFormatDefinitions_();
   forgetDictionaryCache_();
   forgetAppendedTxRows_();
+  forgetDestinationSchema_();
 }
 
 function beginRunScopedReads_() {

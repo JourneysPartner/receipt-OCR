@@ -511,8 +511,8 @@ module.exports = ({test, assert, gas}) => {
 
   test('budget 1: the quota-consuming reads per file stay within budget', () => {
     // 12ヶ月の取込にかかる時間を決めるのは**1ファイル増やすごとの費用**である
-    // （固定費は1回きり）。2026-09-21 実測：固定費12回＋1ファイル27回。
-    // 12ファイル＝336回、60回/分なので**5.6分がクォータだけで要る。**
+    // （固定費は1回きり）。2026-09-21 実測：固定費12回＋1ファイル25回。
+    // 12ファイル＝314回、60回/分なので**5.2分がクォータだけで要る。**
     const one = apiReads(() => measure(20, 1));
     const two = apiReads(() => measure(20, 2));
     const perFile = two - one;
@@ -520,8 +520,8 @@ module.exports = ({test, assert, gas}) => {
     // **上限は実測値そのものに置く。**余白を持たせると、1回増えた変更が
     // 黙って通る（実際に3つの変異がすり抜けた）。枠の読取を1回増やすのは
     // 12ファイルで12回＝12秒ぶんの決定なので、記録に残して上げること。
-    assert.ok(perFile <= 27,
-      `1ファイル増やすごとに枠を${perFile}回消費している（上限27）。` +
+    assert.ok(perFile <= 25,
+      `1ファイル増やすごとに枠を${perFile}回消費している（上限25）。` +
       `12ファイルなら${twelve}回＝${(twelve / 60).toFixed(1)}分がクォータだけで要る`);
   });
 
@@ -800,6 +800,107 @@ module.exports = ({test, assert, gas}) => {
       String(plain(gas.evaluate('VERSIONS.CODE'))), 'コード版が違う');
     assert.equal(String(values[columns.sheetSchemaVersion - 1]),
       String(plain(gas.evaluate('VERSIONS.SHEET_SCHEMA'))), 'シート様式版が違う');
+  });
+
+
+  test('schema 1: the destination layout is checked once per customer, not once per file', () => {
+    // 確認のために転記先を丸ごと読み直す（値と数式で2往復）。1ファイルごとに
+    // やると12ヶ月で24往復 ── 読取クォータが取込の天井なので、そのまま
+    // 待ち時間になる。形は取込のあいだ変わらない。
+    gas.evaluate(
+      '__schemaCalls = 0;' +
+      '__realValidateSchema = validateDestinationSchema;' +
+      'validateDestinationSchema = function(customer, index) {' +
+      '  __schemaCalls += 1; return __realValidateSchema(customer, index);' +
+      '};');
+    try {
+      measure(20, 4);
+      assert.equal(plain(gas.evaluate('__schemaCalls')), 1,
+        `4ファイルの取込で${plain(gas.evaluate('__schemaCalls'))}回確認している（1回のはず）`);
+    } finally {
+      gas.evaluate('validateDestinationSchema = __realValidateSchema;');
+    }
+  });
+
+  test('schema 2: every file gets its own copy of the result, not a shared object', () => {
+    // 結果はファイルごとの検証記録として持ち回る。同じ物を配ると、
+    // 一方の書き換えが他のファイルの記録に混ざる。
+    measure(4);
+    gas.evaluate('beginRunScopedReads_();');
+    try {
+      gas.context.__two = gas.evaluate(
+        '(function() {' +
+        '  var customer = getCustomerById("C001");' +
+        '  var first = destinationSchemaForRun_(customer);' +
+        '  first.problems.push("よその記録");' +
+        '  first.ok = false;' +
+        '  var second = destinationSchemaForRun_(customer);' +
+        '  return {ok: second.ok, problems: second.problems.length};' +
+        '})()');
+      const out = plain(gas.context.__two);
+      assert.equal(out.problems, 0, '1件目の書き換えが2件目に混ざっている');
+      assert.equal(out.ok, true, '1件目の書き換えが2件目に混ざっている');
+    } finally {
+      gas.evaluate('endRunScopedReads_();');
+    }
+  });
+
+  test('schema 3: a broken destination is still reported for every file, not just the first', () => {
+    // 覚えるのは速さのためであって、見逃すためではない。**壊れている**と
+    // 分かったなら、その取込の全ファイルがそう報告しなければならない。
+    measure(4);
+    // ヘッダー（B1=利用日）を壊す
+    gas.evaluate(
+      'SpreadsheetApp.openById("dest1").getSheetByName("入力用シート")' +
+      '.getRange(1, 2).setValue("別の見出し")');
+    gas.evaluate('beginRunScopedReads_();');
+    try {
+      gas.context.__broken = gas.evaluate(
+        '(function() {' +
+        '  var customer = getCustomerById("C001");' +
+        '  var a = destinationSchemaForRun_(customer);' +
+        '  var b = destinationSchemaForRun_(customer);' +
+        '  return {aOk: a.ok, bOk: b.ok, aCode: String(a.code), bCode: String(b.code)};' +
+        '})()');
+      const out = plain(gas.context.__broken);
+      assert.equal(out.aOk, false, '壊れた転記先を通している');
+      assert.equal(out.bOk, false, '2件目が壊れた転記先を通している');
+      assert.equal(out.bCode, out.aCode, '2件目に同じ理由が伝わっていない');
+      assert.equal(out.aCode, 'DESTINATION_SCHEMA_MISMATCH', out.aCode);
+    } finally {
+      gas.evaluate('endRunScopedReads_();');
+    }
+  });
+
+  test('schema 4: a different destination sheet is checked on its own', () => {
+    // 覚える鍵は顧客IDだけでは足りない。同じ顧客でも転記先を差し替えれば
+    // 別のシートであり、前の確認結果を当てはめてはならない。
+    measure(4);
+    gas.evaluate('beginRunScopedReads_();');
+    try {
+      gas.context.__keys = gas.evaluate(
+        '(function() {' +
+        '  var customer = getCustomerById("C001");' +
+        '  destinationSchemaForRun_(customer);' +
+        '  var other = Object.assign({}, customer, {destinationSheetName: "取引先一覧"});' +
+        '  destinationSchemaForRun_(other);' +
+        '  return Object.keys(runScopedDestinationSchema_).length;' +
+        '})()');
+      assert.equal(Number(plain(gas.context.__keys)), 2,
+        '転記先が違うのに前の確認結果を使い回している');
+    } finally {
+      gas.evaluate('endRunScopedReads_();');
+    }
+  });
+
+  test('schema 5: outside an import the layout is checked afresh', () => {
+    // 画面からの操作は、人がシートを直した直後に走ることがある。
+    measure(4);
+    gas.evaluate('endRunScopedReads_();');
+    const first = apiReads(() => gas.evaluate('destinationSchemaForRun_(getCustomerById("C001"))'));
+    const second = apiReads(() => gas.evaluate('destinationSchemaForRun_(getCustomerById("C001"))'));
+    assert.ok(first > 0, '前提：確認には読取が要る');
+    assert.equal(second, first, '取込の外なのに覚えた結果を使っている');
   });
 
   test('pace 1: every Sheets read goes through the pacer', () => {
