@@ -224,4 +224,91 @@ module.exports = ({test, assert, gas}) => {
     const report = plain(gas.call('runImport', [{}]));
     assert.equal(report.stoppedBy, 'NO_AUTHORIZED_CUSTOMER');
   });
+
+  // ---- INV-28 を本番と同じ経路で：取込 → 承認 → 巻き戻し → 取込 ----
+  //
+  // **`validation` を手で渡してはならない。**既存の INV-28 のテスト
+  // （phase3）は `processFile` へ `contentHash`・`hashVersion` 入りの
+  // `validation` を手で渡していたので、71 がそれを組み立てる結線を一度も
+  // 通らず、**本番では区分2の承認が一度も効いていなかった**のに緑だった
+  // （2026-09-23 発見）。ここは `runImport` から入り、承認と巻き戻しは
+  // メニューと同じ関数で行う（96_Menu 902行）。
+  //
+  // 照合の算術だけは固定する（件数不一致を必ず出す）。論点は算術ではなく、
+  // **承認が再検証まで届くかどうか**である。
+  function approveAndRewind(reviewId, runId) {
+    gas.call('resolveFileReview', [reviewId, 'APPROVE_COUNT_MISMATCH',
+      {runId: runId, reason: '手数料行を含むため'}]);
+    gas.evaluate('rewindFileForReimportAudited_("fileA", "admin@example.com", ' +
+      '{from: FILE_STATE.VALIDATING, operation: "APPROVE_COUNT_MISMATCH", customerId: "C001"})');
+  }
+
+  function countMismatchWorld() {
+    setup();
+    putCsv('fileA', '三井住友カード202601.csv',
+      '利用日,利用店名,金額,使用用途\n2025/12/16,ローソン,10800,仕入れ\n2025/12/28,ローソン,2900,仕入れ\n');
+    gas.stubs.createFolder('folder1', {fileIds: ['fileA']});
+    gas.evaluate('__realVerifyCounts = verifyCountsAndTotals;' +
+      'verifyCountsAndTotals = function() { return {ok: false, expected: {count: 99},' +
+      ' actual: {count: 2}, kind: "COUNT", code: "COUNT_TOTAL_MISMATCH"}; };');
+  }
+
+  function openCountMismatch() {
+    return plain(gas.evaluate('openReviews({})'))
+      .filter((review) => review.reviewType === 'COUNT_TOTAL_MISMATCH');
+  }
+
+  test('INV-28 end to end: an approval takes the file past the cause on the next import', () => {
+    countMismatchWorld();
+    try {
+      const first = plain(gas.call('runImport', [{}]));
+      assert.equal(String(gas.evaluate('getFileState("fileA")')), 'REVIEW_WAIT',
+        '前提：件数不一致で止まる');
+      const opened = openCountMismatch();
+      assert.equal(opened.length, 1, '前提：件数不一致の要確認が1件立つ');
+
+      approveAndRewind(opened[0].reviewId, first.runId);
+      assert.equal(String(gas.evaluate('getFileState("fileA")')), 'DISCOVERED',
+        '前提：巻き戻して次の取込に拾わせる');
+
+      const second = plain(gas.call('runImport', [{}]));
+      const file = second.customers[0].files[0];
+      assert.equal(file && file.outcome, 'WRITTEN',
+        '承認したのに同じ要因でまた止まった ── 承認が再検証まで届いていない。' +
+        '担当者が何度承認しても抜けられない（INV-28 が防ぐはずの無限ループ）。' +
+        '71 が `validation` に contentHash と hashVersion を渡しているかを見よ。' +
+        JSON.stringify(file));
+      assert.deepEqual(openCountMismatch(), [], '同じ要確認が開き直している');
+      assert.equal(plain(gas.evaluate('getCategory2Approvals("fileA")')).length, 1,
+        '承認が積み上がっている（同じ要因で何度も承認させている）');
+    } finally {
+      gas.evaluate('verifyCountsAndTotals = __realVerifyCounts;');
+    }
+  });
+
+  test('INV-28 end to end: the material the approval needs reaches the classifier', () => {
+    // 判定（`validationCauseApproved_`）は内容ハッシュと版が**どちらか欠けて
+    // いれば必ず「未承認」**と答える。取込の経路がそれを渡しているかを、
+    // 分類器の入口で直接見る ── 上のテストが赤になったとき、原因がここか
+    // どうかをすぐ切り分けられる。
+    countMismatchWorld();
+    gas.evaluate('__seenValidation = null; __realClassify = classifyValidationResult;' +
+      'classifyValidationResult = function(input) { __seenValidation = input;' +
+      ' return __realClassify(input); };');
+    try {
+      gas.call('runImport', [{}]);
+      const seen = plain(gas.evaluate('__seenValidation'));
+      const submitted = String(gas.evaluate(
+        'getProcessLogRecord_("fileA").values[PROCESS_FIELD_COLUMNS_.submittedContentHash - 1]'));
+      assert.ok(seen, '分類器が呼ばれていない');
+      assert.equal(seen.contentHash, submitted,
+        '分類器に渡る内容ハッシュが、承認が結び付く提出時点のハッシュと違う');
+      assert.equal(String(seen.hashVersion), String(plain(gas.evaluate('VERSIONS.HASH'))),
+        '分類器に版が渡っていない');
+    } finally {
+      gas.evaluate('classifyValidationResult = __realClassify;' +
+        'verifyCountsAndTotals = __realVerifyCounts;');
+    }
+  });
+
 };
