@@ -637,6 +637,255 @@ function webAppCloneDestination_(customer, now) {
   };
 }
 
+/**
+ * **最終確認**（段階4 ダウンロードの手前）。
+ *
+ * このセッションの転記先シートに**実際に入っている行**と、明細との突き合わせを
+ * 返す。ダウンロードはこのシートをそのまま xlsx にして渡すので、ここに出る行が
+ * ダウンロードされる行そのものである ── Excel を開くまで何が書かれたか
+ * 確かめられない、という状態をなくす（ko-ch さんの要望、2026-09-21）。
+ *
+ * **単位は転記先シートである。**取込も要確認の確定も同じシートへ書く
+ * （確定は要確認行 M列が指すシートへ書く）。だから取込と確定の両方を含む。
+ *
+ * **全列を、計算後の値で出す。**システムが書くのは日付・取引先・摘要・金額・
+ * メモの5列だけで、勘定科目・消費税・残高は雛形の数式が計算する。
+ * 利用者が確かめたいのは Excel に出る値なので、数式ではなく結果を出す。
+ *
+ * @param {string} customerId
+ * @param {string} destinationSpreadsheetId このセッションの転記先
+ * @param {Array<string>=} fileIds このセッションで取り込んだファイル。
+ *   シートに1行も書かれなかったファイルの漏れを拾うためにある
+ *   （シートの行から辿るだけでは、全部漏れたファイルが見えない）。
+ */
+function webAppFinalReview(customerId, destinationSpreadsheetId, fileIds) {
+  return webAppInvoke_(function() {
+    webAppAuthorizeCustomer_(customerId, 'WEBAPP:最終確認');
+    var base = getCustomerById(String(customerId));
+    var destinationId = webAppValidateDestination_(base, destinationSpreadsheetId);
+    var customer = Object.assign({}, base, {destinationSpreadsheetId: destinationId});
+    var sheet = finalReviewSheet_(customer);
+    var reconciliation = finalReviewReconcile_(customer, sheet.rows, fileIds || []);
+    // 行ごとの状態（確定済み／要確認）を付ける。表の各行で見分けられるように。
+    sheet.rows.forEach(function(row) {
+      var status = reconciliation.statusByTxId[row.txId];
+      row.status = status || null;
+    });
+    delete reconciliation.statusByTxId;
+    return {
+      destinationSpreadsheetId: destinationId,
+      headers: sheet.headers,
+      amountColumnIndex: sheet.amountColumnIndex,
+      rows: sheet.rows,
+      reconciliation: reconciliation
+    };
+  });
+}
+
+/**
+ * 転記先シートの見出しと、システムが書いた行（取引IDを持つ行）を読む。
+ *
+ * 表示用（`FORMATTED_VALUE`）と計算用（`UNFORMATTED_VALUE`）で2回読む。
+ * 描画指定は要求ごとにしか選べないので1回にはまとまらない。1画面1回の
+ * 読取なので、取込の往復予算（読取クォータ）には関わらない。
+ */
+function finalReviewSheet_(customer) {
+  var headerRow = Number(customer.headerRow);
+  var lastColumn = Number(customer.rowScanLastColumn);
+  var range = quoteSheetName_(customer.destinationSheetName) + '!A' + headerRow + ':' +
+    columnLetter_(lastColumn);
+  var shown = destinationRangeValues_(customer.destinationSpreadsheetId, range, 'FORMATTED_VALUE');
+  var raw = destinationRangeValues_(customer.destinationSpreadsheetId, range, 'UNFORMATTED_VALUE');
+
+  var headers = [];
+  var headerCells = shown[0] || [];
+  for (var column = 0; column < lastColumn; column += 1) {
+    var label = headerCells[column];
+    headers.push(label === undefined || label === null ? '' : String(label));
+  }
+
+  var txIdIndex = Number(customer.columnMapping.txId) - 1;
+  // **金額は M 列である**（71 の `planned`：B日付・F取引先・Iメモ・K摘要・M金額）。
+  // freee の列記号で呼ぶので名前から推し量ると取り違える ── 2026-09-23 に
+  // 実際に K を金額と読み違え、テストが「転記した合計 0」で捕まえた。
+  var amountIndex = Number(customer.columnMapping.M) - 1;
+  var rows = [];
+  for (var offset = 1; offset < raw.length; offset += 1) {
+    var rawRow = raw[offset] || [];
+    var txId = rawRow[txIdIndex];
+    if (txId === undefined || txId === null || String(txId) === '') continue;
+    var shownRow = shown[offset] || [];
+    var cells = [];
+    for (var index = 0; index < lastColumn; index += 1) {
+      var cell = shownRow[index];
+      cells.push(cell === undefined || cell === null ? '' : String(cell));
+    }
+    var amount = rawRow[amountIndex];
+    rows.push({
+      rowNumber: headerRow + offset,
+      txId: String(txId),
+      cells: cells,
+      amount: typeof amount === 'number' ? amount : null
+    });
+  }
+  return {headers: headers, rows: rows, amountColumnIndex: amountIndex};
+}
+
+/** 転記されているはずの状態。`PREPARED`・`WRITING` が残っていれば書き損じである。 */
+var FINAL_REVIEW_WRITTEN_STATUSES_ = [
+  TX_STATUS.COMMITTED, TX_STATUS.REVIEW_REQUIRED, TX_STATUS.PREPARED, TX_STATUS.WRITING
+];
+/** 転記しないと決めた状態。明細にはあるが、シートに無くて正しい。 */
+var FINAL_REVIEW_EXCLUDED_STATUSES_ = [TX_STATUS.CANCELED, TX_STATUS.DELETED_ACCEPTED];
+
+/**
+ * **明細とシートの突き合わせ。**
+ *
+ * ファイルごとに次が成り立てば、漏れも重複もない：
+ *
+ *     明細の利用金額の合計 − 除外した分 ＋ 金額修正の差 − 転記した金額の合計 ＝ 0
+ *
+ * 「転記した金額が明細の合計と一致すること」が、漏れなく重複なく転記された
+ * 指標の1つになる（ko-ch さんの説明、2026-09-20）。ただし**正しく除外した
+ * 取引**と**担当者が直した金額**の分は、合わなくて正しい。それを差し引いて
+ * 残りが0かを見る。残りが0でなければ、取引ごとの検査のどれかが理由を
+ * 名指しする。
+ *
+ * - 明細の利用金額：取引ログ Q列（`originalAmount`）。取り込んだ時の明細の値で、
+ *   後から変わらない。**読めない値は0円として計算し、必ず問題として出す**
+ *   （黙って外すと過少計上を見逃す。30 の件数・合計の照合と同じ扱い）。
+ * - 転記した金額：いまシートにある金額列の値。
+ * - 金額修正の差：取引ログ W列（`planned.m`、担当者の修正を反映した予定金額）と
+ *   明細の値の差。
+ */
+function finalReviewReconcile_(customer, rows, requestedFileIds) {
+  var problems = [];
+  var rowsByTxId = Object.create(null);
+  rows.forEach(function(row) {
+    if (!rowsByTxId[row.txId]) rowsByTxId[row.txId] = [];
+    rowsByTxId[row.txId].push(row);
+  });
+  var txIds = Object.keys(rowsByTxId);
+
+  // 1. 行が指す取引。そこからファイルを知る。
+  var byId = txIds.length ? findRowsByColumnValues_(transactionLogSheet_(), 1, txIds,
+    TRANSACTION_LOG_WIDTH_) : {};
+  var fileIds = Object.create(null);
+  txIds.forEach(function(txId) {
+    var found = (byId[txId] || []).map(txLogFromRecord_).filter(function(tx) { return tx.active; });
+    if (!found.length) {
+      problems.push({kind: 'ORPHAN', txId: txId,
+        rowNumbers: rowsByTxId[txId].map(function(row) { return row.rowNumber; })});
+      return;
+    }
+    if (String(found[0].customerId) !== String(customer.customerId)) {
+      problems.push({kind: 'FOREIGN_CUSTOMER', txId: txId,
+        rowNumbers: rowsByTxId[txId].map(function(row) { return row.rowNumber; })});
+      return;
+    }
+    fileIds[String(found[0].fileId)] = true;
+  });
+  // このセッションで取り込んだファイルも足す（1行も書かれなかったファイルの漏れを拾う）
+  (requestedFileIds || []).forEach(function(fileId) {
+    if (fileId !== undefined && fileId !== null && String(fileId) !== '') {
+      fileIds[String(fileId)] = true;
+    }
+  });
+
+  // 2. そのファイルの取引を全部。
+  var fileIdList = Object.keys(fileIds);
+  var byFile = fileIdList.length ? findRowsByColumnValues_(transactionLogSheet_(), 5, fileIdList,
+    TRANSACTION_LOG_WIDTH_) : {};
+
+  var statusByTxId = Object.create(null);
+  var files = [];
+  fileIdList.forEach(function(fileId) {
+    var txs = (byFile[fileId] || []).map(txLogFromRecord_).filter(function(tx) {
+      return tx.active && String(tx.customerId) === String(customer.customerId);
+    });
+    // **この顧客の取引が1件も無いファイルは出さない。**画面から渡された
+    // ファイルIDに他の顧客のものが混ざると、取引は上で落ちてもファイル名は
+    // 処理ログから引けてしまう ── 名前も明細の一部である。
+    if (!txs.length) return;
+    var summary = {fileId: fileId, fileName: '', transactions: txs.length,
+      statement: 0, excluded: 0, corrected: 0, written: 0, writtenRows: 0, residual: 0};
+    txs.forEach(function(tx) {
+      statusByTxId[tx.fullTxId] = tx.transactionStatus;
+      var original = finalReviewAmount_(tx.originalAmount);
+      if (original === null) {
+        problems.push({kind: 'UNREADABLE_AMOUNT', txId: tx.fullTxId, fileId: fileId,
+          value: String(tx.originalAmount)});
+        original = 0;
+      }
+      summary.statement += original;
+      var excluded = FINAL_REVIEW_EXCLUDED_STATUSES_.indexOf(tx.transactionStatus) >= 0;
+      var shouldBeWritten = FINAL_REVIEW_WRITTEN_STATUSES_.indexOf(tx.transactionStatus) >= 0;
+      var present = rowsByTxId[tx.fullTxId] || [];
+      if (excluded) {
+        summary.excluded += original;
+        if (present.length) {
+          problems.push({kind: 'EXCLUDED_BUT_PRESENT', txId: tx.fullTxId, fileId: fileId,
+            rowNumbers: present.map(function(row) { return row.rowNumber; })});
+        }
+        return;
+      }
+      if (!shouldBeWritten) return;
+      var planned = finalReviewAmount_(tx.planned && tx.planned.m);
+      if (planned !== null && planned !== original) summary.corrected += planned - original;
+      if (!present.length) {
+        problems.push({kind: 'MISSING', txId: tx.fullTxId, fileId: fileId,
+          status: tx.transactionStatus, amount: planned === null ? original : planned});
+        return;
+      }
+      if (present.length > 1) {
+        problems.push({kind: 'DUPLICATE', txId: tx.fullTxId, fileId: fileId,
+          rowNumbers: present.map(function(row) { return row.rowNumber; })});
+      }
+      present.forEach(function(row) {
+        summary.writtenRows += 1;
+        summary.written += row.amount === null ? 0 : row.amount;
+        var expected = planned === null ? original : planned;
+        if (row.amount === null || row.amount !== expected) {
+          problems.push({kind: 'AMOUNT_MISMATCH', txId: tx.fullTxId, fileId: fileId,
+            rowNumber: row.rowNumber, expected: expected, actual: row.amount});
+        }
+      });
+    });
+    summary.residual = summary.statement - summary.excluded + summary.corrected - summary.written;
+    summary.balanced = summary.residual === 0;
+    summary.fileName = finalReviewFileName_(fileId);
+    files.push(summary);
+  });
+
+  var totals = files.reduce(function(sum, file) {
+    ['statement', 'excluded', 'corrected', 'written', 'residual'].forEach(function(key) {
+      sum[key] += file[key];
+    });
+    return sum;
+  }, {statement: 0, excluded: 0, corrected: 0, written: 0, residual: 0});
+  totals.balanced = totals.residual === 0 && problems.length === 0;
+
+  return {files: files, totals: totals, problems: problems, statusByTxId: statusByTxId};
+}
+
+/** 金額を円の整数に。読めなければ null（呼出側が問題として出す）。 */
+function finalReviewAmount_(value) {
+  if (value === undefined || value === null || value === '') return null;
+  try {
+    return toJpyInteger(value);
+  } catch (error) {
+    return null;
+  }
+}
+
+/** 表示用のファイル名。処理ログに無ければファイルIDのまま。 */
+function finalReviewFileName_(fileId) {
+  var record = getProcessLogRecord_(fileId);
+  if (!record) return String(fileId);
+  var name = record.values[PROCESS_FIELD_COLUMNS_.originalFileName - 1];
+  return name ? String(name) : String(fileId);
+}
+
 /** Web 取込の固定した戻り値を作る。 */
 function webAppImportResult_(done, total, destinationSpreadsheetId, fileResults,
     stoppedBy, schemaValidation) {

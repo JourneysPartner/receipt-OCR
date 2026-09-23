@@ -1853,4 +1853,348 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(clientEval('madeProgress(1, 0)'), true, '最後の1件で止まっている');
   });
 
+
+  // ================= 最終確認（段階4の手前） =================
+  //
+  // **会計の検査である。**一致するときに一致と言い、壊れているときに
+  // どこがどう壊れているかを名指しすること。式は
+  //   明細の利用金額 − 除外 ＋ 金額修正 − 転記した金額 ＝ 0
+  // で、除外と修正は「合わなくて正しい」差である（ko-ch さん、2026-09-21）。
+
+  function finalWorld(rows) {
+    const {customer} = setupWorld();
+    seedDictionaryRow(customer.customerId, {dictId: 'DICT_FR', original: '確定店',
+      partnerName: '株式会社確定'});
+    const fileId = putCsv(customer, {fileId: 'final_file', rows: rows || [
+      '2025/12/10,確定店,1000,仕入れ',
+      '2025/12/11,確定店,2500,仕入れ',
+      '2025/12/12,確定店,700,仕入れ']});
+    const imported = webImport(customer, {});
+    assert.ok(imported.destinationSpreadsheetId, '前提：転記先が作られる');
+    const mapping = plain(gas.evaluate('getCustomerById("C001").columnMapping'));
+    return {customer, fileId, destinationId: imported.destinationSpreadsheetId, mapping};
+  }
+
+  function finalReview(world, fileIds) {
+    return call('webAppFinalReview', [world.customer.customerId, world.destinationId,
+      fileIds || [world.fileId]]);
+  }
+
+  function finalSheet(world) {
+    return gas.stubs.getSpreadsheet(world.destinationId).getSheetByName('入力用シート');
+  }
+
+  function kinds(result) {
+    return result.reconciliation.problems.map((problem) => problem.kind).sort();
+  }
+
+  test('final 1: a clean import balances and names no problem', () => {
+    requireWebFunction('webAppFinalReview');
+    const world = finalWorld();
+    const result = finalReview(world);
+    assert.equal(result.rows.length, 3, '転記した3行が出ていない');
+    const file = result.reconciliation.files[0];
+    assert.equal(file.statement, 4200, '明細の合計');
+    assert.equal(file.written, 4200, '転記した合計');
+    assert.equal(file.residual, 0);
+    assert.equal(file.balanced, true);
+    assert.deepEqual(kinds(result), []);
+    assert.equal(result.reconciliation.totals.balanced, true);
+    // 見出しはシートのまま出す（数式の列も同じ扱い）
+    assert.deepEqual(result.headers.slice(0, 7),
+      ['', '利用日', 'freee取引先名', '摘要', '金額', 'メモ', '内部ID']);
+  });
+
+  test('final 2: a correctly excluded transaction is accounted for, not reported', () => {
+    // **正しく除外したのに「不一致」と出てはならない。**単純に合計だけ比べると
+    // そうなる ── 除外した分は明細にあってシートに無いのが正しい。
+    requireWebFunction('webAppFinalReview');
+    const world = finalWorld(['2025/12/10,確定店,1000,仕入れ', '2025/12/11,未登録の店,700,仕入れ']);
+    const review = openReviewsFor(world.customer.customerId, {fileId: world.fileId})
+      .find((row) => row.reviewType === 'PARTNER');
+    assert.ok(review, '前提：未登録の店に要確認が立つ');
+    call('resolveReview', [review.reviewId, 'EXCLUDE', {}]);
+
+    const result = finalReview(world);
+    const file = result.reconciliation.files[0];
+    assert.equal(file.statement, 1700);
+    assert.equal(file.excluded, 700, '除外した分が勘定されていない');
+    assert.equal(file.written, 1000);
+    assert.equal(file.residual, 0, '正しく除外したのに差額が出ている');
+    assert.deepEqual(kinds(result), [], '正しい除外を問題として出している');
+    assert.equal(result.rows.length, 1, '除外した行がシートに残っている');
+  });
+
+  test('final 3: an amount changed by hand in the sheet is named, with both values', () => {
+    // 転記後に誰かがシートの金額を書き換えた。Excel は黙ってその値を渡す。
+    requireWebFunction('webAppFinalReview');
+    const world = finalWorld();
+    const before = finalReview(world);
+    const target = before.rows[1];
+    finalSheet(world).getRange(target.rowNumber, world.mapping.M).setValue(9999);
+
+    const result = finalReview(world);
+    const mismatch = result.reconciliation.problems.find((p) => p.kind === 'AMOUNT_MISMATCH');
+    assert.ok(mismatch, '書き換えられた金額を見逃している');
+    assert.equal(mismatch.rowNumber, target.rowNumber, '行を取り違えている');
+    assert.equal(mismatch.expected, 2500);
+    assert.equal(mismatch.actual, 9999);
+    assert.notEqual(result.reconciliation.files[0].residual, 0);
+    assert.equal(result.reconciliation.totals.balanced, false);
+  });
+
+  test('final 4: a transaction that should be in the sheet but is not is named', () => {
+    // 転記漏れ。行ごと消えると、シートの行から辿るだけでは見えない。
+    requireWebFunction('webAppFinalReview');
+    const world = finalWorld();
+    const before = finalReview(world);
+    const lost = before.rows[2];
+    finalSheet(world).getRange(lost.rowNumber, 1, 1, 8).clearContent();
+
+    const result = finalReview(world);
+    const missing = result.reconciliation.problems.find((p) => p.kind === 'MISSING');
+    assert.ok(missing, '転記漏れを見逃している');
+    assert.equal(missing.txId, lost.txId);
+    assert.equal(missing.amount, 700);
+    assert.equal(result.reconciliation.files[0].residual, 700,
+      '差額が消えた行の金額と一致しない');
+  });
+
+  test('final 5: the same transaction written twice is named', () => {
+    // 二重転記。合計は増えるので残差でも分かるが、どの取引かは名指しする。
+    requireWebFunction('webAppFinalReview');
+    const world = finalWorld();
+    const before = finalReview(world);
+    const copied = before.rows[0];
+    const sheet = finalSheet(world);
+    const spare = copied.rowNumber + 5;
+    sheet.getRange(spare, 1, 1, 8).setValues(
+      [sheet.getRange(copied.rowNumber, 1, 1, 8).getValues()[0]]);
+
+    const result = finalReview(world);
+    const duplicate = result.reconciliation.problems.find((p) => p.kind === 'DUPLICATE');
+    assert.ok(duplicate, '二重転記を見逃している');
+    assert.equal(duplicate.txId, copied.txId);
+    assert.deepEqual(duplicate.rowNumbers.sort(), [copied.rowNumber, spare].sort());
+    assert.equal(result.reconciliation.files[0].residual, -1000, '差額が二重分と一致しない');
+  });
+
+  test('final 6: a row whose transaction the log does not know is named', () => {
+    requireWebFunction('webAppFinalReview');
+    const world = finalWorld();
+    const before = finalReview(world);
+    const sheet = finalSheet(world);
+    const spare = before.rows[2].rowNumber + 3;
+    sheet.getRange(spare, world.mapping.txId).setValue('TX_UNKNOWN_000');
+    sheet.getRange(spare, world.mapping.M).setValue(500);
+
+    const result = finalReview(world);
+    const orphan = result.reconciliation.problems.find((p) => p.kind === 'ORPHAN');
+    assert.ok(orphan, '取引ログに無い行を見逃している');
+    assert.equal(orphan.txId, 'TX_UNKNOWN_000');
+    assert.deepEqual(orphan.rowNumbers, [spare]);
+    // **差額は0のままである**（どのファイルにも属さない行は、どのファイルの
+    // 合計にも入らない）。だから「一致」の判定は差額だけでは決められない ──
+    // 問題が1つでもあれば一致と言ってはならない。言えば、取引ログに無い行を
+    // 抱えたまま「一致しました」と表示してダウンロードさせる。
+    assert.equal(result.reconciliation.totals.residual, 0, '前提：差額は0');
+    assert.equal(result.reconciliation.totals.balanced, false,
+      '取引ログに無い行があるのに「一致」と言っている');
+  });
+
+  test('final 7: an amount the reviewer corrected is accounted for, not reported', () => {
+    // 担当者が金額を直した取引は、明細の値とシートの値が違って正しい。
+    // 取引ログの予定値（V列）が直した値を持つので、その差を勘定する。
+    requireWebFunction('webAppFinalReview');
+    const world = finalWorld();
+    const before = finalReview(world);
+    const fixed = before.rows[0];
+    // 修正を再現：取引ログの予定金額（W列＝planned.m）とシートの金額を 1000 → 1100 に
+    gas.context.__txId = fixed.txId;
+    gas.evaluate(
+      '(function() { var tx = getTransaction(__txId);' +
+      ' transactionLogSheet_().getRange(tx._rowNumber, 23).setValue(1100); })()');
+    finalSheet(world).getRange(fixed.rowNumber, world.mapping.M).setValue(1100);
+
+    const result = finalReview(world);
+    const file = result.reconciliation.files[0];
+    assert.equal(file.corrected, 100, '修正の差が勘定されていない');
+    assert.equal(file.residual, 0, '正しく直した金額を不一致として出している');
+    assert.deepEqual(kinds(result), []);
+  });
+
+  test('final 8: a file whose rows were all lost still shows up', () => {
+    // シートの行から辿るだけだと、1行も残っていないファイルは見えない。
+    // このセッションで取り込んだファイルを渡すのはそのためである。
+    requireWebFunction('webAppFinalReview');
+    const world = finalWorld();
+    const before = finalReview(world);
+    const sheet = finalSheet(world);
+    before.rows.forEach((row) => sheet.getRange(row.rowNumber, 1, 1, 8).clearContent());
+
+    const withFiles = finalReview(world, [world.fileId]);
+    assert.equal(withFiles.reconciliation.files.length, 1, 'ファイルが消えている');
+    assert.equal(withFiles.reconciliation.problems.filter((p) => p.kind === 'MISSING').length, 3,
+      '全部漏れたのに漏れとして出ていない');
+    assert.equal(withFiles.reconciliation.totals.balanced, false);
+
+    const withoutFiles = finalReview(world, []);
+    assert.equal(withoutFiles.reconciliation.files.length, 0,
+      '前提：ファイルを渡さなければ見えない（だから渡す）');
+  });
+
+  test('final 9: each row says whether it is settled or still waiting for review', () => {
+    requireWebFunction('webAppFinalReview');
+    const world = finalWorld(['2025/12/10,確定店,1000,仕入れ', '2025/12/11,未登録の店,700,仕入れ']);
+    const result = finalReview(world);
+    const statuses = result.rows.map((row) => row.status).sort();
+    assert.deepEqual(statuses, ['COMMITTED', 'REVIEW_REQUIRED'],
+      '確定済みと要確認を見分けられない');
+  });
+
+  test('final 10: another customer cannot read a destination through this', () => {
+    requireWebFunction('webAppFinalReview');
+    const world = finalWorld();
+    gas.stubs.setActiveUser('stranger@example.com');
+    const error = caught(() => gas.call('webAppFinalReview',
+      [world.customer.customerId, world.destinationId, [world.fileId]]));
+    assert.ok(error, '担当外が読めてしまう');
+  });
+
+  test('final 11: the template itself is refused', () => {
+    // 雛形は顧客の全期間の転記の元である。最終確認の対象はセッションの複製だけ。
+    requireWebFunction('webAppFinalReview');
+    const world = finalWorld();
+    const templateId = String(plain(gas.evaluate('getCustomerById("C001").destinationSpreadsheetId')));
+    const error = caught(() => gas.call('webAppFinalReview',
+      [world.customer.customerId, templateId, [world.fileId]]));
+    assert.ok(error && /雛形/.test(String(error.message)), '雛形を読めてしまう');
+  });
+
+
+  test('final 12: the amount is read from the amount column, not from the description', () => {
+    // freee の列記号（B・F・I・K・M）は名前から意味を推し量れない。
+    // K は摘要（元の店名）、M が金額である。取り違えると、店名と金額を
+    // 突き合わせる無意味な検査になる（2026-09-23 に実際に取り違えた）。
+    requireWebFunction('webAppFinalReview');
+    const world = finalWorld();
+    const result = finalReview(world);
+    assert.equal(result.amountColumnIndex, world.mapping.M - 1, '金額列が M でない');
+    result.rows.forEach((row) => {
+      assert.equal(typeof row.amount, 'number', `行${row.rowNumber}の金額が数値でない`);
+      assert.equal(row.cells[world.mapping.K - 1], '確定店', 'K 列（摘要）に店名が無い');
+    });
+    assert.deepEqual(result.rows.map((row) => row.amount).sort((a, b) => a - b), [700, 1000, 2500]);
+  });
+
+
+  test('final 13: a row that should have been deleted by an exclusion is named', () => {
+    // 除外は転記先の行を消す。消えずに残る（後から戻された・消去が失敗した）と、
+    // その取引は**黙ってダウンロードされる**。差額には出ない ── 除外した取引は
+    // どの合計にも「転記した」として入らないからである。
+    requireWebFunction('webAppFinalReview');
+    const world = finalWorld(['2025/12/10,確定店,1000,仕入れ', '2025/12/11,未登録の店,700,仕入れ']);
+    const before = finalReview(world);
+    const excludedRow = before.rows.find((row) => row.status === 'REVIEW_REQUIRED');
+    assert.ok(excludedRow, '前提：除外する行がある');
+    const saved = finalSheet(world).getRange(excludedRow.rowNumber, 1, 1, 8).getValues()[0];
+    const review = openReviewsFor(world.customer.customerId, {fileId: world.fileId})
+      .find((row) => row.reviewType === 'PARTNER');
+    call('resolveReview', [review.reviewId, 'EXCLUDE', {}]);
+    // 消された行を戻す
+    finalSheet(world).getRange(excludedRow.rowNumber, 1, 1, 8).setValues([saved]);
+
+    const result = finalReview(world);
+    const present = result.reconciliation.problems.find((p) => p.kind === 'EXCLUDED_BUT_PRESENT');
+    assert.ok(present, '除外したのに残っている行を見逃している');
+    assert.deepEqual(present.rowNumbers, [excludedRow.rowNumber]);
+    assert.equal(result.reconciliation.totals.balanced, false);
+  });
+
+  test('final 14: an amount the statement gave in an unreadable form is named, not silently zeroed', () => {
+    // 読めない金額を黙って0円にすると、過少計上を見逃す（30 の件数・合計の照合と
+    // 同じ扱い）。0円として計算はするが、必ず問題として出す。
+    requireWebFunction('webAppFinalReview');
+    const world = finalWorld();
+    const before = finalReview(world);
+    gas.context.__txId = before.rows[0].txId;
+    gas.evaluate('(function() { var tx = getTransaction(__txId);' +
+      ' transactionLogSheet_().getRange(tx._rowNumber, 17).setValue("千円"); })()');
+
+    const result = finalReview(world);
+    const unreadable = result.reconciliation.problems.find((p) => p.kind === 'UNREADABLE_AMOUNT');
+    assert.ok(unreadable, '読めない金額を黙って0にしている');
+    assert.equal(unreadable.value, '千円');
+    assert.equal(result.reconciliation.totals.balanced, false);
+  });
+
+  test('final 15: another customer\'s file or rows reveal nothing about that customer', () => {
+    // 画面から渡すファイルIDは利用者が書き換えられる。他の顧客のファイルIDを
+    // 混ぜても、**その取引の金額も、ファイル名も**返してはならない。
+    requireWebFunction('webAppFinalReview');
+    const {world, customer} = setupWorld();
+    const other = addCustomer(world, {suffix: '2', customerId: 'C002', customerName: '顧客二',
+      reviewers: 'reviewer@example.com', admins: 'admin@example.com'});
+    seedDictionaryRow('C002', {dictId: 'DICT_OTHER', original: '他社の店', partnerName: '他社'});
+    const otherFile = putCsv(other, {fileId: 'other_file', name: '他社の秘密の明細202601.csv',
+      rows: ['2025/12/10,他社の店,777777,仕入れ']});
+    webImport(other, {});
+    seedDictionaryRow('C001', {dictId: 'DICT_OWN', original: '確定店', partnerName: '株式会社確定'});
+    const ownFile = putCsv(customer, {fileId: 'own_file', rows: ['2025/12/10,確定店,1000,仕入れ']});
+    const own = webImport(customer, {});
+
+    const result = call('webAppFinalReview', ['C001', own.destinationSpreadsheetId,
+      [ownFile, otherFile]]);
+    const text = JSON.stringify(result);
+    assert.ok(text.indexOf('777777') < 0, '他の顧客の金額が漏れている');
+    assert.ok(text.indexOf('他社の秘密の明細') < 0, '他の顧客のファイル名が漏れている');
+    assert.deepEqual(result.reconciliation.files.map((file) => file.fileId), [ownFile],
+      '他の顧客のファイルを突き合わせに入れている');
+    assert.equal(result.reconciliation.totals.balanced, true, '自分のファイルは一致するはず');
+  });
+
+
+  test('final 16: the download waits until the final review of this very sheet has been opened', () => {
+    // 最終確認は「ダウンロードの一つ手前」の段階である（ko-ch さんの要望）。
+    // 開く前・別のシートを開いた後・確定で古くなった後は、ダウンロードさせない。
+    const gate = (lastId, reviewedId) => clientEval(
+      `(state.lastCompletedDestinationSpreadsheetId = ${JSON.stringify(lastId)},` +
+      ` state.finalReviewedFor = ${JSON.stringify(reviewedId)}, finalReviewIsCurrent())`);
+    assert.equal(gate('D1', null), false, '最終確認を開く前にダウンロードできる');
+    assert.equal(gate('D1', 'D1'), true, '開いたのにダウンロードできない');
+    assert.equal(gate('D2', 'D1'), false, '別のシートの最終確認でダウンロードできる');
+    assert.equal(gate(null, null), false, '転記先が無いのにダウンロードできる');
+  });
+
+  test('final 17: every problem kind the server can return has its own sentence', () => {
+    // 利用者が読むのはこの文である。新しい種類を足してここを忘れると、
+    // 「確認が必要です：AMOUNT_MISMATCH」のような内部名がそのまま出る。
+    const kinds = ['MISSING', 'DUPLICATE', 'AMOUNT_MISMATCH', 'ORPHAN',
+      'EXCLUDED_BUT_PRESENT', 'UNREADABLE_AMOUNT', 'FOREIGN_CUSTOMER'];
+    // 突き合わせの関数の中だけを見る（他の関数にも `kind:` はある）
+    const server = fs.readFileSync(path.join(process.cwd(), 'src', '80_WebApp.gs'), 'utf8');
+    const body = server.slice(server.indexOf('function finalReviewReconcile_'),
+      server.indexOf('function finalReviewAmount_'));
+    assert.ok(body.length > 100, '突き合わせの関数が見つからない');
+    const serverKinds = (body.match(/kind: '([A-Z_]+)'/g) || []).map((m) => m.slice(7, -1));
+    assert.deepEqual([...new Set(serverKinds)].sort(), kinds.slice().sort(),
+      'サーバーが返す問題の種類と、この表が食い違う');
+    const sample = {txId: 'TX_0123456789abcdef', amount: 700, rowNumbers: [3, 9], rowNumber: 4,
+      expected: 2500, actual: 9999, value: '千円'};
+    kinds.forEach((kind) => {
+      const text = clientEval(`FINAL_PROBLEM_TEXT[${JSON.stringify(kind)}](${JSON.stringify(sample)})`);
+      assert.ok(typeof text === 'string' && text.length > 0, `${kind} の文が無い`);
+      assert.ok(text.indexOf(kind) < 0, `${kind} が内部名のまま出ている: ${text}`);
+    });
+    const mismatch = clientEval(`FINAL_PROBLEM_TEXT.AMOUNT_MISMATCH(${JSON.stringify(sample)})`);
+    assert.ok(/¥9,999/.test(mismatch) && /¥2,500/.test(mismatch),
+      `書き換え後と記録の両方の金額を出していない: ${mismatch}`);
+  });
+
+  test('final 18: amounts read as yen, with the sign in front', () => {
+    assert.equal(clientEval('yen(4200)'), '¥4,200');
+    assert.equal(clientEval('yen(0)'), '¥0');
+    assert.equal(clientEval('yen(-1000)'), '−¥1,000', '負の差額が読めない');
+  });
+
 };

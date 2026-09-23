@@ -158,6 +158,18 @@
     .pager { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
     .pager-controls { display: flex; gap: 6px; }
     .excel-status { color: var(--ok); font-size: 12px; }
+    .final-wrap { padding: 0 22px 24px; }
+    .final-verdict { margin-bottom: 12px; padding: 10px 12px; border-radius: 8px; font-weight: 700; }
+    .final-verdict.ok { color: #0f5132; background: #e8f5ee; }
+    .final-verdict.ng { color: #842029; background: #fdecea; }
+    .final-verdict.stale { color: #5e4800; background: #fff7d6; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .final-problems { margin: 10px 0 0; padding-left: 20px; color: #842029; }
+    .final-problems li { margin-bottom: 4px; }
+    .final-rows { max-height: 60vh; }
+    .state-badge { display: inline-block; border-radius: 999px; padding: 1px 8px; font-size: 11px; white-space: nowrap; }
+    .state-badge.done { color: #0f5132; background: #e8f5ee; }
+    .state-badge.wait { color: #8a4b00; background: #fff1d6; }
     dialog {
       width: min(760px, calc(100vw - 48px));
       max-height: calc(100vh - 64px);
@@ -198,7 +210,8 @@
     <div class="step current" data-step="1">1. 顧客選定</div>
     <div class="step" data-step="2">2. カード選択</div>
     <div class="step" data-step="3">3. 記帳・要確認</div>
-    <div class="step" data-step="4">4. ダウンロード</div>
+    <div class="step" data-step="4">4. 最終確認</div>
+    <div class="step" data-step="5">5. ダウンロード</div>
   </div>
 
   <section id="notice" class="notice" role="status" aria-live="polite"></section>
@@ -255,6 +268,7 @@
           <div id="resolve-progress" class="status-line" aria-live="polite"></div>
           <div class="action-row">
             <button id="resolve-button" type="button" class="button primary" disabled>選択した要確認を確定</button>
+            <button id="final-button" type="button" class="button" disabled>最終確認を表示</button>
             <button id="excel-button" type="button" class="button" disabled>Excel ダウンロード</button>
             <span id="excel-status" class="excel-status"></span>
           </div>
@@ -262,6 +276,23 @@
       </div>
     </section>
   </main>
+
+  <div class="final-wrap">
+    <section id="final-panel" class="panel final" aria-labelledby="final-heading" hidden>
+      <div class="panel-header">
+        <h2 id="final-heading">最終確認</h2>
+        <span id="final-sheet" class="muted"></span>
+      </div>
+      <div class="panel-body">
+        <div id="final-verdict" class="final-verdict" role="status" aria-live="polite"></div>
+        <h3 class="subheading">元の明細との突き合わせ</h3>
+        <div id="final-files" class="table-wrap"></div>
+        <ul id="final-problems" class="final-problems"></ul>
+        <h3 class="subheading">ダウンロードされる行（<span id="final-row-count">0</span> 行）</h3>
+        <div id="final-rows" class="table-wrap final-rows"></div>
+      </div>
+    </section>
+  </div>
 
   <dialog id="confirm-dialog" aria-labelledby="confirm-title">
     <div class="dialog-header"><h2 id="confirm-title">要確認の確定</h2></div>
@@ -341,6 +372,12 @@
       resolveBusy: false,
       activeImportDestinationSpreadsheetId: null,
       lastCompletedDestinationSpreadsheetId: null,
+      // 最終確認を開いた転記先。確定で中身が変わったら null に戻して開き直させる。
+      finalReviewedFor: null,
+      finalLoading: false,
+      finalRequest: 0,
+      // このセッションで取り込んだファイル。1行も書かれなかったファイルの漏れを拾う。
+      sessionFileIds: [],
       confirmPayload: null
     };
 
@@ -351,7 +388,9 @@
       'import-progress', 'import-disabled-reason', 'import-button', 'review-total',
       'review-window', 'review-empty', 'review-content', 'other-reviews', 'review-table',
       'review-more', 'review-prev', 'review-next', 'resolve-progress', 'resolve-button',
-      'excel-button', 'excel-status', 'confirm-dialog', 'confirm-intro', 'confirm-list',
+      'excel-button', 'excel-status', 'final-button', 'final-panel', 'final-sheet',
+      'final-verdict', 'final-files', 'final-problems', 'final-row-count', 'final-rows',
+      'confirm-dialog', 'confirm-intro', 'confirm-list',
       'confirm-cancel', 'confirm-submit'
     ].forEach(function(id) { el[id] = document.getElementById(id); });
 
@@ -363,6 +402,7 @@
         else if (name === 'webAppListReviews') runner.webAppListReviews(args[0], args[1], args[2]);
         else if (name === 'webAppRunImport') runner.webAppRunImport(args[0], args[1], args[2]);
         else if (name === 'webAppResolveReviews') runner.webAppResolveReviews(args[0], args[1], args[2]);
+        else if (name === 'webAppFinalReview') runner.webAppFinalReview(args[0], args[1], args[2]);
         else reject(new Error('Unknown server function'));
       });
     }
@@ -447,6 +487,8 @@
       if (state.selectedCustomerId) step = 2;
       if (state.selectedFolderId) step = 3;
       if (state.lastCompletedDestinationSpreadsheetId) step = 4;
+      if (state.lastCompletedDestinationSpreadsheetId &&
+          state.finalReviewedFor === state.lastCompletedDestinationSpreadsheetId) step = 5;
       document.querySelectorAll('[data-step]').forEach(function(node) {
         node.classList.toggle('current', Number(node.getAttribute('data-step')) === step);
       });
@@ -716,7 +758,12 @@
       el['import-button'].disabled = !customer || !customer.canImport || !state.selectedFolderId ||
         state.loadingFiles || isMutationBusy();
       el['resolve-button'].disabled = !customer || selectedCount === 0 || isMutationBusy();
-      el['excel-button'].disabled = !state.lastCompletedDestinationSpreadsheetId || isMutationBusy();
+      el['final-button'].disabled = !state.lastCompletedDestinationSpreadsheetId ||
+        isMutationBusy() || state.finalLoading;
+      // **最終確認を開くまでダウンロードさせない。**段階として挟むご要望であり、
+      // 開いたあとに要確認を確定したら表示は古くなるので、もう一度開かせる。
+      el['excel-button'].disabled = !state.lastCompletedDestinationSpreadsheetId ||
+        isMutationBusy() || !finalReviewIsCurrent();
       renderCustomers();
     }
 
@@ -740,6 +787,9 @@
       state.reviewOffset = 0;
       state.activeImportDestinationSpreadsheetId = null;
       state.lastCompletedDestinationSpreadsheetId = null;
+      // 別の顧客の転記先を最終確認に出したままにしない。
+      forgetFinalReview();
+      state.sessionFileIds = [];
       el['excel-status'].textContent = '';
       el['import-progress'].textContent = '';
       el['resolve-progress'].textContent = '';
@@ -774,6 +824,8 @@
       state.selectedFolderId = String(folderId);
       state.files = [];
       state.lastCompletedDestinationSpreadsheetId = null;
+      forgetFinalReview();
+      state.sessionFileIds = [];
       el['excel-status'].textContent = '';
       el['import-progress'].textContent = '';
       renderFolders();
@@ -882,6 +934,8 @@
       state.importBusy = true;
       state.activeImportDestinationSpreadsheetId = null;
       state.lastCompletedDestinationSpreadsheetId = null;
+      forgetFinalReview();
+      state.sessionFileIds = [];
       el['excel-status'].textContent = '';
       clearNotice();
       el['import-progress'].textContent = TEXT.processing(0, 0);
@@ -900,6 +954,7 @@
             state.activeImportDestinationSpreadsheetId = String(result.destinationSpreadsheetId);
             state.lastCompletedDestinationSpreadsheetId = state.activeImportDestinationSpreadsheetId;
           }
+          collectSessionFiles(result.fileResults);
           var done = Number(result.done || 0);
           var remaining = Number(result.remaining || 0);
           cumulativeDone += done;
@@ -1168,8 +1223,194 @@
       } finally {
         if (token === state.resolveRun && generation === state.viewGeneration) {
           state.resolveBusy = false;
+          // 転記先の中身が変わった。開いていた最終確認はもう正しくない。
+          markFinalReviewStale();
           renderSelection();
           loadReviews(customerId, state.reviewOffset, generation);
+        }
+      }
+    }
+
+    function finalReviewIsCurrent() {
+      return Boolean(state.lastCompletedDestinationSpreadsheetId) &&
+        state.finalReviewedFor === state.lastCompletedDestinationSpreadsheetId;
+    }
+
+    function forgetFinalReview() {
+      state.finalReviewedFor = null;
+      state.finalRequest += 1;
+      el['final-panel'].hidden = true;
+    }
+
+    function markFinalReviewStale() {
+      if (!state.finalReviewedFor) return;
+      state.finalReviewedFor = null;
+      el['final-verdict'].className = 'final-verdict stale';
+      el['final-verdict'].textContent =
+        '要確認を確定したため、この表示は古くなりました。「最終確認を表示」を押し直してください。';
+    }
+
+    function collectSessionFiles(fileResults) {
+      (Array.isArray(fileResults) ? fileResults : []).forEach(function(file) {
+        var id = file && file.fileId ? String(file.fileId) : '';
+        if (id && state.sessionFileIds.indexOf(id) < 0) state.sessionFileIds.push(id);
+      });
+    }
+
+    function yen(value) {
+      var number = Number(value || 0);
+      return (number < 0 ? '−' : '') + '¥' + Math.abs(number).toLocaleString('ja-JP');
+    }
+
+    function columnName(index) {
+      var name = '';
+      var n = index + 1;
+      while (n > 0) {
+        var rest = (n - 1) % 26;
+        name = String.fromCharCode(65 + rest) + name;
+        n = Math.floor((n - 1) / 26);
+      }
+      return name;
+    }
+
+    function cellNode(tag, text, className) {
+      var node = document.createElement(tag);
+      node.textContent = text;
+      if (className) node.className = className;
+      return node;
+    }
+
+    var FINAL_PROBLEM_TEXT = {
+      MISSING: function(p) {
+        return '転記漏れ：' + yen(p.amount) + ' の取引がシートにありません（' + shortTx(p.txId) + '）';
+      },
+      DUPLICATE: function(p) {
+        return '二重転記：同じ取引が ' + (p.rowNumbers || []).join('・') + ' 行目に入っています（' + shortTx(p.txId) + '）';
+      },
+      AMOUNT_MISMATCH: function(p) {
+        return p.rowNumber + ' 行目の金額が ' + (p.actual === null ? '空欄' : yen(p.actual)) +
+          ' になっています。記録では ' + yen(p.expected) + ' です（シート上で書き換えられた可能性）';
+      },
+      ORPHAN: function(p) {
+        return (p.rowNumbers || []).join('・') + ' 行目に、取引ログに無い取引があります（' + shortTx(p.txId) + '）';
+      },
+      EXCLUDED_BUT_PRESENT: function(p) {
+        return '除外した取引が ' + (p.rowNumbers || []).join('・') + ' 行目に残っています（' + shortTx(p.txId) + '）';
+      },
+      UNREADABLE_AMOUNT: function(p) {
+        return '明細の金額「' + p.value + '」を読めません。0円として計算しています（' + shortTx(p.txId) + '）';
+      },
+      FOREIGN_CUSTOMER: function(p) {
+        return (p.rowNumbers || []).join('・') + ' 行目に、別の顧客の取引があります';
+      }
+    };
+
+    function shortTx(txId) {
+      var text = String(txId || '');
+      return text.length > 14 ? text.slice(0, 14) + '…' : text;
+    }
+
+    function renderFinalReview(result) {
+      var recon = result.reconciliation || {files: [], totals: {}, problems: []};
+      var totals = recon.totals || {};
+      el['final-panel'].hidden = false;
+      el['final-sheet'].textContent = '転記先: ' + String(result.destinationSpreadsheetId || '');
+
+      // 判定：一致なら緑、そうでなければ赤。色だけに頼らず文で言う。
+      el['final-verdict'].className = 'final-verdict ' + (totals.balanced ? 'ok' : 'ng');
+      el['final-verdict'].textContent = totals.balanced ?
+        '明細と一致しました。漏れ・重複・書き換えはありません。' :
+        '明細と一致しません。下の内容を確認してから、ダウンロードしてください。';
+
+      // ファイルごとの突き合わせ
+      var fileTable = document.createElement('table');
+      var head = document.createElement('tr');
+      ['元のファイル', '明細の利用金額', '除外した分', '金額修正', '転記した金額', '差額', '判定']
+        .forEach(function(label, i) { head.appendChild(cellNode('th', label, i > 0 && i < 6 ? 'num' : '')); });
+      var thead = document.createElement('thead'); thead.appendChild(head); fileTable.appendChild(thead);
+      var tbody = document.createElement('tbody');
+      (recon.files || []).forEach(function(file) {
+        var row = document.createElement('tr');
+        row.appendChild(cellNode('td', file.fileName || file.fileId, 'file-name'));
+        row.appendChild(cellNode('td', yen(file.statement), 'num'));
+        row.appendChild(cellNode('td', file.excluded ? '−' + yen(file.excluded).replace('−', '') : '—', 'num'));
+        row.appendChild(cellNode('td', file.corrected ? yen(file.corrected) : '—', 'num'));
+        row.appendChild(cellNode('td', yen(file.written), 'num'));
+        row.appendChild(cellNode('td', yen(file.residual), 'num'));
+        row.appendChild(cellNode('td', file.balanced ? '一致' : '不一致'));
+        tbody.appendChild(row);
+      });
+      var total = document.createElement('tr');
+      total.appendChild(cellNode('th', '合計'));
+      [totals.statement, totals.excluded, totals.corrected, totals.written, totals.residual]
+        .forEach(function(value) { total.appendChild(cellNode('th', yen(value), 'num')); });
+      total.appendChild(cellNode('th', totals.balanced ? '一致' : '不一致'));
+      tbody.appendChild(total);
+      fileTable.appendChild(tbody);
+      el['final-files'].textContent = '';
+      el['final-files'].appendChild(fileTable);
+
+      // 問題の一覧
+      el['final-problems'].textContent = '';
+      (recon.problems || []).forEach(function(problem) {
+        var describe = FINAL_PROBLEM_TEXT[problem.kind];
+        el['final-problems'].appendChild(cellNode('li',
+          describe ? describe(problem) : ('確認が必要です：' + problem.kind)));
+      });
+
+      // 転記した行（全列を、シートの見出しのまま）
+      var rows = Array.isArray(result.rows) ? result.rows : [];
+      el['final-row-count'].textContent = String(rows.length);
+      var headers = Array.isArray(result.headers) ? result.headers : [];
+      var amountIndex = Number(result.amountColumnIndex);
+      var table = document.createElement('table');
+      var headRow = document.createElement('tr');
+      headRow.appendChild(cellNode('th', '行', 'num'));
+      headRow.appendChild(cellNode('th', '状態'));
+      headers.forEach(function(label, index) {
+        headRow.appendChild(cellNode('th', label || columnName(index), index === amountIndex ? 'num' : ''));
+      });
+      var rowsHead = document.createElement('thead'); rowsHead.appendChild(headRow); table.appendChild(rowsHead);
+      var rowsBody = document.createElement('tbody');
+      rows.forEach(function(row) {
+        var tr = document.createElement('tr');
+        tr.appendChild(cellNode('td', String(row.rowNumber), 'num'));
+        var settled = row.status === 'COMMITTED';
+        var badge = cellNode('span', settled ? '確定済み' : (row.status === 'REVIEW_REQUIRED' ? '要確認' : '—'),
+          'state-badge ' + (settled ? 'done' : 'wait'));
+        var statusCell = document.createElement('td'); statusCell.appendChild(badge); tr.appendChild(statusCell);
+        (row.cells || []).forEach(function(value, index) {
+          tr.appendChild(cellNode('td', value, index === amountIndex ? 'num' : ''));
+        });
+        rowsBody.appendChild(tr);
+      });
+      table.appendChild(rowsBody);
+      el['final-rows'].textContent = '';
+      el['final-rows'].appendChild(table);
+    }
+
+    async function loadFinalReview() {
+      var destinationId = state.lastCompletedDestinationSpreadsheetId;
+      var customerId = state.selectedCustomerId;
+      if (!destinationId || !customerId || state.finalLoading || isMutationBusy()) return;
+      var request = ++state.finalRequest;
+      state.finalLoading = true;
+      clearNotice();
+      renderSelection();
+      try {
+        var result = await gasCall('webAppFinalReview',
+          [customerId, destinationId, state.sessionFileIds.slice()]);
+        if (request !== state.finalRequest ||
+            destinationId !== state.lastCompletedDestinationSpreadsheetId) return;
+        renderFinalReview(result);
+        state.finalReviewedFor = destinationId;
+        el['final-panel'].scrollIntoView({behavior: 'smooth', block: 'start'});
+      } catch (error) {
+        if (request === state.finalRequest) showNotice(failureMessage(error), 'error');
+      } finally {
+        if (request === state.finalRequest) {
+          state.finalLoading = false;
+          renderSelection();
         }
       }
     }
@@ -1215,6 +1456,7 @@
       if (state.loadingReviews || isMutationBusy()) return;
       loadReviews(state.selectedCustomerId, state.reviewOffset + state.reviewLimit, state.viewGeneration);
     });
+    el['final-button'].addEventListener('click', loadFinalReview);
     el['excel-button'].addEventListener('click', downloadExcel);
     el['confirm-cancel'].addEventListener('click', function() {
       state.confirmPayload = null;
