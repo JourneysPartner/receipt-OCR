@@ -547,6 +547,24 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
         // 8-8：重複・修正版候補。
         var contentHash = generateContentHash(transactions,
           resolvedSheet.name === null ? '' : String(resolvedSheet.name));
+        // **INV-28：承認を判定する材料を渡す。**区分2の承認は、承認した時点の
+        // 内容ハッシュと版に結び付けて保存される（`approveAndRevalidate_`）。
+        // 判定（`validationCauseApproved_`）はその2つを `validation` から読み、
+        // **どちらかが欠けていれば必ず「未承認」と答える**（undefined 同士を
+        // 一致と見なさないための正しい規則である）。
+        //
+        // ここで渡していなかったので、**取込の経路では区分2の承認が一度も
+        // 効いていなかった。**担当者が承認して巻き戻すたびに同じ要因が再発し、
+        // 承認だけが積み上がる ── INV-28 が防ぐはずの無限ループそのもので
+        // ある（2026-09-23、本番と同じ経路で4回繰り返して確認）。既存の
+        // INV-28 のテストは `processFile` へ `validation` を**手で**渡して
+        // いたので、この結線を一度も通っていなかった。
+        //
+        // 手元で計算した値でよい。同じファイルなら提出時点のハッシュと一致し、
+        // 違えばこの先の `updateProcessLog` が提出時点ハッシュの不変条件
+        // （INV-07）で止める ── 判定まで届くのは一致する場合だけである。
+        validation.contentHash = contentHash;
+        validation.hashVersion = VERSIONS.HASH;
         var indexRows = permanentIndexRowsForScan_()
           .filter(function(row) { return row.fileId !== fileId; })
           .map(function(row) {
