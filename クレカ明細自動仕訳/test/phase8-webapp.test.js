@@ -1853,6 +1853,125 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(clientEval('madeProgress(1, 0)'), true, '最後の1件で止まっている');
   });
 
+  // ================= 取引先不明で確定（§15 の 2） =================
+  //
+  // 「取引先なし」も「取引先不明」も F列は空欄になる。見分ける手掛かりは I列の
+  // 印だけである。取引先欄の「取引先不明」は名前ではなく指示で、名前として
+  // 通すと F列に実在しない取引先が入り、辞書が以後その店名をそこへ自動確定する。
+
+  test('webapp 49: 取引先不明 in the partner field marks column I; a blank still marks nothing', () => {
+    requireWebFunction('webAppResolveReviews');
+    const seeded = seedPartnerViaWeb({count: 2});
+    const [unknown, none] = seeded.reviews;
+    const unknownRow = transactionFor(unknown).destinationRow;
+    const noneRow = transactionFor(none).destinationRow;
+    const beforeDictionary = dictionaryCount();
+
+    const result = webResolve(seeded.customer.customerId,
+      [decision(unknown, '取引先不明'), decision(none, '')]);
+
+    assert.equal(result.resolved, 2);
+    assert.deepEqual(result.errors, []);
+    assert.equal(reviewById(unknown.reviewId).resolveOperation, 'RESOLVE_PARTNER_UNKNOWN');
+    assert.equal(destinationValue(seeded.destinationSpreadsheetId, unknownRow, 3), '',
+      'F列に「取引先不明」という取引先を書かない');
+    assert.equal(destinationValue(seeded.destinationSpreadsheetId, unknownRow, 4), '仕入れ,取引先不明',
+      'I列（メモタグ）の用途の後ろに印を足す');
+    assert.equal(transactionFor(unknown).transactionStatus, 'COMMITTED');
+    assert.equal(reviewById(none.reviewId).resolveOperation, 'RESOLVE_WITHOUT_PARTNER');
+    assert.equal(destinationValue(seeded.destinationSpreadsheetId, noneRow, 4), '仕入れ',
+      '空欄は「取引先が要らない」のまま。印を書けば、また区別が付かなくなる');
+    assert.equal(dictionaryCount(), beforeDictionary, 'どちらも辞書に学ばない');
+  });
+
+  test('webapp 50: the server recognizes the marker through spacing, so it never becomes a name', () => {
+    requireWebFunction('webAppResolveReviews');
+    const seeded = seedPartnerViaWeb();
+    const review = seeded.reviews[0];
+    const row = transactionFor(review).destinationRow;
+    const beforeDictionary = dictionaryCount();
+    // 判定はサーバーが行う。画面の判定と食い違っても、F列と辞書は守られる。
+    const result = webResolve(seeded.customer.customerId, [decision(review, '取引先　不明')]);
+    assert.equal(result.resolved, 1);
+    assert.equal(reviewById(review.reviewId).resolveOperation, 'RESOLVE_PARTNER_UNKNOWN');
+    assert.equal(destinationValue(seeded.destinationSpreadsheetId, row, 3), '');
+    assert.equal(destinationValue(seeded.destinationSpreadsheetId, row, 4), '仕入れ,取引先不明',
+      '印は打ち方ではなく決まった語で書く');
+    assert.equal(dictionaryCount(), beforeDictionary);
+  });
+
+  test('webapp 51: every row offers 取引先不明, spelled exactly like the server marker', () => {
+    const label = gas.evaluate('MEMO_TAG_PARTNER_UNKNOWN_');
+    assert.equal(clientEval('TEXT.partnerUnknown'), label,
+      '画面とサーバーの語が食い違うと、選んだ「取引先不明」が取引先名として採用される');
+    assert.deepEqual(plain(clientEval('partnerChoices({candidates: []})')), [label],
+      '候補の無い行こそ、取引先が分からないまま確定したい行である');
+    assert.deepEqual(plain(clientEval(
+      "partnerChoices({candidates: [{partnerName: 'Amazon'}, {partnerName: '取引先不明'}]})")),
+      ['Amazon', label], '候補に同じ語があっても二度出さない');
+    assert.equal(clientEval("isPartnerUnknownChoice(' 取引先　不明 ')"), true);
+    assert.equal(clientEval("isPartnerUnknownChoice('株式会社不明堂')"), false);
+    assert.equal(clientEval(
+      "dictionaryMessage({partnerName: '取引先不明', conflictReason: 'DIFFERENT_PARTNER', review: {}})"),
+      clientEval('TEXT.learnUnknown'), '確認ダイアログは、何を書くかを言う');
+  });
+
+  test('webapp 52: marking an unknown partner costs no more round trips than adopting one', () => {
+    requireWebFunction('webAppResolveReviews');
+    // 締切ゲートは1件を `WEBAPP_ITEM_TRIPS_`（採用で測った値）で見積もる。
+    // 印を書く操作がそれより重いと、ゲートが見積を外して6分に当たる。
+    const measure = (partnerName) => {
+      const seeded = seedPartnerViaWeb();
+      gas.stubs.resetRoundTrips();
+      const result = webResolve(seeded.customer.customerId,
+        [decision(seeded.reviews[0], partnerName)]);
+      assert.equal(result.resolved, 1, `前提：${partnerName} が確定する`);
+      const trips = gas.stubs.roundTrips();
+      return trips.rangeReads + trips.rangeWrites + trips.flushes;
+    };
+    const adopt = measure('株式会社テスト');
+    const unknown = measure('取引先不明');
+    assert.ok(unknown <= adopt, `取引先不明 ${unknown} 往復 > 採用 ${adopt} 往復`);
+  });
+
+  test('webapp 53: a file lease stops the mark, and every decision is still accounted for once', () => {
+    requireWebFunction('webAppResolveReviews');
+    const seeded = seedPartnerViaWeb({count: 3});
+    call('acquireLease', [seeded.customer.customerId, seeded.fileId, 'other-run',
+      'other@example.com', 'PROCESS']);
+    const decisions = [decision(seeded.reviews[0], '取引先不明'),
+      decision(seeded.reviews[1], ''), decision(seeded.reviews[2], '採用先')];
+    const result = webResolve(seeded.customer.customerId, decisions);
+
+    const unknownError = result.errors.find((entry) => entry.reviewId === seeded.reviews[0].reviewId);
+    assert.equal(unknownError && unknownError.code, 'LEASE_CONFLICT');
+    assert.equal(destinationValue(seeded.destinationSpreadsheetId,
+      transactionFor(seeded.reviews[0]).destinationRow, 4), '仕入れ', '他者の実行中に印を書かない');
+    assert.equal(reviewById(seeded.reviews[0].reviewId).status, 'OPEN');
+    assert.equal(decisions.length,
+      result.resolved + result.skippedByLease +
+      result.errors.filter((entry) => entry.reviewId).length + result.remaining);
+  });
+
+  test('webapp 54: both refusals reach the reader as sentences, not internal English', () => {
+    requireWebFunction('webAppResolveReviews');
+    const seeded = seedPartnerViaWeb();
+    const review = seeded.reviews[0];
+    // 別の経路で対象外にされた取引へ、開いたままの画面から「取引先不明」を送る。
+    call('updateTransactionStatus', [review.fullTxId, 'REVIEW_REQUIRED', 'CANCELED']);
+    const result = webResolve(seeded.customer.customerId, [decision(review, '取引先不明')]);
+    const message = String(result.errors[0] && result.errors[0].message);
+    assert.match(message, /取り消されたか除外されています（状態 CANCELED）/);
+    assert.doesNotMatch(message, /not offered/);
+
+    // メニューの「既存の取引先名を採用する」に「取引先不明」と打った場合。
+    const refused = caught(() => gas.call('resolveReview',
+      [review.reviewId, 'ADOPT_EXISTING_PARTNER', {partnerName: '取引先不明'}]));
+    const adoptMessage = gas.call('menuOperationErrorMessage_', [refused]);
+    assert.match(adoptMessage, /「取引先不明」は取引先名にできません/);
+    assert.doesNotMatch(adoptMessage, /marker/);
+  });
+
 
   // ================= 最終確認（段階4の手前） =================
   //
