@@ -336,6 +336,27 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(destSheet().getRange(4, 3).getValue(), '', '転記先の取引先は空欄');
   });
 
+  test('取引先不明 in F column marks column I and registers no rule, even under partial', () => {
+    // 仕様 webapp §15 の 2。名前として扱うと、partial では確定より先に
+    // 「取引先不明」へ当てるパターンが辞書に入り、以後の取込が F列にそれを書く。
+    setup();
+    gas.call('opsListPartnerReviews', []);
+    const row = decisionRowFor('キュウテン');
+    decisionSheet().getRange(row, 4, 1, 3).setValues([['partial', 'キュウ', '取引先不明']]);
+
+    const summary = plain(gas.call('opsApplyPartnerDecisions', []));
+    assert.equal(summary.errors, 0, JSON.stringify(summary.results));
+    const result = summary.results.find((r) => r.merchant === 'キュウテン');
+    assert.equal(result.resolved, 1);
+    assert.ok(String(decisionSheet().getRange(row, 7).getValue()).indexOf('取引先不明') >= 0,
+      '状態欄に「取引先不明」と出ること');
+    const rules = plain(gas.call('readDictionary_', [false]))
+      .filter((rule) => rule.partnerName === '取引先不明' || rule.original === 'キュウテン');
+    assert.equal(rules.length, 0, '辞書に何も登録しない');
+    assert.equal(destSheet().getRange(4, 3).getValue(), '', 'F列は空欄');
+    assert.equal(destSheet().getRange(4, 4).getValue(), '仕入れ,取引先不明', 'I列に印を足す');
+  });
+
   test('opsReprocessFile takes a review-blocked file back for a fresh import', () => {
     // 形式定義の欠陥で立った要確認は、人が判断すべきものではない ── 定義を
     // 直したら取り込み直すのが正しい。実機ではコメリの請求年月規則の誤りで

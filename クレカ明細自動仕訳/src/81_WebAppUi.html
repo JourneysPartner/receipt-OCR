@@ -344,7 +344,11 @@
       learnDuplicate: '辞書に登録しません：同じ店名の 1 件目で登録します',
       learnCard: '辞書に登録しません：この用途の取引先はカード名で決まります',
       learnNone: '辞書に登録しません：取引先なしで確定します',
-      learnYes: '辞書に登録します'
+      learnUnknown: '辞書に登録しません：メモタグに「取引先不明」と書いて確定します',
+      learnYes: '辞書に登録します',
+      // サーバーの `MEMO_TAG_PARTNER_UNKNOWN_`（36）と同じ語。取引先欄にこの語が
+      // 入った件を、サーバーは名前ではなく「取引先不明で確定」として扱う。
+      partnerUnknown: '取引先不明'
     });
 
     var state = {
@@ -630,6 +634,23 @@
       }).filter(Boolean);
     }
 
+    /** 取引先欄の値が「取引先不明」の指示か。空白と全角・半角の違いはサーバーと同じく見ない。 */
+    function isPartnerUnknownChoice(value) {
+      return String(value || '').normalize('NFKC').replace(/\s+/g, '') === TEXT.partnerUnknown;
+    }
+
+    /**
+     * 取引先欄の選択肢。推測候補の後ろに、どの行にも「取引先不明」を置く。
+     * 候補が無い行こそ、取引先が分からないまま確定したい行である。
+     */
+    function partnerChoices(review) {
+      var names = candidateNames(review).filter(function(name) {
+        return !isPartnerUnknownChoice(name);
+      });
+      names.push(TEXT.partnerUnknown);
+      return names;
+    }
+
     function renderReviews() {
       el['review-total'].textContent = String(state.partnerTotal || 0);
       renderOtherReviews();
@@ -690,18 +711,16 @@
           input.className = 'partner-input';
           input.placeholder = '空欄＝取引先なし';
           input.disabled = isMutationBusy();
-          if (names.length) {
-            var listId = 'candidate-' + index + '-' + state.reviewRequest;
-            input.setAttribute('list', listId);
-            var dataList = document.createElement('datalist');
-            dataList.id = listId;
-            names.forEach(function(name) {
-              var option = document.createElement('option');
-              option.value = name;
-              dataList.appendChild(option);
-            });
-            inputCell.appendChild(dataList);
-          }
+          var listId = 'candidate-' + index + '-' + state.reviewRequest;
+          input.setAttribute('list', listId);
+          var dataList = document.createElement('datalist');
+          dataList.id = listId;
+          partnerChoices(review).forEach(function(name) {
+            var option = document.createElement('option');
+            option.value = name;
+            dataList.appendChild(option);
+          });
+          inputCell.appendChild(dataList);
           inputCell.appendChild(input);
           row.appendChild(inputCell);
           var fileCell = document.createElement('td');
@@ -1072,6 +1091,7 @@
     }
 
     function dictionaryMessage(item) {
+      if (isPartnerUnknownChoice(item.partnerName)) return TEXT.learnUnknown;
       if (item.conflictReason === 'DIFFERENT_PARTNER') return TEXT.learnDifferent;
       if (!item.partnerName) return TEXT.learnNone;
       if (item.review.learnBlockedBy === 'EMPTY_MERCHANT') return TEXT.learnEmpty;

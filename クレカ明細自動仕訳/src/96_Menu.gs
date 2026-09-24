@@ -1058,6 +1058,15 @@ function menuOperationErrorMessage_(error) {
     if (message.indexOf('freee-imported transactions require') >= 0) {
       return 'freee 取込済みの取引のため、画面からは変更できません。管理者へ連絡してください。';
     }
+    if (message.indexOf('Partner-unknown resolution is not offered while the transaction is ') >= 0) {
+      return 'この取引は既に取り消されたか除外されています（状態 ' +
+        message.split('Partner-unknown resolution is not offered while the transaction is ').pop() +
+        '）。画面を再読み込みしてください。';
+    }
+  }
+  if (message.indexOf('The partner-unknown marker is not a partner name') >= 0) {
+    return '「取引先不明」は取引先名にできません。取引先が分からないまま確定するときは、' +
+      'Web アプリの取引先欄で「取引先不明」を選んでください。';
   }
   var classified = classifyMenuError_(error);
   return classified.lines && classified.lines.length ? classified.lines.join('\n') : message;

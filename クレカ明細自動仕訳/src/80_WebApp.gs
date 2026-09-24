@@ -302,7 +302,11 @@ function webAppResolveReviews(customerId, decisions, options) {
 
       var partnerName = decision.partnerName === null || decision.partnerName === undefined ? '' :
         String(decision.partnerName).trim();
-      var code = partnerName ? 'ADOPT_EXISTING_PARTNER' : 'RESOLVE_WITHOUT_PARTNER';
+      // 取引先欄の「取引先不明」は名前ではなく、I列へ印を残して確定する指示である
+      // （§15 の 2）。判定はサーバーで行う ── 古い画面が名前として送ってきても、
+      // F列と辞書に実在しない取引先を入れない。
+      var code = isPartnerUnknownLabel(partnerName) ? 'RESOLVE_PARTNER_UNKNOWN' :
+        (partnerName ? 'ADOPT_EXISTING_PARTNER' : 'RESOLVE_WITHOUT_PARTNER');
       var itemAuth;
       try {
         itemAuth = authorizeOperation(code, String(review.customerId), {});

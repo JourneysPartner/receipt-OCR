@@ -15,8 +15,11 @@
 
 /** 種別ごとに許される操作（4.26 解決操作の表）。 */
 var TX_REVIEW_OPERATIONS_ = Object.freeze({
+  // `RESOLVE_PARTNER_UNKNOWN` は後から足したので末尾に置く。この並びは
+  // メニューの選択肢の番号になる（`96` はメニューの表に無い操作を出さないので
+  // いまは出ないが、出すときに「3＝対象外」を押し慣れた手が別の操作を選ぶ）。
   PARTNER: ['ADOPT_EXISTING_PARTNER', 'REQUEST_NEW_PARTNER',
-            'RESOLVE_WITHOUT_PARTNER', 'EXCLUDE'],
+            'RESOLVE_WITHOUT_PARTNER', 'EXCLUDE', 'RESOLVE_PARTNER_UNKNOWN'],
   DATE: ['FIX_DATE_AMOUNT', 'EXCLUDE'],
   AMOUNT: ['FIX_DATE_AMOUNT', 'EXCLUDE'],
   ZERO_AMOUNT: ['POST_ZERO_AMOUNT', 'EXCLUDE'],
@@ -63,6 +66,8 @@ function resolveReview(reviewId, operation, input) {
     case 'RESOLVE_WITHOUT_PARTNER':
       updatePartnerResolution(fullTxId, PARTNER_STATUS.RESOLVED_WITHOUT_PARTNER);
       return settle_(review, operation, actor);
+    case 'RESOLVE_PARTNER_UNKNOWN':
+      return resolvePartnerUnknown_(review, input, actor);
     case 'FIX_DATE_AMOUNT':
       return fixDateAmount_(review, input, actor);
     case 'POST_ZERO_AMOUNT':
@@ -94,6 +99,7 @@ function requestNewPartner_(review, input, actor) {
   if (!input.partnerName) {
     throw new TypeError('REQUEST_NEW_PARTNER requires the proposed partner name');
   }
+  assertNotPartnerUnknownLabel_(input.partnerName);
   var requestId = submitRequest(REQUEST_TYPE.PARTNER_CREATE, {
     partnerName: String(input.partnerName),
     similarPartners: input.similarPartners || [],
@@ -120,6 +126,7 @@ function adoptExistingPartner_(review, input, actor) {
   if (!input.partnerName) {
     throw new TypeError('ADOPT_EXISTING_PARTNER requires a partner name');
   }
+  assertNotPartnerUnknownLabel_(input.partnerName);
   var customer = reviewWriteCustomer_(review);
   var leaseId = acquireLease(review.customerId, review.fileId, input.runId || null,
     actor, LEASE_PURPOSE.WRITE_ONLY);
@@ -148,6 +155,65 @@ function adoptExistingPartner_(review, input, actor) {
     }
     return settle_(review, 'ADOPT_EXISTING_PARTNER', actor,
       {adoptedPartner: String(input.partnerName)});
+  } finally {
+    releaseLease(review.fileId, input.runId || null, 'RESOLVE_DONE');
+  }
+}
+
+/**
+ * 「取引先不明」を取引先名として通さない。
+ *
+ * 通すと F列に実在しない取引先が入り、freee に「取引先不明」という取引先が
+ * 作られる。採用なら辞書も学習し、その店名は以後ずっと自動でそこへ確定する。
+ * 分からなかったことは `RESOLVE_PARTNER_UNKNOWN` で I列に残す。
+ */
+function assertNotPartnerUnknownLabel_(partnerName) {
+  if (isPartnerUnknownLabel(partnerName)) {
+    throw new TypeError('The partner-unknown marker is not a partner name: ' +
+      'resolve with RESOLVE_PARTNER_UNKNOWN instead');
+  }
+}
+
+/**
+ * `RESOLVE_PARTNER_UNKNOWN`：取引先を特定できないまま確定する（仕様 webapp §15 の 2）。
+ *
+ * `RESOLVE_WITHOUT_PARTNER` との違いは、転記先に印を残すことだけである。
+ * あちらは取引先が**要らない**取引（顧客マスター AM列の用途、運用シートの
+ * 「（不要）」）を確定し、転記先に何も書かない。こちらは I列（メモタグ）の
+ * 末尾へ「取引先不明」を足す。用途は消さない。
+ *
+ * 転記行へ書くので `ADOPT_EXISTING_PARTNER` と同じ手順を踏む ── リースを取り、
+ * 読み返して照合し、予定値と読取確認値を一緒に更新する（INV-01）。
+ * 辞書には学ばない。「分からなかった」は店名と取引先の対応ではない。
+ */
+function resolvePartnerUnknown_(review, input, actor) {
+  var customer = reviewWriteCustomer_(review);
+  var leaseId = acquireLease(review.customerId, review.fileId, input.runId || null,
+    actor, LEASE_PURPOSE.WRITE_ONLY);
+  try {
+    var tx = getTransaction(review.fullTxId);
+    // 取消し・対象外で空けた行へ書くと、I列だけが埋まった行が転記先に残る。
+    var from = tx && tx.transactionStatus;
+    if (from !== TX_STATUS.REVIEW_REQUIRED && from !== TX_STATUS.COMMITTED) {
+      throw new StateTransitionError(
+        'Partner-unknown resolution is not offered while the transaction is ' + from);
+    }
+    var planned = Object.assign({}, tx.planned,
+      {i: appendMemoTag(tx.planned && tx.planned.i, MEMO_TAG_PARTNER_UNKNOWN_)});
+    var rowWrite = buildRowWrite(Number(tx.destinationRow), {
+      fullTxId: tx.fullTxId, planned: planned, columns: ['i']
+    });
+    applyPlainTextFormat(customer, [rowWrite.rowNumber]);
+    writeTransactionRows(customer, [rowWrite], leaseId, review.fileId);
+
+    var verified = verifyWrittenValues(customer, [rowWrite]);
+    if (!verified[0] || !verified[0].ok) {
+      throw new IntegrityError('DESTINATION_VALUE_MISMATCH',
+        'Read-back verification failed for ' + tx.fullTxId);
+    }
+    updateWrittenValues(tx.fullTxId, planned, verified[0].values);
+    updatePartnerResolution(tx.fullTxId, PARTNER_STATUS.RESOLVED_WITHOUT_PARTNER);
+    return settle_(review, 'RESOLVE_PARTNER_UNKNOWN', actor);
   } finally {
     releaseLease(review.fileId, input.runId || null, 'RESOLVE_DONE');
   }

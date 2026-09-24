@@ -249,4 +249,32 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(rows[0][3], '雑収益,キャッシュバック,海外決済',
       'タグの順序は定めておく（毎回変わると差分が読めない）');
   });
+
+  // ---- 取引先不明（仕様 webapp §15 の 2）：転記済みの I列へ後から足す ----
+
+  test('appendMemoTag adds a tag after what is already written, and only once', () => {
+    const append = (current) => gas.call('appendMemoTag', [current, '取引先不明']);
+    assert.equal(append('仕入れ'), '仕入れ,取引先不明', '用途を消してはならない');
+    assert.equal(append('仕入れ,海外決済'), '仕入れ,海外決済,取引先不明');
+    assert.equal(append(''), '取引先不明', '用途が空でも先頭にカンマを残さない');
+    assert.equal(append(null), '取引先不明');
+    // 書き直しをやり直しても二重にしない。composeMemoTags に既存の値を渡すと、
+    // 値を1つの塊として比べるのでここが二重になる。
+    assert.equal(append('仕入れ,取引先不明'), '仕入れ,取引先不明');
+    assert.equal(append('取引先不明,仕入れ'), '取引先不明,仕入れ', '書いてある並びは変えない');
+    assert.equal(append('仕入れ，取引先不明'), '仕入れ，取引先不明', '全角のカンマも区切りとして読む');
+    assert.equal(append('仕入れ,'), '仕入れ,取引先不明', '末尾の区切りを残すと空のタグになる');
+  });
+
+  test('only the partner-unknown marker itself is recognized, through spacing and width', () => {
+    const is = (value) => gas.call('isPartnerUnknownLabel', [value]);
+    assert.equal(is('取引先不明'), true);
+    assert.equal(is(' 取引先不明 '), true);
+    assert.equal(is('取引先　不明'), true, '全角の空白を挟んでも印である');
+    assert.equal(is('取引先 不明'), true);
+    assert.equal(is('株式会社不明堂'), false);
+    assert.equal(is('不明'), false, '印は1語に決めてある。似た語まで広げると本物の取引先名を奪う');
+    assert.equal(is(''), false);
+    assert.equal(is(null), false);
+  });
 };

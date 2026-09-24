@@ -624,7 +624,7 @@ var fileOutcome = processDiscoveredFile_(runId, writeCustomer, candidate, opts);
 
 `webAppResolveReviews_(customerId, decisions, options)`
 
-`decisions` は `[{reviewId, partnerName, sameMerchantConflict}]`。空の `partnerName` は `RESOLVE_WITHOUT_PARTNER`、空でなければ `ADOPT_EXISTING_PARTNER` とする。`sameMerchantConflict` は §7.4.4 のとおりクライアントが押下時に計算した真偽値である。
+`decisions` は `[{reviewId, partnerName, sameMerchantConflict}]`。空の `partnerName` は `RESOLVE_WITHOUT_PARTNER`、**「取引先不明」は `RESOLVE_PARTNER_UNKNOWN`**（`isPartnerUnknownLabel`。空白と全角・半角は見ない。§15 の 2）、それ以外は `ADOPT_EXISTING_PARTNER` とする。`sameMerchantConflict` は §7.4.4 のとおりクライアントが押下時に計算した真偽値である。
 
 **押す前に確認を出す（§2.4 原理 1）。**確定は転記先へ書き、辞書へ登録し、取引を `COMMITTED` へ進める ── **画面から取り消す手段は無い**（辞書の取り消しは `rollbackDictionary` で管理者だけ、転記の取り消しは `CANCEL_FILE` でファイル単位）。したがってクライアントは、送る前に**その押下で書く件を1件ずつ並べた確認**を出す：
 
@@ -657,7 +657,7 @@ var fileOutcome = processDiscoveredFile_(runId, writeCustomer, candidate, opts);
 - **ただし `getCustomerById(customerId)` は 1 押下に 1 回呼ぶ**（4 往復。`WEBAPP_ITEM_TRIPS_` ＝ 74 に算入済み。§3.2）── §7.4.2 判定 2 の `isCardNamePartnerPurpose(customer, tx.planned.i)` が `customer` オブジェクトを要求するからである。**呼ばずに `undefined` を渡してはならない** ── `purposeInList_`（`02_CustomerMaster.gs` 81〜85 行）は `if (!list || !list.length) return false` なので**例外も出ず静かに常に偽**になり、カード名で取引先が決まる用途（顧客マスター AN列）の店名が辞書に入る。**次の取込からその顧客の年会費行などが誤った取引先に自動確定される**（§12.3 ケース 19 が赤にするが、赤を消す最短経路は「判定 2 を消す」でもある）
 - **件ごとに §7.4.2 の `input.learn` を決める**
 - **件ごとに §7.4.3 の取引状態を確かめる**
-- **`RESOLVE_WITHOUT_PARTNER` の件だけ、呼ぶ前に `activeLeases_()` でそのファイルのリースを確かめる。**取られていたら `resolveReview` を呼ばず `skippedByLease` を 1 増やし、以後同じ `fileId` の件もすべて `skippedByLease` にする（`96_Menu.gs` 842〜851 行と同じ形・同じ理由）。**ただし先頭の 1 件だけは `errors` に `{reviewId, code: 'LEASE_CONFLICT'}` としても積む** ── メニューがそうしている（同 848 行）。`skippedByLease` は件数しか持たないので、これが無いと K-W8 の対処「リース衝突の文言を画面に出す」の材料が画面に届かない。**恒等式では `errors` 側に数え、`skippedByLease` からは除く**（1 件が 2 つの項に入ると破れる）。**`ADOPT_EXISTING_PARTNER` には掛けない** ── `51` 124 行が自らリースを取るので、衝突は `LEASE_CONFLICT` 例外として `errors` に載る。**`RESOLVE_WITHOUT_PARTNER` は `51` 64〜65 行のとおりリースを取らないので、この事前確認だけが守りである**（K-W8 が「リースで守られる」と書いているが、この操作は守られない）
+- **`RESOLVE_WITHOUT_PARTNER` の件だけ、呼ぶ前に `activeLeases_()` でそのファイルのリースを確かめる。**取られていたら `resolveReview` を呼ばず `skippedByLease` を 1 増やし、以後同じ `fileId` の件もすべて `skippedByLease` にする（`96_Menu.gs` 842〜851 行と同じ形・同じ理由）。**ただし先頭の 1 件だけは `errors` に `{reviewId, code: 'LEASE_CONFLICT'}` としても積む** ── メニューがそうしている（同 848 行）。`skippedByLease` は件数しか持たないので、これが無いと K-W8 の対処「リース衝突の文言を画面に出す」の材料が画面に届かない。**恒等式では `errors` 側に数え、`skippedByLease` からは除く**（1 件が 2 つの項に入ると破れる）。**`ADOPT_EXISTING_PARTNER` には掛けない** ── `51` 124 行が自らリースを取るので、衝突は `LEASE_CONFLICT` 例外として `errors` に載る（`RESOLVE_PARTNER_UNKNOWN` も同じ。I列へ書くので自らリースを取る）。**`RESOLVE_WITHOUT_PARTNER` は `51` 64〜65 行のとおりリースを取らないので、この事前確認だけが守りである**（K-W8 が「リースで守られる」と書いているが、この操作は守られない）
 - 1件の失敗で全体を止めず `errors` に積む（§6.2）
 - 後始末（`commitSettledTransactions_`・`completeFileIfFullyResolved_`）は「1件でも書込を試みたファイル」だけに行い、予算判定を掛けない
 
@@ -1041,6 +1041,7 @@ if (!review.destinationSpreadsheetId) return customer;   // ← 必ずここを�
 | `97_Ops.gs` 194 | `opsAutoAdoptPartners` | **書く** |
 | `97_Ops.gs` 1051 | `opsApplyPartnerDecisions` | **書く** |
 | `97_Ops.gs` 1041・1480 | `RESOLVE_WITHOUT_PARTNER` | 書かない（`51` 64〜65 行） |
+| `80_WebApp.gs`・`97_Ops.gs` `opsApplyPartnerDecisions` | `RESOLVE_PARTNER_UNKNOWN`（§15 の 2 で追加） | **書く**（I列だけ。転記先は `51` が `reviewWriteCustomer_` で引く） |
 | `97_Ops.gs` 344・366 | `REGISTER_FORMAT`／`CONFIRM_DESTINATION_FIXED`（`52` → `moveFile_`） | 書かない（`52` 118 行） |
 | `54_IntegrityResolution.gs` 292 | `EXCLUDE`（`51` 266 行へ入る） | **書く**（転記行を消す）。`51` を直せば正しくなる |
 
@@ -1433,7 +1434,14 @@ var WEBAPP_DEADLINE_MS_ = 300000;      // 1回の呼出しの締切
 本仕様の範囲を超えるので、**第2段の仕様として起こし直す**。場当たりで足すと値の直し漏れを作る。
 
 1. **取引先のマスターを転記先タブからマスターシートへ移す。**いま辞書の元データは転記先スプレッドシートの「取引先一覧」タブにあり（`opsImportPartnerListToDictionary`）、帳簿の中にマスターデータが同居している。`共通取引先一覧` は毎回読まれているのに**照合で一度も参照されていない**（`commonPartners` は `buildDictionaryIndex` へ渡されるだけ）。「マスター取引先＋顧客ごとの取引先」の構造はシートとしては在るが半分しか結線されていない。2026-09-16 の `amazon`／`Amazon` の食い違いもこの同居が遠因
-2. **「取引先不明」をメモタグ（I列）に書いて完了させる操作。**`RESOLVE_WITHOUT_PARTNER` は取引の状態を変えるだけで転記先に何も書かないので、後からシートを開いた人が「取引先が要らない」と「分からなかった」を区別できない。手作業ではメモ欄に書いて完了させていた
+2. ~~**「取引先不明」をメモタグ（I列）に書いて完了させる操作。**~~ **作った（2026-09-24）。**`RESOLVE_PARTNER_UNKNOWN`（51）。`RESOLVE_WITHOUT_PARTNER` は取引の状態を変えるだけで転記先に何も書かないので、後からシートを開いた人が「取引先が要らない」と「分からなかった」を区別できなかった。手作業ではメモ欄に書いて完了させていた。
+    **既存の操作は変えず、操作を1つ足した。**`RESOLVE_WITHOUT_PARTNER` は「要らない」の意味で既に使われている ── 顧客マスター AM列の用途をまとめて閉じる `opsResolvePartnerExemptReviews` と、運用シートの「（不要）」である。こちらに印を書けば、区別はまた付かなくなる。
+    **I列の末尾へ足す**（`appendMemoTag`、36）。用途は消さない。既に同じ印があれば足さない ── 書いた後・確定の前に殺されて押し直されたとき、`composeMemoTags` を使うと既存の値を1塊として比べるので二重になる（変異で確認）。転記行へ書くので採用と同じ手順を踏む：リースを取り、読み返して照合し、予定値と読取確認値を一緒に更新する（INV-01）。取引先解決状態は `RESOLVED_WITHOUT_PARTNER` のまま（INV-17 の判定は変わらない）── 「分からなかった」は I列と要確認の `resolveOperation` に残る。辞書には学ばない。取消し・対象外で行を空けた取引は拒む（I列だけが埋まった行を残さない）。
+    **画面は取引先欄の選択肢に「取引先不明」を置く**（どの行にも。候補の無い行こそ使う）。確認ダイアログは「メモタグに「取引先不明」と書いて確定します」と言う。**判定はサーバーが行う**（`isPartnerUnknownLabel`。空白と全角・半角は見ない）。
+    **取引先欄に「取引先不明」と打つと、これまでは取引先名として採用されていた。**F列に実在しない取引先が入り、freee にその名の取引先ができ、辞書が以後その店名を自動でそこへ確定する ── 手作業の癖どおりに打てばそうなっていた。いまは Web アプリがこの語を指示として読み、採用と新規申請は部品の側でもこの語を拒む（メニューの「既存の取引先名を採用する」に打った場合も含む）。**運用シート「取引先判断（運用）」も同じ穴を持っていた** ── 一致方法が `prefix`／`partial` だと、確定より先に「取引先不明」へ当てるパターンを辞書に登録する。「（不要）」と並ぶ印として受けるようにした（辞書に何も登録せず、I列に印を書く）。
+    **メニューには出さない。**取引先の要確認を確定する画面は Web アプリである（K-W2）。メニューの選択肢は `MENU_RESOLVE_OPERATIONS_` に載る操作だけなので、51 の並びに足しても番号は変わらない。出すときのために、51 の並びでも末尾に置いた（「3＝対象外」を押し慣れた手が別の操作を選ばないように）。
+    **本番の辞書は確かめていない。**これまでに採用や運用シートで「取引先不明」を取引先名として入れたことがあれば、辞書に残っていて、取込時の自動確定が F列にそれを書く（取込の自動確定は部品の採用を通らないので、今回の番人は効かない）。辞書の2シートを「取引先不明」で検索して確かめること。
+    テスト16本（`15-2:` 7本・メモタグ 2本・運用シート 1本・`webapp 49`〜`54`）、変異26個。
 3. **K-W9：整合性チェックが全ての複製を見る。**複製が常態なら「雛形 1 枚だけ検査」は検査していないに等しい
 4. **取込時に取引ログ AC・AD列へ転記先を書く。**要確認行の M列だけが正本という状態は、要確認の無いファイルで転記先を失う（K-W10 の残る死角）。取引ごとに転記先を持てば K-W13・K-W14・K-W18 も同じ形で閉じる
 5. ~~**`settle_` の途中で殺された取引を後始末が拾う**~~ **第1段で片付けた**（2026-09-19、v1.4）。`opsCommitSettledTransactions`。取込を続ける前に安全網が要ると判断して引き上げた

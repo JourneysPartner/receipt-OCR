@@ -117,7 +117,7 @@ module.exports = ({test, assert, gas}) => {
     setup();
     assert.deepEqual(plain(gas.call('availableResolveOperations', ['PARTNER'])),
       ['ADOPT_EXISTING_PARTNER', 'REQUEST_NEW_PARTNER',
-       'RESOLVE_WITHOUT_PARTNER', 'EXCLUDE'],
+       'RESOLVE_WITHOUT_PARTNER', 'EXCLUDE', 'RESOLVE_PARTNER_UNKNOWN'],
       'without REQUEST_NEW_PARTNER, an unknown merchant has no ordinary resolution');
     // INV-31：どの種別にも終端へ至る経路が必ずある
     ['PARTNER', 'DATE', 'AMOUNT', 'ZERO_AMOUNT', 'PRIOR_YEAR'].forEach((type) => {
@@ -215,6 +215,143 @@ module.exports = ({test, assert, gas}) => {
       (error) => error && /partner name/.test(String(error.message)));
     assert.equal(gas.stubs.getSpreadsheet('dest1')
       .getSheetByName('入力用シート').getRange(2, 6).getValue(), '');
+  });
+
+  // ================= 取引先不明で確定（仕様 webapp §15 の 2） =================
+  //
+  // 「取引先なし」も「取引先不明」も F列は空欄になる。見分ける手掛かりは I列の
+  // 印だけなので、「書く」「書かない」の両方を固定する。
+
+  const destination = () => gas.stubs.getSpreadsheet('dest1').getSheetByName('入力用シート');
+  const customerDictionaryRows = () => {
+    const dict = gas.stubs.getSpreadsheet('master').getSheetByName('顧客別取引先辞書');
+    return dict.getLastRow() - 1;
+  };
+  const leaseRows = () => gas.stubs.getSpreadsheet('master').getSheetByName('処理リース')
+    .getDataRange().getValues().slice(1).filter((row) => row[0] !== '');
+
+  test('15-2: RESOLVE_PARTNER_UNKNOWN marks column I, keeps the purpose and commits', () => {
+    setup();
+    committedTx('TX_1');
+    const id = review('PARTNER', 'TX_1');
+    const dictionaryBefore = customerDictionaryRows();
+
+    const result = plain(gas.call('resolveReview', [id, 'RESOLVE_PARTNER_UNKNOWN', {}]));
+
+    assert.equal(destination().getRange(2, 9).getValue(), '仕入れ,取引先不明',
+      '用途を消さずに末尾へ足す');
+    assert.equal(destination().getRange(2, 6).getValue(), '', 'F列は空欄のまま');
+    assert.equal(destination().getRange(2, 13).getValue(), 1000, '他の列は触らない');
+    const tx = gas.call('getTransaction', ['TX_1']);
+    assert.equal(tx.planned.i, '仕入れ,取引先不明');
+    assert.equal(tx.verified.i, '仕入れ,取引先不明',
+      'planned and verified must be written together (INV-01)');
+    assert.equal(tx.partnerResolutionStatus, 'RESOLVED_WITHOUT_PARTNER');
+    assert.equal(tx.transactionStatus, 'COMMITTED');
+    assert.equal(result.committed, true);
+    assert.equal(plain(gas.call('getReviewById', [id])).resolveOperation, 'RESOLVE_PARTNER_UNKNOWN',
+      '要確認の記録からも「要らない」と「分からなかった」を見分けられる');
+    assert.equal(customerDictionaryRows(), dictionaryBefore,
+      '「分からなかった」は店名と取引先の対応ではない');
+    assert.equal(leaseRows().length, 0, 'the lease taken for the write is released');
+  });
+
+  test('15-2: RESOLVE_WITHOUT_PARTNER still writes nothing to the destination', () => {
+    setup();
+    committedTx('TX_1');
+    const id = review('PARTNER', 'TX_1');
+    gas.call('resolveReview', [id, 'RESOLVE_WITHOUT_PARTNER', {}]);
+    assert.equal(destination().getRange(2, 9).getValue(), '仕入れ',
+      '取引先が要らない取引に「取引先不明」を書くと、区別がまた付かなくなる');
+    assert.equal(gas.call('getTransaction', ['TX_1']).planned.i, '仕入れ');
+  });
+
+  test('15-2: a retry after the mark landed does not write it twice', () => {
+    setup();
+    committedTx('TX_1');
+    const id = review('PARTNER', 'TX_1');
+    // 書込は済んだが settle_ の前で殺された状態。要確認は開いたまま残る。
+    const marked = {b: '2026-01-02', f: '', i: '仕入れ,取引先不明', k: '店舗', m: 1000};
+    destination().getRange(2, 9).setValue(marked.i);
+    gas.call('updateWrittenValues', ['TX_1', marked, marked]);
+
+    gas.call('resolveReview', [id, 'RESOLVE_PARTNER_UNKNOWN', {}]);
+    assert.equal(destination().getRange(2, 9).getValue(), '仕入れ,取引先不明');
+    assert.equal(gas.call('getTransaction', ['TX_1']).transactionStatus, 'COMMITTED');
+  });
+
+  test('15-2: a mark that does not read back is neither recorded nor settled', () => {
+    setup();
+    committedTx('TX_1');
+    const id = review('PARTNER', 'TX_1');
+    // 書式が値を変えた・他者が同時に書き換えた ── 書いた値を読み返せない場合。
+    const saved = gas.context.verifyWrittenValues;
+    gas.context.verifyWrittenValues = (customer, rowWrites) => rowWrites.map((write) => ({
+      rowNumber: write.rowNumber, fullTxId: write.fullTxId, ok: false,
+      mismatches: [{column: 'i'}], values: {}}));
+    try {
+      assert.throws(() => gas.call('resolveReview', [id, 'RESOLVE_PARTNER_UNKNOWN', {}]),
+        (error) => error && error.code === 'DESTINATION_VALUE_MISMATCH');
+    } finally {
+      gas.context.verifyWrittenValues = saved;
+    }
+    const tx = gas.call('getTransaction', ['TX_1']);
+    assert.equal(tx.planned.i, '仕入れ', '読み返せなかった値を予定値として記録しない');
+    assert.equal(tx.partnerResolutionStatus, 'UNRESOLVED');
+    assert.equal(plain(gas.call('getReviewById', [id])).status, 'OPEN',
+      '要確認を開いたまま残し、もう一度確定できるようにする');
+    assert.equal(leaseRows().length, 0);
+  });
+
+  test('15-2: a canceled transaction is refused before anything is written', () => {
+    setup();
+    committedTx('TX_1');
+    const id = review('PARTNER', 'TX_1');
+    // 別の経路で対象外になり、行が空けられた後の古い画面からの確定。
+    gas.call('updateTransactionStatus', ['TX_1', 'REVIEW_REQUIRED', 'CANCELED']);
+    [2, 6, 9, 11, 13, 30].forEach((column) => destination().getRange(2, column).setValue(''));
+
+    assert.throws(() => gas.call('resolveReview', [id, 'RESOLVE_PARTNER_UNKNOWN', {}]),
+      (error) => error && /not offered while the transaction is CANCELED/.test(String(error.message)));
+    assert.equal(destination().getRange(2, 9).getValue(), '',
+      '空けた行に I列だけが埋まった行を残さない');
+    assert.equal(plain(gas.call('getReviewById', [id])).status, 'OPEN');
+    assert.equal(leaseRows().length, 0);
+  });
+
+  test('15-2: another holder of the file lease stops the mark before it is written', () => {
+    setup();
+    committedTx('TX_1');
+    const id = review('PARTNER', 'TX_1');
+    gas.call('acquireLease', ['C001', 'file1', 'RUN_OTHER', 'scheduler@example.com', 'PROCESS']);
+
+    assert.throws(() => gas.call('resolveReview', [id, 'RESOLVE_PARTNER_UNKNOWN', {}]),
+      (error) => error && error.code === 'LEASE_CONFLICT');
+    assert.equal(destination().getRange(2, 9).getValue(), '仕入れ');
+    assert.equal(plain(gas.call('getReviewById', [id])).status, 'OPEN');
+    assert.equal(leaseRows().length, 1, 'the other holder keeps its lease');
+  });
+
+  test('15-2: the marker is refused as a partner name on every naming path', () => {
+    setup();
+    committedTx('TX_1');
+    const id = review('PARTNER', 'TX_1');
+    const dictionaryBefore = customerDictionaryRows();
+
+    assert.throws(() => gas.call('resolveReview',
+      [id, 'ADOPT_EXISTING_PARTNER', {partnerName: '取引先不明'}]),
+      (error) => error && /partner-unknown marker/.test(String(error.message)));
+    assert.throws(() => gas.call('resolveReview',
+      [id, 'REQUEST_NEW_PARTNER', {partnerName: '取引先　不明', similarPartners: []}]),
+      (error) => error && /partner-unknown marker/.test(String(error.message)));
+
+    assert.equal(destination().getRange(2, 6).getValue(), '',
+      'F列に「取引先不明」という取引先を書かない');
+    assert.equal(customerDictionaryRows(), dictionaryBefore,
+      '辞書が以後この店名を「取引先不明」へ自動確定しない');
+    assert.equal(gas.stubs.getSpreadsheet('master').getSheetByName('承認申請').getLastRow(), 1,
+      '「取引先不明」という取引先の作成を申請しない');
+    assert.equal(plain(gas.call('getReviewById', [id])).status, 'OPEN');
   });
 
   // ================= 日付・金額の修正 =================

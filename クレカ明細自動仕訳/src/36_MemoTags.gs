@@ -13,6 +13,16 @@ var MEMO_TAG_CASHBACK_ = 'キャッシュバック';
 var MEMO_TAG_FOREIGN_ = '海外決済';
 
 /**
+ * 取引先を特定できないまま確定した印（仕様 webapp §15 の 2）。
+ *
+ * 「取引先なしで確定」（取引先が要らない取引）と転記先で見分けるためにある。
+ * どちらも F列は空欄なので、印が無いと後からシートを開いた人には「要らない」と
+ * 「分からなかった」の区別が付かない。手作業では同じ語をメモ欄に書いて
+ * 完了させていた。
+ */
+var MEMO_TAG_PARTNER_UNKNOWN_ = '取引先不明';
+
+/**
  * 海外決済かどうか。
  *
  * 判定材料は2つある。形式が通貨・現地金額・換算レートの列を持つ場合は
@@ -69,4 +79,40 @@ function composeMemoTags(purpose, tags) {
     if (!duplicate) parts.push(value);
   });
   return parts.join(',');
+}
+
+/**
+ * 転記済みのI列の値へタグを1つ足す。同じタグが既にあれば値をそのまま返す。
+ *
+ * `composeMemoTags` は用途を1つの塊として比べるので、用途とタグをカンマで
+ * つないだ既存の値へ使うと、同じタグが二重になる。ここでは区切ってから比べる。
+ * 書いてある部分は並びも表記も変えない ── 足すのは末尾だけである。
+ *
+ * @param {*} current いまのI列の予定値
+ * @param {string} tag
+ * @return {string}
+ */
+function appendMemoTag(current, tag) {
+  var text = current === null || current === undefined ? '' : String(current);
+  var value = String(tag || '').trim();
+  if (value === '') return text;
+  var present = text.split(/[,，]/).some(function(part) {
+    return normalizeMerchant(part) === normalizeMerchant(value);
+  });
+  if (present) return text;
+  // 末尾の区切りを残したまま足すと、freee が空のタグとして読む。
+  var base = text.replace(/[\s,，]+$/, '');
+  return base === '' ? value : base + ',' + value;
+}
+
+/**
+ * 取引先欄に入った語が「取引先不明」の印そのものか。
+ *
+ * 空白と全角・半角の違いは見ない。「取引先 不明」のような打ち方を取引先名と
+ * して通すと、印ではなく実在しない取引先が F列と辞書に入る。
+ */
+function isPartnerUnknownLabel(value) {
+  var squeezed = normalizeMerchant(value).replace(/ /g, '');
+  return squeezed !== '' &&
+    squeezed === normalizeMerchant(MEMO_TAG_PARTNER_UNKNOWN_).replace(/ /g, '');
 }
