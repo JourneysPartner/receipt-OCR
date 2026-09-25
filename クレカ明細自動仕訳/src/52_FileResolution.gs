@@ -14,7 +14,7 @@
 
 /** 種別ごとに提示する操作（4.26 解決操作の表）。 */
 var FILE_REVIEW_OPERATIONS_ = Object.freeze({
-  FORMAT_UNKNOWN: ['REGISTER_FORMAT', 'CANCEL_FILE'],
+  FORMAT_UNKNOWN: ['REGISTER_FORMAT', 'CANCEL_FILE', 'RETURN_TO_CUSTOMER'],
   FORMAT_AMBIGUOUS: ['REGISTER_FORMAT', 'CANCEL_FILE'],
   MULTI_SHEET: ['SELECT_TARGET_SHEET', 'REGISTER_FORMAT', 'CANCEL_FILE'],
   DUPLICATE: ['IMPORT_AS_NEW_FILE', 'UPDATE_PURPOSE', 'KEEP_ORIGINAL_RESULT', 'CANCEL_FILE'],
@@ -48,6 +48,7 @@ function availableFileResolveOperations(reviewType) {
 var FILE_OPERATION_ROLES_ = Object.freeze({
   SELECT_TARGET_SHEET: ['SYSTEM_ADMIN', 'OWNER_ADMIN'],
   REGISTER_FORMAT: ['SYSTEM_ADMIN', 'OWNER_ADMIN'],
+  RETURN_TO_CUSTOMER: ['SYSTEM_ADMIN', 'OWNER_ADMIN'],
   APPROVE_SCAN_TRUNCATION: ['SYSTEM_ADMIN', 'OWNER_ADMIN'],
   CONFIRM_DESTINATION_FIXED: ['SYSTEM_ADMIN', 'OWNER_ADMIN']
 });
@@ -90,6 +91,9 @@ function resolveFileReview(reviewId, operation, input) {
   if (op === 'CANCEL_FILE') return cancelFileFromReview_(review, actor, input);
   if (op === 'CONFIRM_EMPTY_FILE') return confirmEmptyFile_(review, actor, input);
   if (op === 'REJECT_COUNT_MISMATCH') {
+    return moveFile_(review, op, actor, input, FILE_STATE.CUSTOMER_FIX_REQUIRED);
+  }
+  if (op === 'RETURN_TO_CUSTOMER') {
     return moveFile_(review, op, actor, input, FILE_STATE.CUSTOMER_FIX_REQUIRED);
   }
   if (op === 'RESIZE_INPUT' && input.askCustomerToSplit === true) {

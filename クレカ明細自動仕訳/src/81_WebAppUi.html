@@ -133,6 +133,14 @@
     .customer-meta { display: flex; gap: 6px; margin-top: 2px; color: var(--muted); font-size: 12px; }
     .tag { display: inline-block; border-radius: 999px; padding: 1px 7px; background: #eef2f6; font-size: 11px; }
     .tag.warning { color: #8a4b00; background: #fff1d6; }
+    .tag.blocking { color: #a12622; background: #ffebea; }
+    .format-message { display: block; padding: 7px 10px; margin: 7px 0;
+      border-radius: 6px; overflow-wrap: anywhere; white-space: pre-line; }
+    .format-message.warning { color: #8a4b00; background: #fff1d6; }
+    .format-message.blocking { color: #a12622; background: #ffebea; }
+    tr.format-header td { background: #fff1d6; }
+    tr.format-start td { background: #eef5ff; }
+    tr.format-warning td { background: #fff1d6; }
     .subheading { margin: 15px 0 7px; font-size: 13px; }
     .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
     table { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -278,6 +286,13 @@
   </main>
 
   <div class="final-wrap">
+    <section id="format-panel" class="panel final" aria-labelledby="format-heading" hidden>
+      <div class="panel-header">
+        <h2 id="format-heading">形式の確認</h2>
+        <button id="format-close" type="button" class="button">閉じる</button>
+      </div>
+      <div class="panel-body" id="format-body"></div>
+    </section>
     <section id="final-panel" class="panel final" aria-labelledby="final-heading" hidden>
       <div class="panel-header">
         <h2 id="final-heading">最終確認</h2>
@@ -382,6 +397,21 @@
       finalRequest: 0,
       // このセッションで取り込んだファイル。1行も書かれなかったファイルの漏れを拾う。
       sessionFileIds: [],
+      formatBusy: false,
+      formatRequest: 0,
+      formatFileId: null,
+      formatDiagnosis: null,
+      formatAnswers: null,
+      formatManualColumns: {},
+      formatPreview: null,
+      formatHash: null,
+      formatRegistrationOpen: false,
+      formatSaved: null,
+      formatUncertainSaveId: null,
+      formatSelectedIds: [],
+      formatRequeueRemaining: false,
+      formatConfirmResolve: null,
+      formatMessage: null,
       confirmPayload: null
     };
 
@@ -394,8 +424,9 @@
       'review-more', 'review-prev', 'review-next', 'resolve-progress', 'resolve-button',
       'excel-button', 'excel-status', 'final-button', 'final-panel', 'final-sheet',
       'final-verdict', 'final-files', 'final-problems', 'final-row-count', 'final-rows',
-      'confirm-dialog', 'confirm-intro', 'confirm-list',
+      'confirm-dialog', 'confirm-title', 'confirm-intro', 'confirm-list',
       'confirm-cancel', 'confirm-submit'
+      , 'format-panel', 'format-body', 'format-close'
     ].forEach(function(id) { el[id] = document.getElementById(id); });
 
     function gasCall(name, args) {
@@ -407,6 +438,12 @@
         else if (name === 'webAppRunImport') runner.webAppRunImport(args[0], args[1], args[2]);
         else if (name === 'webAppResolveReviews') runner.webAppResolveReviews(args[0], args[1], args[2]);
         else if (name === 'webAppFinalReview') runner.webAppFinalReview(args[0], args[1], args[2]);
+        else if (name === 'webAppExplainUnknownFile') runner.webAppExplainUnknownFile(args[0], args[1], args[2], args[3]);
+        else if (name === 'webAppPreviewFormat') runner.webAppPreviewFormat(args[0], args[1], args[2], args[3]);
+        else if (name === 'webAppSaveFormat') runner.webAppSaveFormat(args[0], args[1], args[2], args[3], args[4]);
+        else if (name === 'webAppRequeueFormatFiles') runner.webAppRequeueFormatFiles(args[0], args[1], args[2]);
+        else if (name === 'webAppReturnFileToCustomer') runner.webAppReturnFileToCustomer(args[0], args[1], args[2], args[3], args[4]);
+        else if (name === 'webAppWithdrawFormat') runner.webAppWithdrawFormat(args[0], args[1]);
         else reject(new Error('Unknown server function'));
       });
     }
@@ -444,7 +481,7 @@
       }) || null;
     }
 
-    function isMutationBusy() { return state.importBusy || state.resolveBusy; }
+    function isMutationBusy() { return state.importBusy || state.resolveBusy || state.formatBusy; }
 
     function categoryLabel(value) {
       if (value === 'CORPORATE') return '法人';
@@ -600,13 +637,25 @@
       state.files.forEach(function(file) {
         var row = document.createElement('tr');
         if (!file.importable) row.className = 'dimmed';
-        [file.fileName, formatDate(file.lastUpdated, true), formatSize(file.size), file.stateLabel]
+        [file.fileName, formatDate(file.lastUpdated, true), formatSize(file.size),
+          file.formatReviewId ? '形式不明' : file.stateLabel]
           .forEach(function(value, index) {
             var td = document.createElement('td');
             if (index === 0) td.className = 'file-name';
             td.textContent = value;
             row.appendChild(td);
           });
+        if (file.formatReviewId) {
+          var actionCell = row.lastChild;
+          var formatButton = document.createElement('button');
+          formatButton.type = 'button';
+          formatButton.className = 'button';
+          formatButton.textContent = '形式を確認';
+          formatButton.disabled = isMutationBusy();
+          formatButton.addEventListener('click', function() { openFormat(file.fileId); });
+          actionCell.appendChild(document.createElement('br'));
+          actionCell.appendChild(formatButton);
+        }
         tbody.appendChild(row);
       });
       table.appendChild(tbody);
@@ -623,8 +672,10 @@
       var box = document.createElement('div');
       box.className = 'other-reviews';
       box.textContent = entries.map(function(key) {
-        return reviewTypeLabel(key) + ' ' + state.otherCounts[key] + ' 件';
-      }).join('、') + '。これらはメニューから確定してください。';
+        return reviewTypeLabel(key) + ' ' + state.otherCounts[key] + ' 件' +
+          (key === 'FORMAT_UNKNOWN' ? '（中央のファイル一覧の［形式を確認］から扱えます）' : '');
+      }).join('、') + '。' + (entries.some(function(key) { return key !== 'FORMAT_UNKNOWN'; }) ?
+        'その他の要確認はメニューから確定してください。' : '');
       el['other-reviews'].appendChild(box);
     }
 
@@ -767,6 +818,7 @@
       renderFolders();
       renderFiles();
       renderReviews();
+      if (state.formatPanelBusySignature !== String(isMutationBusy())) renderFormatPanel();
       updateActionButtons();
       setStep();
     }
@@ -789,11 +841,22 @@
     function invalidateOperations() {
       state.importRun += 1;
       state.resolveRun += 1;
+      state.formatRequest += 1;
+      state.formatFileId = null;
+      state.formatDiagnosis = null;
+      state.formatAnswers = null;
+      state.formatManualColumns = {};
+      state.formatMessage = null;
+      state.formatSaved = null;
+      state.formatUncertainSaveId = null;
+      invalidateFormatPreview();
       state.confirmPayload = null;
     }
 
-    function chooseCustomer(customerId) {
+    async function chooseCustomer(customerId) {
       if (isMutationBusy()) return;
+      if (state.formatSaved && !await formatConfirm('保存結果を閉じる',
+          '保存結果と取り消しの操作を閉じます。続けますか。')) return;
       state.viewGeneration += 1;
       invalidateOperations();
       state.selectedCustomerId = String(customerId);
@@ -813,6 +876,7 @@
       el['import-progress'].textContent = '';
       el['resolve-progress'].textContent = '';
       clearNotice();
+      renderFormatPanel();
       renderSelection();
       loadFolders(state.selectedCustomerId, state.viewGeneration);
       loadReviews(state.selectedCustomerId, 0, state.viewGeneration);
@@ -838,8 +902,20 @@
       }
     }
 
-    function chooseFolder(folderId) {
+    async function chooseFolder(folderId) {
       if (isMutationBusy()) return;
+      if (state.formatSaved && !await formatConfirm('保存結果を閉じる',
+          '保存結果と取り消しの操作を閉じます。続けますか。')) return;
+      state.formatRequest += 1;
+      state.formatFileId = null;
+      state.formatDiagnosis = null;
+      state.formatAnswers = null;
+      state.formatSaved = null;
+      state.formatUncertainSaveId = null;
+      state.formatManualColumns = {};
+      state.formatMessage = null;
+      invalidateFormatPreview();
+      renderFormatPanel();
       state.selectedFolderId = String(folderId);
       state.files = [];
       state.lastCompletedDestinationSpreadsheetId = null;
@@ -1107,6 +1183,7 @@
         showNotice(TEXT.tooMany(state.reviewLimit), 'warning');
         return;
       }
+      formatCancelPendingConfirmation();
       freezeSameMerchantConflict(items);
       var payload = {
         customerId: state.selectedCustomerId,
@@ -1121,6 +1198,8 @@
         })
       };
       state.confirmPayload = payload;
+      el['confirm-title'].textContent = '要確認の確定';
+      el['confirm-submit'].textContent = '確定する';
       el['confirm-intro'].textContent = '次の ' + items.length + ' 件を確定します。取り消せません。';
       el['confirm-list'].textContent = '';
       items.forEach(function(item) {
@@ -1138,6 +1217,14 @@
     function closeConfirmation() {
       if (typeof el['confirm-dialog'].close === 'function') el['confirm-dialog'].close();
       else el['confirm-dialog'].removeAttribute('open');
+    }
+
+    function formatCancelPendingConfirmation() {
+      if (!state.formatConfirmResolve) return false;
+      var resolve = state.formatConfirmResolve;
+      state.formatConfirmResolve = null;
+      closeConfirmation(); resolve(false);
+      return true;
     }
 
     function batchId() {
@@ -1416,7 +1503,7 @@
       var request = ++state.finalRequest;
       state.finalLoading = true;
       clearNotice();
-      renderSelection();
+      updateActionButtons();
       try {
         var result = await gasCall('webAppFinalReview',
           [customerId, destinationId, state.sessionFileIds.slice()]);
@@ -1430,7 +1517,7 @@
       } finally {
         if (request === state.finalRequest) {
           state.finalLoading = false;
-          renderSelection();
+          updateActionButtons();
         }
       }
     }
@@ -1446,6 +1533,978 @@
       }
       el['excel-status'].textContent = 'Excel作成済み ' + formatDate(new Date(), true);
     }
+
+    function formatActionOrder(customerSide) {
+      return customerSide ? ['RETURN_TO_CUSTOMER', 'REGISTER_FORMAT'] : ['REGISTER_FORMAT'];
+    }
+
+    function formatCanSave(preview, hash, acknowledgements) {
+      if (!preview || !hash || preview.previewHash !== hash ||
+          (preview.blocking || []).length) return false;
+      var ack = acknowledgements || {};
+      if (preview.requiresCustomerSide && ack.customerSide !== true) return false;
+      if (preview.requiresAmountChoice && ack.amountChoice !== true) return false;
+      return true;
+    }
+
+    function invalidateFormatPreview() {
+      state.formatPreview = null;
+      state.formatHash = null;
+    }
+
+    function formatPreviewView(result, diagnosis) {
+      if (!result || result.ok === false) {
+        return {preview: null, hash: null,
+          notice: formatBlockingMessage(result && result.code || 'UNKNOWN')};
+      }
+      result.requiresCustomerSide = (result.blocking || []).some(function(item) {
+        return item.code === 'ACK_CUSTOMER_SIDE_REQUIRED';
+      }) || Boolean(diagnosis && diagnosis.customerSide);
+      result.requiresAmountChoice = Boolean(diagnosis && diagnosis.proposal &&
+        diagnosis.proposal.amountCandidates.length >= 2);
+      return {preview: result, hash: result.previewHash || null, notice: null};
+    }
+
+    function formatRoleName(role) {
+      return {date: '利用日', merchant: '店名', amount: '金額',
+        purpose: '使用用途', amountFallback: '予備金額'}[role] || role;
+    }
+
+    function formatNameForId(id) {
+      var nearest = state.formatDiagnosis && state.formatDiagnosis.nearest || [];
+      var active = state.formatPreview && state.formatPreview.formatNames || [];
+      var found = nearest.concat(active).filter(function(item) { return item.formatId === id; })[0];
+      return found ? found.formatName : id;
+    }
+
+    function formatGapMessage(gap) {
+      if (!gap) return '定義が不正です';
+      if (gap.stage === 'INVALID') return '定義が不正です';
+      if (gap.stage === 'FILE_TYPE') return 'ファイル種別が違います';
+      if (gap.stage === 'COLUMNS' && gap.width) {
+        if (gap.samplesFound === false) return '見本行が取れません';
+        var range = (gap.width.min == null ? '?' : gap.width.min) + '〜' +
+          (gap.width.max == null ? '上限なし' : gap.width.max);
+        if (gap.width.actual < gap.width.min || gap.width.max != null &&
+            gap.width.actual > gap.width.max)
+          return '列数が ' + gap.width.actual + '（この形式は ' + range + '）';
+        var failures = (gap.typeFailures || []).map(function(item) {
+          var type = {date: '日付', text: '文字', number: '数値',
+            numeric: '数値'}[item.type] || item.type;
+          return (item.index + 1) + '列目が' + type + 'でない行 ' +
+            item.bad + '/' + item.of;
+        });
+        return failures.length ? failures.join('、') :
+          '列数 ' + gap.width.actual + ' は範囲内（' + range + '）ですが、列の型が合いません';
+      }
+      if (gap.stage === 'KEYWORDS') {
+        var missing = (gap.keywords && gap.keywords.conditions || []).reduce(function(all, item) {
+          return all.concat(item.missing || []);
+        }, []);
+        return '見出しの語が足りません' + (missing.length ? '（' + missing.join('、') + '）' : '');
+      }
+      if (gap.stage === 'MATCH')
+        return 'このシートには当たりますが、ファイル全体では 1 つの形式に決まりません（他のシートにも当たります）';
+      return '形式の条件に合いません';
+    }
+
+    function formatBlockingMessage(code, detail, fallbackId) {
+      var d = detail == null ? '' : String(detail);
+      var names = (Array.isArray(detail) ? detail : detail == null ? [] : [detail])
+        .map(formatNameForId).join('、');
+      var messages = {
+        DEFINITION_INVALID: '形式の定義として不正です：' +
+          (Array.isArray(detail) ? '\n・' + detail.join('\n・') : d),
+        FORMAT_ID_INVALID: '形式 ID は英小文字・数字・下線で 32 文字までにしてください。',
+        FORMAT_ID_TAKEN: '形式 ID「' + (d || fallbackId || state.formatAnswers && state.formatAnswers.formatId || '指定した ID') + '」は既に使われています（取り消した形式を含む）。',
+        FORMAT_NAME_REQUIRED: '形式名を 60 文字までで入れてください（先頭に = + - @ は使えません）。',
+        HEADER_ROW_INVALID: '見出し行がシートの範囲にありません。',
+        DATA_START_INVALID: '明細の開始行は、見出し行より後にしてください。',
+        COLUMN_OUT_OF_RANGE: formatRoleName(d) + 'の列がこの表の範囲にありません。',
+        COLUMN_ROLE_DUPLICATE: d.split('/').map(formatRoleName).join('と') + 'に同じ列が選ばれています。',
+        PURPOSE_COLUMN_REQUIRED: '使用用途の列が無い形式は登録できません（取り込むと必ず【要修正】になります）。顧客に修正を依頼してください。',
+        TOO_FEW_KEYWORDS: '見出しの語が少なすぎて、この形式を見分けられません。',
+        NOT_MATCHING_TARGET: 'この定義では、このファイル自体が読めません：' + formatGapMessage(detail),
+        TARGET_AMBIGUOUS: '登録すると、このファイルが「' + names + '」にも当たり、止まります。',
+        STATIC_COLLISION: '登録済みの形式「' + names + '」が見出しでも列数でもこのファイルに当たっています。型の違いだけで外れているので、判定の不具合の疑いがあります。登録せずに管理者へ連絡してください。',
+        REFERENCE_COLLISION: 'この定義は、同じフォルダの「' + d + '」（' + formatNameForId(state.formatAnswers && state.formatAnswers.baseFormatId || '') + 'で読めていたファイル）にも当たります。登録すると、その様式のファイルが止まります。',
+        NO_TRANSACTIONS: '明細が 1 件も読めません。見出し行・開始行・列を確かめてください。',
+        ZERO_AMOUNT_MAJORITY: '金額が 0 円か空の行が半分を超えています。金額の列が違う可能性があります。',
+        ACK_CUSTOMER_SIDE_REQUIRED: '登録するには「入力ミスを様式として登録することを理解した」にチェックしてください。',
+        ACK_AMOUNT_CHOICE_REQUIRED: '金額らしい列が複数あります。どれを金額にするか確かめて「金額の列を確認した」にチェックしてください。',
+        NOT_FORMAT_UNKNOWN: '形式不明の要確認がありません（既に扱われた可能性があります）。',
+        PREVIEW_STALE: '試し読みの後に入力かファイルが変わりました。もう一度［試し読み］を押してください。',
+        NOT_WEBAPP_FORMAT: 'この形式は画面から登録したものではないので、ここでは取り消せません。',
+        NOT_ACTIVE: 'この形式は既に無効です。'
+      };
+      return messages[code] || '登録できない理由があります：' + code;
+    }
+
+    function formatWarningMessage(code, detail) {
+      var n = detail == null ? 0 : detail;
+      var reason = {
+        UNKNOWN_CARD_FORMAT: '形式が分からない', AMBIGUOUS_CARD_FORMAT: '形式が複数に当たる',
+        MULTI_SHEET_AMBIGUOUS: '対象のシートが複数ある',
+        CARD_FORMAT_DEFINITION_INVALID: '形式の定義が不正',
+        DESTINATION_SCHEMA_MISMATCH: '転記先の列が合わない',
+        DESTINATION_TEMPLATE_ROW_NOT_EMPTY: '転記先の雛形行に値がある',
+        ENCODING_DETECTION_FAILED: '文字コードが分からない', CSV_PARSE_FAILED: 'CSV が読めない',
+        DUPLICATE_CONTENT: '同じ内容のファイルがある',
+        PURPOSE_REVISION_CANDIDATE: '用途を直したファイルの可能性がある',
+        COUNT_TOTAL_MISMATCH: '件数か合計が合わない',
+        SCAN_TRUNCATION_SUSPECTED: '明細が途中で切れている可能性がある',
+        EMPTY_FILE_CONFIRMATION_REQUIRED: '明細が空', INPUT_LIMIT_EXCEEDED: '取込上限を超えた'
+      }[detail] || '確認が必要';
+      return {
+        PURPOSE_EMPTY_ROWS: '使用用途が空の行が ' + n + ' 行あります。このまま取り込むと【要修正】になります。',
+        CATEGORY_2: 'このまま取り込むと「' + reason + '」で止まる見込みです。',
+        REVIEW_ROWS: '取り込んだ後に要確認になる行が ' + n + ' 行ある見込みです。',
+        BILLING_MONTH_UNRESOLVED: '請求年月が読めません。年の補完が効きません。',
+        EXCLUDED_ROWS: '取引ではないとして除いた行が ' + n + ' 行あります。下の表で確かめてください。',
+        RULES_NOT_INHERITED: '土台の形式の規則のうち、列の位置に依るもの（' + (Array.isArray(detail) ? detail.join('、') : detail || '') + '）は引き継ぎませんでした。',
+        FOREIGN_NOT_INHERITED: 'この形式では外貨の補足（通貨・現地額・レート）を取りません。',
+        PURPOSE_HEADER_NOT_STANDARD: '使用用途として読む列の見出しが「' + (detail || '') + '」です。',
+        REFERENCE_UNREADABLE: '参照ファイル「' + (detail || '') + '」が読めなかったので、列の対応は見出しから推しました。'
+      }[code] || '確認してください：' + code;
+    }
+
+    function formatSaveResult(result) {
+      if (!result || result.ok === false) return {saved: null, close: true,
+        notice: formatBlockingMessage(result && result.code || 'UNKNOWN')};
+      if (result.saved !== true) return {saved: null, close: false,
+        stale: result.code === 'PREVIEW_STALE',
+        notice: result.code ? formatBlockingMessage(result.code) :
+          (result.blocking || []).map(function(item) {
+            return formatBlockingMessage(item.code, item.detail);
+          }).join('\n')};
+      return {saved: result, close: false, notice: null};
+    }
+
+    function formatApplySaveFailure(result) {
+      if (!result || result.saved !== false) return;
+      state.formatHash = null;
+      if (state.formatPreview && result.blocking)
+        state.formatPreview.blocking = result.blocking;
+      else invalidateFormatPreview();
+    }
+
+    function formatPreviewIsCurrent(sentAnswers, answers) {
+      return sentAnswers === JSON.stringify(answers);
+    }
+
+    function formatNormalizeHeader(value) {
+      if (value === null || value === undefined || value === '') return '';
+      var normalized = String(value).normalize('NFKC').toUpperCase();
+      normalized = normalized.replace(/[\u3000\t\r\n\f\v ]+/g, ' ');
+      normalized = normalized.replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212\u30FC\uFF0D\uFF70\u00AD]/g, '-');
+      normalized = normalized.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
+      return normalized.trim();
+    }
+
+    function formatPurposeAcknowledgement(diagnosis, answers) {
+      var grid = diagnosis.grid || {rowNumbers: [], columnLetters: [], cells: []};
+      var row = grid.rowNumbers.indexOf(Number(answers.headerRow));
+      var column = grid.columnLetters.indexOf(answers.columns.purpose);
+      var header = row < 0 || column < 0 ? '' : String((grid.cells[row] || [])[column] || '');
+      return {header: header, required: Boolean(diagnosis.customerSide ||
+        answers.columns.purpose && formatNormalizeHeader(header) !==
+          formatNormalizeHeader('使用用途'))};
+    }
+
+    function formatExcludedReason(ruleId) {
+      return ruleId === '_dateAmountEmpty' ? '利用日と金額が空' :
+        '除外の規則「' + ruleId + '」';
+    }
+
+    function formatRequiredColumnMessage(answers) {
+      for (var role of ['date', 'merchant', 'amount']) {
+        if (!answers.columns[role]) return formatRoleName(role) + 'の列を選んでください';
+      }
+      return null;
+    }
+
+    function formatGapText(value) {
+      return String(value || '').replace(/\*\*/g, '');
+    }
+
+    function formatAmountChoices(proposal, answers, grid) {
+      var choices = proposal.amountCandidates.slice();
+      var reference = proposal.columns.amount.source === 'REFERENCE' ?
+        proposal.columns.amount.column : null;
+      if (reference && !choices.some(function(item) { return item.column === reference; })) {
+        var row = grid.rowNumbers.indexOf(Number(answers.headerRow));
+        var column = grid.columnLetters.indexOf(reference);
+        choices.unshift({column: reference,
+          header: row < 0 || column < 0 ? '' : String((grid.cells[row] || [])[column] || ''),
+          numericCount: 0});
+      }
+      return choices;
+    }
+
+    function formatRequeueMessage(result) {
+      var count = (result.requeued || []).length;
+      var remaining = (result.remaining || []).length;
+      return count + ' 件を取込待ちに戻しました。' +
+        (count ? '［記帳を実行］で取り込みます。' : '') +
+        (remaining ? ' 残り ' + remaining + ' 件です。もう一度押すと残りを戻します。' : '');
+    }
+
+    function formatNode(tag, text, className) {
+      var node = document.createElement(tag);
+      if (text !== undefined && text !== null) node.textContent = String(text);
+      if (className) node.className = className;
+      return node;
+    }
+
+    function formatButton(label, onClick, primary) {
+      var button = formatNode('button', label, primary ? 'button primary' : 'button');
+      button.type = 'button'; button.disabled = isMutationBusy();
+      button.addEventListener('click', onClick);
+      return button;
+    }
+
+    function formatAppendLine(parent, text, className) {
+      parent.appendChild(formatNode('p', text, className));
+    }
+
+    function formatAnswersFromProposal(proposal) {
+      var columns = {};
+      ['date', 'merchant', 'amount', 'purpose', 'amountFallback'].forEach(function(role) {
+        columns[role] = proposal.columns[role].column;
+      });
+      return {baseFormatId: proposal.baseFormatId, formatId: proposal.formatId,
+        formatName: proposal.formatName, sheetName: proposal.sheetName,
+        headerRow: proposal.headerRow, dataStartRow: proposal.dataStartRow,
+        columns: columns,
+        acknowledgements: {customerSide: false, amountChoice: false}};
+    }
+
+    function formatUpdateAnswer(setValue, keepAcknowledgementControl) {
+      if (state.formatSaved || isMutationBusy()) return;
+      setValue(); invalidateFormatPreview();
+      state.formatMessage = null;
+      var signature = formatAcknowledgementSignature();
+      if (state.formatAcknowledgementHost && !keepAcknowledgementControl &&
+          signature !== state.formatAcknowledgementSignature) {
+        state.formatAcknowledgementHost.textContent = '';
+        renderFormatAcknowledgements(state.formatAcknowledgementHost);
+      }
+      state.formatAcknowledgementSignature = signature;
+      if (state.formatPreviewHost) state.formatPreviewHost.textContent = '';
+      if (state.formatSaveButton) state.formatSaveButton.disabled = true;
+      formatRefreshVisuals();
+    }
+
+    function formatRefreshVisuals() {
+      var d = state.formatDiagnosis, a = state.formatAnswers;
+      if (!d || !a || !d.grid) return;
+      var grid = d.grid;
+      if (state.formatGridTable) {
+        var rows = state.formatGridTable.children;
+        grid.columnLetters.forEach(function(letter, index) {
+          var roles = Object.keys(a.columns).filter(function(role) {
+            return a.columns[role] === letter;
+          });
+          rows[0].children[index + 1].textContent = letter +
+            (roles.length ? ' ' + roles.map(formatRoleName).join('/') : '');
+        });
+        grid.rowNumbers.forEach(function(number, index) {
+          rows[index + 1].className = number === Number(a.headerRow) ? 'format-header' :
+            number === Number(a.dataStartRow) ? 'format-start' : '';
+        });
+      }
+      (state.formatColumnSelects || []).forEach(function(select) {
+        grid.columnLetters.forEach(function(letter, index) {
+          var headerIndex = grid.rowNumbers.indexOf(Number(a.headerRow));
+          var firstIndex = grid.rowNumbers.indexOf(Number(a.dataStartRow));
+          select.children[index + 1].textContent = letter + '「' +
+            ((grid.cells[headerIndex] || [])[index] || '') + '」 ' +
+            ((grid.cells[firstIndex] || [])[index] || '');
+        });
+      });
+      (state.formatAmountLabels || []).forEach(function(entry) {
+        var column = grid.columnLetters.indexOf(entry.column);
+        var headerIndex = grid.rowNumbers.indexOf(Number(a.headerRow));
+        var firstIndex = grid.rowNumbers.indexOf(Number(a.dataStartRow));
+        entry.span.textContent = entry.column + '「' +
+          ((grid.cells[headerIndex] || [])[column] || '') + '」 ' +
+          ((grid.cells[firstIndex] || [])[column] || '');
+      });
+      if (state.formatMessageHost) state.formatMessageHost.textContent = '';
+    }
+
+    function renderFormatGrid(parent, diagnosis) {
+      var grid = diagnosis.grid;
+      if (!grid) return;
+      parent.appendChild(formatNode('h3', '見本の表', 'subheading'));
+      var wrap = formatNode('div', null, 'table-wrap');
+      var table = formatNode('table');
+      var head = formatNode('tr'); head.appendChild(formatNode('th', '行'));
+      grid.columnLetters.forEach(function(letter) {
+        var roles = Object.keys(state.formatAnswers.columns).filter(function(role) {
+          return state.formatAnswers.columns[role] === letter;
+        });
+        head.appendChild(formatNode('th', letter + (roles.length ? ' ' + roles.map(formatRoleName).join('/') : '')));
+      });
+      table.appendChild(head);
+      grid.cells.forEach(function(cells, index) {
+        var tr = formatNode('tr');
+        if (grid.rowNumbers[index] === Number(state.formatAnswers.headerRow)) tr.className = 'format-header';
+        else if (grid.rowNumbers[index] === Number(state.formatAnswers.dataStartRow)) tr.className = 'format-start';
+        tr.appendChild(formatNode('td', grid.rowNumbers[index]));
+        cells.forEach(function(cell) { tr.appendChild(formatNode('td', cell)); });
+        table.appendChild(tr);
+      });
+      wrap.appendChild(table); parent.appendChild(wrap);
+      state.formatGridTable = table;
+    }
+
+    function formatField(parent, label, value, onChange, type) {
+      var wrap = formatNode('label', label + ' ');
+      var input = formatNode('input'); input.type = type || 'text'; input.value = value;
+        input.disabled = isMutationBusy() || Boolean(state.formatSaved);
+      input.addEventListener('input', function() { onChange(input.value); });
+      input.addEventListener('change', function() { onChange(input.value); });
+      wrap.appendChild(input); parent.appendChild(wrap);
+    }
+
+    function formatColumnChoice(parent, role, title, proposal) {
+      var diagnosis = state.formatDiagnosis;
+      var current = state.formatAnswers.columns[role];
+      var source = state.formatManualColumns && state.formatManualColumns[role] ?
+        'MANUAL' : proposal.columns[role].source;
+      var wrap = formatNode('label', title + '（' +
+        (role === 'amountFallback' && !current ? 'なし' :
+          source === 'REFERENCE' ? '参照ファイル' : source === 'HEADER' ? '見出し' :
+          source === 'MANUAL' ? '手で選択' : '要選択') + '） ');
+      var select = formatNode('select'); select.disabled = isMutationBusy() || Boolean(state.formatSaved);
+      var none = formatNode('option', 'なし'); none.value = ''; select.appendChild(none);
+      diagnosis.grid.columnLetters.forEach(function(letter, index) {
+        var headerRowIndex = diagnosis.grid.rowNumbers.indexOf(Number(state.formatAnswers.headerRow));
+        var header = (diagnosis.grid.cells[headerRowIndex] || [])[index] || '';
+        var firstRow = diagnosis.grid.rowNumbers.indexOf(Number(state.formatAnswers.dataStartRow));
+        var first = (diagnosis.grid.cells[firstRow] || [])[index] || '';
+        var option = formatNode('option', letter + '「' + header + '」 ' + first);
+        option.value = letter; select.appendChild(option);
+      });
+      select.value = current || '';
+      state.formatColumnSelects.push(select);
+      select.addEventListener('change', function() {
+        formatUpdateAnswer(function() {
+          state.formatAnswers.columns[role] = select.value || null;
+          state.formatManualColumns[role] = true;
+          wrap.firstChild.textContent = title + '（' +
+            (role === 'amountFallback' && !select.value ? 'なし' : '手で選択') + '） ';
+        });
+      });
+      wrap.appendChild(select); parent.appendChild(wrap);
+    }
+
+    function renderFormatInputs(parent, diagnosis) {
+      var answers = state.formatAnswers;
+      var proposal = diagnosis.proposal;
+      state.formatColumnSelects = [];
+      state.formatAmountLabels = [];
+      var ackHost = formatNode('div');
+      state.formatAcknowledgementHost = ackHost;
+      renderFormatAcknowledgements(ackHost);
+      parent.appendChild(ackHost);
+      parent.appendChild(formatNode('h3', '列と形式の指定', 'subheading'));
+      var fields = formatNode('div', null, 'action-row');
+      formatField(fields, '見出し行', answers.headerRow, function(value) {
+        formatUpdateAnswer(function() { answers.headerRow = Number(value); });
+      }, 'number');
+      formatField(fields, '明細の開始行', answers.dataStartRow, function(value) {
+        formatUpdateAnswer(function() { answers.dataStartRow = Number(value); });
+      }, 'number');
+      formatField(fields, '形式 ID', answers.formatId, function(value) {
+        formatUpdateAnswer(function() { answers.formatId = value; });
+      });
+      formatField(fields, '形式名', answers.formatName, function(value) {
+        formatUpdateAnswer(function() { answers.formatName = value; });
+      });
+      parent.appendChild(fields);
+      var columnFields = formatNode('div', null, 'action-row');
+      formatColumnChoice(columnFields, 'date', '利用日', proposal);
+      formatColumnChoice(columnFields, 'merchant', '店名', proposal);
+      formatColumnChoice(columnFields, 'purpose', '使用用途', proposal);
+      formatColumnChoice(columnFields, 'amountFallback', '予備金額', proposal);
+      parent.appendChild(columnFields);
+      parent.appendChild(formatNode('h3', '金額の列', 'subheading'));
+      if (proposal.amountCandidates.length >= 2) {
+        var list = formatNode('div');
+        var candidates = formatAmountChoices(proposal, answers, diagnosis.grid);
+        candidates.forEach(function(candidate) {
+          var label = formatNode('label');
+          var radio = formatNode('input'); radio.type = 'radio'; radio.name = 'format-amount';
+          radio.value = candidate.column; radio.checked = answers.columns.amount === candidate.column;
+          radio.disabled = isMutationBusy() || Boolean(state.formatSaved);
+          radio.addEventListener('change', function() {
+            formatUpdateAnswer(function() {
+              answers.columns.amount = candidate.column;
+              state.formatManualColumns.amount = true;
+            });
+          });
+          label.appendChild(radio);
+          var comparison = state.formatPreview && state.formatPreview.extraction &&
+            state.formatPreview.amountComparison || [];
+          var compared = comparison.filter(function(item) {
+            return item.column === candidate.column;
+          })[0];
+          if (!compared && state.formatPreview && state.formatPreview.extraction &&
+              candidate.column === answers.columns.amount)
+            compared = {total: state.formatPreview.extraction.total, differsRows: 0};
+          var first = (diagnosis.grid.cells[diagnosis.grid.rowNumbers.indexOf(
+            Number(answers.dataStartRow))] || [])[ 
+            diagnosis.grid.columnLetters.indexOf(candidate.column)];
+          var amountSpan = formatNode('span', candidate.column + '「' + candidate.header + '」 ' +
+            (first || '') + (compared ? ' 合計 ' + formatAmount(compared.total) +
+              ' 相違 ' + compared.differsRows + ' 行' : ''));
+          label.appendChild(amountSpan);
+          state.formatAmountLabels.push({column: candidate.column, span: amountSpan});
+          list.appendChild(label); list.appendChild(formatNode('br'));
+        });
+        parent.appendChild(list);
+      } else {
+        formatColumnChoice(parent, 'amount', '金額', proposal);
+      }
+      var ack = answers.acknowledgements;
+      var actions = formatNode('div', null, 'action-row');
+      var previewButton = formatButton('試し読み', previewFormat, true);
+      previewButton.disabled = isMutationBusy() || Boolean(state.formatSaved);
+      actions.appendChild(previewButton);
+      var save = formatButton('保存して有効にする', saveFormat, true);
+      save.disabled = isMutationBusy() || Boolean(state.formatSaved) || !formatCanSave(state.formatPreview,
+        state.formatHash, ack);
+      state.formatSaveButton = save;
+      actions.appendChild(save); parent.appendChild(actions);
+    }
+
+    function renderFormatAcknowledgements(parent) {
+      var diagnosis = state.formatDiagnosis;
+      var answers = state.formatAnswers;
+      var proposal = diagnosis.proposal;
+      var ack = answers.acknowledgements;
+      var purpose = formatPurposeAcknowledgement(diagnosis, answers);
+      state.formatAcknowledgementSignature = formatAcknowledgementSignature();
+      if (diagnosis.customerSide)
+        formatAppendLine(parent, 'この形のファイルを形式として登録すると、顧客の入力ミスが正常な様式として定着します。通常は顧客に修正を依頼してください。', 'format-message warning');
+      if (answers.columns.purpose && formatNormalizeHeader(purpose.header) !==
+          formatNormalizeHeader('使用用途'))
+        formatAppendLine(parent, answers.columns.purpose + '列（見出し「' + purpose.header +
+          '」）を使用用途として読みます。この列にカード会社が書いた文言も、使用用途として転記されます。', 'format-message warning');
+      if (purpose.required) {
+        var customerAck = formatNode('label');
+        var check = formatNode('input'); check.type = 'checkbox'; check.checked = ack.customerSide;
+        check.disabled = isMutationBusy() || Boolean(state.formatSaved);
+        check.addEventListener('change', function() {
+          formatUpdateAnswer(function() { ack.customerSide = check.checked; }, true);
+        });
+        customerAck.appendChild(check);
+        customerAck.appendChild(formatNode('span', '入力ミスを様式として登録することを理解した'));
+        parent.appendChild(customerAck);
+      }
+      if (proposal.amountCandidates.length >= 2) {
+        var amountAck = formatNode('label');
+        var amountCheck = formatNode('input'); amountCheck.type = 'checkbox';
+        amountCheck.checked = ack.amountChoice;
+        amountCheck.disabled = isMutationBusy() || Boolean(state.formatSaved);
+        amountCheck.addEventListener('change', function() {
+          formatUpdateAnswer(function() { ack.amountChoice = amountCheck.checked; }, true);
+        });
+        amountAck.appendChild(amountCheck);
+        amountAck.appendChild(formatNode('span', '金額の列を確認した'));
+        parent.appendChild(amountAck);
+      }
+    }
+
+    function formatAcknowledgementSignature() {
+      var d = state.formatDiagnosis, a = state.formatAnswers;
+      if (!d || !a || !d.proposal) return '';
+      var purpose = formatPurposeAcknowledgement(d, a);
+      return JSON.stringify([d.customerSide, purpose.required, purpose.header,
+        a.columns.purpose, d.proposal.amountCandidates.length,
+        a.acknowledgements.customerSide, a.acknowledgements.amountChoice]);
+    }
+
+    function renderFormatPreview(parent) {
+      var result = state.formatPreview;
+      if (!result) return;
+      parent.appendChild(formatNode('h3', '試し読みの結果', 'subheading'));
+      (result.blocking || []).forEach(function(item) {
+        formatAppendLine(parent, formatBlockingMessage(item.code, item.detail), 'format-message blocking');
+      });
+      if (result.extraction) {
+        var extraction = result.extraction;
+        formatAppendLine(parent, extraction.count + ' 件、合計 ' + formatAmount(extraction.total) +
+          ' 円、区分の見込み ' + (extraction.category.category || 'なし'));
+        if (extraction.category.category === 1)
+          formatAppendLine(parent, 'このまま取り込むと【要修正】になります。', 'format-message warning');
+        var wrap = formatNode('div', null, 'table-wrap'); var table = formatNode('table');
+        var head = formatNode('tr');
+        ['行', '利用日', '金額', '店名', '使用用途'].forEach(function(v) {
+          head.appendChild(formatNode('th', v));
+        }); table.appendChild(head);
+        extraction.rows.forEach(function(row) {
+          var tr = formatNode('tr');
+          if (!row.amount || !row.purpose) tr.className = 'format-warning';
+          [row.sourceRow, row.date || '', formatAmount(row.amount), row.merchant,
+            row.purpose].forEach(function(value) { tr.appendChild(formatNode('td', value)); });
+          table.appendChild(tr);
+        });
+        wrap.appendChild(table); parent.appendChild(wrap);
+        if (extraction.moreRows)
+          formatAppendLine(parent, '表示しなかった明細が ' + extraction.moreRows + ' 行あります。');
+        if (extraction.excluded.length) {
+          parent.appendChild(formatNode('h4', '除外した行'));
+          var excludedTable = formatNode('table');
+          var excludedHead = formatNode('tr');
+          ['行', '理由', '中身'].forEach(function(label) {
+            excludedHead.appendChild(formatNode('th', label));
+          });
+          excludedTable.appendChild(excludedHead);
+          extraction.excluded.forEach(function(item) {
+            var tr = formatNode('tr');
+            [item.sourceRow, formatExcludedReason(item.ruleId),
+              (item.cells || []).join(' ／ ')].forEach(function(value) {
+              tr.appendChild(formatNode('td', value));
+            });
+            excludedTable.appendChild(tr);
+          });
+          parent.appendChild(excludedTable);
+        }
+        formatAppendLine(parent, '請求年月 ' +
+          (extraction.billing.yearMonth || '読めません') + '。年のない日付 ' +
+          extraction.year.yearless + ' 行のうち ' + extraction.year.inferred +
+          ' 行で年を補完しました。年を確認する行は ' + extraction.year.reviewRows + ' 行です。');
+      }
+      (result.warnings || []).forEach(function(item) {
+        formatAppendLine(parent, formatWarningMessage(item.code, item.detail), 'format-message warning');
+      });
+    }
+
+    function renderFormatSaved(parent) {
+      var saved = state.formatSaved;
+      if (!saved || saved.saved !== true) return;
+      if (saved.readback === 'UNCERTAIN') {
+        if (saved.disabled) {
+          formatAppendLine(parent, '保存後の確認を終えられなかったので、安全のため無効にしました。' +
+            '形式 ID を変えてやり直してください（同じ ID は使えません）。', 'format-message blocking');
+          parent.appendChild(formatButton('形式 ID を変えてやり直す', function() {
+            state.formatSaved = null; invalidateFormatPreview(); renderFormatPanel();
+          }));
+        } else {
+          formatAppendLine(parent, '保存後の確認を終えられず、無効にもできませんでした。' +
+            'この登録を取り消すか、管理者に確認してください。', 'format-message blocking');
+          parent.appendChild(formatButton('この登録を取り消す', withdrawFormat));
+        }
+        return;
+      }
+      if (saved.readback === 'MISMATCH') {
+        formatAppendLine(parent, '保存した行を読み直すと結果が違ったので、この形式を無効にしました。' +
+          ' 行の値：' + (saved.diff && saved.diff.cells ? '一致' : '不一致') +
+          '、明細：' + (saved.diff && saved.diff.extraction ? '一致' : '不一致') +
+          '、形式判定：' + (saved.diff && saved.diff.detection ? '一致' : '不一致') +
+          '。形式 ID を変えてやり直してください（同じ ID は使えません）。', 'format-message blocking');
+        parent.appendChild(formatButton('形式 ID を変えてやり直す', function() {
+          state.formatSaved = null; invalidateFormatPreview(); renderFormatPanel();
+        }));
+        return;
+      }
+      formatAppendLine(parent, '保存しました。保存した行から読み直した結果も一致しました。' +
+        saved.after.count + ' 件、合計 ' + formatAmount(saved.after.total) + ' 円。');
+      if (saved.siblingsError)
+        formatAppendLine(parent, '同じフォルダのファイルを確かめられませんでした。',
+          'format-message warning');
+      var siblingIds = state.formatSelectedIds;
+      if (!state.formatRequeueRemaining) {
+        var targetLabel = formatNode('label');
+        var targetCheck = formatNode('input');
+        targetCheck.type = 'checkbox'; targetCheck.checked = siblingIds.indexOf(state.formatFileId) >= 0;
+        targetCheck.disabled = isMutationBusy();
+        targetCheck.addEventListener('change', function() {
+          if (targetCheck.checked && siblingIds.indexOf(state.formatFileId) < 0)
+            siblingIds.push(state.formatFileId);
+          else if (!targetCheck.checked) siblingIds = siblingIds.filter(function(id) {
+            return id !== state.formatFileId;
+          });
+          state.formatSelectedIds = siblingIds;
+        });
+        targetLabel.appendChild(targetCheck);
+        targetLabel.appendChild(formatNode('span', state.formatDiagnosis.fileName + '：登録した形式に一致'));
+        parent.appendChild(targetLabel); parent.appendChild(formatNode('br'));
+      }
+      var visibleSiblings = state.formatRequeueRemaining ?
+        (saved.siblings || []).filter(function(item) {
+          return item.fileId !== state.formatFileId && siblingIds.indexOf(item.fileId) >= 0;
+        }) : (saved.siblings || []);
+      visibleSiblings.forEach(function(sibling) {
+        var label = formatNode('label'); var check = formatNode('input');
+        check.type = 'checkbox'; check.checked = siblingIds.indexOf(sibling.fileId) >= 0;
+        check.disabled = isMutationBusy() || sibling.verdict !== 'MATCHES_NEW';
+        check.addEventListener('change', function() {
+          if (check.checked && siblingIds.indexOf(sibling.fileId) < 0) siblingIds.push(sibling.fileId);
+          else siblingIds = siblingIds.filter(function(id) { return id !== sibling.fileId; });
+          state.formatSelectedIds = siblingIds;
+        });
+        label.appendChild(check);
+        label.appendChild(formatNode('span', sibling.fileName + '：' + ({
+          MATCHES_NEW: 'この形式で読めます', MATCHES_OTHER: '別の登録済みの形式で読めます',
+          NO_MATCH: 'まだどの形式にも当たりません', AMBIGUOUS: '2 つ以上の形式に当たります'
+        }[sibling.verdict] || sibling.verdict)));
+        parent.appendChild(label); parent.appendChild(formatNode('br'));
+      });
+      if (!state.formatRequeueRemaining && saved.siblingsNotRead && saved.siblingsNotRead.length)
+        formatAppendLine(parent, 'まだ確認していないファイル：' + saved.siblingsNotRead.length + ' 件');
+      var actions = formatNode('div', null, 'action-row');
+      actions.appendChild(formatButton('選んだファイルを取込待ちに戻す', function() {
+        requeueFormat(siblingIds);
+      }, true));
+      if (!state.formatRequeueRemaining)
+        actions.appendChild(formatButton('この登録を取り消す', withdrawFormat));
+      parent.appendChild(actions);
+    }
+
+    function renderFormatPanel() {
+      var d = state.formatDiagnosis;
+      state.formatPanelBusySignature = String(isMutationBusy());
+      el['format-panel'].hidden = !state.formatFileId;
+      el['format-close'].disabled = isMutationBusy();
+      el['format-body'].textContent = '';
+      if (!state.formatFileId) return;
+      var body = el['format-body'];
+      state.formatMessageHost = formatNode('div');
+      if (state.formatMessage) {
+        formatAppendLine(state.formatMessageHost, state.formatMessage.text,
+          'format-message ' + state.formatMessage.kind);
+        (state.formatMessage.details || []).forEach(function(detail) {
+          formatAppendLine(state.formatMessageHost, detail,
+            'format-message ' + state.formatMessage.kind);
+        });
+      }
+      body.appendChild(state.formatMessageHost);
+      if (state.formatBusy) formatAppendLine(body, '処理中…');
+      if (!d) return;
+      if (!d.ok) { formatAppendLine(body, formatBlockingMessage(d.code), 'format-message warning'); return; }
+      if (state.formatRequeueRemaining) {
+        formatAppendLine(body, '取込待ちへ戻す残りのファイルを確認しました。');
+        renderFormatSaved(body); return;
+      }
+      formatAppendLine(body, d.verdict === 'MATCHES_ACTIVE' || d.verdict === 'AMBIGUOUS' ?
+        d.fileName : d.fileName + ' ／ ' + (d.sheetName || '') + ' ／ ' + (d.width || '') + ' 列');
+      if (d.verdict === 'MATCHES_ACTIVE') {
+        formatAppendLine(body, 'このファイルは、登録済みの形式「' + d.matched.formatName +
+          '」で読めます（止まった後に形式が足されたか、判定が直りました）。');
+        body.appendChild(formatButton('登録済みの形式で再検査する', function() {
+          requeueFormat([d.fileId]);
+        }, true));
+        if (state.formatUncertainSaveId &&
+            String(d.matched.formatId) === String(state.formatUncertainSaveId))
+          body.appendChild(formatButton('この登録を取り消す', withdrawFormat));
+        return;
+      }
+      if (d.verdict === 'AMBIGUOUS') {
+        formatAppendLine(body, 'このファイルは 2 つ以上の形式に当たります。スプレッドシートのメニューから扱ってください。');
+        return;
+      }
+      if (d.verdict === 'NEAR')
+        formatAppendLine(body, 'いちばん近い形式は「' + d.nearest[0].formatName +
+          '」です。違い：' + formatGapText(d.nearest[0].gapText));
+      else formatAppendLine(body, '近い形式がありません。列を指定して、新しい形式として登録します。');
+      (d.warnings || []).forEach(function(item) {
+        formatAppendLine(body, formatWarningMessage(item.code, item.detail),
+          'format-message warning');
+      });
+      if (d.customerSide) {
+        var chosen = (d.nearest || []).filter(function(item) {
+          return item.formatId === d.proposal.baseFormatId;
+        })[0] || d.nearest[0];
+        if (d.purposeGap.kind === 'PURPOSE_COLUMN_ABSENT')
+          formatAppendLine(body, '違いは「使用用途」の列だけです。カード会社の出力は「' +
+            chosen.formatName + '」と同じで、顧客が「使用用途」の列を足していません。');
+        else formatAppendLine(body, '違いは「使用用途」の列だけです。' + d.purposeGap.column +
+          '列の見出しが「' + d.purposeGap.headerText +
+          '」になっています。顧客が見出しのセルに用途を書いた可能性があります。');
+        if (!state.formatRegistrationOpen) {
+          formatActionOrder(true).forEach(function(action) {
+            if (action === 'RETURN_TO_CUSTOMER' && !state.formatSaved)
+              body.appendChild(formatButton('顧客に修正を依頼する（【要修正】にする）', returnFormatToCustomer, true));
+            else body.appendChild(formatButton('別の形式として登録する…', function() {
+              state.formatRegistrationOpen = true; renderFormatPanel();
+            }));
+            body.appendChild(formatNode('br'));
+          });
+        } else {
+          if (!state.formatSaved) body.appendChild(formatButton(
+            '顧客に修正を依頼する（【要修正】にする）', returnFormatToCustomer, true));
+        }
+      }
+      if (d.verdict === 'NEAR') {
+        var selector = formatNode('select');
+        d.nearest.forEach(function(item) {
+          var option = formatNode('option', item.formatName + '：' + formatGapText(item.gapText));
+          option.value = item.formatId; selector.appendChild(option);
+        });
+        selector.value = d.proposal.baseFormatId;
+        selector.disabled = isMutationBusy() || Boolean(state.formatSaved);
+        selector.addEventListener('change', function() {
+          openFormat(d.fileId, selector.value, state.formatRegistrationOpen);
+        });
+        body.appendChild(selector);
+      }
+      if (d.customerSide && !state.formatRegistrationOpen) return;
+      renderFormatGrid(body, d);
+      renderFormatInputs(body, d);
+      var previewHost = formatNode('div');
+      state.formatPreviewHost = previewHost;
+      renderFormatPreview(previewHost);
+      body.appendChild(previewHost);
+      renderFormatSaved(body);
+    }
+
+    function formatSetBusy(busy) {
+      state.formatBusy = busy;
+      renderFiles();
+      renderFolders();
+      document.querySelectorAll('.review-select, .partner-input').forEach(function(node) {
+        node.disabled = isMutationBusy();
+      });
+      el['review-prev'].disabled = state.loadingReviews || isMutationBusy() || state.reviewOffset <= 0;
+      el['review-next'].disabled = state.loadingReviews || isMutationBusy() ||
+        state.reviewOffset + state.reviewLimit >= state.partnerTotal;
+      updateActionButtons();
+      try { renderFormatPanel(); }
+      catch (error) {
+        el['format-body'].textContent = '';
+        formatAppendLine(el['format-body'], '形式の画面を表示できませんでした。' +
+          failureMessage(error), 'format-message blocking');
+      }
+    }
+
+    function formatShowMessage(message, kind, details) {
+      state.formatMessage = {text: message, kind: kind || 'warning', details: details || []};
+      if (!state.formatMessageHost) return;
+      state.formatMessageHost.textContent = '';
+      formatAppendLine(state.formatMessageHost, message,
+        'format-message ' + (kind || 'warning'));
+      (details || []).forEach(function(detail) {
+        formatAppendLine(state.formatMessageHost, detail,
+          'format-message ' + (kind || 'warning'));
+      });
+    }
+
+    function closeFormatPanel() {
+      state.formatFileId = null; state.formatDiagnosis = null;
+      state.formatAnswers = null; state.formatSaved = null;
+      state.formatUncertainSaveId = null;
+      state.formatManualColumns = {}; state.formatMessage = null;
+      state.formatSelectedIds = []; state.formatRequeueRemaining = false;
+      invalidateFormatPreview();
+    }
+
+    async function openFormat(fileId, baseFormatId, keepRegistrationOpen) {
+      if (isMutationBusy()) return;
+      if (state.formatSaved && !await formatConfirm('保存結果を閉じる',
+          '保存結果と取り消しの操作を閉じます。続けますか。')) return;
+      var request = ++state.formatRequest;
+      var customerId = state.selectedCustomerId, folderId = state.selectedFolderId;
+      state.formatFileId = fileId; state.formatDiagnosis = null;
+      state.formatSaved = null; state.formatRequeueRemaining = false;
+      state.formatUncertainSaveId = null;
+      state.formatManualColumns = {}; state.formatMessage = null;
+      invalidateFormatPreview();
+      formatSetBusy(true);
+      el['format-panel'].scrollIntoView({behavior: 'smooth', block: 'start'});
+      try {
+        var result = await gasCall('webAppExplainUnknownFile',
+          [customerId, folderId, fileId, baseFormatId || null]);
+        if (request !== state.formatRequest || customerId !== state.selectedCustomerId ||
+            folderId !== state.selectedFolderId) return;
+        if (!result || result.ok === false) {
+          formatShowMessage(formatBlockingMessage(result && result.code), 'blocking');
+          await refreshFormatLists();
+          return;
+        }
+        state.formatDiagnosis = result;
+        state.formatRegistrationOpen = Boolean(keepRegistrationOpen || !result.customerSide);
+        state.formatAnswers = result.proposal ? formatAnswersFromProposal(result.proposal) : null;
+      } catch (error) { formatShowMessage(failureMessage(error), 'blocking'); }
+      finally { formatSetBusy(false); }
+    }
+
+    async function previewFormat() {
+      if (isMutationBusy() || !state.formatAnswers || state.formatSaved) return;
+      var missingColumn = formatRequiredColumnMessage(state.formatAnswers);
+      if (missingColumn) { formatShowMessage(missingColumn, 'warning'); return; }
+      var sentAnswers = JSON.stringify(state.formatAnswers);
+      invalidateFormatPreview(); formatSetBusy(true);
+      try {
+        var result = await gasCall('webAppPreviewFormat',
+          [state.selectedCustomerId, state.selectedFolderId, state.formatFileId, state.formatAnswers]);
+        if (!formatPreviewIsCurrent(sentAnswers, state.formatAnswers)) return;
+        if (!result || result.ok === false) {
+          formatShowMessage(formatBlockingMessage(result && result.code), 'blocking');
+          await refreshFormatLists(); return;
+        }
+        var view = formatPreviewView(result, state.formatDiagnosis);
+        state.formatPreview = view.preview; state.formatHash = view.hash;
+        if (view.notice) formatShowMessage(view.notice, 'blocking');
+      } catch (error) { formatShowMessage(failureMessage(error), 'blocking'); }
+      finally { formatSetBusy(false); }
+    }
+
+    async function saveFormat() {
+      if (isMutationBusy() || !formatCanSave(state.formatPreview,
+          state.formatHash, state.formatAnswers.acknowledgements)) return;
+      var answers = state.formatAnswers;
+      if (!await formatConfirm('形式を保存', 'カード形式マスターに「' + answers.formatName + '」（' + answers.formatId +
+          '）を追加し、有効にします。形式は全顧客に共通です。次の取込から、この形に合うファイルはすべてこの形式で読まれます。')) return;
+      formatSetBusy(true);
+      var uncertain = false;
+      try {
+        var result = await gasCall('webAppSaveFormat', [state.selectedCustomerId,
+          state.selectedFolderId, state.formatFileId, answers, state.formatHash]);
+        var outcome = formatSaveResult(result);
+        formatApplySaveFailure(result);
+        if (outcome.notice) formatShowMessage(outcome.notice, 'blocking');
+        if (outcome.close) { invalidateFormatPreview(); await refreshFormatLists(); }
+        if (outcome.saved) {
+          state.formatSaved = outcome.saved;
+          state.formatRequeueRemaining = false;
+          state.formatSelectedIds = result.readback === 'OK' ?
+            [state.formatFileId].concat((result.siblings || [])
+              .filter(function(item) { return item.verdict === 'MATCHES_NEW'; })
+              .map(function(item) { return item.fileId; })) : [];
+        }
+      } catch (error) {
+        invalidateFormatPreview();
+        uncertain = true;
+      }
+      finally { formatSetBusy(false); }
+      if (uncertain) {
+        var fileId = state.formatFileId;
+        var baseId = state.formatAnswers && state.formatAnswers.baseFormatId;
+        var attemptedId = answers.formatId;
+        await openFormat(fileId, baseId, state.formatRegistrationOpen);
+        if (state.formatDiagnosis && state.formatDiagnosis.verdict === 'MATCHES_ACTIVE' &&
+            state.formatDiagnosis.matched &&
+            String(state.formatDiagnosis.matched.formatId) === String(attemptedId)) {
+          state.formatUncertainSaveId = attemptedId;
+          renderFormatPanel();
+        }
+        formatShowMessage('保存できたか確かめられません。診断し直してください。', 'blocking');
+      }
+    }
+
+    function formatConfirm(title, message) {
+      return new Promise(function(resolve) {
+        state.formatConfirmResolve = resolve;
+        el['confirm-title'].textContent = title;
+        el['confirm-intro'].textContent = message;
+        el['confirm-list'].textContent = '';
+        el['confirm-submit'].textContent = '実行する';
+        if (typeof el['confirm-dialog'].showModal === 'function')
+          el['confirm-dialog'].showModal();
+        else el['confirm-dialog'].setAttribute('open', 'open');
+      });
+    }
+
+    async function requeueFormat(fileIds) {
+      if (isMutationBusy() || !fileIds.length) return;
+      if (!await formatConfirm('取込待ちへ戻す', '選んだ ' + fileIds.length +
+          ' 件を取込待ちに戻します。［記帳を実行］で取り込みます。')) return;
+      formatSetBusy(true);
+      try {
+        var result = await gasCall('webAppRequeueFormatFiles',
+          [state.selectedCustomerId, state.selectedFolderId, fileIds]);
+        if (!result || result.ok === false) {
+          formatShowMessage(formatBlockingMessage(result && result.code), 'blocking');
+          await refreshFormatLists(); return;
+        }
+        var skippedDetails = (result.skipped || []).map(function(item) {
+            var sibling = state.formatSaved && (state.formatSaved.siblings || []).filter(function(s) {
+              return s.fileId === item.fileId;
+            })[0];
+            var name = sibling && sibling.fileName ||
+              (state.formatDiagnosis && state.formatDiagnosis.fileId === item.fileId ?
+                state.formatDiagnosis.fileName : item.fileId);
+            return name + '：' + ({STILL_UNKNOWN: 'まだどの形式にも当たりません。',
+              AMBIGUOUS: '2 つ以上の形式に当たります。',
+              NOT_FORMAT_UNKNOWN: '形式不明の要確認がありません（既に扱われた可能性があります）。',
+              REQUEUE_FAILED: '読み直しの途中でエラーになりました。もう一度お試しください。'}[
+                item.code] || item.code);
+          });
+        formatShowMessage(formatRequeueMessage(result),
+          result.requeued.length ? 'success' : 'warning', skippedDetails);
+        if (!result.remaining || !result.remaining.length)
+          showNotice(formatRequeueMessage(result),
+            result.requeued.length ? 'success' : 'warning', skippedDetails);
+        if (result.remaining && result.remaining.length) {
+          state.formatSelectedIds = result.remaining.slice();
+          state.formatRequeueRemaining = true;
+        } else closeFormatPanel();
+        await refreshFormatLists();
+      } catch (error) {
+        formatShowMessage(failureMessage(error), 'blocking');
+        await refreshFormatLists();
+      }
+      finally { formatSetBusy(false); }
+    }
+
+    async function returnFormatToCustomer() {
+      var d = state.formatDiagnosis;
+      if (isMutationBusy() || !d || state.formatSaved) return;
+      if (!await formatConfirm('顧客に修正を依頼', '「' + d.fileName +
+          '」を【要修正】にします。顧客が直したファイルを置き直すまで取り込みません。')) return;
+      var reason = d.purposeGap.kind === 'PURPOSE_COLUMN_ABSENT' ?
+        'PURPOSE_COLUMN_MISSING' : d.purposeGap.kind;
+      formatSetBusy(true);
+      try {
+        var result = await gasCall('webAppReturnFileToCustomer',
+          [state.selectedCustomerId, state.selectedFolderId, d.fileId, reason, '']);
+        if (result.returned) {
+          showNotice('【要修正】にしました。', 'success');
+          closeFormatPanel();
+          await refreshFormatLists();
+        } else {
+          formatShowMessage(formatBlockingMessage(result.code), 'blocking');
+          await refreshFormatLists();
+        }
+      } catch (error) { formatShowMessage(failureMessage(error), 'blocking'); }
+      finally { formatSetBusy(false); }
+    }
+
+    async function withdrawFormat() {
+      var d = state.formatDiagnosis;
+      var a = state.formatAnswers;
+      var formatId = state.formatSaved && state.formatSaved.formatId ||
+        d && d.verdict === 'MATCHES_ACTIVE' && d.matched &&
+        String(d.matched.formatId) === String(state.formatUncertainSaveId) &&
+        state.formatUncertainSaveId;
+      if (isMutationBusy() || !formatId) return;
+      if (!await formatConfirm('形式を取り消す', '「' +
+          (a && a.formatName || d && d.matched && d.matched.formatName || formatId) +
+          '」を無効にします。取り込み済みの取引は変わりません。次の取込から、この形式で読めていたファイルは形式不明で止まります。')) return;
+      formatSetBusy(true);
+      try {
+        var result = await gasCall('webAppWithdrawFormat',
+          [state.selectedCustomerId, formatId]);
+        if (result.withdrawn) {
+          showNotice('形式を無効にしました。', 'success');
+          closeFormatPanel();
+        } else formatShowMessage(formatBlockingMessage(result.code), 'blocking');
+        await refreshFormatLists();
+      } catch (error) { formatShowMessage(failureMessage(error), 'blocking'); }
+      finally { formatSetBusy(false); }
+    }
+
+    async function refreshFormatLists() {
+      await Promise.all([
+        loadFiles(state.selectedCustomerId, state.selectedFolderId, state.viewGeneration),
+        loadReviews(state.selectedCustomerId, 0, state.viewGeneration)
+      ]);
+    }
+
 
     async function bootstrap() {
       var generation = ++state.viewGeneration;
@@ -1466,6 +2525,13 @@
     }
 
     el['customer-search'].addEventListener('input', renderCustomers);
+    el['format-close'].addEventListener('click', async function() {
+      if (isMutationBusy()) return;
+      if (state.formatSaved && !await formatConfirm('保存結果を閉じる',
+          '保存結果と取り消しの操作を閉じます。続けますか。')) return;
+      state.formatRequest += 1;
+      closeFormatPanel(); renderFormatPanel();
+    });
     el['import-button'].addEventListener('click', startImport);
     el['resolve-button'].addEventListener('click', openConfirmation);
     el['review-prev'].addEventListener('click', function() {
@@ -1479,10 +2545,29 @@
     el['final-button'].addEventListener('click', loadFinalReview);
     el['excel-button'].addEventListener('click', downloadExcel);
     el['confirm-cancel'].addEventListener('click', function() {
+      if (state.formatConfirmResolve) {
+        var resolve = state.formatConfirmResolve;
+        state.formatConfirmResolve = null;
+        closeConfirmation(); resolve(false); return;
+      }
       state.confirmPayload = null;
       closeConfirmation();
     });
-    el['confirm-submit'].addEventListener('click', startResolve);
+    el['confirm-dialog'].addEventListener('cancel', function() {
+      if (state.formatConfirmResolve) {
+        var resolve = state.formatConfirmResolve;
+        state.formatConfirmResolve = null;
+        resolve(false);
+      } else state.confirmPayload = null;
+    });
+    el['confirm-submit'].addEventListener('click', function() {
+      if (state.formatConfirmResolve) {
+        var resolve = state.formatConfirmResolve;
+        state.formatConfirmResolve = null;
+        closeConfirmation(); resolve(true); return;
+      }
+      startResolve();
+    });
     document.querySelectorAll('[data-coming-soon]').forEach(function(button) {
       button.addEventListener('click', function() { showNotice(TEXT.comingSoon, 'info'); });
     });

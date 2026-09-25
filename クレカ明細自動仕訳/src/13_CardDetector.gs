@@ -511,22 +511,31 @@ function detectorTableWidth_(rows, headerRowNumber, samples) {
  * N列を2.1.2.3の評価規則で判定する。
  * @return {?boolean} N列が空欄なら判定を適用しない（null）
  */
-function matchesColumnProfile(sheet, formatRow) {
+function detectorProfileSamples_(sheet, formatRow) {
   var profile = formatRow && formatRow.columnProfile;
-  if (!profile) return null;
   var rows = sheet && Array.isArray(sheet.rows) ? sheet.rows : [];
   var dateIndex = parserDateColumnIndex_(formatRow);
   var amountIndex = detectorColumnIndex_(formatRow.amountColumn);
-  var sampleRows = Number.isInteger(profile.sampleRows) ? profile.sampleRows : 5;
+  var sampleRows = profile && Number.isInteger(profile.sampleRows) ? profile.sampleRows : 5;
   var dataStart = Number(formatRow.dataStartRow);
+  var breaks = parserSectionBreakIndexes_(rows, formatRow);
+  var stop = breaks.length ? breaks[0] : rows.length;
   var samples = [];
-  for (var index = dataStart - 1; index < rows.length && samples.length < sampleRows; index += 1) {
+  for (var index = dataStart - 1; index < stop && samples.length < sampleRows; index += 1) {
     var row = rows[index];
     if (!Array.isArray(row)) continue;
     var hasDate = dateIndex >= 0 && !isParserBlank_(row[dateIndex]);
     var hasAmount = amountIndex >= 0 && !isParserBlank_(row[amountIndex]);
     if (hasDate || hasAmount) samples.push(row);
   }
+  return samples;
+}
+
+function matchesColumnProfile(sheet, formatRow) {
+  var profile = formatRow && formatRow.columnProfile;
+  if (!profile) return null;
+  var rows = sheet && Array.isArray(sheet.rows) ? sheet.rows : [];
+  var samples = detectorProfileSamples_(sheet, formatRow);
   if (!samples.length) return false;
 
   var width = detectorTableWidth_(rows, formatRow.headerRow, samples);
