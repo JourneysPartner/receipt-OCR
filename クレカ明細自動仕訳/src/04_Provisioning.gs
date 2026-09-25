@@ -287,6 +287,21 @@ function installCardFormat(spec) {
       return {installed: false, reason: 'ALREADY_EXISTS', formatId: spec.formatId, version: version};
     }
   }
+  var row = cardFormatRowValues_(spec, version, now, activeUserEmail_());
+
+  var validated = formatRowFromValues_(row, null);
+  if (!validated.valid) {
+    throw new FormatDefinitionError('The definition does not pass the 2.1.2 schemas: ' +
+      validated.problems.join('; '));
+  }
+  var rowNumber = sheet.getLastRow() + 1;
+  ensureRowExists_(sheet, rowNumber);
+  sheet.getRange(rowNumber, 1, 1, CARD_FORMAT_COLUMNS_).setValues([row]);
+  return {installed: true, formatId: String(spec.formatId), version: version, rowNumber: rowNumber};
+}
+
+/** 登録と試し読みで同じセル値を作る。 */
+function cardFormatRowValues_(spec, version, now, actor) {
   var row = Array(CARD_FORMAT_COLUMNS_).fill('');
   row[0] = String(spec.formatId);
   row[1] = String(spec.formatName || spec.formatId);
@@ -307,7 +322,7 @@ function installCardFormat(spec) {
   row[16] = spec.billingRule ? JSON.stringify(spec.billingRule) : '';
   row[17] = spec.parserKind || 'generic';
   row[18] = version;
-  row[19] = activeUserEmail_();
+  row[19] = actor;
   row[21] = now;
   row[24] = spec.lookbackMonths === undefined ? '' : spec.lookbackMonths;
   row[25] = spec.forwardMonths === undefined ? '' : spec.forwardMonths;
@@ -321,15 +336,7 @@ function installCardFormat(spec) {
   row[35] = spec.amountFallbackColumn || '';
   row[36] = spec.sectionBreakRule ? JSON.stringify(spec.sectionBreakRule) : '';
 
-  var validated = formatRowFromValues_(row, null);
-  if (!validated.valid) {
-    throw new FormatDefinitionError('The definition does not pass the 2.1.2 schemas: ' +
-      validated.problems.join('; '));
-  }
-  var rowNumber = sheet.getLastRow() + 1;
-  ensureRowExists_(sheet, rowNumber);
-  sheet.getRange(rowNumber, 1, 1, CARD_FORMAT_COLUMNS_).setValues([row]);
-  return {installed: true, formatId: String(spec.formatId), version: version, rowNumber: rowNumber};
+  return row;
 }
 
 /**

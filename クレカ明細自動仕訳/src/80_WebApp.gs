@@ -23,6 +23,133 @@ var WEBAPP_IMPORT_TRIPS_PER_REVIEW_ = 7;
 var WEBAPP_CLONE_TRIPS_ = 3;
 var WEBAPP_TRIP_WORST_MS_ = 400;
 var WEBAPP_DEADLINE_MS_ = 300000;
+var WEBAPP_FORMAT_FILE_WORST_MS_ = 20000;
+var WEBAPP_FORMAT_SIBLING_LIMIT_ = 6;
+var WEBAPP_FORMAT_REQUEUE_LIMIT_ = 6;
+var WEBAPP_FORMAT_PREVIEW_ROWS_ = 50;
+var WEBAPP_FORMAT_GRID_ROWS_ = 30;
+var WEBAPP_FORMAT_GRID_COLUMNS_ = 26;
+function webAppFormatNowMs_() { return Date.now(); }
+
+function webAppFormatContext_(customerId, folderId, fileId, operation) {
+  var scope = authorize(ROLE.SYSTEM_ADMIN, customerId, {operation: 'WEBAPP:' + operation});
+  var customer = scope.customers[0];
+  var folder = webAppDirectChildFolder_(customer, folderId);
+  var files = webAppIteratorToArray_(folder.getFiles());
+  var file = files.filter(function(item) {
+    return String(item.getId()) === String(fileId);
+  })[0];
+  if (!file) throw new AuthorizationError('選択されたファイルはこのフォルダにありません。');
+  var review = openReviews({fileId: String(fileId), reviewType: 'FORMAT_UNKNOWN'})
+    .filter(function(item) { return String(item.customerId) === String(customerId); })[0];
+  if (!review) return {ok: false, code: 'NOT_FORMAT_UNKNOWN'};
+  return {ok: true, customer: customer, customerId: String(customerId), folder: folder,
+    file: file, fileId: String(fileId), fileName: String(file.getName()),
+    review: review, actor: scope.userEmail};
+}
+
+function webAppExplainUnknownFile(customerId, folderId, fileId, baseFormatId) {
+  return webAppInvoke_(function() {
+    var context = webAppFormatContext_(customerId, folderId, fileId, '形式診断');
+    return context.ok ? formatExplainUnknown_(context, baseFormatId) : context;
+  });
+}
+
+function webAppPreviewFormat(customerId, folderId, fileId, answers) {
+  return webAppInvoke_(function() {
+    var context = webAppFormatContext_(customerId, folderId, fileId, '形式試し読み');
+    return context.ok ? formatPreview_(context, answers || {}).response : context;
+  });
+}
+
+function webAppSaveFormat(customerId, folderId, fileId, answers, previewHash) {
+  return webAppInvoke_(function() {
+    var startedAt = webAppFormatNowMs_();
+    var context = webAppFormatContext_(customerId, folderId, fileId, '形式保存');
+    return context.ok ? formatSave_(context, answers || {}, previewHash, startedAt) : context;
+  });
+}
+
+function webAppRequeueFormatFiles(customerId, folderId, fileIds) {
+  return webAppInvoke_(function() {
+    var startedAt = webAppFormatNowMs_();
+    var scope = authorize(ROLE.SYSTEM_ADMIN, customerId, {operation: 'WEBAPP:再検査へ戻す'});
+    var folder = webAppDirectChildFolder_(scope.customers[0], folderId);
+    var files = webAppIteratorToArray_(folder.getFiles());
+    var byId = Object.create(null);
+    files.forEach(function(file) { byId[String(file.getId())] = file; });
+    var ids = Array.isArray(fileIds) ? fileIds.map(String) : [];
+    var selected = ids.slice(0, WEBAPP_FORMAT_REQUEUE_LIMIT_);
+    var requeued = [], skipped = [], remaining = ids.slice(WEBAPP_FORMAT_REQUEUE_LIMIT_);
+    var defs = formatActiveDefinitions_();
+    for (var index = 0; index < selected.length; index += 1) {
+      var id = selected[index];
+      if (webAppFormatNowMs_() - startedAt + WEBAPP_FORMAT_FILE_WORST_MS_ >
+          WEBAPP_DEADLINE_MS_) {
+        remaining = selected.slice(index).concat(remaining); break;
+      }
+      var file = byId[id];
+      try {
+      var review = openReviews({fileId: id, reviewType: 'FORMAT_UNKNOWN'})
+        .filter(function(item) { return String(item.customerId) === String(customerId); })[0];
+      if (!file || !review) {
+        skipped.push({fileId: id, code: 'NOT_FORMAT_UNKNOWN'}); continue;
+      }
+      var fileName = String(file.getName());
+      var read = readFile(id, fileName,
+        {expectedKeywords: detectionKeywordUnion_(defs)});
+      var verdict = formatDetectRead_(defs, read, fileName, id);
+      if (verdict.status !== 'RESOLVED') {
+        skipped.push({fileId: id, code: verdict.status === 'UNKNOWN_CARD_FORMAT' ?
+          'STILL_UNKNOWN' : 'AMBIGUOUS'}); continue;
+      }
+      resolveFileReview(review.reviewId, 'REGISTER_FORMAT',
+        {role: ROLE.SYSTEM_ADMIN, actor: scope.userEmail});
+      rewindFileForReimport_(id);
+      appendAudit({type: 'FORMAT_REQUEUE', actor: scope.userEmail,
+        targetType: 'FILE', targetId: id, customerId: String(customerId),
+        before: {fileState: 'VALIDATING'},
+        after: {fileState: 'DISCOVERED', formatId: verdict.formatId}, reason: 'WEBAPP'});
+      requeued.push({fileId: id, fileName: fileName, formatId: verdict.formatId});
+      } catch (error) {
+        skipped.push({fileId: id, code: 'REQUEUE_FAILED'});
+      }
+    }
+    return {requeued: requeued, skipped: skipped, remaining: remaining};
+  });
+}
+
+function webAppReturnFileToCustomer(customerId, folderId, fileId, reason, note) {
+  return webAppInvoke_(function() {
+    var context = webAppFormatContext_(customerId, folderId, fileId, '要修正へ回す');
+    if (!context.ok) return context;
+    var allowed = ['PURPOSE_COLUMN_MISSING', 'PURPOSE_HEADER_VALUE',
+      'PURPOSE_IN_ISSUER_COLUMN', 'OTHER'];
+    if (allowed.indexOf(String(reason)) < 0) throw new TypeError('Invalid reason');
+    var detail = String(note || '');
+    if (detail.length > 200) throw new TypeError('Note exceeds 200 characters');
+    resolveFileReview(context.review.reviewId, 'RETURN_TO_CUSTOMER',
+      {role: ROLE.SYSTEM_ADMIN, actor: context.actor});
+    recordError(context.fileId, {code: 'SOURCE_REQUIRES_CUSTOMER_FIX',
+      detail: String(reason) + (detail ? ': ' + detail : '')});
+    return {returned: true, fileId: context.fileId,
+      nextState: 'CUSTOMER_FIX_REQUIRED'};
+  });
+}
+
+function webAppWithdrawFormat(customerId, formatId) {
+  return webAppInvoke_(function() {
+    var scope = authorize(ROLE.SYSTEM_ADMIN, customerId, {operation: 'WEBAPP:形式取消し'});
+    var rows = loadFormatDefinitions({formatId: String(formatId)});
+    if (rows.length && !rows.some(function(row) {
+      return row.answers && row.answers.origin === 'WEBAPP';
+    })) return {withdrawn: false, code: 'NOT_WEBAPP_FORMAT'};
+    if (!rows.some(function(row) { return row.enabled; }))
+      return {withdrawn: false, code: 'NOT_ACTIVE'};
+    disableCardFormat_(String(formatId), 'WITHDRAWN_BY_OPERATOR', scope.userEmail);
+    return {withdrawn: true, formatId: String(formatId)};
+  });
+}
 
 /** Web アプリの HTML を返す。 */
 function doGet(e) {
@@ -86,6 +213,18 @@ function webAppListFolder(customerId, folderId) {
     var nowMs = Date.now();
     var files = webAppIteratorToArray_(folder.getFiles()).map(function(file) {
       return webAppFolderFile_(file, stateByFileId, nowMs);
+    });
+    var reviewsByFile = Object.create(null);
+    if (files.some(function(file) { return file.state === FILE_STATE.REVIEW_WAIT; })) {
+      openReviews({reviewType: 'FORMAT_UNKNOWN'}).forEach(function(review) {
+        if (String(review.customerId) === String(customerId) &&
+            (review.status === 'OPEN' || review.status === 'IN_PROGRESS')) {
+          reviewsByFile[String(review.fileId)] = review.reviewId;
+        }
+      });
+    }
+    files.forEach(function(file) {
+      file.formatReviewId = reviewsByFile[file.fileId] || null;
     });
     files.sort(function(a, b) {
       if (a.fileName !== b.fileName) return a.fileName < b.fileName ? -1 : 1;
