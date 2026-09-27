@@ -1634,6 +1634,7 @@
         ACK_AMOUNT_CHOICE_REQUIRED: '金額らしい列が複数あります。どれを金額にするか確かめて「金額の列を確認した」にチェックしてください。',
         NOT_FORMAT_UNKNOWN: '形式不明の要確認がありません（既に扱われた可能性があります）。',
         PREVIEW_STALE: '試し読みの後に入力かファイルが変わりました。もう一度［試し読み］を押してください。',
+        PREVIEW_HASH_MISSING: '保存に要る試し読みの結果がサーバーに届きませんでした。何も保存していません。もう一度［試し読み］を押してから保存してください。続くときは管理者に連絡してください。',
         NOT_WEBAPP_FORMAT: 'この形式は画面から登録したものではないので、ここでは取り消せません。',
         NOT_ACTIVE: 'この形式は既に無効です。'
       };
@@ -1672,7 +1673,7 @@
       if (!result || result.ok === false) return {saved: null, close: true,
         notice: formatBlockingMessage(result && result.code || 'UNKNOWN')};
       if (result.saved !== true) return {saved: null, close: false,
-        stale: result.code === 'PREVIEW_STALE',
+        stale: result.code === 'PREVIEW_STALE' || result.code === 'PREVIEW_HASH_MISSING',
         notice: result.code ? formatBlockingMessage(result.code) :
           (result.blocking || []).map(function(item) {
             return formatBlockingMessage(item.code, item.detail);
@@ -1777,6 +1778,21 @@
         headerRow: proposal.headerRow, dataStartRow: proposal.dataStartRow,
         columns: columns,
         acknowledgements: {customerSide: false, amountChoice: false}};
+    }
+
+    function formatTransportAnswers(value) {
+      if (Array.isArray(value)) return value.filter(function(item) {
+        return item !== null && item !== undefined;
+      }).map(formatTransportAnswers);
+      if (value && typeof value === 'object') {
+        var copy = {};
+        Object.keys(value).forEach(function(key) {
+          if (value[key] !== null && value[key] !== undefined)
+            copy[key] = formatTransportAnswers(value[key]);
+        });
+        return copy;
+      }
+      return value;
     }
 
     function formatUpdateAnswer(setValue, keepAcknowledgementControl) {
@@ -2337,10 +2353,11 @@
       var missingColumn = formatRequiredColumnMessage(state.formatAnswers);
       if (missingColumn) { formatShowMessage(missingColumn, 'warning'); return; }
       var sentAnswers = JSON.stringify(state.formatAnswers);
+      var transportAnswers = formatTransportAnswers(state.formatAnswers);
       invalidateFormatPreview(); formatSetBusy(true);
       try {
         var result = await gasCall('webAppPreviewFormat',
-          [state.selectedCustomerId, state.selectedFolderId, state.formatFileId, state.formatAnswers]);
+          [state.selectedCustomerId, state.selectedFolderId, state.formatFileId, transportAnswers]);
         if (!formatPreviewIsCurrent(sentAnswers, state.formatAnswers)) return;
         if (!result || result.ok === false) {
           formatShowMessage(formatBlockingMessage(result && result.code), 'blocking');
@@ -2363,7 +2380,7 @@
       var uncertain = false;
       try {
         var result = await gasCall('webAppSaveFormat', [state.selectedCustomerId,
-          state.selectedFolderId, state.formatFileId, answers, state.formatHash]);
+          state.selectedFolderId, state.formatFileId, formatTransportAnswers(answers), state.formatHash]);
         var outcome = formatSaveResult(result);
         formatApplySaveFailure(result);
         if (outcome.notice) formatShowMessage(outcome.notice, 'blocking');

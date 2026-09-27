@@ -1813,6 +1813,213 @@ module.exports = ({test, assert, gas}) => {
     }
   });
 
+  test('fmt 117: a missing preview hash stops before reading or writing', () => {
+    const {answers} = answersFor('ペイペイカード__PAYPAY_detail202502(0000)');
+    answers.columns.amount = 'E'; answers.columns.purpose = 'L';
+    const master = gas.stubs.getSpreadsheet('master');
+    const formats = master.getSheetByName(gas.evaluate('CONFIG.SHEET_NAMES.CARD_FORMAT_MASTER'));
+    const audit = master.getSheetByName(gas.evaluate('CONFIG.SHEET_NAMES.AUDIT_LOG'));
+    const original = gas.context.readFile;
+    let reads = 0;
+    gas.context.readFile = (...args) => { reads += 1; return original(...args); };
+    try {
+      for (const hash of [undefined, null, '']) {
+        const before = [formats.getLastRow(), audit.getLastRow()];
+        const result = gas.call('webAppSaveFormat', ['C001', 'card', 'target', answers, hash]);
+        assert.deepEqual(JSON.parse(JSON.stringify(result)),
+          {saved: false, code: 'PREVIEW_HASH_MISSING'});
+        assert.deepEqual([formats.getLastRow(), audit.getLastRow()], before);
+        assert.equal(reads, 0);
+      }
+    } finally { gas.context.readFile = original; }
+  });
+
+  test('fmt 118: null and absent answer keys have the same hash and save', () => {
+    const {answers} = answersFor('ペイペイカード__PAYPAY_detail202502(0000)');
+    answers.columns.amount = 'E'; answers.columns.purpose = 'L';
+    answers.baseFormatId = null; answers.columns.amountFallback = null;
+    const withNull = gas.call('webAppPreviewFormat', ['C001', 'card', 'target', answers]);
+    const absent = JSON.parse(JSON.stringify(answers));
+    delete absent.baseFormatId; delete absent.columns.amountFallback;
+    const withoutNull = gas.call('webAppPreviewFormat', ['C001', 'card', 'target', absent]);
+    assert.equal(withNull.previewHash, withoutNull.previewHash);
+    assert.deepEqual(JSON.parse(JSON.stringify(withoutNull.blocking)), []);
+    const saved = gas.call('webAppSaveFormat',
+      ['C001', 'card', 'target', absent, withoutNull.previewHash]);
+    assert.equal(saved.readback, 'OK', JSON.stringify(saved));
+  });
+
+  browserAsyncTest('fmt 119: the browser sends a null-free copy and handles a missing hash', async () => {
+    const world = mountedFormatWorld({webAppPreviewFormat: {ok: true, previewHash: 'new-hash',
+      blocking: [], warnings: [], extraction: {count: 1, total: 100, rows: [], excluded: [],
+        category: {category: 1}, billing: {}, year: {}}, amountComparison: []},
+      webAppSaveFormat: {saved: false, code: 'PREVIEW_HASH_MISSING'}});
+    const state = world.ui.state;
+    state.formatDiagnosis.proposal.amountCandidates = [{column: 'C', header: '金額'}];
+    state.formatAnswers.acknowledgements.amountChoice = false;
+    state.formatAnswers.acknowledgements.optional = null;
+    state.formatAnswers.optional = {empty: '', zero: 0, nested: {missing: undefined,
+      blank: null, list: [{missing: null, flag: false}]}};
+    state.formatHash = null; state.formatPreview = null;
+    world.ui.renderFormatPanel();
+    const checkCopy = (value) => {
+      assert.ok(value && typeof value === 'object');
+      for (const child of Object.values(value)) {
+        assert.notEqual(child, null);
+        assert.notEqual(child, undefined);
+        if (child && typeof child === 'object') checkCopy(child);
+      }
+    };
+    await world.ui.previewFormat();
+    const previewCall = world.calls.find((call) => call.name === 'webAppPreviewFormat');
+    checkCopy(previewCall.args[3]);
+    assert.equal(previewCall.args[3].acknowledgements.amountChoice, false);
+    assert.equal(previewCall.args[3].optional.zero, 0);
+    assert.equal(previewCall.args[3].optional.empty, '');
+    assert.equal(state.formatAnswers.baseFormatId, null);
+    assert.equal(state.formatAnswers.columns.amountFallback, null);
+    assert.equal(state.formatAnswers.optional.nested.blank, null);
+    const pending = world.ui.saveFormat();
+    world.ids['confirm-submit'].fire('click');
+    await pending;
+    const saveCall = world.calls.find((call) => call.name === 'webAppSaveFormat');
+    assert.ok(saveCall);
+    checkCopy(saveCall.args[3]);
+    assert.notEqual(saveCall.args[3], state.formatAnswers);
+    assert.equal(saveCall.args[3].acknowledgements.amountChoice, false);
+    assert.equal(saveCall.args[3].optional.zero, 0);
+    assert.equal(saveCall.args[3].optional.empty, '');
+    assert.equal(state.formatAnswers.baseFormatId, null);
+    assert.ok(world.ids['format-body'].textContent.includes(
+      '保存に要る試し読みの結果がサーバーに届きませんでした。何も保存していません。'));
+    assert.equal(state.formatHash, null);
+    assert.equal(control(world, 'button', '保存して有効にする').disabled, true);
+  });
+
+  function paypayWithBlankTail() {
+    const {answers} = answersFor('ペイペイカード__PAYPAY_detail202502(0000)');
+    answers.columns.amount = 'E'; answers.columns.purpose = 'L';
+    const before = gas.call('webAppPreviewFormat', ['C001', 'card', 'target', answers]);
+    replaceFixtureFile('ペイペイカード__PAYPAY_detail202502(0000)', 'target', (rows) => {
+      rows.push(...Array.from({length: 7}, () => []),
+        ...Array.from({length: 7}, () => Array(12).fill('')),
+        ...Array.from({length: 6}, () => Array(12).fill(null)));
+    });
+    return {answers, before};
+  }
+
+  test('fmt 120: blank excluded rows stay out of warnings but a nonblank row remains', () => {
+    const {answers, before} = paypayWithBlankTail();
+    const blank = gas.call('webAppPreviewFormat', ['C001', 'card', 'target', answers]);
+    assert.equal(blank.extraction.excludedBlank, 20);
+    assert.deepEqual(JSON.parse(JSON.stringify(blank.extraction.excluded)),
+      JSON.parse(JSON.stringify(before.extraction.excluded)));
+    assert.deepEqual(JSON.parse(JSON.stringify(blank.warnings)),
+      JSON.parse(JSON.stringify(before.warnings)));
+    assert.ok(!blank.warnings.some((item) => item.code === 'EXCLUDED_ROWS'));
+    replaceFixtureFile('ペイペイカード__PAYPAY_detail202502(0000)', 'target', (rows) => {
+      const nonblank = Array(12).fill('');
+      nonblank[answers.columns.merchant.charCodeAt(0) - 65] = '店名だけ';
+      rows.splice(answers.dataStartRow + 1, 0, nonblank);
+      rows.push(...Array.from({length: 7}, () => []),
+        ...Array.from({length: 7}, () => Array(12).fill('')),
+        ...Array.from({length: 6}, () => Array(12).fill(null)));
+    });
+    const mixed = gas.call('webAppPreviewFormat', ['C001', 'card', 'target', answers]);
+    assert.equal(mixed.extraction.excludedBlank, 20);
+    assert.equal(mixed.extraction.excluded.length, 1);
+    assert.ok(mixed.extraction.excluded[0].cells.includes('店名だけ'));
+    assert.equal(mixed.warnings.find((item) => item.code === 'EXCLUDED_ROWS').detail, 1);
+  });
+
+  test('fmt 121: blank rows remain in the readback comparison', () => {
+    const {answers} = paypayWithBlankTail();
+    const preview = gas.call('webAppPreviewFormat', ['C001', 'card', 'target', answers]);
+    const context = gas.call('webAppFormatContext_',
+      ['C001', 'card', 'target', '形式試し読み']);
+    const extracted = gas.call('formatPreview_', [context, answers]).extracted;
+    assert.equal(extracted.allExcluded.filter((item) =>
+      item.sourceRow >= answers.dataStartRow && item.cells.every((cell) => cell === '')).length, 20);
+    const saved = gas.call('webAppSaveFormat',
+      ['C001', 'card', 'target', answers, preview.previewHash]);
+    assert.equal(saved.readback, 'OK', JSON.stringify(saved));
+    const extraction = {count: 0, total: 0, category: {category: 1}};
+    const first = gas.call('formatExtractionSignature_', [extraction, [],
+      [{sourceRow: 30, ruleId: '_dateAmountEmpty', cells: []}]]);
+    const second = gas.call('formatExtractionSignature_', [extraction, [],
+      [{sourceRow: 30, ruleId: '_dateAmountEmpty', cells: []},
+        {sourceRow: 31, ruleId: '_dateAmountEmpty', cells: []}]]);
+    assert.notEqual(first, second);
+  });
+
+  function proposalSheet(width) {
+    const header = Array(width).fill('');
+    Object.assign(header, {0: '利用日', 1: '店名', 2: '利用金額', 3: '使用用途'});
+    header[width - 1] = '補助';
+    const detail = Array(width).fill('');
+    Object.assign(detail, {0: '2025/02/01', 1: '店', 2: 100, 3: '経費'});
+    detail[width - 1] = '値';
+    return {name: '明細', rows: [header, detail]};
+  }
+
+  test('fmt 122: proposed IDs replace the base width suffix and reserve disabled IDs', () => {
+    setup();
+    const cases = [
+      ['paypay_family', 12, [], 'paypay_family_x12'],
+      ['rakuten_x11', 11, [], 'rakuten_x11_2'],
+      ['aeon_x9', 8, [{formatId: 'aeon_x8', valid: false}], 'aeon_x8_2'],
+      ['paypay_family_x12_2', 13, [], 'paypay_family_x13'],
+      ['amex_6', 7, [], 'amex_6_x7']
+    ];
+    for (const [baseId, width, extra, expected] of cases) {
+      const base = {formatId: baseId, formatName: '土台', headerRow: 1, dataStartRow: 2};
+      const definitions = [{formatId: baseId}, ...extra];
+      const proposal = gas.call('formatProposal_',
+        [proposalSheet(width), 'xlsx', 'カード', base, null, definitions]);
+      assert.equal(proposal.formatId, expected, baseId);
+    }
+  });
+
+  test('fmt 123: proposed names replace parentheses, avoid duplicates, and fit', () => {
+    setup();
+    const paypay = unknown('ペイペイカード__PAYPAY_detail202502(0000)');
+    const reference = unknown('ペイペイカード__detail202503(0000)');
+    const base = gas.call('pinFormatVersion', ['paypay_family', 1]);
+    const named = gas.call('formatProposal_', [paypay.sheets[0], 'xlsx', 'ペイペイカード',
+      base, reference.sheets[0], defs()]);
+    assert.equal(named.formatName, 'PayPayカード系Excel（12列・用途L）');
+    const name = named.formatName;
+    const duplicate = [base, {formatId: 'other', formatName: name, valid: false}];
+    const second = gas.call('formatProposal_', [paypay.sheets[0], 'xlsx', 'ペイペイカード',
+      base, reference.sheets[0], duplicate]);
+    assert.equal(second.formatName, 'PayPayカード系Excel（12列・用途L・その2）');
+    duplicate.push({formatId: 'another', formatName: second.formatName});
+    const third = gas.call('formatProposal_', [paypay.sheets[0], 'xlsx', 'ペイペイカード',
+      base, reference.sheets[0], duplicate]);
+    assert.equal(third.formatName, 'PayPayカード系Excel（12列・用途L・その3）');
+    const enaviSlug = fs.readdirSync(path.join(fixtureRoot, 'unknown-formats'))
+      .find((file) => file.includes('enavi202509')).slice(0, -5);
+    const enavi = unknown(enaviSlug);
+    const rakuten = gas.call('pinFormatVersion', ['rakuten_x11', 1]);
+    const rakutenProposal = gas.call('formatProposal_', [enavi.sheets[0], 'xlsx', '楽天カード',
+      rakuten, null, defs()]);
+    assert.equal(rakutenProposal.columns.purpose.column, null);
+    assert.equal(rakutenProposal.formatName, '楽天カード系Excel（11列）');
+    const noPurpose = proposalSheet(7);
+    noPurpose.rows[0][3] = 'メモ';
+    const blankNoPurpose = gas.call('formatProposal_', [noPurpose, 'xlsx', 'カード',
+      null, null, []]);
+    assert.equal(blankNoPurpose.formatName, 'カード Excel（7列）');
+    const plain = {...base, formatName: '括弧なし'};
+    assert.equal(gas.call('formatProposal_', [proposalSheet(7), 'xlsx', 'カード',
+      plain, null, []]).formatName, '括弧なし（7列・用途D）');
+    const long = {...base, formatName: '長'.repeat(65) + '（古い括弧）'};
+    const shortened = gas.call('formatProposal_', [proposalSheet(7), 'xlsx', 'カード',
+      long, null, []]).formatName;
+    assert.ok(shortened.length <= 60, shortened);
+    assert.ok(shortened.endsWith('（7列・用途D）'), shortened);
+  });
+
   test('fmt 72: editing an answer clears the preview hash', () => {
     assert.equal(clientEval("(state.formatPreview={previewHash:'old'},state.formatHash='old',invalidateFormatPreview(),state.formatHash)"), null);
   });

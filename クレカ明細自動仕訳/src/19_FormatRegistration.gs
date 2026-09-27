@@ -137,17 +137,32 @@ function formatProposal_(sheet, fileType, folderName, base, referenceSheet, defi
       if (hits.length === 1) roles[role] = {column: hits[0], source: 'REFERENCE'};
     });
   }
-  var id = base ? String(base.formatId).slice(0, 29 - String(width).length) + '_x' + width :
+  var idStem = base ? String(base.formatId).replace(/(?:_x[0-9]+)+(?:_[0-9]+)?$/, '') : '';
+  var id = base ? idStem.slice(0, 30 - String(width).length) + '_x' + width :
     'new_' + toTokyoDateString_(new Date()).replace(/-/g, '') + '_x' + width;
   var taken = {};
-  (definitions || []).forEach(function(def) { taken[def.formatId] = true; });
+  var takenNames = {};
+  (definitions || []).forEach(function(def) {
+    taken[def.formatId] = true;
+    takenNames[def.formatName] = true;
+  });
   var initial = id;
   for (var suffix = 2; taken[id]; suffix += 1) {
     id = initial.slice(0, 31 - String(suffix).length) + '_' + suffix;
   }
+  var nameStem = base ? String(base.formatName).replace(/（[^（）]*）$/, '') :
+    folderName + ' ' + (fileType === 'csv' ? 'CSV' : 'Excel');
+  var nameDetail = String(width) + '列' +
+    (roles.purpose.column ? '・用途' + roles.purpose.column : '');
+  function proposedName(number) {
+    var end = '（' + nameDetail + (number ? '・その' + number : '') + '）';
+    return nameStem.slice(0, 60 - end.length) + end;
+  }
+  var name = proposedName(null);
+  for (var nameSuffix = 2; takenNames[name]; nameSuffix += 1)
+    name = proposedName(nameSuffix);
   return {baseFormatId: base ? base.formatId : null, formatId: id,
-    formatName: base ? base.formatName + '（' + width + '列版）' :
-      folderName + ' ' + (fileType === 'csv' ? 'CSV' : 'Excel') + '（' + width + '列）',
+    formatName: name,
     sheetName: sheet.name, headerRow: headerRow, dataStartRow: dataStartRow,
     columns: roles, amountCandidates: amountCandidates, headers: headers};
 }
@@ -527,11 +542,20 @@ function formatPreviewExtraction_(context, sheet, def) {
         return cell instanceof Date ? toTokyoDateString_(cell) : String(cell || '');
       })};
   });
+  var excludedBlank = 0;
+  var visibleExcluded = excluded.filter(function(item) {
+    if (item.ruleId === '_rowRange') return false;
+    if ((sheet.rows[item.sourceRow - 1] || []).every(isParserBlank_)) {
+      excludedBlank += 1;
+      return false;
+    }
+    return true;
+  });
   return {extraction: {count: txs.length, total: rows.reduce(function(sum, row) {
       return sum + Number(row.amount || 0);
     }, 0), rows: rows.slice(0, WEBAPP_FORMAT_PREVIEW_ROWS_),
     moreRows: Math.max(0, rows.length - WEBAPP_FORMAT_PREVIEW_ROWS_),
-    excluded: excluded.filter(function(item) { return item.ruleId !== '_rowRange'; }),
+    excluded: visibleExcluded, excludedBlank: excludedBlank,
     excludedBeforeStart: excluded.filter(function(item) { return item.ruleId === '_rowRange'; }).length,
     billing: {status: billing.status, yearMonth: billing.status === 'RESOLVED' ?
       String(billing.year) + '-' + ('0' + billing.month).slice(-2) : null},
@@ -723,6 +747,8 @@ function formatExtractionSignature_(extraction, allRows, allExcluded) {
 }
 
 function formatSave_(context, answers, previewHash, startedAt) {
+  if (typeof previewHash !== 'string' || previewHash.length === 0)
+    return {saved: false, code: 'PREVIEW_HASH_MISSING'};
   var preview = formatPreview_(context, answers);
   var response = preview.response;
   if (String(response.previewHash) !== String(previewHash))
