@@ -1849,6 +1849,71 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(saved.readback, 'OK', JSON.stringify(saved));
   });
 
+  test('fmt 124: acknowledgement key order is stable in hash and stored metadata', () => {
+    const {answers} = answersFor('ペイペイカード__PAYPAY_detail202502(0000)');
+    answers.columns.amount = 'E'; answers.columns.purpose = 'L';
+    answers.acknowledgements = {customerSide: true, amountChoice: true};
+    const canonical = gas.call('webAppPreviewFormat', ['C001', 'card', 'target', answers]);
+    const reversedAnswers = JSON.parse(JSON.stringify(answers));
+    reversedAnswers.acknowledgements = {amountChoice: true, customerSide: true};
+    const reversed = gas.call('webAppPreviewFormat',
+      ['C001', 'card', 'target', reversedAnswers]);
+    assert.equal(reversed.previewHash, canonical.previewHash);
+
+    const saved = gas.call('webAppSaveFormat',
+      ['C001', 'card', 'target', reversedAnswers, canonical.previewHash]);
+    assert.equal(saved.readback, 'OK', JSON.stringify(saved));
+    const definition = defs().find((item) => item.formatId === answers.formatId);
+    const formats = gas.stubs.getSpreadsheet('master').getSheetByName(
+      gas.evaluate('CONFIG.SHEET_NAMES.CARD_FORMAT_MASTER'));
+    const record = JSON.parse(formats.getRange(definition._rowNumber, 28).getValue());
+    assert.deepEqual(JSON.parse(JSON.stringify(record.acknowledgements)),
+      {customerSide: true, amountChoice: true});
+    assert.deepEqual(Object.keys(record.acknowledgements), ['customerSide', 'amountChoice']);
+  });
+
+  test('fmt 125: acknowledgements normalize unknown keys and non-true values', () => {
+    const {answers} = answersFor('ペイペイカード__PAYPAY_detail202502(0000)');
+    answers.columns.amount = 'E'; answers.columns.purpose = 'L';
+    const previewWith = (acknowledgements, omitted = false) => {
+      const candidate = JSON.parse(JSON.stringify(answers));
+      if (omitted) delete candidate.acknowledgements;
+      else candidate.acknowledgements = acknowledgements;
+      return {answers: candidate,
+        preview: gas.call('webAppPreviewFormat', ['C001', 'card', 'target', candidate])};
+    };
+    const pairs = [
+      ['(a)', previewWith({customerSide: true, amountChoice: true, note: 'x'}),
+        previewWith({customerSide: true, amountChoice: true})],
+      ['(b)', previewWith({customerSide: 'true', amountChoice: 1}),
+        previewWith({customerSide: false, amountChoice: false})],
+      ['(c)', previewWith(undefined, true),
+        previewWith({customerSide: false, amountChoice: false})]
+    ];
+    const mismatches = [];
+    const codes = (result) => result.blocking.map((item) => item.code).sort();
+    for (const [label, left, right] of pairs) {
+      if (left.preview.previewHash !== right.preview.previewHash)
+        mismatches.push(label + ': previewHash');
+      if (JSON.stringify(codes(left.preview)) !== JSON.stringify(codes(right.preview)))
+        mismatches.push(label + ': blocking codes');
+    }
+
+    const saved = gas.call('webAppSaveFormat',
+      ['C001', 'card', 'target', pairs[0][1].answers, pairs[0][1].preview.previewHash]);
+    if (saved.readback !== 'OK') mismatches.push('saved readback: ' + saved.readback);
+    if (saved.readback === 'OK') {
+      const definition = defs().find((item) => item.formatId === answers.formatId);
+      const formats = gas.stubs.getSpreadsheet('master').getSheetByName(
+        gas.evaluate('CONFIG.SHEET_NAMES.CARD_FORMAT_MASTER'));
+      const record = JSON.parse(formats.getRange(definition._rowNumber, 28).getValue());
+      const keys = Object.keys(record.acknowledgements).sort();
+      if (JSON.stringify(keys) !== JSON.stringify(['amountChoice', 'customerSide']))
+        mismatches.push('stored acknowledgement keys: ' + keys.join(','));
+    }
+    assert.deepEqual(mismatches, []);
+  });
+
   browserAsyncTest('fmt 119: the browser sends a null-free copy and handles a missing hash', async () => {
     const world = mountedFormatWorld({webAppPreviewFormat: {ok: true, previewHash: 'new-hash',
       blocking: [], warnings: [], extraction: {count: 1, total: 100, rows: [], excluded: [],

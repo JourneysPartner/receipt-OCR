@@ -1,0 +1,48 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の、**形式不明のカードを Web アプリの画面から登録する機能（§15-8）**を受け取ります。この機能は 1.6 まで本番に出ています（`db4c2a3`）。**1.6 の実機受入で見つけた不具合を 1 つ直してください。**
+
+いま作業ツリーの `src/` と `test/` に未コミットの変更はありません。`node test/run-tests.js` は **1225/1225 緑**です。
+
+## 仕様書
+
+`work/spec_format_registration.md` を **1.7** に改めました（未コミット）。**改訂履歴 1.7 を最初に読み、次の節を読んでから直してください**：§5.5 の表の AB 行、§5.6 手順 6、§5.7 手順 2 の括弧書き、§8 の「1.7 の修正で変えてよいのは」の段落、§10.13（fmt 124・125）、§11 の M49〜M51。
+
+## 直すこと（要点。詳細は仕様書）
+
+**`previewHash` が回答の `acknowledgements` の鍵の順で変わる。**
+
+- いまの `src/19_FormatRegistration.gs` の `formatDerivedSpec_` は、登録回答（AB 列）の metadata に `acknowledgements: answers.acknowledgements || {}` と、受け取った物をそのまま入れています。AB は `JSON.stringify` の文字列で `formatHashRow_` の材料になるので、同じ意味の回答でも鍵の順・余計な鍵・`true` 以外の真の値で `previewHash` が変わります。実機の実行 API は鍵の順を保たないので、試し読みの値が 2 通りを行き来し、保存が時々 `PREVIEW_STALE` になりました。
+- 直し方：AB に入れる `acknowledgements` を、`{customerSide: a.customerSide === true, amountChoice: a.amountChoice === true}`（`a` は `answers.acknowledgements`、無ければ `{}`）として**この鍵の順で作り直す**。AB 列に書く値とハッシュの材料は同じ物にする（ハッシュでだけ作り直すのは M51 で、誤り）。
+
+---
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。**
+2. **git を操作しないこと**（commit・stash・reset・checkout・clean・add）。
+3. **`src/` で変えてよいのは `src/19_FormatRegistration.gs` の 1 つだけ。**検査：`git status --porcelain -- src/` が 1 行以下で、このファイル以外が出ないこと。画面（`src/81_WebAppUi.html`）は変えない。
+4. テストの変更は `test/phase9-format-registration.test.js` だけ。`test/fixtures/` と他の既存テストは 1 文字も変えないこと。
+5. **テストを先に赤にしてから直すこと。**fmt 124・125 を書き、いまの実装で赤になることを確かめてから直す。fmt 125 のうち今でも緑になる部分があれば、どれかを報告する。
+6. 既存の 1225 本を 1 つも壊さないこと。**既存のテストの期待を変えて緑にしてはならない**（特に fmt 28「確認を外すと値が変わる」と fmt 118 はそのまま緑であること）。変えないと通らないものがあれば、変えずに止めて理由を報告すること。
+7. リポジトリの親フォルダの `.codex/config.toml` に触らないこと。
+8. **この 1 件以外は変えないこと**（§14 K-F6・K-F7 も触らない。1.6 の `PREVIEW_HASH_MISSING` と画面の `null` 除去も残す）。仕様書も変えないこと（間違いを見つけたら報告する）。
+9. 新しいエラーコードを `ERROR_CATALOG` に足してはならない。
+
+## 進め方
+
+1. 仕様書 1.7 の該当節を読む
+2. fmt 124・125 を書く → 赤を確かめる
+3. `formatDerivedSpec_` を直す
+4. `node test/run-tests.js` を全部緑にする
+5. §11 の M1〜M51 を回す（M1〜M48 は退行の確認。M49〜M51 は今回の分）
+6. `git status --porcelain -- src/` を確かめる
+
+## 報告してほしいこと
+
+- `node test/run-tests.js` の最後の行と、テストの本数の増減
+- 直す前に fmt 124・125 のどの確かめが赤だったか
+- 仕様書 1.7 が間違っていた箇所（黙って直さないこと）
+- 自分で決めた箇所
+- 赤にならなかった変異と、その理由の見立て
+- `git status --porcelain -- src/ test/` の出力
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。
