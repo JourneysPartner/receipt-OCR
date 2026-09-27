@@ -86,6 +86,7 @@ module.exports = ({test, assert, gas}) => {
         return child;
       }
       get firstChild() { return this.children[0] || null; }
+      get lastChild() { return this.children[this.children.length - 1] || null; }
       addEventListener(name, listener) { (this.listeners[name] ||= []).push(listener); }
       fire(name) {
         if (this.disabled) return [];
@@ -1912,6 +1913,54 @@ module.exports = ({test, assert, gas}) => {
         mismatches.push('stored acknowledgement keys: ' + keys.join(','));
     }
     assert.deepEqual(mismatches, []);
+  });
+
+  test('fmt 126: a review file name opens the source file in Drive in a new tab', () => {
+    const world = browserWorld();
+    const {state} = world.ui;
+    state.customers = [{customerId: 'C001', customerName: '顧客一', canImport: true}];
+    state.selectedCustomerId = 'C001';
+    state.reviews = [
+      {reviewId: 'r1', fileId: '1AbC_x-9', fileName: 'meisai202506(1).xlsx',
+        merchantOriginal: '店A', sourceRow: 26},
+      {reviewId: 'r2', fileId: '', fileName: '', merchantOriginal: '店B', sourceRow: 3}];
+    state.partnerTotal = 2;
+    world.ui.renderSelection();
+    const cells = world.root.querySelectorAll('.review-file');
+    assert.equal(cells.length, 2);
+    const link = cells[0].querySelector('a');
+    assert.ok(link, 'file name with an ID must be a link');
+    assert.equal(link.href, 'https://drive.google.com/file/d/1AbC_x-9/view');
+    assert.equal(link.target, '_blank');
+    assert.equal(link.rel, 'noopener noreferrer');
+    assert.equal(link.textContent, 'meisai202506(1).xlsx');
+    assert.equal(cells[1].querySelector('a'), null);
+    assert.equal(cells[1].textContent, '（ファイル名不明）');
+  });
+
+  test('fmt 127: a folder file name opens the file in Drive in a new tab', () => {
+    const world = browserWorld();
+    const {state} = world.ui;
+    state.customers = [{customerId: 'C001', customerName: '顧客一', canImport: true}];
+    state.selectedCustomerId = 'C001';
+    state.selectedFolderId = 'card';
+    state.files = [
+      {fileId: 'F_1', fileName: 'PAYPAY detail202502(1606).xlsx', lastUpdated: '2025-03-01T00:00:00Z',
+        size: 1024, stateLabel: '取込可能', importable: true},
+      {fileId: 'F_2', fileName: 'unknown.xlsx', lastUpdated: '2025-03-01T00:00:00Z',
+        size: 1024, stateLabel: '要確認', importable: false, formatReviewId: 'RV1'}];
+    world.ui.renderSelection();
+    const cells = world.ids['file-list'].querySelectorAll('.file-name');
+    assert.equal(cells.length, 2);
+    const link = cells[0].querySelector('a');
+    assert.ok(link, 'file name with an ID must be a link');
+    assert.equal(link.href, 'https://drive.google.com/file/d/F_1/view');
+    assert.equal(link.target, '_blank');
+    assert.equal(link.rel, 'noopener noreferrer');
+    assert.equal(link.textContent, 'PAYPAY detail202502(1606).xlsx');
+    assert.equal(cells[1].querySelector('a').href, 'https://drive.google.com/file/d/F_2/view');
+    assert.ok(world.ids['file-list'].querySelectorAll('button')
+      .some((node) => node.textContent === '形式を確認'), 'format button must remain');
   });
 
   browserAsyncTest('fmt 119: the browser sends a null-free copy and handles a missing hash', async () => {

@@ -149,6 +149,8 @@
     tr:last-child td { border-bottom: 0; }
     tr.dimmed { color: #8a94a3; background: #fafafa; }
     .file-name, .review-file { overflow-wrap: anywhere; }
+    .file-name a, .review-file a { color: var(--brand); }
+    .file-name a:hover, .review-file a:hover { text-decoration: none; }
     .status-line { min-height: 21px; margin: 8px 0; color: var(--muted); }
     .action-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
     .button {
@@ -641,8 +643,12 @@
           file.formatReviewId ? '形式不明' : file.stateLabel]
           .forEach(function(value, index) {
             var td = document.createElement('td');
-            if (index === 0) td.className = 'file-name';
-            td.textContent = value;
+            if (index === 0) {
+              td.className = 'file-name';
+              appendDriveFileName(td, file.fileId, value);
+            } else {
+              td.textContent = value;
+            }
             row.appendChild(td);
           });
         if (file.formatReviewId) {
@@ -700,6 +706,24 @@
       });
       names.push(TEXT.partnerUnknown);
       return names;
+    }
+
+    /**
+     * 空のセルへ、Drive で元ファイルを開くリンクとしてファイル名を置く。ID が無ければ文字だけ置く。
+     * Web アプリは iframe の中で動くので、同じ枠で開くと画面ごと置き換わる。必ず別タブで開く。
+     */
+    function appendDriveFileName(cell, fileId, label) {
+      if (!fileId) {
+        cell.textContent = label;
+        return;
+      }
+      var link = document.createElement('a');
+      link.href = 'https://drive.google.com/file/d/' + encodeURIComponent(String(fileId)) + '/view';
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.title = 'Drive で元ファイルを開く（別タブ）';
+      link.textContent = label;
+      cell.appendChild(link);
     }
 
     function renderReviews() {
@@ -776,7 +800,7 @@
           row.appendChild(inputCell);
           var fileCell = document.createElement('td');
           fileCell.className = 'review-file';
-          fileCell.textContent = review.fileName || '（ファイル名不明）';
+          appendDriveFileName(fileCell, review.fileId, review.fileName || '（ファイル名不明）');
           row.appendChild(fileCell);
           var sourceCell = document.createElement('td');
           sourceCell.textContent = review.sourceRow === null || review.sourceRow === undefined ? '—' : String(review.sourceRow);
