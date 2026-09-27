@@ -2,11 +2,12 @@
 
 対象システム：クレジットカード明細 自動仕訳システム（Google Apps Script、リポジトリ `クレカ明細自動仕訳`）
 作成日：2026-09-25
-版：1.6（実機受入で見つけた 3 点を反映。修正は未実装）
+版：1.7（1.6 の受入で見つけた `previewHash` の揺れを直す。修正は未実装）
 読者：本仕様だけを読んで実装する実装者（AI を含む）。**書いてあることは変えない。**書いていないことは実装者が決めてよいが、決めた箇所は報告する。判断に迷ったら §2.3「線引きの原理」を先に読む。
 起点：`work/spec_webapp.md` §15 の 8。前提となる仕組みは `design_document.md` 4.11（形式判定）・4.12（形式登録）・6.6（登録フロー）、および `work/spec_webapp.md`（Web アプリ第1段）。
 
 改訂履歴：
+- 1.7（2026-09-27）：**1.6 は本番に出た（`db4c2a3`・`gas-push-96`）。1.6 の受入 9 で、1.6 の (1) の見立てが誤りだったと分かった。**`previewHash` は実行 API でも届いている ── でたらめな値で保存を呼ぶと `PREVIEW_HASH_MISSING` ではなく `PREVIEW_STALE` が返る。**本当の原因は、回答の `acknowledgements` の鍵の順番である。**実行 API（`clasp run-function`）は物を protobuf の Struct で運び、鍵の順を保たない。サーバーは `answers.acknowledgements` を**受け取ったまま**登録回答（AB 列）に入れ、AB は `JSON.stringify` の文字列として `previewHash` の材料になる（§5.6 手順 6）。鍵が 2 つなので、同じ回答でも `{customerSide, amountChoice}` と `{amountChoice, customerSide}` の 2 通りに届き、**`previewHash` が 2 つの値を行き来した**（実機で同じ回答の試し読みを 12 回：2 値が 7 回と 5 回。試し読みで得た値での保存 7 回のうち 2 回が `PREVIEW_STALE`）。`acknowledgements` の鍵を 1 つにして送ると、6 回とも同じ値になった。`null` の鍵は関係が無かった（入れ子の `null` を含む回答でも、順番が合えば保存は通った）。1.6 の受入で「最上位に `baseFormatId: null` があると毎回」と書いたのは、試した回数が少なかったための見誤りである。**直し方：サーバーは `acknowledgements` を受け取ったまま使わず、`{customerSide: 値 === true, amountChoice: 値 === true}` をこの鍵の順で作り直してから AB に入れる**（§5.5 AB）。これで AB の中身は、送り方（`google.script.run`・実行 API）にも、余計な鍵にも左右されない。画面の `google.script.run` は `{customerSide, amountChoice}` を固定の順で作って送るので、画面でこの揺れが起きていたかは確かめていない（1.6 の受入 10 は未実施）。**1.6 の `PREVIEW_HASH_MISSING`（§5.7 手順 2）と画面の `null` 除去（U42）はそのまま残す** ── 原因ではなかったが、どちらも害が無く、前者は「試し読みをせずに呼んだ」を正しく言い分ける。§5.5 AB・§5.6 手順 6・§5.7 手順 2・U42 の理由・§8・§10.13・§11 M49〜M51・§12。
 - 1.6（2026-09-27）：**1.5 は本番に出て（`d0a7fca`・`gas-push-95`）、実機受入を終えた**（§12。`clasp run-function` で画面と同じサーバー関数を呼んだ）。受入で見つけた 4 点のうち 3 点を直す。**(1) 保存に `previewHash` が届かないと `PREVIEW_STALE` と誤って言う。**実行 API（`clasp run-function`）で、回答の最上位に `baseFormatId: null` があると保存が毎回 `PREVIEW_STALE` になった。回答から `previewHash` の計算に効くものは何も変わらないので、**5 番目の引数 `previewHash` が届いていない**と見ている（試し読みは引数が 4 つで、最後が回答なので起きない）。画面の `google.script.run` で起きるかは確かめていない。直し方は 2 つ：画面は**値が `null` の鍵を回答から除いて送る**（サーバーは鍵が無いのと `null` を同じに扱うので、`previewHash` は変わらない）。サーバーは**`previewHash` が文字列で届かなければ `PREVIEW_HASH_MISSING`** を返す（「入力が変わった」と嘘を言わない）。§5.7 手順 2・§6.1・U42・付録 B。**(2) `EXCLUDED_ROWS` が明細の下の空行を数える。**試し読みで、明細の下の空行 20 行が `_dateAmountEmpty` で除外され、除外した行の表に 20 行並んで警告も出た。**全セルが空の行は表示にも警告にも入れない**（数は `excludedBlank` で返す。読み戻しの比較は全部で比べる）。§5.6・§6.2。**(3) 形式 ID と形式名の提案が不格好。**土台の ID が既に `_x<列数>` で終わると `rakuten_x11_x11`、土台の名前が既に「（13列・用途M）」を持つと「PayPayカード系Excel（13列・用途M）（12列版）」になった。**ID は土台の末尾の `_x<数>`（と `_<数>`）を外してから付け、名前は末尾の括弧を置き換える。**§5.4.5。残る 1 点（イオンの「会員値引」行が日付なしで `DATE_UNREADABLE` の要確認になる。既存の挙動）は経理の扱いが決まっていないので、この版では扱わない（§14 K-F7）。
 - 1.5（2026-09-25）：**1.4 の修正（1214/1214 緑、M1〜M37 すべて赤）を監査した。**U36〜U40 は直っている。**実装者が仕様に無い判断を 1 つしており、それが P4 に反していた** ── 保存の後の処理（登録の監査・読み戻し・兄弟ファイルの列挙）で例外が出たら `readback: 'UNCERTAIN'` を返すが、**形式は有効のまま残す**（テストもそれを固定していた）。読み戻しの確認を終えていない形式が全顧客の取込に効く。§5.7 手順 7' と U41 を足した。
 - 1.4（2026-09-25）：**1.3 の修正（1207/1207 緑、M1〜M32 すべて赤、ソース文字列の検査 14 か所を偽の DOM の振る舞いに置き換え）を監査した。**高はもう無い ── U1・U2・U24 は監査者も偽の DOM で再現して確かめ、監査者の変異（初期化を全部消す・`ok: false` を成功扱い・正規化で空白を消す）もそれぞれ赤になった。サーバーは監査者の変異 24 個中 21 個が赤。画面に中 5（U36〜U40）。**この版で直すのは中の 5 つと、それを捕まえるテストだけにする。**低 10 は §14 K-F6 に記録して後回しにする（どれも帳簿を壊さず、サーバーが `PREVIEW_STALE` などで止める）。**偽の DOM のテストの強さにも限りがある**（フォーカスの仕組みが無い・偽の `google.script.run` が同期で即答するので遅れた応答や処理中の状態を作れない）── 中の 5 つを捕まえる分だけ足す（§10.10）。
@@ -422,7 +423,7 @@
 | Y・Z | 土台のもの。**土台の値が空（`null`）なら `undefined` にして空文字で書かせる。`null` をセルへ書いてはならない** ── 実機のシートは `null` を持てず空セルになり、§5.7 の行の比較が必ず不一致になる（1.1 の(1)）。導出した行（`cardFormatRowValues_` の戻り値）に `null`・`undefined` のセルが 1 つも無いこと（fmt 30b） |
 | AE・AF・AG 外貨 | **空**（見出しで対応を取れないので引き継がない。空は不備ではない ── INV-38） |
 | R・S・C・D・AD | `generic`・`1`・`active`・`TRUE`・`NEW` |
-| AB 登録回答 | `{origin: 'WEBAPP', baseFormatId, customerId, sourceFileId, sourceFileName, referenceFileId, purposeGap, purposeHeader, acknowledgements, amountCandidates: [列…], previewHash}`。**`previewHash` は、AB から `previewHash` の鍵を除いた行で計算し（§5.6 手順 6）、その後で AB に入れる** ── 入れてから計算すると自分自身を含んで循環する |
+| AB 登録回答 | `{origin: 'WEBAPP', baseFormatId, customerId, sourceFileId, sourceFileName, referenceFileId, purposeGap, purposeHeader, acknowledgements, amountCandidates: [列…], previewHash}`。**`previewHash` は、AB から `previewHash` の鍵を除いた行で計算し（§5.6 手順 6）、その後で AB に入れる** ── 入れてから計算すると自分自身を含んで循環する。**`acknowledgements` は回答の物をそのまま入れず、`{customerSide: a.customerSide === true, amountChoice: a.amountChoice === true}`（`a` は `answers.acknowledgements`、無ければ `{}`）を、この鍵の順で作って入れる（1.7）。**AB は `JSON.stringify` の文字列でハッシュの材料になるので、回答の物を入れると、鍵の順（実行 API は保たない）・余計な鍵・`true` 以外の真の値（`'true'`・`1`）で `previewHash` が変わる。`=== true` にするのは、§6.1 の `ACK_*_REQUIRED` と同じ判定にするため（止める検査は `'true'` を未確認とみなすのに、記録は確認済みと書く、を起こさない）。**AB のほかの値はすべてサーバーが自分で組む**（文字列・数値、またはサーバーが決めた順の物）── 回答の物をそのまま AB に入れてよいものは無い |
 
 **列記号を持つ規則を引き継がない理由**：F1 と同じで、列がずれた形式に土台の列記号を持ち込むと、別の列を見る。引き継がなかった規則は警告 `RULES_NOT_INHERITED` で名指しする（§6.2）。
 
@@ -440,7 +441,7 @@
    `classifyValidationResult` に渡す `validation` の鍵は **`format: {ok: true}`・`scanTruncation`・`effectiveTransactionCount`・`purposeResolution`・`yearInference`・`dateTriage`・`countsTotals`・`priorYear`・`transactionValidation` だけ**。`duplicate`・`purposeRevision`・`destinationSchema`・`inputLimit`・`validationApprovals` は入れない（転記先・取引インデックス・承認は試し読みの材料ではない）。**したがって区分は「見込み」である**（重複や承認で実際の区分は変わり得る。画面もそう言う）。`checkPriorYearUsage` が例外を投げる顧客（個人事業主で年度が無い）では、取込も同じ所で落ちるので、試し読みも例外のままにする。
    - **`detectDisplayIdCollision` は呼ばない**（取引インデックスを読む。試し読みは転記しないので衝突は起き得ない）。
    - **`71_RunOrchestrator.gs` は変えない。**取込の本線に触らない代わりに、試し読みと実際の取込の結果を突き合わせるテストを置く（§10 `fmt 29`）。
-6. `previewHash` ＝ `sha256Hex(utf8Bytes(serializeDeterministic(要素)))`（`sha256Hex` はバイト列しか受け取らない ── `90_Utils.gs` 31 行。`62_AuditLog.gs` 12〜15 行と同じ形）。要素は次の順の配列：導出した行の各セルを A 列から 1 要素ずつ（**T・V・AH の 3 列は空文字に置き換え、AB は `previewHash` の鍵を除いた JSON**）、`fileId`、`sha256Hex(読んだファイルのバイト列)`、`acknowledgements.customerSide`、`acknowledgements.amountChoice`。**ファイルが差し替わった・回答が変わった・確認を外した、のどれでも値が変わる。**
+6. `previewHash` ＝ `sha256Hex(utf8Bytes(serializeDeterministic(要素)))`（`sha256Hex` はバイト列しか受け取らない ── `90_Utils.gs` 31 行。`62_AuditLog.gs` 12〜15 行と同じ形）。要素は次の順の配列：導出した行の各セルを A 列から 1 要素ずつ（**T・V・AH の 3 列は空文字に置き換え、AB は `previewHash` の鍵を除いた JSON**）、`fileId`、`sha256Hex(読んだファイルのバイト列)`、`acknowledgements.customerSide`、`acknowledgements.amountChoice`。**ファイルが差し替わった・回答が変わった・確認を外した、のどれでも値が変わる。****逆に、意味の同じ回答からは送り方によらず同じ値になること（1.7）** ── 物の鍵の順・値が `null` の鍵と鍵が無いこと・`acknowledgements` の余計な鍵では変わらない。そのために AB の `acknowledgements` は §5.5 のとおり作り直したものを使う。
 7. 返す。
 
 戻り値：
@@ -474,7 +475,7 @@
 ### 5.7 保存 `webAppSaveFormat(customerId, folderId, fileId, answers, previewHash)`
 
 1. 認可・フォルダ・ファイル・要確認（§5.1）。
-2. **受け取った `previewHash` が空でない文字列でなければ、ファイルを読む前に `{saved: false, code: 'PREVIEW_HASH_MISSING'}` を返し、何も書かない（1.6）。**引数が届かなかったのか、試し読みをせずに呼ばれたのかであり、「入力かファイルが変わった」（`PREVIEW_STALE`）ではない。受入で実行 API から呼んだとき、回答の最上位に `null` があると 5 番目の引数が届かないとみられる事象があった（改訂履歴 1.6）── `PREVIEW_STALE` と言うと、人は試し読みをやり直し続ける。
+2. **受け取った `previewHash` が空でない文字列でなければ、ファイルを読む前に `{saved: false, code: 'PREVIEW_HASH_MISSING'}` を返し、何も書かない（1.6）。**引数が届かなかったのか、試し読みをせずに呼ばれたのかであり、「入力かファイルが変わった」（`PREVIEW_STALE`）ではない ── `PREVIEW_STALE` と言うと、人は試し読みをやり直し続ける。（1.6 はこの手順を「実行 API で 5 番目の引数が届かない」という見立てから足したが、その見立ては誤りだった。本当の原因は `acknowledgements` の鍵の順で、1.7 が §5.5 で直す。この手順は言い分けとして正しいので残す。）
 2'. **§5.6 の 2〜6 をやり直す。画面から来た試し読みの結果を信じない。**計算した `previewHash` が受け取った値と違えば `{saved: false, code: 'PREVIEW_STALE'}` を返し、何も書かない。
 3. `blocking` が 1 つでもあれば `{saved: false, blocking}`。
 4. `withScriptLock_` の中で、形式 ID が無いこと（**無効の行も含む**）を確かめてから `installCardFormat(spec)`。**ロックの中で行うのはこの 2 つだけ**にする。`withScriptLock_` は入れ子にできず（`01_DataAccessCore.gs` 100〜104 行。スタブも保持中は取れない）、`appendAudit` は自分でロックを取る（`62_AuditLog.gs` 48 行）。監査・`recordError`・`disableCardFormat_` はロックの外で行う。
@@ -711,7 +712,7 @@
 | U38 | **確認のチェック欄は、中身（出す警告・チェックが要るか・今の値）が変わったときだけ作り直す。**値が前回と同じ `change` や、関係のない欄の `input` では作り直さない | 形式 ID を打った直後にチェックを押すと、mousedown → blur → change で押そうとしたチェックが作り直されて DOM から外れ、1 回目のクリックが効かなかった（U14 と同じ形が、チェック欄に残っていた） |
 | U39 | **保存した後は［顧客に修正を依頼する］を出さない（または無効にする）。**`returnFormatToCustomer` も保存の結果があれば断る | 保存後も押せ、押すと要確認が閉じてパネルが閉じ、保存の結果（取消しのボタン）が確認なしに消えた。登録した形式は有効のまま残る（U19・U29 の抜け道） |
 | U41 | `readback: 'UNCERTAIN'` の画面：`disabled: true` なら「保存後の確認を終えられなかったので、安全のため無効にしました。形式 ID を変えてやり直してください（同じ ID は使えません）」と言い、取消しのボタンは出さない。`disabled: false` のときだけ「無効にもできませんでした。この登録を取り消すか、管理者に確認してください」と取消しのボタンを出す。`siblingsError: true` なら「同じフォルダのファイルを確かめられませんでした」と言う | 1.4 の実装は `UNCERTAIN` で形式を有効のまま残し、取消しを人に任せていた |
-| U42 | **試し読みと保存に送る回答は、値が `null`（と `undefined`）の鍵を除いた写しにする（1.6）。**最上位（`baseFormatId` など）だけでなく `columns`・`acknowledgements` の中も除く。`false`・`0`・`''` は除かない。**写しを送り、`state.formatAnswers` は変えない**（U3 の「送った回答と今の回答が同じか」の比べ方は今のまま `state.formatAnswers` どうしで行う）。保存の応答が `PREVIEW_HASH_MISSING` なら、付録 B の文をパネルの中に出し、`PREVIEW_STALE` と同じく試し読みを古くして保存ボタンを押せなくする | 受入で、実行 API から回答の最上位に `baseFormatId: null` を入れて保存を呼ぶと、毎回 `PREVIEW_STALE` になった。`google.script.run` で同じことが起きるかは確かめていないが、サーバーは鍵が無いのと `null` を同じに扱うので、除いて送れば運び方に左右されない |
+| U42 | **試し読みと保存に送る回答は、値が `null`（と `undefined`）の鍵を除いた写しにする（1.6）。**最上位（`baseFormatId` など）だけでなく `columns`・`acknowledgements` の中も除く。`false`・`0`・`''` は除かない。**写しを送り、`state.formatAnswers` は変えない**（U3 の「送った回答と今の回答が同じか」の比べ方は今のまま `state.formatAnswers` どうしで行う）。保存の応答が `PREVIEW_HASH_MISSING` なら、付録 B の文をパネルの中に出し、`PREVIEW_STALE` と同じく試し読みを古くして保存ボタンを押せなくする | 受入で、実行 API から回答の最上位に `baseFormatId: null` を入れて保存を呼ぶと、毎回 `PREVIEW_STALE` になった。`google.script.run` で同じことが起きるかは確かめていないが、サーバーは鍵が無いのと `null` を同じに扱うので、除いて送れば運び方に左右されない。**（1.7 の注：「`null` のせい」は見誤りで、本当の原因は `acknowledgements` の鍵の順だった。改訂履歴 1.7。この項は害が無いので残す）** |
 | U40 | **取込待ちへ戻す呼出しが例外で終わっても、パネルの中に文を出し、ファイル一覧と要確認を読み直す。**サーバーの `webAppRequeueFormatFiles` は 1 件ずつ例外から守り、失敗したものを `skipped`（コード `REQUEUE_FAILED`）に入れる（付録 B に 1 行） | サーバーの繰り返しが守られておらず、途中の 1 件の例外で呼出し全体が例外になった。前の数件は戻し済みなのに、画面は最上部に文を出すだけで一覧を読み直さず、戻したファイルが「形式不明」のまま残った |
 
 ## 8. 既存コードへの変更（許す差分）
@@ -730,6 +731,8 @@
 | `src/81_WebAppUi.html` | §7 |
 
 **1.6 の修正で変えてよいのは `src/19_FormatRegistration.gs` と `src/81_WebAppUi.html` の 2 つだけ**（1.5 までの 8 ファイルはコミット済み。`git status --porcelain -- src/` が 2 行以下）。テストは `test/phase9-format-registration.test.js` だけ。
+
+**1.7 の修正で変えてよいのは `src/19_FormatRegistration.gs` の 1 つだけ**（1.6 までコミット済み。`git status --porcelain -- src/` が 1 行以下）。画面（`81`）は変えない ── 画面は `{customerSide, amountChoice}` を固定の順で作っており、直すのはサーバーが受け取った物を信じている所だけである。テストは `test/phase9-format-registration.test.js` だけ。
 
 **`70`・`71`・`24`・`30`・`31`・`35`・`43`・`44`・`45`・`51`・`96`・`06`・`00` に 1 行の差分も作らないこと。**`70`・`71` を変えない理由は §5.6、`96` は §5.9、`06` は §5.9。
 
@@ -917,6 +920,15 @@
 | fmt 122 | ID の提案：§5.4.5 の表の 5 行すべて（`formatProposal_` に土台の定義と `definitions` を直接渡してよい）。`rakuten_x11_2` は `rakuten_x11` が在るとき、`aeon_x8_2` は `aeon_x8` が**無効で**在るとき | 幹を外さない（M46） |
 | fmt 123 | 名前の提案：(a) `PAYPAY detail202502` × `paypay_family` → 「PayPayカード系Excel（12列・用途L）」。(b) 置き換えた結果が既にある名前と同じ（テストで同名の定義を `definitions` に入れる。**無効の行も数える**）→ 「…・その2」。「…・その2」も在れば「…・その3」。(b') `enavi202509` × `rakuten_x11` の実際の提案名を報告する（用途の列が空か K か。§5.4.5 の注意）。(c) 用途の列が提案に無い `BLANK` → `<フォルダ名> Excel（<列数>列）`。(d) 土台の名前に末尾の括弧が無い → 括弧を足すだけ。(e) 60 文字を超える土台の名前 → 60 文字以内で、末尾が括弧で終わる | 末尾の括弧を置き換えない（M47）・同名を許す（M48） |
 
+### 10.13 1.7 で足すケース
+
+どれも `PAYPAY detail202502` の固定データで、fmt 118 と同じ回答（金額 E・用途 L）を使う。**Node の物は鍵を足した順を保つので、鍵の順を変えた物は、鍵を書く順を変えた物リテラルで作る**（実行 API で鍵の順が入れ替わるのを、これで模す）。
+
+| # | 内容 | 落とす実装 |
+|---|---|---|
+| fmt 124 | 試し読みを、`acknowledgements` が `{customerSide: true, amountChoice: true}` の回答と `{amountChoice: true, customerSide: true}` の回答で呼ぶ：`previewHash` が等しい。さらに**後者の回答と前者の `previewHash`** で保存すると `readback: 'OK'`。保存した行の AB（カード形式マスターの行を読み、JSON を解析する）の `acknowledgements` が `{customerSide: true, amountChoice: true}` と等しく、`Object.keys` が `['customerSide', 'amountChoice']` の順 | 受け取った物をそのまま AB に入れる（M49）・ハッシュでだけ作り直して AB には受け取ったまま書く（M51） |
+| fmt 125 | 次の 3 つがそれぞれ**対になる回答と同じ `previewHash`・同じ `blocking` のコードの集合**になる：(a) `{customerSide: true, amountChoice: true, note: 'x'}` と `{customerSide: true, amountChoice: true}`。(b) `{customerSide: 'true', amountChoice: 1}` と `{customerSide: false, amountChoice: false}`。(c) `acknowledgements` の鍵が無い回答と `{customerSide: false, amountChoice: false}`。(a) の回答で保存した行の AB の `acknowledgements` の鍵が 2 つだけ（`note` が無い）。**fmt 28 の「確認を外すと値が変わる」は今のまま緑であること** | 余計な鍵を残す（M49）・`Boolean()` で真偽にする（M50） |
+
 ---
 
 ## 11. 変異（実装者が入れて、赤になることを確かめる）
@@ -971,6 +983,9 @@
 | M46 | サーバー：ID の幹を外さない（1.5 の `<土台の形式 ID>_x<列数>` に戻す） | fmt 122 |
 | M47 | サーバー：名前の末尾の括弧を外さない | fmt 123 |
 | M48 | サーバー：既にある名前との重なりを見ない | fmt 123 |
+| M49 | サーバー：AB の `acknowledgements` に `answers.acknowledgements` をそのまま入れる（1.6 までの形） | fmt 124・fmt 125 |
+| M50 | サーバー：作り直すが `=== true` でなく `Boolean(…)` で真偽にする | fmt 125 (b) |
+| M51 | サーバー：`previewHash` の計算にだけ作り直した物を使い、AB 列には受け取った物を書く | fmt 124 |
 
 
 ---
@@ -998,6 +1013,21 @@
 | 10 | 画面で白紙の形式の［試し読み］→［保存］を押す（`google.script.run` の経路。保存まで行うかは経理が決める） |
 | 11 | 明細の下に空行のある xlsx の試し読みで、除外した行の表に空の行が並ばず、`EXCLUDED_ROWS` が出ない |
 | 12 | `PAYPAY detail202502` 型のファイルを診断すると、提案の ID が `paypay_family_x12` の次の空き（受入で `paypay_family_x12` を登録済みなので `paypay_family_x12_2`）、名前が「PayPayカード系Excel（12列・用途L）」 |
+
+**1.6 の受入の結果**（2026-09-27、`clasp run-function`。形式不明の要確認が開いていたのがアプラス 202510 の 1 件だけだったので、すべてこのファイルで行った。保存は形式 ID を既に在る `aplus_x10` にして `FORMAT_ID_TAKEN` で止め、何も保存していない）：
+
+- 9：**見立てが誤り**。でたらめな `previewHash` で保存 → `PREVIEW_STALE`（届いている）。原因は `acknowledgements` の鍵の順（改訂履歴 1.7）。
+- 10：未実施（画面の操作が要る）。
+- 11：済み。`excludedBlank: 20`・`excluded: []`・`EXCLUDED_ROWS` なし。
+- 12：`PAYPAY detail202502` は `paypay_family_x12` に一致して診断できないので、アプラスで代わりに確かめた ── 提案 ID `aplus_x10` → `aplus_x9`、名前「アプラス系Excel（10列・用途J）」→「アプラス系Excel（9列）」。`_2` の重なりは実機では未確認。
+- 所要：診断 16 秒・試し読み約 20 秒・保存 17〜24 秒。
+
+**1.7 の受入**（次に形式不明のファイルが来たとき。いまは形式不明の要確認が 1 件も無い）：
+
+| # | 内容 |
+|---|---|
+| 13 | 実行 API から、`acknowledgements` の鍵が 2 つの同じ回答で試し読みを 6 回呼ぶ：`previewHash` が 1 つの値になる。その値で保存を 3 回呼ぶ（形式 ID を既に在るものにして `FORMAT_ID_TAKEN` で止める）：`PREVIEW_STALE` が 1 回も出ない |
+| 14 | 1.6 の受入 10 と同じ（画面で［試し読み］→［保存］。保存まで行うかは経理が決める） |
 
 ---
 

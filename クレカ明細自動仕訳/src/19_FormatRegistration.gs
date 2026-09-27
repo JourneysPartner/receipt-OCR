@@ -441,12 +441,15 @@ function formatDerivedSpec_(context, read, sheet, answers, base, proposal, purpo
       return source.kind === 'fileName' || source.kind === 'scanRows';
     });
   var cardSources = base && base.cardNameRule && base.cardNameRule.sources || [];
+  var a = answers.acknowledgements || {};
+  var acknowledgements = {customerSide: a.customerSide === true,
+    amountChoice: a.amountChoice === true};
   var metadata = {origin: 'WEBAPP', baseFormatId: base ? base.formatId : null,
     customerId: context.customerId, sourceFileId: context.fileId,
     sourceFileName: context.fileName, referenceFileId: context.referenceFileId || null,
     purposeGap: purposeGap, purposeHeader: columns.purpose ?
       String(header[detectorColumnIndex_(columns.purpose)] || '') : null,
-    acknowledgements: answers.acknowledgements || {},
+    acknowledgements: acknowledgements,
     amountCandidates: proposal.amountCandidates.map(function(candidate) {
       return candidate.column;
     })};
@@ -702,7 +705,8 @@ function formatPreview_(context, answers) {
     return {column: candidate.column, header: candidate.header, total: total,
       differsRows: differsRows};
   });
-  var previewHash = formatHashRow_(row, context.fileId, read.bytes, ack);
+  var previewHash = formatHashRow_(row, context.fileId, read.bytes,
+    spec.answers.acknowledgements);
   spec.answers.previewHash = previewHash;
   var response = {ok: true, blocking: blocking, warnings: warnings,
     formatNames: defs.map(function(item) {
