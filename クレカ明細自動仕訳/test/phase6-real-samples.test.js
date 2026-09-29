@@ -383,4 +383,143 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(target.purposeInferred, true);
     assert.equal(target.purposeInferenceRuleId, 'KF1_RULE');
   });
+
+  function kf7Aeon(change) {
+    setup();
+    const fixture = JSON.parse(fs.readFileSync(path.resolve(__dirname, 'fixtures',
+      'member-discount', 'イオンゴールドカード__meisai202506_(1).json'), 'utf8'));
+    const format = gas.call('pinFormatVersion', ['aeon_x9', 1]);
+    const sheet = {name: fixture.sheets[0].name,
+      rows: fixture.sheets[0].rows.map((row) => row.map(reviveCell))};
+    if (change) change(sheet.rows);
+    const rawParsed = gas.call('parseFile', [sheet, format,
+      {customerId: 'C001', fileId: 'kf7', fileNameOriginal: fixture.fileName}]);
+    const parsed = plain(rawParsed);
+    return {fixture, format, sheet, parsed, rawParsed};
+  }
+
+  test('kf7 1: actual Aeon discounts keep their own text and amount with the parent date', () => {
+    const {parsed, sheet, rawParsed} = kf7Aeon();
+    assert.equal(parsed.txs.length, 28);
+    const byRow = new Map(parsed.txs.map((tx) => [tx.sourceRow, tx]));
+    const discountRows = [12, 14, 16, 18, 20, 22, 24, 26, 29, 31, 34];
+    discountRows.forEach((row) => {
+      const tx = byRow.get(row);
+      const parent = byRow.get(row - 1);
+      assert.ok(tx && parent, `row ${row}`);
+      assert.equal(tx.dateUnreadable, false, `row ${row}`);
+      ['dateMonthDay', 'dateYear', 'dateYearDigits', 'dateHashKey', 'date',
+        'dateYearRaw', 'dateYearMissing'].forEach((key) =>
+        assert.deepEqual(tx[key], parent[key], `row ${row} ${key}`));
+      assert.equal(tx.merchantOriginal, sheet.rows[row - 1][2], `row ${row}`);
+      assert.ok(tx.amountBillingJpy < 0, `row ${row}`);
+      assert.equal(tx.dateRawText, '', `row ${row}`);
+      assert.deepEqual(tx.discountOf,
+        {sourceRow: parent.sourceRow, merchantOriginal: parent.merchantOriginal}, `row ${row}`);
+      const rawChild = rawParsed.txs.find((item) => item.sourceRow === row);
+      const rawParent = rawParsed.txs.find((item) => item.sourceRow === row - 1);
+      assert.notStrictEqual(rawChild.dateMonthDay, rawParent.dateMonthDay, `row ${row} date copy`);
+    });
+    assert.equal(parsed.txs.filter((tx) => !discountRows.includes(tx.sourceRow) &&
+      !('discountOf' in tx)).length, 17);
+    assert.equal(parsed.txs.reduce((sum, tx) => sum + tx.amountBillingJpy, 0), 395265);
+  });
+
+  test('kf7 2: billing-year inference and validation give discounts their parent date', () => {
+    const {fixture, format, sheet, parsed} = kf7Aeon();
+    const base = plain(gas.call('extractBillingYearMonth', [sheet, fixture.fileName, format]));
+    const inferred = plain(gas.call('inferYearsForFile', [parsed.txs, base, format]));
+    const issues = plain(gas.call('validateTransactions', [inferred.txs, {cardFormat: format}])).issues;
+    assert.equal(issues.filter((issue) => issue.code === 'DATE_UNREADABLE').length, 0);
+    const byRow = new Map(inferred.txs.map((tx) => [tx.sourceRow, tx]));
+    [12, 14, 16, 18, 20, 22, 24, 26, 29, 31, 34].forEach((row) =>
+      assert.equal(byRow.get(row).date, byRow.get(row - 1).date, `row ${row}`));
+    assert.equal(gas.call('toTokyoDateString_', [new Date(byRow.get(12).date)]), '2025-04-19');
+  });
+
+  test('kf7 3: mismatches, gaps, exclusion, dates, text, and chained discounts stay unreadable', () => {
+    const cases = [
+      ['amount mismatch', (r) => { r[11][2] = r[11][2].replace('５，４５６', '５，４５７'); }, 12],
+      ['blank gap', (r) => { r.splice(11, 0, Array(9).fill('')); }, 13],
+      ['excluded parent', (r) => {
+        r[9][6] = 5456;
+        r[10][0] = '';
+        r[10][6] = '';
+      }, 12],
+      ['positive discount', (r) => { r[11][6] = 273; }, 12],
+      ['unreadable discount date', (r) => { r[11][0] = '不明'; }, 12],
+      ['unreadable parent date', (r) => { r[10][0] = '不明'; }, 12],
+      ['bare text', (r) => { r[11][2] = '会員値引'; }, 12],
+      ['different prefix', (r) => { r[11][2] = 'ポイント値引（１回払い　￥５，４５６分）'; }, 12],
+      ['trailing text', (r) => { r[11][2] += 'おまけ'; }, 12],
+      ['chained discounts', (r) => { r.splice(12, 0, r[11].slice()); }, 13],
+      ['first detail', (r) => { r.splice(8, 0, r[11].slice()); }, 9]
+    ];
+    cases.forEach(([name, change, row]) => {
+      const {parsed, format} = kf7Aeon(change);
+      const tx = parsed.txs.find((item) => item.sourceRow === row);
+      assert.ok(tx, name);
+      assert.equal(tx.dateUnreadable, true, name);
+      assert.equal('discountOf' in tx, false, name);
+      const issues = plain(gas.call('validateTransactions', [parsed.txs, {cardFormat: format}])).issues;
+      assert.ok(issues.some((issue) => issue.sourceRow === row &&
+        issue.code === 'DATE_UNREADABLE'), name);
+    });
+  });
+
+  test('kf7 4: discount purpose inherits only when blank after foreign-amount cleanup', () => {
+    const cases = [
+      ['inherited', '', '仕入', '仕入'],
+      ['own purpose', '雑費', '仕入', '雑費'],
+      ['both blank', '', '', ''],
+      ['foreign-shaped parent', '', '3,000 KRW', '']
+    ];
+    cases.forEach(([name, childPurpose, parentPurpose, wanted]) => {
+      const {parsed} = kf7Aeon((r) => {
+        r[10][8] = parentPurpose;
+        r[11][8] = childPurpose;
+      });
+      const parent = parsed.txs.find((tx) => tx.sourceRow === 11);
+      const child = parsed.txs.find((tx) => tx.sourceRow === 12);
+      assert.equal(child.purpose, wanted, name);
+      if (name === 'both blank' || name === 'foreign-shaped parent')
+        assert.equal(parent.purpose, '', name + ' parent');
+    });
+  });
+
+  test('kf7 5: NFKC, whitespace, and a three-digit source amount match', () => {
+    ['会員値引(1回払い ¥5,456分)', '会員値引（１回払い￥５，４５６分）'].forEach((label) => {
+      const {parsed} = kf7Aeon((r) => { r[11][2] = label; });
+      const child = parsed.txs.find((tx) => tx.sourceRow === 12);
+      assert.equal(child.dateUnreadable, false, label);
+      assert.equal(child.merchantOriginal, label, label);
+    });
+    const {parsed, fixture, format} = kf7Aeon();
+    assert.equal(parsed.txs.find((tx) => tx.sourceRow === 26).dateUnreadable, false);
+    const logicalCsv = plain(gas.call('parseFile', [{name: 'logical CSV',
+      rows: [fixture.sheets[0].rows[10], fixture.sheets[0].rows[11]],
+      recordStarts: [11, 14]}, format, {customerId: 'C001', fileId: 'kf7-csv'}]));
+    assert.equal(logicalCsv.txs.length, 2);
+    assert.deepEqual(logicalCsv.txs[1].discountOf,
+      {sourceRow: 11, merchantOriginal: logicalCsv.txs[0].merchantOriginal});
+  });
+
+  // 固定データのイオンは年2桁の日付なので、`date`（年4桁で解析時に決まる）と
+  // `dateYearMissing`（年なしで補完の対象になる）の写し漏れを見ない。漏れると
+  // 値引の行は日付なし・要確認なしで通る（B列空欄のまま誰にも捕捉されない）。
+  test('kf7 11: four-digit and year-less parent dates reach the discount after inference', () => {
+    [['four-digit year', '2025/04/19'], ['year-less', '4/19']].forEach(([name, cell]) => {
+      const {fixture, format, sheet, parsed} = kf7Aeon((r) => { r[10][0] = cell; });
+      const base = plain(gas.call('extractBillingYearMonth', [sheet, fixture.fileName, format]));
+      const inferred = plain(gas.call('inferYearsForFile', [parsed.txs, base, format]));
+      const parent = inferred.txs.find((tx) => tx.sourceRow === 11);
+      const child = inferred.txs.find((tx) => tx.sourceRow === 12);
+      assert.ok(parent.date, name + ' parent date');
+      assert.equal(child.date, parent.date, name);
+      assert.equal(child.dateHashKey, parent.dateHashKey, name);
+      assert.equal(gas.call('toTokyoDateString_', [new Date(child.date)]), '2025-04-19', name);
+      const issues = plain(gas.call('validateTransactions', [inferred.txs, {cardFormat: format}])).issues;
+      assert.equal(issues.filter((issue) => issue.sourceRow === 12).length, 0, name);
+    });
+  });
 };

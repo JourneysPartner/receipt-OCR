@@ -637,7 +637,8 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
           // 「基本カード年会費」はどのカードでも同じ文字列なので、店名で
           // 辞書を作ると全カードの年会費が1つの取引先へ潰れる。
           var matchKey = !exempt && cardName &&
-            isCardNamePartnerPurpose(customer, tx.purpose) ? cardName : null;
+            isCardNamePartnerPurpose(customer, tx.purpose) ? cardName :
+            (tx.discountOf ? tx.discountOf.merchantOriginal : null);
           var forMatching = matchKey
             ? Object.assign({}, tx, {merchantOriginal: matchKey, originalMerchant: matchKey})
             : tx;
