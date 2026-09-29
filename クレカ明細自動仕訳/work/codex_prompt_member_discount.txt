@@ -1,0 +1,50 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の、**イオンの「会員値引」行を、すぐ上の行と同じ日付・同じ取引先のマイナス行として転記する**直し（K-F7）を受け取ります。
+
+作業ツリーの未コミットの物は、仕様書 `work/spec_member_discount.md`、この指示書、固定データ `test/fixtures/member-discount/イオンゴールドカード__meisai202506_(1).json` だけです（どれも Claude が置いた）。開始時の `node test/run-tests.js` の本数は、始める前に自分で数えて報告に書いてください（1278/1278 のはずです）。
+
+## 仕様書
+
+`work/spec_member_discount.md`（1.0、未コミット）。**全部読んでから始めてください。**
+
+## 直すこと（要点。詳細は仕様書）
+
+1. `parseFile`（`src/24_Parser_Generic.gs`）：日付が空で、店名が `会員値引（…￥N分）`（NFKC・空白除去の後に全体一致）で、直前の走査行が取引（親）で、親の日付が読めていて、親の金額（正）が N と等しく、自分の金額が負の行は、親の日付の各鍵を写し、用途が空なら親の用途にし、`discountOf: {sourceRow, merchantOriginal}` を付ける。当たらなければいまと 1 文字も変わらない。全形式に効かせる。
+2. 8-10（`src/71_RunOrchestrator.gs`）：`discountOf` を持つ取引は照合の鍵を親の店名にする（カード名の用途ならカード名が優先）。`planned.k` は値引の文言のまま。
+3. `opsAutoAdoptPartners`・`opsExplainPartnerMatch`（`src/97_Ops.gs`）：要確認の `merchantOriginal`（取込が照合に使った鍵）が空でなければ、それで照合し直す。
+
+---
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。**
+2. **git を操作しないこと**（commit・stash・reset・checkout・clean・add）。
+3. **`src/` で変えてよいのは `src/24_Parser_Generic.gs`・`src/71_RunOrchestrator.gs`・`src/97_Ops.gs` の 3 つだけ。**71 は 8-10 の `transactions.map` の中だけ、97 は `opsAutoAdoptPartners` と `opsExplainPartnerMatch` の中だけ。検査：終わったとき `git status --porcelain -- src/` がこの 3 行だけであること。
+4. **`src/97_Ops.gs` には文字列の中に生の NUL バイトが 2 つある。**消したり増やしたりしないこと（エディタやツールで書き戻すときに落ちやすい）。終わったら数が 2 のままか確かめて報告すること（例：`node -e "console.log(require('fs').readFileSync('src/97_Ops.gs').filter(b=>b===0).length)"`）。
+5. テストの変更は、既存のテストファイルに `kf7 N: …` を**足すことだけ**。`test/fixtures/`（Claude が置いた固定データを含む）と既存のテストは 1 文字も変えないこと。
+6. **テストを先に赤にしてから直すこと。**kf7 1〜10 を書き、いまの実装で赤になることを確かめてから直す。いまでも緑になる確かめ（kf7 3 の「当たらない形」はいまでも緑のはず）はどれかを報告する。
+7. 既存のテストを 1 つも壊さないこと。**既存のテストの期待を変えて緑にしてはならない。**変えないと通らないものがあれば、変えずに止めて理由を報告すること。
+8. リポジトリの親フォルダの `.codex/config.toml` に触らないこと。
+9. 仕様書を変えないこと（間違いを見つけたら報告する）。形式定義・カード形式マスター・`ERROR_CATALOG`・取引ログの列に足さない。取引の物に足してよい鍵は `discountOf` だけ（当たった取引にだけ付ける）。
+10. 仕様書に無い判断で安全側を外さないこと。迷ったら止めて報告すること。
+
+## 進め方
+
+1. 仕様書を読む。`src/24_Parser_Generic.gs` の `parseFile`・`applyExclusionRules`・`isParserBlank_`、`src/30_TransactionValidator.gs` の年補完、`src/35_TransactionChecks.gs` の `validateTransactions`、`src/71_RunOrchestrator.gs` の 8-10（`matchKey`・`forMatching`・`partnerMatchKey` のあたり）、`src/70_ImportFlow.gs` 150〜165 行（要確認に載せる店名）、`src/97_Ops.gs` の `opsAutoAdoptPartners`・`opsExplainPartnerMatch`、`test/phase6-real-samples.test.js` の `kf1Amex` などの補助、`test/phase6-card-name-partner.test.js`（取込の 8-10 を動かす補助）を読む
+2. kf7 1〜10 を書く → 赤を確かめる
+3. 直す
+4. `node test/run-tests.js` を全部緑にする
+5. 仕様書 §6 の M1〜M18 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら `git diff` が変異を入れる前と同じか確かめる）
+6. `git status --porcelain -- src/ test/` と `git diff --stat -- src/` を確かめる
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 直す前に kf7 1〜10 のどの確かめが赤だったか（緑だったものも）
+- kf7 の各テストをどのファイルに置いたか
+- M1〜M18 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て
+- 仕様書が間違っていた箇所（黙って直さないこと）
+- 自分で決めた箇所（全部）
+- `src/97_Ops.gs` の NUL バイトの数（前と後）
+- `git status --porcelain -- src/ test/` と `git diff --stat -- src/` の出力（始める前と後）
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。

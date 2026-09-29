@@ -650,9 +650,38 @@ function parseFile(sheet, cardFormat, context) {
         }
       }
     } else {
-      // 空欄または列挙外の表記。年補完の対象にせず（4.14が要求する
-      // dateMonthDayを持たないため）、取引単位の要確認`DATE`の材料とする。
-      tx.dateUnreadable = true;
+      // イオンの「会員値引」行（K-F7）はすぐ上の取引への割引なので日付が無い。
+      // 上の行と同じ日付のマイナス行として転記する（ユーザー決定 (B)）。
+      // 誤爆させないため、文言・隣接・金額（「￥N分」＝親の金額）が全部揃う
+      // ときだけ当てる。揃わなければ従来どおり`DATE`の要確認に回す。
+      // `dateRawText`は元ファイルの空欄のまま残す。
+      var parent = txs.length ? txs[txs.length - 1] : null;
+      var previousRowNumber = index > 0 ?
+        (recordStarts ? recordStarts[index - 1] : index) : null;
+      var discountText = isParserBlank_(dateCell) ?
+        tx.merchantOriginal.normalize('NFKC').replace(/[\s　]/g, '') : '';
+      var discountMatch = /^会員値引\(.*¥(\d{1,3}(?:,\d{3})+|\d+)分\)$/.exec(discountText);
+      var sourceAmount = discountMatch ? Number(discountMatch[1].replace(/,/g, '')) : null;
+      if (parent && parent.sourceRow === previousRowNumber &&
+          parent.dateUnreadable === false &&
+          typeof parent.amountBillingJpy === 'number' &&
+          parent.amountBillingJpy > 0 && parent.amountBillingJpy === sourceAmount &&
+          amount.ok && tx.amountBillingJpy < 0) {
+        tx.date = parent.date;
+        tx.dateYearDigits = parent.dateYearDigits;
+        tx.dateYear = parent.dateYear;
+        tx.dateYearRaw = parent.dateYearRaw;
+        tx.dateYearMissing = parent.dateYearMissing;
+        tx.dateMonthDay = parent.dateMonthDay ?
+          {month: parent.dateMonthDay.month, day: parent.dateMonthDay.day} : null;
+        tx.dateHashKey = parent.dateHashKey;
+        if (tx.purpose === '') tx.purpose = parent.purpose;
+        tx.discountOf = {sourceRow: parent.sourceRow, merchantOriginal: parent.merchantOriginal};
+      } else {
+        // 空欄または列挙外の表記。年補完の対象にせず（4.14が要求する
+        // dateMonthDayを持たないため）、取引単位の要確認`DATE`の材料とする。
+        tx.dateUnreadable = true;
+      }
     }
     txs.push(tx);
   }

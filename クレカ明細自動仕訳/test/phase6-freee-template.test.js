@@ -218,6 +218,107 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(String(gas.call('getProcessLogRecord_', ['fileU']).values[16]), 'DISCOVERED');
   });
 
+  function kf7Import(options = {}) {
+    setup();
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const fixture = JSON.parse(fs.readFileSync(path.resolve(__dirname, 'fixtures',
+      'member-discount', 'イオンゴールドカード__meisai202506_(1).json'), 'utf8'));
+    const dest = gas.stubs.getSpreadsheet('dest1');
+    dest.getSheetByName('入力用シート').insertRowsAfter(10, 50);
+    gas.call('registerTestCustomer', [Object.assign({}, CUSTOMER,
+      options.cardNamePurpose ? {cardNamePartnerPurposes: ['仕入']} : {})]);
+    gas.call('installAnnotatedFormatsBatch1', []);
+    const parentMerchant = fixture.sheets[0].rows[10][2];
+    if (options.partner) {
+      dest.getSheetByName('取引先一覧').getRange(1, 1, 2, 2).setValues([
+        ['元表記', '取引先名'], [parentMerchant, options.partner]
+      ]);
+      gas.call('opsImportPartnerListToDictionary', []);
+    }
+    gas.stubs.createFile('kf7-file', {name: fixture.fileName,
+      bytes: Buffer.from('kf7-aeon-xlsx'),
+      lastUpdated: new Date(Date.now() - 3600 * 1000),
+      createdTime: '2026-08-01T00:00:00Z',
+      xlsxSheets: fixture.sheets.map((sheet) => ({name: sheet.name, values: sheet.rows,
+        maxRows: sheet.rows.length, maxColumns: 9}))});
+    if (options.cardNamePurpose) {
+      gas.stubs.createFolder('kf7-card', {name: 'イオンゴールドカード', fileIds: ['kf7-file']});
+      gas.stubs.createFolder('folder1', {subFolderIds: ['kf7-card']});
+    } else {
+      gas.stubs.createFolder('folder1', {fileIds: ['kf7-file']});
+    }
+    const run = plain(gas.call('runImport', [{}]));
+    const txs = plain(gas.call('getTransactionsByStatus', ['kf7-file',
+      ['COMMITTED', 'REVIEW_REQUIRED', 'PREPARED']]));
+    const reviews = plain(gas.call('openReviews', [{fileId: 'kf7-file'}]));
+    return {fixture, parentMerchant, dest, run, txs, reviews};
+  }
+
+  test('kf7 6: import writes a matched discount with parent partner and date', () => {
+    const {fixture, parentMerchant, run, txs, reviews} = kf7Import({partner: 'イオン株式会社'});
+    assert.equal(run.customers[0].files[0].outcome, 'WRITTEN',
+      JSON.stringify(run.customers[0].files[0]));
+    const parent = txs.find((tx) => tx.sourceRow === 11);
+    const child = txs.find((tx) => tx.sourceRow === 12);
+    assert.ok(parent && child);
+    assert.equal(parent.originalMerchant, parentMerchant);
+    assert.equal(child.planned.f, parent.planned.f);
+    assert.equal(child.planned.b, parent.planned.b);
+    assert.equal(child.planned.k, fixture.sheets[0].rows[11][2]);
+    assert.equal(child.planned.m, -273);
+    assert.equal(child.partnerResolutionStatus, 'RESOLVED_WITH_PARTNER');
+    assert.equal(reviews.filter((r) => r.sourceRow === 12 &&
+      ['DATE', 'PARTNER'].includes(r.reviewType)).length, 0);
+  });
+
+  test('kf7 7: unmatched discount review carries the parent match key', () => {
+    const {parentMerchant, reviews} = kf7Import();
+    const parent = reviews.find((r) => r.sourceRow === 11 && r.reviewType === 'PARTNER');
+    const child = reviews.find((r) => r.sourceRow === 12 && r.reviewType === 'PARTNER');
+    assert.ok(parent && child, JSON.stringify(reviews.filter((r) => r.sourceRow <= 12)));
+    assert.equal(child.merchantOriginal, parentMerchant);
+    assert.equal(child.merchantNormalized, gas.call('normalizeMerchant', [parentMerchant]));
+    assert.equal(reviews.filter((r) => r.sourceRow === 12 && r.reviewType === 'DATE').length, 0);
+  });
+
+  test('kf7 8: a card-name purpose takes precedence over a discount parent merchant', () => {
+    const {parentMerchant, reviews} = kf7Import({cardNamePurpose: true});
+    const child = reviews.find((r) => r.sourceRow === 12 && r.reviewType === 'PARTNER');
+    assert.ok(child);
+    assert.equal(child.merchantOriginal, 'イオンゴールドカード');
+    assert.notEqual(child.merchantOriginal, parentMerchant);
+  });
+
+  test('kf7 9: auto-adoption reuses the discount review match key', () => {
+    const {parentMerchant, dest, reviews} = kf7Import();
+    const child = reviews.find((r) => r.sourceRow === 12 && r.reviewType === 'PARTNER');
+    assert.ok(child);
+    dest.getSheetByName('取引先一覧').getRange(1, 1, 2, 2).setValues([
+      ['元表記', '取引先名'], [parentMerchant, 'イオン株式会社']
+    ]);
+    gas.call('opsImportPartnerListToDictionary', []);
+    const adopted = plain(gas.call('opsAutoAdoptPartners', []));
+    assert.equal(adopted.errors, 0, JSON.stringify(adopted.results));
+    assert.ok(adopted.results.some((r) => r.reviewId === child.reviewId && r.partner),
+      JSON.stringify(adopted.results));
+  });
+
+  test('kf7 10: partner-match explanation uses the discount review match key', () => {
+    const {parentMerchant, dest, reviews} = kf7Import();
+    const child = reviews.find((r) => r.sourceRow === 12 && r.reviewType === 'PARTNER');
+    assert.ok(child);
+    dest.getSheetByName('取引先一覧').getRange(1, 1, 2, 2).setValues([
+      ['元表記', '取引先名'], [parentMerchant, 'イオン株式会社']
+    ]);
+    gas.call('opsImportPartnerListToDictionary', []);
+    const explained = plain(gas.call('opsExplainPartnerMatch', [child.reviewId]));
+    assert.equal(explained.merchantOriginal, parentMerchant);
+    assert.equal(explained.merchantNormalized,
+      gas.call('normalizeMerchant', [parentMerchant]));
+    assert.notEqual(explained.blockedBy, 'NO_MATCH');
+  });
+
   test('an import lands on row 5 and leaves the template J/N cells intact', () => {
     setup();
     gas.call('registerTestCustomer', [CUSTOMER]);
