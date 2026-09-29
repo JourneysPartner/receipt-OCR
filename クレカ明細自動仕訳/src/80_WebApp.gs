@@ -685,14 +685,13 @@ function webAppDisplayMerchant_(merchant) {
 /**
  * 候補を取引先名で一意にする。**表示のためだけの重複排除である。**
  *
- * `merchantCandidates_`（33_MerchantMatcher.gs 98行）は一致した辞書の行を
+ * `merchantCandidates_` は一致した辞書の行を
  * 1行1候補にして返す。同じ取引先名の行が辞書に何行あっても、担当者に
  * 見せるべき選択肢は1つである ── 2026-09-16 の実機で、1件の要確認に
  * 同一の「Amazon」が30個並んだ。
  *
- * 根は `learnFromResolution`（34_MerchantDictionary.gs 22行）が重複を
- * 確かめずに `appendRow` することで、確定のたびに同じ行が積まれる。
- * **ここはその症状を画面から隠すだけで、辞書そのものは直さない**（K-W17）。
+ * K-W17 第2段で `learnFromResolution` は同等行の再学習を防ぎ、
+ * 積もった行は運用関数で無効化できる。
  * 推測（STEP5）で同名の規則が複数当たる場合にも同じ形になるので、
  * 辞書を直した後もこの重複排除は要る。
  *

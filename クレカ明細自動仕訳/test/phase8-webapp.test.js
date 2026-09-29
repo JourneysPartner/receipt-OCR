@@ -2316,4 +2316,329 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(clientEval('yen(-1000)'), '−¥1,000', '負の差額が読めない');
   });
 
+  function kw17Seed(customerId, options = {}) {
+    const original = options.original || 'AMAZON.CO.JP';
+    const row = blank(18);
+    Object.assign(row, {
+      0: options.dictId || `DICT_KW17_${dictionaryRows().length + 1}`,
+      1: original, 2: options.normalized === undefined ? call('normalizeMerchant', [original]) : options.normalized,
+      3: options.partnerName || 'Amazon', 4: options.matchMethod || 'exact_normalized',
+      5: options.priority === undefined ? '' : options.priority, 6: customerId,
+      7: options.validFrom || '', 8: options.validTo || '', 9: 'FALSE',
+      10: 'owner@example.com', 12: '2026-01-01T00:00:00+09:00',
+      13: 1, 14: options.active === false ? 'FALSE' : 'TRUE',
+      15: options.conflict ? 'TRUE' : 'FALSE'
+    });
+    gas.stubs.getSpreadsheet('master').getSheetByName('顧客別取引先辞書').appendRow(row);
+    return row[0];
+  }
+
+  function kw17Sheet(name) {
+    return gas.stubs.getSpreadsheet('master').getSheetByName(name);
+  }
+
+  function kw17Audit() {
+    return kw17Sheet('監査ログ').getDataRange().getValues().slice(1)
+      .filter((row) => String(row[2]) === 'DICT_REGISTER');
+  }
+
+  function kw17Match(customerId, original) {
+    const rows = call('readDictionary_', [false]);
+    const index = call('buildDictionaryIndex', [customerId, {customer: rows, common: []}]);
+    return call('matchPartner', [{merchantOriginal: original}, customerId, index]);
+  }
+
+  test('kw17 1: repeat learning returns the first id without a second row or audit', () => {
+    const {customer} = setupWorld();
+    const args = [customer.customerId, 'AMAZON.CO.JP', call('normalizeMerchant', ['AMAZON.CO.JP']),
+      'Amazon', 'reviewer@example.com'];
+    const beforeRows = dictionaryRows().length;
+    const beforeAudit = kw17Audit().length;
+    const first = call('learnFromResolution', args);
+    const second = call('learnFromResolution', args);
+    assert.equal(second, first);
+    assert.equal(dictionaryRows().length, beforeRows + 1);
+    assert.equal(kw17Audit().length, beforeAudit + 1);
+  });
+
+  test('kw17 2: resolving two reviews for one merchant learns one row', () => {
+    const seeded = seedPartnerViaWeb({count: 2});
+    const before = dictionaryRows().length;
+    seeded.reviews.forEach((review) => call('resolveReview', [review.reviewId,
+      'ADOPT_EXISTING_PARTNER', {partnerName: 'Amazon'}]));
+    assert.equal(dictionaryRows().length, before + 1);
+  });
+
+  test('kw17 3: a flagged equivalent row prevents learning', () => {
+    const {customer} = setupWorld();
+    const id = kw17Seed(customer.customerId, {conflict: true});
+    const before = dictionaryRows().length;
+    assert.equal(call('learnFromResolution', [customer.customerId, 'AMAZON.CO.JP',
+      call('normalizeMerchant', ['AMAZON.CO.JP']), 'Amazon', 'reviewer@example.com']), id);
+    assert.equal(dictionaryRows().length, before);
+  });
+
+  test('kw17 4: each of eight nonequivalent rows requires a new learned row', () => {
+    const cases = [
+      ['a inactive', {active: false}],
+      ['b partner', {partnerName: 'Other'}],
+      ['c original', {original: 'ＡＭＡＺＯＮ．ＣＯ．ＪＰ'}],
+      ['d period', {validTo: '2025-01-01'}],
+      ['e customer', {customerId: 'C002'}],
+      ['f method', {matchMethod: 'prefix'}],
+      ['g priority', {priority: 1}],
+      ['h case', {partnerName: 'amazon'}]
+    ];
+    cases.forEach(([name, variant]) => {
+      const {customer} = setupWorld();
+      kw17Seed(variant.customerId || customer.customerId, variant);
+      const before = dictionaryRows().length;
+      call('learnFromResolution', [customer.customerId, 'AMAZON.CO.JP',
+        call('normalizeMerchant', ['AMAZON.CO.JP']), 'Amazon', 'reviewer@example.com']);
+      assert.equal(dictionaryRows().length, before + 1, name);
+    });
+  });
+
+  test('kw17 5: one web press resolves two reviews with one learned row', () => {
+    const single = seedPartnerViaWeb();
+    gas.stubs.resetRoundTrips();
+    assert.equal(webResolve(single.customer.customerId,
+      [decision(single.reviews[0], 'Amazon')]).resolved, 1);
+    const trips = gas.stubs.roundTrips();
+    const total = trips.rangeReads + trips.rangeWrites + trips.flushes;
+    // 修正前 92 往復、修正後 94 往復（+2）。読取経路の往復が増えた。
+    assert.ok(total > 0);
+    console.log(`KW17_ADOPT_TRIPS ${total}`);
+    const seeded = seedPartnerViaWeb({count: 2});
+    const before = dictionaryRows().length;
+    const result = webResolve(seeded.customer.customerId,
+      seeded.reviews.map((review) => decision(review, 'Amazon')));
+    assert.equal(result.resolved, 2);
+    assert.equal(dictionaryRows().length, before + 1);
+  });
+
+  test('kw17 6: candidate ids use ruleId then id then dictId and carry method', () => {
+    const {customer} = setupWorld();
+    const base = {original: 'SHOP', normalized: 'SHOP', partnerName: 'Shop',
+      matchMethod: 'exact_normalized', active: true, priority: null};
+    const match = (rule) => call('matchPartner', [{merchantOriginal: 'SHOP'}, customer.customerId,
+      {customer: [Object.assign({}, base, rule)], common: []}]).candidates[0];
+    assert.equal(match({dictId: 'DICT_ONLY'}).ruleId, 'DICT_ONLY');
+    assert.equal(match({dictId: 'DICT_ONLY'}).matchMethod, 'exact_normalized');
+    assert.equal(match({}).ruleId, '');
+    assert.equal(match({id: 'ID', dictId: 'DICT'}).ruleId, 'ID');
+    assert.equal(match({ruleId: 'RULE', id: 'ID', dictId: 'DICT'}).ruleId, 'RULE');
+  });
+
+  test('kw17 7: imported review Q and Z candidates carry dictionary id and method', () => {
+    const {customer} = setupWorld();
+    const id = kw17Seed(customer.customerId, {conflict: true});
+    const fileId = putCsv(customer, {rows: ['2025/12/10,AMAZON.CO.JP,1000,仕入れ']});
+    webImport(customer);
+    const review = openReviewsFor(customer.customerId, {fileId})
+      .find((row) => row.reviewType === 'PARTNER');
+    assert.ok(review);
+    const raw = kw17Sheet('要確認').getRange(review._rowNumber, 1, 1, 26).getValues()[0];
+    const q = JSON.parse(raw[16]);
+    const z = JSON.parse(raw[25]);
+    [q, z.candidates].forEach((candidates) => {
+      assert.equal(candidates[0].dictId, id);
+      assert.equal(candidates[0].matchMethod, 'exact_normalized');
+      assert.ok(!JSON.stringify(candidates).includes('undefined'));
+    });
+  });
+
+  test('kw17 8: omitted and false apply report duplicates without writing', () => {
+    const {customer} = setupWorld();
+    kw17Seed(customer.customerId, {dictId: 'A'});
+    kw17Seed(customer.customerId, {dictId: 'B'});
+    const before = JSON.stringify(kw17Sheet('顧客別取引先辞書').getDataRange().getValues());
+    const audit = JSON.stringify(kw17Sheet('監査ログ').getDataRange().getValues());
+    [[], [false]].forEach((args) => {
+      const report = call('opsDedupeDictionaryRows', args);
+      assert.equal(report.apply, false);
+      assert.equal(report.groups, 1);
+      assert.equal(report.deactivate, 1);
+      assert.equal(report.customerRows, 2);
+      assert.equal(report.eligibleRows, 2);
+      assert.equal(JSON.stringify(kw17Sheet('顧客別取引先辞書').getDataRange().getValues()), before);
+      assert.equal(JSON.stringify(kw17Sheet('監査ログ').getDataRange().getValues()), audit);
+    });
+  });
+
+  test('kw17 9: apply changes only O and R, audits once per customer, then is idempotent', () => {
+    const {customer} = setupWorld();
+    ['A', 'B', 'C'].forEach((dictId) => kw17Seed(customer.customerId, {dictId}));
+    const before = kw17Sheet('顧客別取引先辞書').getRange(2, 1, 3, 18).getValues();
+    const audits = kw17Audit().length;
+    const report = call('opsDedupeDictionaryRows', [true]);
+    assert.equal(report.groups, 1);
+    assert.equal(report.deactivate, 2);
+    const after = kw17Sheet('顧客別取引先辞書').getRange(2, 1, 3, 18).getValues();
+    assert.equal(after.length, before.length);
+    after.forEach((row, index) => {
+      [14, 17].forEach((column) => { before[index][column] = row[column]; });
+      assert.deepEqual(row, before[index], `other columns changed in row ${index}`);
+      assert.equal(String(row[14]).toUpperCase(), index === 0 ? 'TRUE' : 'FALSE');
+      if (index > 0) assert.ok(row[17]);
+    });
+    assert.equal(kw17Audit().length, audits + 1);
+    const audit = kw17Audit().at(-1);
+    assert.ok(JSON.stringify(audit).includes('DEDUPE_DICTIONARY_ROWS'));
+    const frozen = JSON.stringify(dictionaryRows());
+    const count = kw17Audit().length;
+    const again = call('opsDedupeDictionaryRows', [true]);
+    assert.equal(again.groups, 0);
+    assert.equal(again.deactivate, 0);
+    assert.equal(JSON.stringify(dictionaryRows()), frozen);
+    assert.equal(kw17Audit().length, count);
+  });
+
+  test('kw17 10: a flagged later row is kept ahead of an unflagged earlier row', () => {
+    const {customer} = setupWorld();
+    kw17Seed(customer.customerId, {dictId: 'A'});
+    kw17Seed(customer.customerId, {dictId: 'B', conflict: true});
+    const report = call('opsDedupeDictionaryRows', [true]);
+    assert.equal(report.keptFlagged, 1);
+    const rows = dictionaryRows();
+    assert.equal(String(rows[0][14]).toUpperCase(), 'FALSE');
+    assert.equal(String(rows[1][14]).toUpperCase(), 'TRUE');
+  });
+
+  test('kw17 11: nonequivalent and exact_original rows stay untouched', () => {
+    const {customer} = setupWorld();
+    kw17Seed(customer.customerId, {dictId: 'BASE'});
+    [
+      {active: false}, {partnerName: 'Other'}, {original: 'ＡＭＡＺＯＮ．ＣＯ．ＪＰ'},
+      {validTo: '2025-01-01'}, {customerId: 'C002'}, {matchMethod: 'prefix'},
+      {priority: 1}, {partnerName: 'amazon'}, {matchMethod: 'exact_original'}
+    ].forEach((variant, index) => kw17Seed(variant.customerId || customer.customerId,
+      Object.assign({dictId: `EXCLUDED_${index}`}, variant)));
+    const before = dictionaryRows().map((row) => row[14]);
+    call('opsDedupeDictionaryRows', [true]);
+    assert.deepEqual(dictionaryRows().map((row) => row[14]), before);
+  });
+
+  test('kw17 12: deduplication preserves matching decisions and distinct candidates', () => {
+    const {customer} = setupWorld();
+    [
+      {dictId: 'A'}, {dictId: 'B'}, {dictId: 'C', conflict: true},
+      {dictId: 'D', partnerName: 'Other'},
+      {dictId: 'E', original: 'ＡＭＡＺＯＮ．ＣＯ．ＪＰ'},
+      {dictId: 'F', original: 'DATED', validTo: '2025-01-01'},
+      {dictId: 'G', original: 'AMAZ', matchMethod: 'prefix'}
+    ].forEach((entry) => kw17Seed(customer.customerId, entry));
+    const names = ['AMAZON.CO.JP', 'ＡＭＡＺＯＮ．ＣＯ．ＪＰ', 'DATED', 'AMAZON-OTHER'];
+    const capture = () => names.map((name) => {
+      const result = kw17Match(customer.customerId, name);
+      return {autoConfirm: result.autoConfirm, partnerName: result.partnerName,
+        matchedBy: result.matchedBy, conflict: result.conflict,
+        names: [...new Set(result.candidates.map((entry) => entry.partnerName))].sort(),
+        count: result.candidates.length};
+    });
+    const before = capture();
+    call('opsDedupeDictionaryRows', [true]);
+    const after = capture();
+    after.forEach((result, index) => {
+      assert.deepEqual(result.names, before[index].names);
+      ['autoConfirm', 'partnerName', 'matchedBy', 'conflict'].forEach((key) =>
+        assert.equal(result[key], before[index][key], `${names[index]} ${key}`));
+    });
+    assert.ok(after.some((result, index) => result.count < before[index].count));
+  });
+
+  test('kw17 13: changed target id at reread aborts all writes', () => {
+    const {customer} = setupWorld();
+    kw17Seed(customer.customerId, {dictId: 'A'});
+    kw17Seed(customer.customerId, {dictId: 'B'});
+    const original = gas.context.readDictionary_;
+    let reads = 0;
+    const error = caught(() => withMocks({readDictionary_: (common) => {
+      if (!common && ++reads === 2) kw17Sheet('顧客別取引先辞書').getRange(3, 1).setValue('CHANGED');
+      return original(common);
+    }}, () => call('opsDedupeDictionaryRows', [true])));
+    assert.match(String(error.message), /3/);
+    const rows = dictionaryRows();
+    assert.equal(rows[1][0], 'CHANGED');
+    assert.equal(String(rows[0][14]).toUpperCase(), 'TRUE');
+    assert.equal(String(rows[1][14]).toUpperCase(), 'TRUE');
+    assert.equal(String(rows[0][17] || ''), '');
+    assert.equal(String(rows[1][17] || ''), '');
+  });
+
+  test('kw17 14: an already inactive drop at reread aborts all writes', () => {
+    const {customer} = setupWorld();
+    kw17Seed(customer.customerId, {dictId: 'A'});
+    kw17Seed(customer.customerId, {dictId: 'B'});
+    kw17Seed(customer.customerId, {dictId: 'C'});
+    const auditCount = kw17Audit().length;
+    const original = gas.context.readDictionary_;
+    let reads = 0;
+    const error = caught(() => withMocks({readDictionary_: (common) => {
+      if (!common && ++reads === 2) kw17Sheet('顧客別取引先辞書').getRange(3, 15).setValue('FALSE');
+      return original(common);
+    }}, () => call('opsDedupeDictionaryRows', [true])));
+    assert.match(String(error.message), /3/);
+    const rows = dictionaryRows();
+    assert.deepEqual(rows.map((row) => String(row[14]).toUpperCase()), ['TRUE', 'FALSE', 'TRUE']);
+    assert.ok(rows.every((row) => !row[17]));
+    assert.equal(kw17Audit().length, auditCount);
+  });
+
+  test('kw17 15: an inactive or changed-conflict keeper at reread aborts all writes', () => {
+    [
+      ['inactive', 15, 'FALSE'],
+      ['conflict', 16, 'TRUE']
+    ].forEach(([caseName, column, value]) => {
+      const {customer} = setupWorld();
+      kw17Seed(customer.customerId, {dictId: 'A'});
+      kw17Seed(customer.customerId, {dictId: 'B'});
+      const auditCount = kw17Audit().length;
+      const original = gas.context.readDictionary_;
+      let reads = 0;
+      const error = caught(() => withMocks({readDictionary_: (common) => {
+        if (!common && ++reads === 2) kw17Sheet('顧客別取引先辞書').getRange(2, column).setValue(value);
+        return original(common);
+      }}, () => call('opsDedupeDictionaryRows', [true])));
+      assert.match(String(error.message), /2/, caseName);
+      const rows = dictionaryRows();
+      assert.equal(String(rows[0][column - 1]).toUpperCase(), value, caseName);
+      assert.equal(String(rows[1][14]).toUpperCase(), 'TRUE', caseName);
+      assert.ok(rows.every((row) => !row[17]), caseName);
+      assert.equal(kw17Audit().length, auditCount, caseName);
+    });
+  });
+
+  test('kw17 16: a stale normalized value does not prevent learning', () => {
+    const {customer} = setupWorld();
+    kw17Seed(customer.customerId, {dictId: 'STALE', normalized: 'OLD_NORMALIZED'});
+    const before = dictionaryRows().length;
+    const learned = call('learnFromResolution', [customer.customerId, 'AMAZON.CO.JP',
+      call('normalizeMerchant', ['AMAZON.CO.JP']), 'Amazon', 'reviewer@example.com']);
+    assert.notEqual(learned, 'STALE');
+    assert.equal(dictionaryRows().length, before + 1);
+  });
+
+  test('kw17 17: rows differing only in normalized value do not form a group', () => {
+    const {customer} = setupWorld();
+    kw17Seed(customer.customerId, {dictId: 'A'});
+    kw17Seed(customer.customerId, {dictId: 'STALE', normalized: 'OLD_NORMALIZED'});
+    const before = JSON.stringify(dictionaryRows());
+    const report = call('opsDedupeDictionaryRows', [true]);
+    assert.equal(report.groups, 0);
+    assert.equal(report.deactivate, 0);
+    assert.equal(JSON.stringify(dictionaryRows()), before);
+  });
+
+  test('kw17 18: null rule ids fall through to id and dictId', () => {
+    const {customer} = setupWorld();
+    const base = {original: 'SHOP', normalized: 'SHOP', partnerName: 'Shop',
+      matchMethod: 'exact_normalized', active: true, priority: null};
+    const candidate = (rule) => call('matchPartner', [{merchantOriginal: 'SHOP'}, customer.customerId,
+      {customer: [Object.assign({}, base, rule)], common: []}]).candidates[0];
+    assert.equal(candidate({ruleId: null, id: null, dictId: 'D'}).ruleId, 'D');
+    assert.equal(candidate({ruleId: null, id: 'ID', dictId: 'D'}).ruleId, 'ID');
+    assert.equal(candidate({ruleId: null, id: null, dictId: null}).ruleId, '');
+  });
+
 };

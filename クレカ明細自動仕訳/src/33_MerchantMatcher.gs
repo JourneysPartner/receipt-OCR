@@ -8,7 +8,10 @@ function merchantPriority_(value) {
 
 /** @param {!Object} rule @return {string} */
 function merchantRuleId_(rule) {
-  return String(rule.ruleId !== undefined ? rule.ruleId : rule.id);
+  if (rule.ruleId !== undefined && rule.ruleId !== null) return String(rule.ruleId);
+  if (rule.id !== undefined && rule.id !== null) return String(rule.id);
+  if (rule.dictId !== undefined && rule.dictId !== null) return String(rule.dictId);
+  return '';
 }
 
 /** @param {!Object} rule @return {string} */
@@ -101,7 +104,8 @@ function merchantCandidates_(rules) {
       ruleId: merchantRuleId_(rule),
       partnerName: merchantPartner_(rule),
       priority: merchantPriority_(rule.priority),
-      conflict: toBool(rule.conflict !== undefined ? rule.conflict : rule.conflictFlag)
+      conflict: toBool(rule.conflict !== undefined ? rule.conflict : rule.conflictFlag),
+      matchMethod: merchantMethod_(rule) || null
     };
   });
 }
