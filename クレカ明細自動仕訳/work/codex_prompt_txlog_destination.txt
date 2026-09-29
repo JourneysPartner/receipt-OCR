@@ -1,0 +1,41 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の直しを 1 つ受け取ります。**仕様書 `work/spec_txlog_destination.md` 1.2 を最初から最後まで読んでから始めてください。**これは 3 度目の起動です。1 度目は `webapp 08`、2 度目は `phase0.test.js` のエラーコード一覧と仕様の食い違いで、どちらも正しく止まってもらいました。1.1・1.2 で §8.1 にその 2 本の扱いを足しました。改訂履歴 1.1・1.2 を読んでください。
+
+要点：取引ログ（`クレカ取引ログ`）の AC・AD 列（転記先スプレッドシートID・シート名）を「取引がどの転記先に居るか」の正本にする。いまは値を書く呼出しが無く、全行が空です。取込の登録で予定の転記先を書き、行番号 AE を書くときは必ず AC・AD を一緒に書き（§3）、1 ファイルを 2 つの転記先へ割る取込を書く前に止め（§4）、後始末・報告・ファイル単位の操作・整合性の操作はまず AC・AD を見る（§5）。AC が空の旧い行はいまの規則のまま扱う。本番の旧い行を実物で検算して埋める運用関数を足す（§7、既定は見るだけ）。
+
+作業ツリーの状態（すべて未コミット。親フォルダの `.codex/config.toml` も変更中だが触らないこと）：**前回の起動が途中まで実装したものが入っています。**これを土台に続けてください（捨ててやり直さないこと。まず `git diff -- src/ test/` で全部読み、仕様書と突き合わせること）。
+- `src/` の 8 ファイル（06・43・45・52・54・61・70・97）に実装が入っている。前回の報告：`resolveFileDestination_` は 61、`assertGuessedRowsPresent_` は 45 に置いた。`UPDATE_PURPOSE` は対象行の取引IDセルを直接読む。埋め戻しは取引ログの対象行から顧客を集め、雛形の親フォルダ直下を MIME 型と名前で列挙し、走査できたときは `folderScan: 'SCANNED'` と書く。スタブ・ハーネスへの追加は無し。
+- `test/phase8-webapp.test.js` に、§8.1 の 4 本の準備（補助 `clearRecordedDestinationsForFile`）、`webapp 08` の改訂、txdest 1〜21 が入っている。前回の記録：**実装前は txdest 8 だけ緑、txdest 1〜7・9〜21 は赤**だった。
+- いまの `node test/run-tests.js` は **1272/1274**。赤は 2 本：(1) `phase0.test.js` の `ERROR_CATALOG contains all 51 design codes …`（仕様書 1.2 §8.1 のとおり一覧を足せば直る）、(2) **txdest 15**（前回の報告：テストの材料の不足で、`ADOPT_AS_NEW_TRANSACTION` に必須の `newFileMeta` を渡していない。テストの材料を直すこと。実装側の期待を緩めないこと）。
+- M1〜M25 はまだ 1 つも回していない。
+
+## 進め方
+
+1. 仕様書を全部読む。関連するコード（`src/61_TransactionLog.gs`・`src/70_ImportFlow.gs`・`src/43_SheetWriter.gs`・`src/45_DestinationIndex.gs`・`src/52_FileResolution.gs`・`src/54_IntegrityResolution.gs`・`src/97_Ops.gs` の `opsInspectStuckFiles`〜`stuckFileWriteCustomer_`・`opsReprocessFile`、`src/06_ErrorCatalog.gs`）と、`test/phase8-webapp.test.js` の `webapp 45f`〜`45l` を読む。
+2. 前回の実装とテストを仕様書と突き合わせ、足りない・違う箇所を直す（自分で見つけたものは報告に書く）。
+3. `phase0.test.js` の一覧を §8.1 のとおり足し、txdest 15 の材料を直して、全件緑にする。
+4. §9 の M1〜M25 を 1 つずつ入れて回し、赤になるテストを記録して戻す。赤にならない変異があれば、テストを足して赤にする（足したテストは報告する）。
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。**
+2. **git を操作しないこと**（commit・stash・reset・checkout・clean・add）。
+3. **`src/` で変えてよいのは `06_ErrorCatalog.gs`（`DESTINATION_MISMATCH` の 1 行を足すだけ）・`43_SheetWriter.gs`・`45_DestinationIndex.gs`・`52_FileResolution.gs`・`54_IntegrityResolution.gs`・`61_TransactionLog.gs`・`70_ImportFlow.gs`・`97_Ops.gs` だけ。**特に `51_ReviewResolution.gs`・`71_RunOrchestrator.gs`・`80_WebApp.gs`・`81_WebAppUi.html` は 1 文字も変えないこと（仕様書 §6）。
+4. **`src/97_Ops.gs` には文字列の中に生の NUL バイトが 2 つある。**消さない・置き換えないこと。検査：`node -e "console.log([...require('fs').readFileSync('src/97_Ops.gs')].filter(b=>b===0).length)"` が前後とも 2。
+5. テストの変更は、`test/phase8-webapp.test.js` に txdest 1〜21（と M を赤にするために足すテスト）と新しい補助を足すこと、§8.1 の 4 本の準備（済み）、`webapp 08` の最後の 2 つの期待（とテスト名。済み）、`test/phase0.test.js` のエラーコード一覧（§8.1）だけ。**既存のテストの期待を変えて緑にしてはならない。**変えないと通らないものがあれば、変えずに止めて理由を報告すること。`test/fixtures/` は 1 文字も変えない。`test/gas-stubs.js`・`test/gas-harness.js` は足りない API を**足すだけ**なら変えてよい（既存の振る舞いを変えない。足したものを報告する）。
+6. 取込の往復を増やさないこと（`test/phase6-round-trips.test.js` の上限を変えない。§3.3・§4 は既に読んだ値だけを使う）。`WEBAPP_*` の定数を変えない。
+7. リポジトリの親フォルダの `.codex/config.toml` に触らないこと。
+8. 仕様書を変えないこと（間違いを見つけたら報告する）。
+9. 仕様書に無い判断で安全側を外さないこと。迷ったら止めて報告すること。**「空」の判定は `''` だけでなく `null`・`undefined` も空とすること**（仕様書 §2。実機の Sheets API は行末の空セルを返さないことがあり、スタブとだけ合わせると実機で外れる）。
+
+## 報告してほしいこと
+
+- 開始時・終了時の `node test/run-tests.js` の最後の行
+- 前回の実装から直した箇所（全部）
+- M1〜M25 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て
+- 仕様書が間違っていた・足りなかった箇所（黙って直さないこと）
+- 自分で決めた箇所（全部。部品の置き場所、`UPDATE_PURPOSE` の取引ID の読み方、埋め戻しの Drive の列挙のしかた、スタブに足したもの など）
+- `src/` の関数ごとの変更の要約（どの関数に何を足したか）
+- `97_Ops.gs` の NUL バイトの数（前・後）
+- `git status --porcelain -- src/ test/` と `git diff --stat -- src/ test/` の出力（始める前と後）
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。

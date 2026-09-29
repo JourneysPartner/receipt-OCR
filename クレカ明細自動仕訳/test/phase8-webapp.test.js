@@ -583,7 +583,7 @@ module.exports = ({test, assert, gas}) => {
     assert.deepEqual(createdIds(before), [first.destinationSpreadsheetId]);
   });
 
-  test('webapp 08: imported reviews point to the clone while transaction AC and AD stay blank', () => {
+  test('webapp 08: imported reviews point to the clone and transaction AC and AD record the same clone', () => {
     requireWebFunction('webAppRunImport');
     const seeded = seedPartnerViaWeb();
     assert.equal(seeded.reviews.length, 1);
@@ -591,8 +591,8 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(review.destinationSpreadsheetId, seeded.destinationSpreadsheetId);
     assert.equal(review.destinationSheetName, '入力用シート');
     const tx = transactionFor(review);
-    assert.equal(tx.destinationSpreadsheetId, '');
-    assert.equal(tx.destinationSheetName, '');
+    assert.equal(tx.destinationSpreadsheetId, seeded.destinationSpreadsheetId);
+    assert.equal(tx.destinationSheetName, '入力用シート');
   });
 
   test('webapp 09: resolving honors WEBAPP_MAX_PER_CALL and reports the remainder by ID', () => {
@@ -1369,6 +1369,17 @@ module.exports = ({test, assert, gas}) => {
     sheet.getRange(index + 1, 31).setValue('');
   }
 
+  /** 本仕様より前の取引ログとして、ファイルの AC・AD を空にする。 */
+  function clearRecordedDestinationsForFile(fileId) {
+    const sheet = gas.stubs.getSpreadsheet('master').getSheetByName('クレカ取引ログ');
+    const rows = sheet.getDataRange().getValues();
+    rows.forEach((row, index) => {
+      if (index > 0 && String(row[4]) === String(fileId)) {
+        sheet.getRange(index + 1, 29, 1, 2).setValues([['', '']]);
+      }
+    });
+  }
+
   test('webapp 45f: the stuck-file report reads the clone, not the template', () => {
     requireWebFunction('opsExplainStuckFileTransactions');
     // opsInspectStuckFiles は customer.destinationSpreadsheetId＝雛形を開くので、
@@ -1376,6 +1387,7 @@ module.exports = ({test, assert, gas}) => {
     // COMMITTED 29 件に対して rowsCarryingTxId: 0 と出た。ここは要確認行の
     // M列を正本にするので、同じ取引が見えなければならない。
     const seeded = seedPartnerViaWeb({count: 2});
+    clearRecordedDestinationsForFile(seeded.fileId);
     // 1 件だけ確定させる ── 実機の 202502.xlsx は 32 件中 29 件が確定済みで、
     // 報告に並ぶべきは残りの 3 件だけだった。全件が未終端の固定データでは、
     // 終端を外す絞り込みが効いていなくても同じ結果になる。
@@ -1473,6 +1485,7 @@ module.exports = ({test, assert, gas}) => {
     // 2 件は転記はされたが要確認が登録される前に殺された。K-W10 のまま回復すると
     // 雛形の索引で動き、複製に居る取引を雛形へもう一度書く。
     const seeded = seedPartnerViaWeb({count: 3});
+    clearRecordedDestinationsForFile(seeded.fileId);
     const customerId = seeded.customer.customerId;
     const clone = seeded.destinationSpreadsheetId;
     const template = seeded.customer.destinationId;
@@ -1551,6 +1564,7 @@ module.exports = ({test, assert, gas}) => {
     // 要確認行の M列が雛形を指すのに、行は複製にある ── K-W10 が起きる形。
     // 転記先を選んだあとの検算が無いと、雛形の索引で回復して二重転記になる。
     const seeded = seedPartnerViaWeb({count: 2});
+    clearRecordedDestinationsForFile(seeded.fileId);
     const customerId = seeded.customer.customerId;
     const template = seeded.customer.destinationId;
     setReviewDestination(seeded.reviews.map((review) => review.reviewId), template);
@@ -1573,6 +1587,7 @@ module.exports = ({test, assert, gas}) => {
     // 仮定が外れる形＝Web アプリで取り込んで要確認が立つ前に殺されたファイルは、
     // 行の検算で止まらなければならない。雛形の索引にその行は無い。
     const seeded = seedPartnerViaWeb({count: 2});
+    clearRecordedDestinationsForFile(seeded.fileId);
     const customerId = seeded.customer.customerId;
     const template = seeded.customer.destinationId;
     blankReviewRows(seeded.reviews.map((review) => review.reviewId));
@@ -1638,6 +1653,610 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(picked.committed.length, 1, JSON.stringify(picked));
     assert.equal(picked.committed[0].fullTxId, orphan.fullTxId);
     assert.equal(transactionFor(seeded.reviews[0]).transactionStatus, 'COMMITTED');
+  });
+
+  // 取引ログ AC・AD を置き場の正本にする第2段。
+  function txLogSheet() {
+    return gas.stubs.getSpreadsheet('master').getSheetByName('クレカ取引ログ');
+  }
+
+  function txLogRow(fullTxId) {
+    const values = txLogSheet().getDataRange().getValues();
+    const index = values.findIndex((row) => String(row[0]) === String(fullTxId));
+    assert.ok(index > 0, `取引ログに ${fullTxId} が無い`);
+    return index + 1;
+  }
+
+  function setTxCell(fullTxId, column, value) {
+    txLogSheet().getRange(txLogRow(fullTxId), column).setValue(value);
+  }
+
+  function txLogSnapshot() {
+    return JSON.stringify(txLogSheet().getDataRange().getValues());
+  }
+
+  function destinationSnapshot(id) {
+    return JSON.stringify(gas.stubs.getSpreadsheet(id)
+      .getSheetByName('入力用シート').getDataRange().getValues());
+  }
+
+  function fileReviewFor(seeded, type = 'FILE_CHANGED', fileId = seeded.fileId) {
+    return call('registerReview', [{reviewType: type, fileId,
+      customerId: seeded.customer.customerId, customerName: seeded.customer.customerName,
+      fileNameOriginal: '明細.csv', detail: type === 'FILE_CHANGED'
+        ? {kind: 'FILE_CHANGED', oldRevision: 'r1', newRevision: 'r2',
+          oldBinaryHash: 'b'.repeat(64), newBinaryHash: 'e'.repeat(64), hashVersion: '3'}
+        : undefined}]).reviewId;
+  }
+
+  function failReserveImport(seeded, options = {}) {
+    return withMocks({reserveDestinationRows: () => { throw new Error('txdest reserve stop'); }},
+      () => webImport(seeded.customer, options));
+  }
+
+  test('txdest 1: web and scheduled imports record AC AD AE, including reviews', () => {
+    const seeded = seedPartnerViaWeb({count: 2});
+    seeded.reviews.forEach((review) => {
+      const tx = transactionFor(review);
+      assert.equal(tx.destinationSpreadsheetId, seeded.destinationSpreadsheetId);
+      assert.equal(tx.destinationSheetName, '入力用シート');
+      assert.ok(Number(tx.destinationRow) >= 1);
+      assert.equal(tx.transactionStatus, 'REVIEW_REQUIRED');
+    });
+    const scheduled = setupWorld();
+    putCsv(scheduled.customer, {fileId: 'scheduled_file'});
+    call('runImport', [{}]);
+    const txs = call('getTransactionsForFile_', ['scheduled_file']);
+    assert.ok(txs.length >= 1);
+    txs.forEach((tx) => {
+      assert.equal(tx.destinationSpreadsheetId, scheduled.customer.destinationId);
+      assert.equal(tx.destinationSheetName, '入力用シート');
+      assert.ok(Number(tx.destinationRow) >= 1);
+    });
+  });
+
+  test('txdest 2: registration records clone before row reservation', () => {
+    const seeded = seedPartnerViaWeb();
+    forceFileState(seeded.fileId, 'DISCOVERED');
+    const tx = transactionFor(seeded.reviews[0]);
+    setTxCell(tx.fullTxId, 10, 'PREPARED');
+    setTxCell(tx.fullTxId, 31, '');
+    clearRecordedDestinationsForFile(seeded.fileId);
+    setTxCell(tx.fullTxId, 29, null);
+    setTxCell(tx.fullTxId, 30, undefined);
+    failReserveImport(seeded, {destinationSpreadsheetId: seeded.destinationSpreadsheetId});
+    const prepared = call('getTransaction', [tx.fullTxId]);
+    assert.equal(prepared.transactionStatus, 'PREPARED');
+    assert.equal(prepared.destinationRow, '');
+    assert.equal(prepared.destinationSpreadsheetId, seeded.destinationSpreadsheetId);
+    assert.equal(prepared.destinationSheetName, '入力用シート');
+  });
+
+  test('txdest 3: recovery uses recorded clone when reviews and rows are absent', () => {
+    const seeded = seedPartnerViaWeb();
+    const tx = transactionFor(seeded.reviews[0]);
+    const sheet = gas.stubs.getSpreadsheet(seeded.destinationSpreadsheetId)
+      .getSheetByName('入力用シート');
+    sheet.getRange(Number(tx.destinationRow), 1, 1, 7).setValues([blank(7)]);
+    blankReviewRows([seeded.reviews[0].reviewId]);
+    setTxCell(tx.fullTxId, 10, 'PREPARED');
+    clearDestinationRow(tx.fullTxId);
+    clearRecordedDestinationsForFile(seeded.fileId);
+    forceFileState(seeded.fileId, 'DISCOVERED');
+    failReserveImport(seeded,
+      {destinationSpreadsheetId: seeded.destinationSpreadsheetId});
+    forceFileState(seeded.fileId, 'WRITING');
+    const result = call('opsRecoverStuckFiles', [])[0];
+    assert.equal(result.destinationSource, 'TX_LOG');
+    assert.equal(result.error, undefined, JSON.stringify(result));
+    assert.equal(result.rewound, true);
+    assert.deepEqual(txIdRowsIn(seeded.customer.destinationId,
+      seeded.customer.customerId), []);
+    const recovered = call('getTransaction', [tx.fullTxId]);
+    assert.equal(recovered.destinationSpreadsheetId, seeded.destinationSpreadsheetId);
+    assert.equal(recovered.destinationSheetName, '入力用シート');
+    assert.ok(Number(recovered.destinationRow) >= 1);
+  });
+
+  test('txdest 4: settlement writes AC AD with AE and rejects incomplete entries atomically', () => {
+    const seeded = setupWorld();
+    const customer = call('getCustomerById', [seeded.customer.customerId]);
+    const tx = {fullTxId: 'TX_TXDEST4', customerId: customer.customerId,
+      fileId: 'txdest4', sourceRow: 2, planned: {b: '2025-12-10', f: '店', i: '用途', k: '店', m: 100}};
+    call('registerPrepared', [[tx], 'RUN_TXDEST4']);
+    const entry = {fullTxId: tx.fullTxId, planned: tx.planned, verified: tx.planned,
+      destinationRow: 2, fromStatus: 'PREPARED', toStatus: 'COMMITTED',
+      destinationSpreadsheetId: customer.destinationSpreadsheetId,
+      destinationSheetName: customer.destinationSheetName};
+    const before = txLogSnapshot();
+    for (const empty of ['', null, undefined, '   ']) {
+      for (const key of ['destinationSpreadsheetId', 'destinationSheetName']) {
+        assert.equal(caught(() => call('settleWrittenTransactions', [[entry,
+          Object.assign({}, entry, {[key]: empty})]])).name, 'TypeError');
+        assert.equal(txLogSnapshot(), before);
+      }
+    }
+    call('settleWrittenTransactions', [[entry]]);
+    const written = call('getTransaction', [tx.fullTxId]);
+    assert.equal(written.destinationSpreadsheetId, customer.destinationSpreadsheetId);
+    assert.equal(written.destinationSheetName, customer.destinationSheetName);
+    assert.equal(Number(written.destinationRow), 2);
+  });
+
+  test('txdest 5: recovery steps 3 4 5 synchronize AC AD AE', () => {
+    for (const step of [3, 4, 5]) {
+      const seeded = seedPartnerViaWeb();
+      const tx = transactionFor(seeded.reviews[0]);
+      const row = Number(tx.destinationRow);
+      const clone = seeded.destinationSpreadsheetId;
+      const sheet = gas.stubs.getSpreadsheet(clone).getSheetByName('入力用シート');
+      setTxCell(tx.fullTxId, 10, 'WRITING');
+      setTxCell(tx.fullTxId, 29, '');
+      setTxCell(tx.fullTxId, 30, '');
+      if (step === 4) sheet.getRange(row, 5).setValue(9999);
+      if (step === 5) {
+        sheet.getRange(row, 1, 1, 7).setValues([blank(7)]);
+        clearDestinationRow(tx.fullTxId);
+      }
+      const customer = Object.assign({}, call('getCustomerById', [seeded.customer.customerId]),
+        {destinationSpreadsheetId: clone});
+      const lease = call('acquireLease', [customer.customerId, seeded.fileId, 'RUN_REC',
+        'reviewer@example.com', 'PROCESS']);
+      try {
+        const result = call('recoverPartialFailure', [seeded.fileId, 'RUN_REC',
+          gas.call('buildIndex', [customer]), lease, {customer}]);
+        assert.equal(result.recovered[0].step, step);
+      } finally { call('releaseLease', [seeded.fileId, 'RUN_REC', 'DONE']); }
+      const recovered = call('getTransaction', [tx.fullTxId]);
+      assert.equal(recovered.destinationSpreadsheetId, clone);
+      assert.equal(recovered.destinationSheetName, '入力用シート');
+      assert.ok(Number(recovered.destinationRow) >= 1);
+    }
+  });
+
+  function rejoinSetup(prepared = false, legacy = false) {
+    const seeded = seedPartnerViaWeb({count: 2});
+    const tx = transactionFor(seeded.reviews[0]);
+    blankReviewRows(seeded.reviews.map((review) => review.reviewId));
+    if (prepared) {
+      setTxCell(tx.fullTxId, 10, 'PREPARED');
+      clearDestinationRow(tx.fullTxId);
+      gas.stubs.getSpreadsheet(seeded.destinationSpreadsheetId)
+        .getSheetByName('入力用シート').getRange(Number(tx.destinationRow), 7).setValue('');
+    }
+    if (legacy) clearRecordedDestinationsForFile(seeded.fileId);
+    forceFileState(seeded.fileId, 'DISCOVERED');
+    return {seeded, tx};
+  }
+
+  test('txdest 6: rejoin preserves recorded B and rebuilds review for B', () => {
+    const {seeded, tx} = rejoinSetup();
+    const before = transactionFor(seeded.reviews[0]);
+    const result = webImport(seeded.customer);
+    const cloneC = result.destinationSpreadsheetId;
+    assert.notEqual(cloneC, seeded.destinationSpreadsheetId);
+    const after = call('getTransaction', [tx.fullTxId]);
+    assert.equal(after.destinationSpreadsheetId, seeded.destinationSpreadsheetId);
+    assert.equal(after.destinationRow, before.destinationRow);
+    assert.deepEqual(txIdRowsIn(cloneC, seeded.customer.customerId), []);
+    const reviews = openReviewsFor(seeded.customer.customerId, {fileId: seeded.fileId});
+    assert.ok(reviews.length >= 1);
+    assert.ok(reviews.every((review) => review.destinationSpreadsheetId ===
+      seeded.destinationSpreadsheetId));
+  });
+
+  test('txdest 7: reimport refuses to split one file between B and C', () => {
+    const {seeded} = rejoinSetup(true);
+    const beforeLog = txLogSnapshot();
+    const beforeReviews = JSON.stringify(reviewSheet().getDataRange().getValues());
+    const beforeB = destinationSnapshot(seeded.destinationSpreadsheetId);
+    const beforeTemplate = destinationSnapshot(seeded.customer.destinationId);
+    const result = webImport(seeded.customer);
+    assert.equal(fileStateOf(seeded.fileId), 'FAILED');
+    assert.ok(importFileResults(result).some((file) => file.errorCode ===
+      'DESTINATION_MISMATCH'), JSON.stringify(result));
+    assert.equal(txLogSnapshot(), beforeLog);
+    assert.equal(JSON.stringify(reviewSheet().getDataRange().getValues()), beforeReviews);
+    assert.equal(destinationSnapshot(seeded.destinationSpreadsheetId), beforeB);
+    assert.equal(destinationSnapshot(seeded.customer.destinationId), beforeTemplate);
+    const cloneC = result.destinationSpreadsheetId;
+    assert.deepEqual(txIdRowsIn(cloneC, seeded.customer.customerId), []);
+  });
+
+  test('txdest 8: legacy AC does not trigger destination split guard', () => {
+    const {seeded} = rejoinSetup(true, true);
+    const customer = call('getCustomerById', [seeded.customer.customerId]);
+    for (const empty of ['', null, undefined, '   ']) {
+      assert.equal(call('recordedDestinationOf_',
+        [{destinationSpreadsheetId: empty, destinationSheetName: '入力用シート'},
+          customer]), null);
+    }
+    const result = webImport(seeded.customer);
+    assert.notEqual(fileStateOf(seeded.fileId), 'FAILED', JSON.stringify(result));
+  });
+
+  test('txdest 9: recovery rejects review M that conflicts with recorded AC', () => {
+    const seeded = seedPartnerViaWeb({count: 2});
+    setReviewDestination(seeded.reviews.map((review) => review.reviewId),
+      seeded.customer.destinationId);
+    clearDestinationRow(seeded.reviews[0].fullTxId);
+    forceFileState(seeded.fileId, 'WRITING');
+    const before = destinationSnapshot(seeded.destinationSpreadsheetId);
+    const result = call('opsRecoverStuckFiles', [])[0];
+    assert.equal(result.destinationSource, 'AMBIGUOUS');
+    assert.equal(result.rewound, undefined);
+    assert.equal(fileStateOf(seeded.fileId), 'WRITING');
+    assert.equal(destinationSnapshot(seeded.destinationSpreadsheetId), before);
+  });
+
+  test('txdest 10: two recorded destinations are ambiguous for recovery and file operations', () => {
+    const seeded = seedPartnerViaWeb({count: 2});
+    setTxCell(seeded.reviews[1].fullTxId, 29, seeded.customer.destinationId);
+    clearDestinationRow(seeded.reviews[0].fullTxId);
+    forceFileState(seeded.fileId, 'WRITING');
+    const result = call('opsRecoverStuckFiles', [])[0];
+    assert.equal(result.destinationSource, 'AMBIGUOUS');
+    const txs = call('getTransactionsForFile_', [seeded.fileId]);
+    assert.equal(caught(() => call('resolveFileDestination_',
+      [call('getCustomerById', [seeded.customer.customerId]), txs])).code,
+    'DESTINATION_MISMATCH');
+  });
+
+  test('txdest 11: stuck reports read each transaction from its recorded clone', () => {
+    const seeded = seedPartnerViaWeb({count: 2});
+    forceFileState(seeded.fileId, 'WRITING');
+    const report = call('opsInspectStuckFiles', [])[0];
+    assert.equal(report.rowsCarryingTxId, 2);
+    assert.deepEqual(report.destinations, [seeded.destinationSpreadsheetId]);
+    const explained = call('opsExplainStuckFileTransactions', [])[0];
+    assert.equal(explained.destinationSource, 'TX_LOG');
+    assert.equal(explained.destinationFromReviewRow, false);
+    assert.equal(explained.destinationSpreadsheetId, seeded.destinationSpreadsheetId);
+    explained.unfinished.forEach((tx) => {
+      assert.equal(tx.destinationSpreadsheetId, seeded.destinationSpreadsheetId);
+    });
+
+    clearRecordedDestinationsForFile(seeded.fileId);
+    setReviewDestination(seeded.reviews.map((review) => review.reviewId), '   ');
+    const legacy = call('opsExplainStuckFileTransactions', [])[0];
+    assert.equal(legacy.destinationSource, 'TEMPLATE');
+    assert.equal(legacy.destinationSpreadsheetId, seeded.customer.destinationId);
+  });
+
+  test('txdest 12: CANCEL_FILE clears clone rows', () => {
+    const seeded = seedPartnerViaWeb({count: 1});
+    const tx = transactionFor(seeded.reviews[0]);
+    const templateBefore = destinationSnapshot(seeded.customer.destinationId);
+    const reviewId = fileReviewFor(seeded);
+    call('resolveFileReview', [reviewId, 'CANCEL_FILE', {choice: 'CANCELED'}]);
+    assert.equal(call('getTransaction', [tx.fullTxId]).transactionStatus, 'CANCELED');
+    for (const column of [2, 3, 4, 5, 6, 7]) {
+      assert.equal(destinationValue(seeded.destinationSpreadsheetId,
+        tx.destinationRow, column), '');
+    }
+    assert.equal(destinationSnapshot(seeded.customer.destinationId), templateBefore);
+  });
+
+  test('txdest 13: legacy rows are checked before CANCEL_FILE and reprocess', () => {
+    for (const operation of ['CANCEL_FILE', 'REPROCESS']) {
+      const seeded = seedPartnerViaWeb();
+      clearRecordedDestinationsForFile(seeded.fileId);
+      const reviewId = fileReviewFor(seeded);
+      const before = {tx: txLogSnapshot(), clone: destinationSnapshot(
+        seeded.destinationSpreadsheetId), template: destinationSnapshot(
+        seeded.customer.destinationId), reviews: JSON.stringify(
+        reviewSheet().getDataRange().getValues()), state: fileStateOf(seeded.fileId)};
+      const error = caught(() => operation === 'CANCEL_FILE'
+        ? call('resolveFileReview', [reviewId, operation, {choice: 'CANCELED'}])
+        : call('opsReprocessFile', [seeded.fileId]));
+      assert.equal(error.code, 'DESTINATION_MISMATCH');
+      assert.equal(txLogSnapshot(), before.tx);
+      assert.equal(destinationSnapshot(seeded.destinationSpreadsheetId), before.clone);
+      assert.equal(destinationSnapshot(seeded.customer.destinationId), before.template);
+      assert.equal(JSON.stringify(reviewSheet().getDataRange().getValues()), before.reviews);
+      assert.equal(fileStateOf(seeded.fileId), before.state);
+    }
+  });
+
+  test('txdest 14: opsReprocessFile cancels rows in the recorded clone', () => {
+    const seeded = seedPartnerViaWeb();
+    const tx = transactionFor(seeded.reviews[0]);
+    const templateBefore = destinationSnapshot(seeded.customer.destinationId);
+    call('opsReprocessFile', [seeded.fileId]);
+    assert.equal(destinationValue(seeded.destinationSpreadsheetId,
+      tx.destinationRow, 7), '');
+    assert.equal(destinationSnapshot(seeded.customer.destinationId), templateBefore);
+  });
+
+  test('txdest 15: file diff and adoption add transactions to the clone', () => {
+    for (const operation of ['APPLY_FILE_DIFF', 'ADOPT_AS_NEW_TRANSACTION']) {
+      const seeded = seedPartnerViaWeb();
+      const original = transactionFor(seeded.reviews[0]);
+      const reviewId = fileReviewFor(seeded);
+      const templateBefore = destinationSnapshot(seeded.customer.destinationId);
+      const next = {identityHash: 'b'.repeat(64), sourceRow: 3,
+        partnerResolutionStatus: 'RESOLVED_WITH_PARTNER',
+        planned: {b: '2025-12-11', f: '株式会社テスト', i: '追加', k: '店', m: 700}};
+      gas.evaluate('SETTINGS.FILE_DIFF_MAX_RATIO=1;');
+      const input = operation === 'APPLY_FILE_DIFF'
+        ? {newTransactions: [Object.assign({}, next,
+          {identityHash: original.identityHash, sourceRow: original.sourceRow}), next],
+          newFileMeta: {fileUpdatedAt: '2026-09-29T00:00:00Z',
+            fileRevision: 'r2', binaryHash: 'e'.repeat(64)}}
+        : {sourceTxId: original.fullTxId, transaction: next,
+          newFileMeta: {fileUpdatedAt: '2026-09-29T00:00:00Z',
+            fileRevision: 'r2', binaryHash: 'e'.repeat(64)}};
+      const result = call('resolveFileReview', [reviewId, operation, input]);
+      const addedId = operation === 'APPLY_FILE_DIFF' ? result.added[0] : result.adoptedTxId;
+      const added = call('getTransaction', [addedId]);
+      assert.equal(added.destinationSpreadsheetId, seeded.destinationSpreadsheetId);
+      assert.equal(added.destinationSheetName, '入力用シート');
+      assert.ok(Number(added.destinationRow) >= 1);
+      assert.equal(destinationValue(seeded.destinationSpreadsheetId,
+        added.destinationRow, 7), addedId);
+      assert.equal(destinationSnapshot(seeded.customer.destinationId), templateBefore);
+    }
+  });
+
+  function purposePair() {
+    const seeded = seedPartnerViaWeb();
+    const tx = transactionFor(seeded.reviews[0]);
+    const duplicateId = 'txdest_duplicate';
+    gas.stubs.createFile(duplicateId, {name: 'duplicate.csv', data: 'a,b'});
+    call('createOrUpdateProcessLog', ['RUN_PURPOSE',
+      call('getCustomerById', [seeded.customer.customerId]),
+      {id: duplicateId, name: 'duplicate.csv', binaryHash: 'f'.repeat(64),
+        contentHash: 'c'.repeat(64), hashVersion: '3', state: 'REVIEW_WAIT'}]);
+    const reviewId = fileReviewFor(seeded, 'DUPLICATE', duplicateId);
+    return {seeded, tx, reviewId};
+  }
+
+  test('txdest 16: UPDATE_PURPOSE checks transaction ID and writes to its clone', () => {
+    let {seeded, tx, reviewId} = purposePair();
+    const templateBefore = destinationSnapshot(seeded.customer.destinationId);
+    call('resolveFileReview', [reviewId, 'UPDATE_PURPOSE',
+      {fullTxId: tx.fullTxId, newPurpose: '新用途'}]);
+    assert.equal(destinationValue(seeded.destinationSpreadsheetId,
+      tx.destinationRow, 4), '新用途');
+    assert.equal(destinationSnapshot(seeded.customer.destinationId), templateBefore);
+
+    ({seeded, tx, reviewId} = purposePair());
+    gas.stubs.getSpreadsheet(seeded.destinationSpreadsheetId)
+      .getSheetByName('入力用シート').getRange(Number(tx.destinationRow), 7)
+      .setValue('TX_OTHER');
+    const before = destinationSnapshot(seeded.destinationSpreadsheetId);
+    const error = caught(() => call('resolveFileReview', [reviewId, 'UPDATE_PURPOSE',
+      {fullTxId: tx.fullTxId, newPurpose: '危険な上書き'}]));
+    assert.equal(error.code, 'DESTINATION_MISMATCH');
+    assert.equal(destinationSnapshot(seeded.destinationSpreadsheetId), before);
+  });
+
+  test('txdest 17: integrity revert uses recorded clone', () => {
+    const seeded = seedPartnerViaWeb();
+    const tx = transactionFor(seeded.reviews[0]);
+    webResolve(seeded.customer.customerId, [decision(seeded.reviews[0], '株式会社テスト')]);
+    const committed = call('getTransaction', [tx.fullTxId]);
+    const templateBefore = destinationSnapshot(seeded.customer.destinationId);
+    gas.stubs.getSpreadsheet(seeded.destinationSpreadsheetId)
+      .getSheetByName('入力用シート').getRange(Number(committed.destinationRow), 4)
+      .setValue('手動変更');
+    call('revertManualChange', [tx.fullTxId, 'reviewer@example.com', {}]);
+    assert.equal(destinationValue(seeded.destinationSpreadsheetId,
+      committed.destinationRow, 4), committed.planned.i);
+    assert.equal(destinationSnapshot(seeded.customer.destinationId), templateBefore);
+  });
+
+  function backfillWorld() {
+    const seeded = setupWorld();
+    const customer = call('getCustomerById', [seeded.customer.customerId]);
+    const prefix = `${seeded.customer.customerName}_`;
+    createTemplate('txdest_clone1', {name: prefix + '20260929-0001'});
+    createTemplate('txdest_clone2', {name: prefix + '20260929-0002'});
+    createTemplate('txdest_wrong_name', {name: prefix + 'wrong'});
+    seeded.customer.destinationParent.fileIds.push('txdest_clone1',
+      'txdest_clone2', 'txdest_wrong_name');
+    const destinations = [seeded.customer.destinationId, 'txdest_clone1',
+      'txdest_clone2', 'txdest_wrong_name'];
+    const specs = [
+      {id: 'TX_BACKFILL_TEMPLATE', row: 3, placements: [[0, 3]], verdict: 'resolved'},
+      {id: 'TX_BACKFILL_CLONE1', row: 4, placements: [[1, 4]], verdict: 'resolved'},
+      {id: 'TX_BACKFILL_CLONE2', row: 5, placements: [[2, 5]], verdict: 'resolved'},
+      {id: 'TX_BACKFILL_MOVED', row: 6, placements: [[1, 7]], verdict: 'moved'},
+      {id: 'TX_BACKFILL_MISSING', row: 8, placements: [], verdict: 'notFound'},
+      {id: 'TX_BACKFILL_WRONGNAME', row: 9, placements: [[3, 9]], verdict: 'notFound'},
+      {id: 'TX_BACKFILL_AMBIG', row: 10, placements: [[1, 10], [2, 10]], verdict: 'ambiguous'}
+    ];
+    specs.forEach((spec) => {
+      call('registerPrepared', [[{fullTxId: spec.id, customerId: customer.customerId,
+        fileId: 'txdest_backfill', sourceRow: spec.row,
+        planned: {b: '2025-12-10', f: '店', i: '用途', k: '店', m: 100}}], 'RUN_BACKFILL']);
+      call('updateTransactionLocation', [spec.id, spec.row]);
+      setTxCell(spec.id, 45, 'OLD_TIMESTAMP');
+      spec.placements.forEach(([destinationIndex, row]) => {
+        gas.stubs.getSpreadsheet(destinations[destinationIndex])
+          .getSheetByName('入力用シート').getRange(row, 7).setValue(spec.id);
+      });
+    });
+    return {seeded, customer, destinations, specs};
+  }
+
+  function assertBackfillCounts(report) {
+    assert.equal(report.totals.targets, 7);
+    assert.equal(report.totals.resolved, 3);
+    assert.equal(report.totals.moved, 1);
+    assert.equal(report.totals.notFound, 2);
+    assert.equal(report.totals.ambiguous, 1);
+    assert.equal(report.customers[0].folderScan, 'SCANNED');
+    assert.equal(report.customers[0].candidates, 3);
+  }
+
+  test('txdest 18: backfill dry runs report only verified destinations', () => {
+    const world = backfillWorld();
+    const beforeTx = txLogSnapshot();
+    const audit = gas.stubs.getSpreadsheet('master').getSheetByName('監査ログ');
+    const beforeAudit = JSON.stringify(audit.getDataRange().getValues());
+    for (const apply of [undefined, false, 'true']) {
+      const report = apply === undefined
+        ? call('opsBackfillTransactionDestinations', [])
+        : call('opsBackfillTransactionDestinations', [apply]);
+      assert.equal(report.apply, false);
+      assertBackfillCounts(report);
+      assert.equal(txLogSnapshot(), beforeTx);
+      assert.equal(JSON.stringify(audit.getDataRange().getValues()), beforeAudit);
+    }
+    assert.equal(world.specs.length, 7);
+  });
+
+  test('txdest 19: backfill writes only verified AC AD AS and is idempotent', () => {
+    const world = backfillWorld();
+    const before = txLogSheet().getDataRange().getValues();
+    const report = call('opsBackfillTransactionDestinations', [true]);
+    assert.equal(report.apply, true);
+    assertBackfillCounts(report);
+    const after = txLogSheet().getDataRange().getValues();
+    world.specs.forEach((spec) => {
+      const row = txLogRow(spec.id) - 1;
+      const expected = spec.verdict === 'resolved'
+        ? world.destinations[spec.placements[0][0]] : '';
+      assert.equal(after[row][28], expected);
+      assert.equal(after[row][29], expected ? '入力用シート' : '');
+      if (expected) assert.notEqual(after[row][44], 'OLD_TIMESTAMP');
+      for (let column = 0; column < 47; column += 1) {
+        if ([28, 29, 44].includes(column)) continue;
+        assert.deepEqual(after[row][column], before[row][column],
+          `${spec.id} column ${column + 1}`);
+      }
+    });
+    const audits = gas.stubs.getSpreadsheet('master').getSheetByName('監査ログ')
+      .getDataRange().getValues().filter((row) => row[11] === 'BACKFILL_TX_DESTINATION');
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0][8], world.customer.customerId);
+    const once = txLogSnapshot();
+    const again = call('opsBackfillTransactionDestinations', [true]);
+    assert.equal(again.totals.resolved, 0);
+    assert.equal(txLogSnapshot(), once);
+  });
+
+  test('txdest 20: backfill rechecks every row before any write', () => {
+    const world = backfillWorld();
+    const originalBuild = gas.context.buildIndex;
+    let changed = false;
+    const error = caught(() => withMocks({buildIndex: (...args) => {
+      const index = originalBuild(...args);
+      if (!changed) {
+        changed = true;
+        setTxCell('TX_BACKFILL_CLONE1', 29, 'OTHER_DESTINATION');
+      }
+      return index;
+    }}, () => call('opsBackfillTransactionDestinations', [true])));
+    assert.ok(changed);
+    assert.match(String(error.message), /changed|変更|destination|AC/i);
+    world.specs.forEach((spec) => {
+      const tx = call('getTransaction', [spec.id]);
+      assert.equal(tx.destinationSpreadsheetId,
+        spec.id === 'TX_BACKFILL_CLONE1' ? 'OTHER_DESTINATION' : '');
+    });
+  });
+
+  test('txdest 21: rejoin assigns destination to a rowless legacy transaction', () => {
+    const {seeded, tx} = rejoinSetup(true, true);
+    failReserveImport(seeded);
+    const prepared = call('getTransaction', [tx.fullTxId]);
+    assert.equal(prepared.transactionStatus, 'PREPARED');
+    assert.equal(prepared.destinationRow, '');
+    assert.notEqual(prepared.destinationSpreadsheetId, '');
+    assert.notEqual(prepared.destinationSpreadsheetId, seeded.destinationSpreadsheetId);
+    assert.equal(prepared.destinationSheetName, '入力用シート');
+  });
+
+  // txdest 22〜25 は監査（2026-09-29）で足した。実装者の変異 M1〜M25 は全部赤に
+  // なったが、監査の変異のうち 4 つがすり抜けた ── コードは正しいが、テストが無いと
+  // 次の変更で黙って壊れる。
+
+  test('txdest 22: backfill stops when a row was deactivated before the write', () => {
+    // 書く直前の読み直しは「AC が空のまま」だけでなく「まだ有効か」も見る。
+    // 読んだ後に取り消しで無効になった行へ転記先を書くと、無効な行の記録が
+    // 生きている行のように見える。txdest 20 は AC の書換えしか見ていない。
+    backfillWorld();
+    const originalBuild = gas.context.buildIndex;
+    let changed = false;
+    const error = caught(() => withMocks({buildIndex: (...args) => {
+      const index = originalBuild(...args);
+      if (!changed) {
+        changed = true;
+        setTxCell('TX_BACKFILL_CLONE1', 42, false);
+      }
+      return index;
+    }}, () => call('opsBackfillTransactionDestinations', [true])));
+    assert.ok(changed);
+    assert.ok(error, '書かずに止まること');
+    ['TX_BACKFILL_TEMPLATE', 'TX_BACKFILL_CLONE1', 'TX_BACKFILL_CLONE2'].forEach((id) => {
+      assert.equal(txLogSheet().getRange(txLogRow(id), 29).getValue(), '',
+        `${id} は 1 セルも書かれない`);
+    });
+    const audits = gas.stubs.getSpreadsheet('master').getSheetByName('監査ログ')
+      .getDataRange().getValues().filter((row) => row[11] === 'BACKFILL_TX_DESTINATION');
+    assert.equal(audits.length, 0);
+  });
+
+  test('txdest 23: only legacy transactions that hold a row are checked as guessed', () => {
+    // 所在を推測して検算するのは「行を持つ旧い行」だけ。行を持たない旧い
+    // PREPARED まで数えると、索引に居ないのが当然なのに取消しが止まる。
+    const customer = call('getCustomerById', [setupWorld().customer.customerId]);
+    const tx = (id, status, ac, row) => ({fullTxId: id, active: true,
+      transactionStatus: status, destinationSpreadsheetId: ac,
+      destinationSheetName: ac ? '入力用シート' : '', destinationRow: row});
+    const legacy = call('resolveFileDestination_', [customer, [
+      tx('TX_ROWLESS', 'PREPARED', '', ''),
+      tx('TX_PLACED', 'COMMITTED', '', 5),
+      tx('TX_GONE', 'CANCELED', '', 6)]]);
+    assert.equal(legacy.kind, 'LEGACY');
+    assert.deepEqual(legacy.guessed.map((item) => item.fullTxId), ['TX_PLACED']);
+    assert.equal(legacy.customer.destinationSpreadsheetId, customer.destinationSpreadsheetId);
+    const mixed = call('resolveFileDestination_', [customer, [
+      tx('TX_REC', 'REVIEW_REQUIRED', 'CLONE_X', 3),
+      tx('TX_ROWLESS', 'WRITING', null, undefined),
+      tx('TX_PLACED', 'COMMITTED', undefined, 4)]]);
+    assert.equal(mixed.kind, 'MIXED');
+    assert.equal(mixed.customer.destinationSpreadsheetId, 'CLONE_X');
+    assert.deepEqual(mixed.guessed.map((item) => item.fullTxId), ['TX_PLACED']);
+  });
+
+  test('txdest 24: recovery of a partly recorded file uses the recorded clone', () => {
+    // 本仕様の後に旧いファイルを取り込み直すと、行を持つ旧い行（AC 空）と
+    // 記録された行が 1 ファイルに混ざる（MIXED）。要確認が無くても記録から
+    // 複製を選び、旧い行は検算が確かめる。旧い扱い（雛形と仮定）に落とすと、
+    // 複製に居る旧い行が雛形の索引に無いので、回復が止まったままになる。
+    const seeded = seedPartnerViaWeb({count: 2});
+    const customerId = seeded.customer.customerId;
+    const clone = seeded.destinationSpreadsheetId;
+    blankReviewRows(seeded.reviews.map((review) => review.reviewId));
+    const legacyTx = transactionFor(seeded.reviews[0]);
+    setTxCell(legacyTx.fullTxId, 29, '');
+    setTxCell(legacyTx.fullTxId, 30, '');
+    clearDestinationRow(seeded.reviews[1].fullTxId);   // 回復に書くものを与える
+    forceFileState(seeded.fileId, 'WRITING');
+    const cloneRowsBefore = txIdRowsIn(clone, customerId);
+
+    const recovered = call('opsRecoverStuckFiles', []);
+    assert.equal(recovered.length, 1);
+    assert.equal(recovered[0].destinationSource, 'TX_LOG', JSON.stringify(recovered[0]));
+    assert.equal(recovered[0].error, undefined, JSON.stringify(recovered[0]));
+    assert.equal(recovered[0].rewound, true);
+    assert.deepEqual(txIdRowsIn(seeded.customer.destinationId, customerId), [],
+      '雛形には 1 行も書かない');
+    assert.deepEqual(txIdRowsIn(clone, customerId), cloneRowsBefore, '複製の行も増えない');
+  });
+
+  test('txdest 25: the stuck-file count uses the review row for legacy transactions', () => {
+    // K-W18 の直しは旧い行にも効く：AC が空なら、雛形ではなく要確認行の M 列の
+    // 転記先で数える（opsExplainStuckFileTransactions と同じ規則）。
+    const seeded = seedPartnerViaWeb({count: 2});
+    clearRecordedDestinationsForFile(seeded.fileId);
+    forceFileState(seeded.fileId, 'WRITING');
+    const report = call('opsInspectStuckFiles', [])[0];
+    assert.equal(report.rowsCarryingTxId, 2, '複製に居る 2 件を数える');
+    assert.deepEqual(report.destinations, [seeded.destinationSpreadsheetId]);
   });
 
   test('webapp 45m: auto-adoption picks up the orphan and lets the file finish', () => {

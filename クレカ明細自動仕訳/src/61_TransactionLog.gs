@@ -64,6 +64,80 @@ function txLogFromRecord_(record) {
     registeredAt: v[43], updatedAt: v[44], _rowNumber: record.rowNumber, _values: v};
 }
 
+/*
+ * 取引ログ AC・AD列（転記先スプレッドシートID・シート名）は、取引が**どの転記先に
+ * 居るか（書かれる予定か）**の正本である（§15-4。2026-09-29）。それまでは値を書く
+ * 呼出しが無く全行が空で、転記先を要る経路はそれぞれ推測していた ── Web アプリは
+ * 処理期ごとに雛形を複製して書くので、顧客マスターの雛形は既存取引の置き場ではない。
+ *
+ * **AC が空の行（旧い行）の転記先は「分からない」のであって、雛形ではない。**
+ * 旧い行は各経路の従来の規則で扱い、推測した所在は書く前に検算する。
+ */
+
+/**
+ * 空か。**`''` だけで判定しない** ── 実機の Sheets API は行末の空セルを返さない
+ * ことがあり（`undefined`）、スタブは `''` を返す。片方に合わせると実機でだけ外れる。
+ */
+function txDestinationEmpty_(value) {
+  return value === null || value === undefined || String(value).trim() === '';
+}
+
+function txHasDestinationRow_(tx) {
+  return Number.isInteger(Number(tx.destinationRow)) && Number(tx.destinationRow) >= 1 &&
+    !txDestinationEmpty_(tx.destinationRow);
+}
+
+function recordedDestinationOf_(tx, customer) {
+  if (!tx || txDestinationEmpty_(tx.destinationSpreadsheetId)) return null;
+  return {spreadsheetId: String(tx.destinationSpreadsheetId),
+    sheetName: txDestinationEmpty_(tx.destinationSheetName)
+      ? String(customer.destinationSheetName) : String(tx.destinationSheetName)};
+}
+
+function customerForRecordedDestination_(customer, tx) {
+  var destination = recordedDestinationOf_(tx, customer);
+  return destination ? Object.assign({}, customer, {
+    destinationSpreadsheetId: destination.spreadsheetId,
+    destinationSheetName: destination.sheetName
+  }) : customer;
+}
+
+function classifyRecordedDestinations_(txs, customer) {
+  var living = (txs || []).filter(function(tx) {
+    return tx.active === true && [TX_STATUS.PREPARED, TX_STATUS.WRITING,
+      TX_STATUS.COMMITTED, TX_STATUS.REVIEW_REQUIRED].indexOf(tx.transactionStatus) >= 0;
+  });
+  var destinations = [];
+  var unrecorded = [];
+  living.forEach(function(tx) {
+    var destination = recordedDestinationOf_(tx, customer);
+    if (!destination) { unrecorded.push(tx); return; }
+    if (!destinations.some(function(known) {
+      return known.spreadsheetId === destination.spreadsheetId &&
+        known.sheetName === destination.sheetName;
+    })) destinations.push(destination);
+  });
+  var kind = !living.length ? 'NONE' : destinations.length > 1 ? 'AMBIGUOUS' :
+    !destinations.length ? 'LEGACY' : unrecorded.length ? 'MIXED' : 'RECORDED';
+  return {kind: kind, destinations: destinations, unrecorded: unrecorded};
+}
+
+function resolveFileDestination_(customer, fileTxs) {
+  var classified = classifyRecordedDestinations_(fileTxs, customer);
+  if (classified.kind === 'AMBIGUOUS') {
+    throw new IntegrityError('DESTINATION_MISMATCH',
+      'Multiple recorded destinations: ' + classified.destinations.map(function(d) {
+        return d.spreadsheetId;
+      }).join(', '));
+  }
+  var chosen = classified.destinations[0];
+  return {customer: chosen ? Object.assign({}, customer, {
+    destinationSpreadsheetId: chosen.spreadsheetId,
+    destinationSheetName: chosen.sheetName
+  }) : customer, kind: classified.kind,
+  guessed: classified.unrecorded.filter(txHasDestinationRow_)};
+}
+
 function activeTransactionRecords_(fullTxId) {
   return findRowsByColumnValue_(transactionLogSheet_(), 1, fullTxId, TRANSACTION_LOG_WIDTH_).map(txLogFromRecord_).filter(function(row) { return row.active; });
 }
@@ -217,11 +291,17 @@ function registerPrepared(txs, runId, existingByIdHint) {
         // 読取確認値を失うと4.24検査3が「予定値あり・読取確認値なし」を
         // 手動変更と誤検知する（INV-01）。
         var carried = current._values || [];
-        [28, 29, 30].forEach(function(column) {          // 転記先ID・シート名・行
-          if (updatedRow[column] === '' && carried[column] !== undefined) {
-            updatedRow[column] = carried[column];
-          }
-        });
+        if (txHasDestinationRow_(current)) {
+          [28, 29, 30].forEach(function(column) {
+            updatedRow[column] = txDestinationEmpty_(carried[column]) ? '' : carried[column];
+          });
+        } else {
+          [28, 29, 30].forEach(function(column) {
+            if (txDestinationEmpty_(updatedRow[column])) {
+              updatedRow[column] = txDestinationEmpty_(carried[column]) ? '' : carried[column];
+            }
+          });
+        }
         [23, 24, 25, 26, 27, 46].forEach(function(column) { // 読取確認値 b/f/i/k/m/g
           if (carried[column] !== undefined) updatedRow[column] = carried[column];
         });
@@ -394,6 +474,12 @@ function activeTransactionRecordsByIds_(fullTxIds) {
 function settleWrittenTransactions(entries) {
   if (!Array.isArray(entries)) throw new TypeError('entries must be an array');
   if (!entries.length) return [];
+  entries.forEach(function(entry) {
+    if (txDestinationEmpty_(entry.destinationSpreadsheetId) ||
+        txDestinationEmpty_(entry.destinationSheetName)) {
+      throw new TypeError('A settled transaction requires a destination spreadsheet and sheet');
+    }
+  });
   return withScriptLock_(function() {
     var sheet = transactionLogSheet_();
     var records = activeTransactionRecordsByIds_(entries.map(function(entry) {
@@ -424,7 +510,9 @@ function settleWrittenTransactions(entries) {
       data.push({range: a1Range_(name, update.rowNumber, 19, 28), values: [
         [].concat(plannedVerifiedArray_(entry.planned), plannedVerifiedArray_(entry.verified))
       ]});
-      data.push({range: a1Range_(name, update.rowNumber, 31, 31), values: [[entry.destinationRow]]});
+      data.push({range: a1Range_(name, update.rowNumber, 29, 31), values: [[
+        String(entry.destinationSpreadsheetId), String(entry.destinationSheetName), entry.destinationRow
+      ]]});
       data.push({range: a1Range_(name, update.rowNumber, 45, 45), values: [[now]]});
       data.push({range: a1Range_(name, update.rowNumber, 46, 47), values: [
         [taxCategoryCell_(entry.planned), taxCategoryCell_(entry.verified)]]});

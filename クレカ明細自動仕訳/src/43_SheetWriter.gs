@@ -372,12 +372,26 @@ function releaseReservedRows(customer, rowNumbers, leaseId, fileId) {
     {valueInputOption: 'RAW', data: data}, customer.destinationSpreadsheetId);
 }
 
-/** 取引ログの転記先行番号（AE列）を更新する。 */
-function updateTransactionLocation(fullTxId, rowNumber) {
+/**
+ * 取引ログの転記先（AC・AD列）と行番号（AE列）を更新する。
+ *
+ * **行番号は、どの転記先の行かと一緒でなければ意味を持たない**（§15-4）。
+ * Web アプリは処理期ごとに複製へ書くので、AE だけを書くと別のシートの
+ * 同じ行番号を指し得る。`src/` の呼出しは必ず書いた転記先の `customer` を渡す。
+ * `customer` を省くと AE だけを書く ── §15-4 より前に書かれたテストの準備のために
+ * 残してあるだけである。
+ */
+function updateTransactionLocation(fullTxId, rowNumber, customer) {
   return withScriptLock_(function() {
     var row = getTransaction(fullTxId);
     if (!row) throw new IntegrityError(null, 'Transaction not found: ' + fullTxId);
-    transactionLogSheet_().getRange(row._rowNumber, 31).setValue(rowNumber);
+    if (customer) {
+      transactionLogSheet_().getRange(row._rowNumber, 29, 1, 3).setValues([[
+        customer.destinationSpreadsheetId, customer.destinationSheetName, rowNumber
+      ]]);
+    } else {
+      transactionLogSheet_().getRange(row._rowNumber, 31).setValue(rowNumber);
+    }
     transactionLogSheet_().getRange(row._rowNumber, 45).setValue(nowIso_());
   });
 }
@@ -502,12 +516,15 @@ function recoveryTargetsFor_(fileId) {
       }));
 }
 
-function recordRecoveredLocation_(tx, rowNumber) {
+function recordRecoveredLocation_(tx, rowNumber, customer) {
   // 転記先には行があるのに取引ログのAE列が空、という食い違いが起こり得る
   // （書込の途中で止まった場合）。回復の機会に揃えておかないと、以後の
   // 解決操作が行番号を取れずに落ちる。
-  if (Number(tx.destinationRow) === Number(rowNumber)) return;
-  updateTransactionLocation(tx.fullTxId, rowNumber);
+  var recorded = recordedDestinationOf_(tx, customer);
+  if (Number(tx.destinationRow) === Number(rowNumber) && recorded &&
+      recorded.spreadsheetId === String(customer.destinationSpreadsheetId) &&
+      recorded.sheetName === String(customer.destinationSheetName)) return;
+  updateTransactionLocation(tx.fullTxId, rowNumber, customer);
 }
 
 function settleRecoveredStatus_(tx) {
@@ -568,7 +585,7 @@ function recoverPartialFailure(fileId, runId, index, leaseId, options) {
         // 「予定値あり・読取確認値なし」を手動変更と誤検知して、
         // 回復した取引を全件、処理開始前に止める。
         updateWrittenValues(tx.fullTxId, tx.planned, current);
-        recordRecoveredLocation_(tx, hit.rowNumber);
+        recordRecoveredLocation_(tx, hit.rowNumber, options.customer);
         settleRecoveredStatus_(tx);
         result.recovered.push({fullTxId: tx.fullTxId, step: 3, rowNumber: hit.rowNumber});
       } else {
@@ -586,7 +603,7 @@ function recoverPartialFailure(fileId, runId, index, leaseId, options) {
             'Read-back verification failed for ' + tx.fullTxId);
         }
         updateWrittenValues(tx.fullTxId, tx.planned, verified4[0].values);
-        recordRecoveredLocation_(tx, hit.rowNumber);
+        recordRecoveredLocation_(tx, hit.rowNumber, options.customer);
         settleRecoveredStatus_(tx);
         result.recovered.push({fullTxId: tx.fullTxId, step: 4, rowNumber: hit.rowNumber});
       }
@@ -613,7 +630,7 @@ function recoverPartialFailure(fileId, runId, index, leaseId, options) {
         'Read-back verification failed for ' + tx.fullTxId);
     }
     updateWrittenValues(tx.fullTxId, tx.planned, verified5[0].values);
-    updateTransactionLocation(tx.fullTxId, rowNumber);
+    updateTransactionLocation(tx.fullTxId, rowNumber, options.customer);
     settleRecoveredStatus_(tx);
     result.recovered.push({fullTxId: tx.fullTxId, step: 5, rowNumber: rowNumber});
     result.reserved.push(rowNumber);
