@@ -283,4 +283,104 @@ module.exports = ({test, assert, gas}) => {
     });
     assert.deepEqual(wrong, []);
   });
+
+  function kf1Amex(purpose, rate) {
+    setup();
+    const fixture = loadFixture('AMEX__202512');
+    const format = gas.call('pinFormatVersion', ['amex_6_alt', 1]);
+    const sheet = {name: fixture.sheets[0].name,
+      rows: fixture.sheets[0].rows.map((row) => row.slice())};
+    sheet.rows[3][4] = purpose;
+    sheet.rows[3][5] = rate;
+    const context = {customerId: 'C001', fileId: 'f1', fileNameOriginal: fixture.fileName};
+    return {fixture, format, sheet, context,
+      parsed: plain(gas.call('parseFile', [sheet, format, context]))};
+  }
+
+  test('kf1 1: foreign amount shape accepts only the specified whole uppercase form', () => {
+    const yes = ['3,000 KRW', '55,800 KRW', '12.99 USD', '-12.99 USD',
+      '3000KRW', '３，０００　ＫＲＷ', '1,234.56 EUR', '+3000KRW', '−12.99 USD'];
+    const no = ['仕入れ', '年会費', 'KRW', '3,000', '3,000 円', 'USD 12.99',
+      '3,000 KRW 仕入れ', '仕入れ 3,000 KRW', '10 kg', '3,000 Krw',
+      '3,000 KRWX', '12,34 USD', null, undefined, 3000, ''];
+    yes.forEach((value) => assert.equal(gas.call('isForeignAmountShapedPurpose_', [value]),
+      true, String(value)));
+    no.forEach((value) => assert.equal(gas.call('isForeignAmountShapedPurpose_', [value]),
+      false, String(value)));
+  });
+
+  test('kf1 2: AMEX foreign amount purpose becomes empty while other purposes stay', () => {
+    const {fixture, format, sheet, context, parsed} = kf1Amex('3,000 KRW', 0.11);
+    const original = plain(gas.call('parseFile', [
+      {name: fixture.sheets[0].name, rows: fixture.sheets[0].rows}, format, context]));
+    assert.equal(parsed.txs.length, original.txs.length);
+    parsed.txs.forEach((tx, index) => {
+      assert.equal(tx.purpose, tx.sourceRow === 4 ? '' : original.txs[index].purpose,
+        `source row ${tx.sourceRow}`);
+    });
+    assert.equal(sheet.rows[3][5], 0.11);
+    assert.ok(parsed.txs.some((tx) => tx.purpose === '年会費'));
+    assert.ok(parsed.txs.some((tx) => tx.purpose === '仕入れ'));
+  });
+
+  test('kf1 3: a corrected AMEX purpose stays even when the rate remains', () => {
+    const {parsed} = kf1Amex('仕入れ', 0.11);
+    assert.equal(parsed.txs.find((tx) => tx.sourceRow === 4).purpose, '仕入れ');
+  });
+
+  test('kf1 4: every supported real sample retains its raw purpose', () => {
+    const defs = setup();
+    let fixtureCount = 0;
+    let rowCount = 0;
+    const byFormat = Object.create(null);
+    Object.entries(EXPECTED).forEach(([slug, formatId]) => {
+      if (formatId === null) return;
+      fixtureCount += 1;
+      const fixture = loadFixture(slug);
+      const format = plain(defs).find((entry) => entry.formatId === formatId);
+      assert.ok(format, `${slug}: missing format ${formatId}`);
+      const column = format.purposeColumn.charCodeAt(0) - 65;
+      fixture.sheets.forEach((sheet) => {
+        const parsed = plain(gas.call('parseFile', [sheet, format,
+          {customerId: 'C001', fileId: 'f1', fileNameOriginal: fixture.fileName}]));
+        parsed.txs.forEach((tx) => {
+          const rawCell = sheet.rows[tx.sourceRow - 1][column];
+          const raw = rawCell === null || rawCell === undefined ? '' :
+            String(gas.call('cellToCanonicalString', [rawCell])).trim();
+          const shaped = /^[+\-−]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*[A-Z]{3}$/
+            .test(raw.normalize('NFKC'));
+          assert.equal(shaped, false, `${slug} row ${tx.sourceRow}: ${raw}`);
+          assert.equal(tx.purpose, raw, `${slug} row ${tx.sourceRow}`);
+          rowCount += 1;
+          byFormat[formatId] = (byFormat[formatId] || 0) + 1;
+        });
+      });
+    });
+    assert.ok(fixtureCount > 0 && rowCount > 0);
+    console.log(`KF1_REAL_SAMPLES ${fixtureCount} fixtures, ${rowCount} rows, ` +
+      JSON.stringify(byFormat));
+  });
+
+  test('kf1 5: unresolved foreign amount purpose is category 1 customer fix', () => {
+    const {fixture, parsed} = kf1Amex('3,000 KRW', 0.11);
+    const resolved = plain(gas.call('resolvePurposes', [parsed.txs, fixture.fileName, []]));
+    assert.equal(resolved.unresolvedCount, 1);
+    const classified = plain(gas.call('classifyValidationResult', [{
+      format: {ok: true}, destinationSchema: {ok: true}, encoding: {ok: true},
+      effectiveTransactionCount: parsed.txs.length, purposeResolution: resolved
+    }]));
+    assert.equal(classified.category, 1);
+    assert.equal(classified.code, 'SOURCE_REQUIRES_CUSTOMER_FIX');
+  });
+
+  test('kf1 6: a filename rule infers purpose for the emptied AMEX row', () => {
+    const {fixture, parsed} = kf1Amex('3,000 KRW', 0.11);
+    const resolved = plain(gas.call('resolvePurposes', [parsed.txs, fixture.fileName,
+      [{id: 'KF1_RULE', keyword: '202512', purpose: '仕入れ', enabled: true}]]));
+    assert.equal(resolved.unresolvedCount, 0);
+    const target = resolved.txs.find((tx) => tx.sourceRow === 4);
+    assert.equal(target.purpose, '仕入れ');
+    assert.equal(target.purposeInferred, true);
+    assert.equal(target.purposeInferenceRuleId, 'KF1_RULE');
+  });
 };

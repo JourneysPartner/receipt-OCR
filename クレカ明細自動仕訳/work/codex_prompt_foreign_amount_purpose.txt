@@ -1,0 +1,46 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の、**用途の列に入った外貨金額（例 `3,000 KRW`）が用途として転記される危険**を受け取ります。本番に出ている読取の直しです。
+
+作業ツリーには、別の直し（取引先辞書。`src/33_MerchantMatcher.gs`・`src/34_MerchantDictionary.gs`・`src/97_Ops.gs`・`src/80_WebApp.gs`・`test/phase8-webapp.test.js`）の未コミットの変更があります。**それには触らないでください。**開始時の `node test/run-tests.js` の本数は、始める前に自分で数えて報告に書いてください（すべて緑のはずです）。
+
+## 仕様書
+
+`work/spec_foreign_amount_purpose.md`（1.0、未コミット）。**全部読んでから始めてください。**
+
+## 直すこと（要点。詳細は仕様書）
+
+用途セルの値が「数字＋大文字アルファベット 3 文字の通貨コード」の形（NFKC 後に `^[+\-−]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*[A-Z]{3}$` に全体一致）なら、`parseFile`（`src/24_Parser_Generic.gs`）でその行の用途を空欄 `''` にする。あとはいまの空欄と同じ道（使用用途補完 → 補完できなければ区分 1＝要修正）を通る。すべての形式に効かせる。換算レート列の値では判定しない。
+
+---
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。**
+2. **git を操作しないこと**（commit・stash・reset・checkout・clean・add）。
+3. **`src/` で変えてよいのは `src/24_Parser_Generic.gs` だけ。**ほかの `src/` の未コミットの変更（上に書いた 4 つ）は別の作業なので、1 文字も変えないこと。検査：終わったとき `git diff --stat -- src/` の 24 以外の行が、始めたときと同じであること（始める前に控えておく）。
+4. テストの変更は `test/phase6-real-samples.test.js` に `kf1 N: …` を足すことだけ。`test/fixtures/` と他の既存テスト（`test/phase8-webapp.test.js` の未コミットの変更を含む）は 1 文字も変えないこと。
+5. **テストを先に赤にしてから直すこと。**kf1 1〜6 を書き、いまの実装で赤になることを確かめてから直す。いまでも緑になる確かめ（kf1 3・kf1 4 は今でも緑のはず）はどれかを報告する。
+6. 既存のテストを 1 つも壊さないこと。**既存のテストの期待を変えて緑にしてはならない。**変えないと通らないものがあれば、変えずに止めて理由を報告すること。
+7. リポジトリの親フォルダの `.codex/config.toml` に触らないこと。
+8. 仕様書を変えないこと（間違いを見つけたら報告する）。取引の物に新しい鍵を足さない。`ERROR_CATALOG` に足さない。
+9. 仕様書に無い判断で安全側を外さないこと。迷ったら止めて報告すること。
+
+## 進め方
+
+1. 仕様書を読む。`src/24_Parser_Generic.gs` の `parseFile`、`src/31_PurposeResolver.gs` の `resolvePurposes`、`src/30_TransactionValidator.gs` の `classifyValidationResult`、`test/phase6-real-samples.test.js` の補助（`EXPECTED`・`loadFixture` など）を読む
+2. kf1 1〜6 を書く → 赤を確かめる
+3. 直す
+4. `node test/run-tests.js` を全部緑にする
+5. 仕様書 §6 の M1〜M7 を 1 つずつ入れて回し、赤になるテストを記録して戻す
+6. `git status --porcelain -- src/ test/` と `git diff --stat -- src/` を確かめる
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 直す前に kf1 1〜6 のどの確かめが赤だったか（緑だったものも）
+- kf1 4 で見た固定データの数と、形式ごとの行数の合計
+- M1〜M7 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て
+- 仕様書が間違っていた箇所（黙って直さないこと）
+- 自分で決めた箇所（全部）
+- `git status --porcelain -- src/ test/` と `git diff --stat -- src/` の出力（始める前と後）
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。
