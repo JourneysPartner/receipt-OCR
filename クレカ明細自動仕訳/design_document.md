@@ -3163,7 +3163,7 @@ Ver.2.2はこれらを「逃げ道として`custom`の行を手作業で作成�
 
 | 関数名 | 引数 | 戻り値 | 保証すること |
 |---|---|---|---|
-| `learnFromResolution(customerId, original, normalized, partnerName, actor)` | 各値 | `dictId` | **顧客別**辞書へ`一致方法 = exact_normalized`・`有効 = TRUE`で登録する |
+| `learnFromResolution(customerId, original, normalized, partnerName, actor)` | 各値 | `dictId` | **顧客別**辞書へ`一致方法 = exact_normalized`・`有効 = TRUE`で登録する。**同等行（顧客・元表記・正規化表記・取引先名が完全一致、有効、`exact_normalized`、期間と優先度なし）があれば書かずにその`dictId`を返す**（K-W17 第2段、`work/spec_dictionary_dedup.md`） |
 | `promoteToCommon(dictId, approver)` | 辞書ID、承認者 | void | **オーナー管理者の承認操作の中でのみ共通辞書へ書き込む**（9.1・仕様20.2） |
 | `detectDictionaryConflicts(scope)` | 対象範囲 | `ConflictGroup[]` | 同一元表記または同一正規化表記に複数のfreee取引先名が対応する行群を検出し、競合フラグと競合グループIDを設定する |
 | `rollbackDictionary(dictId, approver)` | 辞書ID、承認者 | void | 直前の有効バージョンへ戻す。現行行は無効化理由`ROLLBACK`で残す |

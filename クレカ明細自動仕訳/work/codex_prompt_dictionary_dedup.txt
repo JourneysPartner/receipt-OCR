@@ -1,0 +1,50 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の、**取引先辞書の小さな不具合 2 つ**を受け取ります。本番に出ている機能の直しです。
+
+いま作業ツリーの `src/` と `test/` に未コミットの変更はありません。`node test/run-tests.js` は **1229/1229 緑**です。
+
+## 仕様書
+
+`work/spec_dictionary_dedup.md`（1.0、未コミット）。**全部読んでから始めてください。**特に §2（「同じ行」の定義）が芯です ── 畳む・足さない判断は、照合（`matchPartner`）の結果を 1 つも変えてはなりません。
+
+## 直すこと（要点。詳細は仕様書）
+
+1. **`learnFromResolution`（`src/34_MerchantDictionary.gs`）が確定のたびに同じ行を積む（K-W17）。**同等行（仕様書 §2 の E1〜E8）があれば書かずにその `dictId` を返す（§3）。
+2. **`merchantRuleId_`（`src/33_MerchantMatcher.gs`）が辞書の行の `dictId` を見ないので、要確認の候補の `dictId` に文字列 `"undefined"` が入る。**`ruleId` → `id` → `dictId` の順で拾い、無ければ `''`。候補に `matchMethod` も載せる（§4）。
+3. **既に積もった行を畳む運用関数 `opsDedupeDictionaryRows(apply)` を `src/97_Ops.gs` に足す。**既定は見るだけ、`apply === true` のときだけ無効化する（§5）。
+
+---
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。**
+2. **git を操作しないこと**（commit・stash・reset・checkout・clean・add）。
+3. **`src/` で変えてよいのは `33_MerchantMatcher.gs`・`34_MerchantDictionary.gs`・`97_Ops.gs` の 3 つと、`80_WebApp.gs` の `webAppUniquePartners_` の前のコメントだけ**（コードは変えない）。検査：`git status --porcelain -- src/` にこの 4 つ以外が出ないこと。
+4. **`src/97_Ops.gs` には文字列の中に生の NUL バイトが 2 つある。**消さない・置き換えないこと。編集の前後で NUL バイトの数（いまは 2。たとえば `node -e "console.log([...require('fs').readFileSync('src/97_Ops.gs')].filter(b=>b===0).length)"`）が同じであることを確かめて報告すること。ファイル全体を書き直す道具を使うなら、バイトが保たれることを確かめること。
+5. テストの変更は `test/phase8-webapp.test.js` に `kw17 N: …` を足すことだけ。`test/fixtures/` と他の既存テストは 1 文字も変えないこと。既存の補助関数も書き換えない（要るなら新しい補助を足す）。
+6. **テストを先に赤にしてから直すこと。**kw17 1〜13 を書き、いまの実装で赤になることを確かめてから直す。いまの実装でも緑になる確かめがあれば（たとえば kw17 4 の一部、kw17 11）、どれかを報告する ── それ自体は正しい（変異で赤になればよい）。
+7. 既存の 1229 本を 1 つも壊さないこと。**既存のテストの期待を変えて緑にしてはならない。**変えないと通らないものがあれば、変えずに止めて理由を報告すること。
+8. リポジトリの親フォルダの `.codex/config.toml` に触らないこと。
+9. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断で安全側を外さないこと ── 迷ったら書かない・止める側を選び、報告すること。
+10. 新しいエラーコードを `ERROR_CATALOG` に足してはならない。`WEBAPP_*` の定数を変えてはならない。
+
+## 進め方
+
+1. 仕様書を読む。`33_MerchantMatcher.gs`・`34_MerchantDictionary.gs`・`70_ImportFlow.gs` の候補の写し（110〜150 行あたり）・`97_Ops.gs` の `opsMergePartnerNameVariants` と `importPartnerListForCustomer_`（手本）を読む
+2. kw17 1〜13 を書く → 赤を確かめる。kw17 5 の往復数は直す前に測っておく
+3. 直す
+4. `node test/run-tests.js` を全部緑にする
+5. 仕様書 §8 の M1〜M17 を 1 つずつ入れて回し、赤になるテストを記録して戻す
+6. `git status --porcelain -- src/ test/` と、`97_Ops.gs` の NUL バイトの数を確かめる
+
+## 報告してほしいこと
+
+- `node test/run-tests.js` の最後の行と、テストの本数の増減
+- 直す前に kw17 1〜13 のどの確かめが赤だったか（緑だったものも）
+- kw17 5：採用 1 件の往復数の、直す前と後
+- M1〜M17 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て
+- 仕様書が間違っていた箇所（黙って直さないこと）
+- 自分で決めた箇所（仕様書に書いていないことを決めたところ、全部）
+- `97_Ops.gs` の NUL バイトの数（前・後）
+- `git status --porcelain -- src/ test/` の出力
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。

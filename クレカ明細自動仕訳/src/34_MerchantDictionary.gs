@@ -52,6 +52,14 @@ function readDictionary_(common) {
 function learnFromResolution(customerId, original, normalized, partnerName, actor) {
   var expected = normalizeMerchant(original);
   if (String(normalized) !== expected) throw new MasterDataError('Normalized merchant must equal normalizeMerchant(original)');
+  var equivalent = readDictionary_(false).filter(function(row) {
+    return row.active === true &&
+      String(row.customerId || '') === String(customerId) &&
+      row.original === String(original) && row.normalized === expected &&
+      row.partnerName === String(partnerName) && row.matchMethod === 'exact_normalized' &&
+      row.validFrom === null && row.validTo === null && row.priority === null;
+  }).sort(function(left, right) { return left._rowNumber - right._rowNumber; });
+  if (equivalent.length) return equivalent[0].dictId;
   var dictId = generateId('DICT'); var now = nowIso_();
   dictionaryWriteSheet_(false).appendRow([dictId, String(original), expected, String(partnerName), 'exact_normalized', '',
     String(customerId), '', '', false, String(actor), '', now, 1, true, false, '', '']);
