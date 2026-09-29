@@ -492,6 +492,20 @@ function parserTotalRowIndexes_(rows, cardFormat) {
 }
 
 /**
+ * 用途の値が外貨の金額の形（`3,000 KRW`・`12.99 USD`）かどうか（K-F1）。
+ *
+ * 用途を「海外通貨利用金額」の列から読む形式（`amex_6_alt`）では、顧客が
+ * 上書きしなかった海外利用の行にカード会社の値が残り、それが用途として
+ * 黙って転記される。当たった用途は空欄として扱い、補完か要修正へ回す。
+ * 換算レート列の有無では判定しない ── 顧客が正しく上書きした行まで弾く。
+ */
+function isForeignAmountShapedPurpose_(text) {
+  if (typeof text !== 'string') return false;
+  return /^[+\-−]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*[A-Z]{3}$/
+    .test(text.normalize('NFKC'));
+}
+
+/**
  * 4.13 汎用パーサー。形式定義（カード形式マスター）に従い
  * `CommonTransaction[]`を返す。**年を確定しない**（4.14へ委ねる）。
  *
@@ -578,6 +592,7 @@ function parseFile(sheet, cardFormat, context) {
     var purposeRaw = purposeIndex < 0 ? null : row[purposeIndex];
     var purposeCanonical = purposeRaw === null || purposeRaw === undefined ?
       '' : String(cellToCanonicalString(purposeRaw)).trim();
+    if (isForeignAmountShapedPurpose_(purposeCanonical)) purposeCanonical = '';
     var foreign = extractForeignCurrency(row, format, gridWidth || row.length);
 
     var tx = {
