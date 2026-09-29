@@ -74,6 +74,28 @@ function getRowByTxId(index, fullTxId) {
   return {matchCount: rows.length, rowNumber: rows.length === 1 ? rows[0] : null};
 }
 
+/**
+ * 所在を**推測した**取引（取引ログ AC が空の旧い行で、行を持つもの）が、
+ * 選んだ転記先の索引で本当にその行に居るかを、書く前に確かめる（§15-4）。
+ *
+ * 旧い行は雛形と仮定されるが、Web アプリで複製へ書いた旧い取引は雛形に居ない。
+ * 確かめずに取り消すと 1 行も消せず取引ログだけ `CANCELED` になる（K-W14）。
+ * 記録された取引は確かめない ── 索引に居ないのは人が行を消した場合で、それは
+ * 推測が外れたのとは別の話である。
+ */
+function assertGuessedRowsPresent_(index, guessed) {
+  if (!guessed || !guessed.length) return;
+  var missing = guessed.filter(function(tx) {
+    var hit = getRowByTxId(index, tx.fullTxId);
+    return hit.matchCount !== 1 || Number(hit.rowNumber) !== Number(tx.destinationRow);
+  });
+  if (missing.length) {
+    throw new IntegrityError('DESTINATION_MISMATCH',
+      'Guessed destination rows missing: count=' + missing.length + ', txIds=' +
+      missing.slice(0, 5).map(function(tx) { return tx.fullTxId; }).join(','));
+  }
+}
+
 function getAllValuesByRow(index, rowNumber) {
   requireValidDestinationIndex_(index);
   var row = index.valuesByRow.get(Number(rowNumber));

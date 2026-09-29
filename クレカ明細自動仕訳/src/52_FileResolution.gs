@@ -130,6 +130,10 @@ function resolveFileReview(reviewId, operation, input) {
  * ここに独自の書込を書くと、規則が二重になり片方だけ直す事故が起きる。
  */
 function writeAdoptedTransaction_(customer, fileId, tx, leaseId, runId) {
+  tx = Object.assign({}, tx, txDestinationEmpty_(customer.destinationSpreadsheetId) ? {} : {
+    destinationSpreadsheetId: String(customer.destinationSpreadsheetId),
+    destinationSheetName: String(customer.destinationSheetName)
+  });
   registerPrepared([tx], runId);
   var reservation = reserveDestinationRows(customer, [tx.fullTxId], fileId, leaseId);
   var entry = (reservation.reserved || [])[0];
@@ -147,7 +151,7 @@ function writeAdoptedTransaction_(customer, fileId, tx, leaseId, runId) {
       'Read-back verification failed for ' + tx.fullTxId);
   }
   updateWrittenValues(tx.fullTxId, tx.planned, verified[0].values);
-  updateTransactionLocation(tx.fullTxId, entry.rowNumber);
+  updateTransactionLocation(tx.fullTxId, entry.rowNumber, customer);
   var finalStatus = derivePlannedFinalStatus({
     hasOpenReview: false,
     plannedB: tx.planned && tx.planned.b,
@@ -210,7 +214,12 @@ function adoptAsNewTransaction_(review, actor, input) {
     fullTxId: id.full, displayTxId: id.display, generation: generation
   });
 
-  var customer = getCustomerById(review.customerId);
+  var destination = resolveFileDestination_(getCustomerById(review.customerId),
+    getTransactionsForFile_(original.fileId));
+  var customer = destination.customer;
+  if (destination.guessed.length) {
+    assertGuessedRowsPresent_(buildIndex(customer), destination.guessed);
+  }
   var leaseId = acquireLease(review.customerId, original.fileId, input.runId || null,
     actor, LEASE_PURPOSE.WRITE_ONLY);
   var written;
@@ -271,7 +280,12 @@ function applyFileDiff_(review, actor, input) {
       '); a mostly-different file is a different file - use CANCEL_FILE');
   }
 
-  var customer = getCustomerById(review.customerId);
+  var destination = resolveFileDestination_(getCustomerById(review.customerId),
+    getTransactionsForFile_(review.fileId));
+  var customer = destination.customer;
+  if (destination.guessed.length) {
+    assertGuessedRowsPresent_(buildIndex(customer), destination.guessed);
+  }
   var leaseId = acquireLease(review.customerId, review.fileId, input.runId || null,
     actor, LEASE_PURPOSE.WRITE_ONLY);
   var addedIds = [];
@@ -328,7 +342,18 @@ function updatePurpose_(review, actor, input) {
     return warnedResult;
   }
 
-  var customer = getCustomerById(tx.customerId);
+  var customer = customerForRecordedDestination_(getCustomerById(tx.customerId), tx);
+  var destinationRow = Number(tx.destinationRow);
+  if (!Number.isInteger(destinationRow) || destinationRow < 1) {
+    throw new IntegrityError('DESTINATION_MISMATCH', 'Invalid destination row for ' + tx.fullTxId);
+  }
+  var destinationSheet = requireSheet_(
+    SpreadsheetApp.openById(customer.destinationSpreadsheetId), customer.destinationSheetName);
+  if (String(destinationSheet.getRange(destinationRow, customer.columnMapping.txId).getValue()) !==
+      String(tx.fullTxId)) {
+    throw new IntegrityError('DESTINATION_MISMATCH',
+      'Destination row does not carry transaction ' + tx.fullTxId);
+  }
   var leaseId = acquireLease(tx.customerId, tx.fileId, input.runId || null,
     actor, LEASE_PURPOSE.WRITE_ONLY);
   try {
@@ -399,7 +424,11 @@ function keepOriginalResult_(review, actor, input) {
 }
 
 function cancelFileFromReview_(review, actor, input) {
-  var customer = getCustomerById(review.customerId);
+  var destination = resolveFileDestination_(getCustomerById(review.customerId),
+    getTransactionsForFile_(review.fileId));
+  var customer = destination.customer;
+  var index = buildIndex(customer);
+  assertGuessedRowsPresent_(index, destination.guessed);
   var leaseId = acquireLease(review.customerId, review.fileId, input.runId || null,
     actor, LEASE_PURPOSE.WRITE_ONLY);
   var outcome;
@@ -407,7 +436,7 @@ function cancelFileFromReview_(review, actor, input) {
     outcome = cancelTransactions({
       customer: customer, fileId: review.fileId, runId: input.runId || null,
       choice: input.choice || 'CANCELED', leaseId: leaseId,
-      index: buildIndex(customer)
+      index: index
     });
   } finally {
     releaseLease(review.fileId, input.runId || null, 'CANCEL_DONE');

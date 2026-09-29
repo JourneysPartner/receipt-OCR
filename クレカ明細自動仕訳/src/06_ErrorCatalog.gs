@@ -53,6 +53,7 @@ const ERROR_CATALOG = Object.freeze({
   DATE_NOT_EXISTENT: errorCatalogEntry_('補完後の年月日が実在しない（例：2025-02-29）', false, '確認担当者', REVIEW_TYPE.DATE, '日付を修正する'),
   DATE_OUT_OF_EXPECTED_RANGE: errorCatalogEntry_('日付が許容窓の外、または候補年が2つ以上', false, '確認担当者', REVIEW_TYPE.DATE, '日付を確認して修正する'),
   DESTINATION_SCHEMA_MISMATCH: errorCatalogEntry_('転記先形式不一致', false, 'システム管理者', REVIEW_TYPE.DESTINATION_FIX, '書込前に停止。列構成・シート名・期待値定義を是正して再検査する'),
+  DESTINATION_MISMATCH: errorCatalogEntry_('取引ログに記録された転記先と、これから書く転記先が食い違う（1 ファイルの取引を 2 つの転記先へ割る）', false, 'システム管理者', null, '書かずに止める。取引ログ AC 列が指す転記先を書込先に指定して取り込み直す'),
   DESTINATION_TEMPLATE_ROW_NOT_EMPTY: errorCatalogEntry_('テンプレート行を複製した結果が空き行判定を満たさない', false, 'システム管理者', REVIEW_TYPE.DESTINATION_FIX, 'コピー元行の値・数式を是正する。無限に拡張を繰り返さない'),
   SOURCE_REQUIRES_CUSTOMER_FIX: errorCatalogEntry_('使用用途等の顧客修正が必要', false, '顧客', null, '元ファイルを修正して再提出する'),
   TRANSACTION_ID_COLLISION: errorCatalogEntry_('表示ID衝突、または同一取引IDが転記先の複数行に存在', false, 'システム管理者', REVIEW_TYPE.INTEGRITY, '自動修復せず停止する。リースを解放し内部状態を`REVIEW_WAIT`とする'),

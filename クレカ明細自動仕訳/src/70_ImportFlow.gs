@@ -107,6 +107,41 @@ function runPreValidationBlock(input) {
   var existingById = parsedIds.length ?
     activeTransactionRecordsByIds_(parsedIds) : Object.create(null);
   markPhase(input, 'pre:existing');
+  // **1 ファイルの取引を 2 つの転記先へ割らない**（§15-4）。中断したファイルを
+  // 後始末で発見へ戻し、Web アプリの新しいセッション（別の複製）で取り込み直すと、
+  // 既に書いた取引は前の複製に、まだの取引は新しい複製に書かれる。書くものが
+  // あるときだけ、取引ログに記録された転記先と今回の書込先が食い違えば書く前に
+  // 止める。書くものが無ければ割れないので止めない（全件確定済みのファイルを
+  // 開き直しただけで失敗させない）。AC が空の旧い行は所在が分からないので数えない。
+  var writeDestination = {
+    spreadsheetId: txDestinationEmpty_(input.customer.destinationSpreadsheetId) ? '' :
+      String(input.customer.destinationSpreadsheetId),
+    sheetName: txDestinationEmpty_(input.customer.destinationSheetName) ? '' :
+      String(input.customer.destinationSheetName)
+  };
+  var elsewhere = Object.keys(existingById).map(function(id) { return existingById[id]; })
+    .filter(function(tx) {
+      if (!tx.active || [TX_STATUS.PREPARED, TX_STATUS.WRITING,
+          TX_STATUS.COMMITTED, TX_STATUS.REVIEW_REQUIRED].indexOf(tx.transactionStatus) < 0) return false;
+      var recorded = recordedDestinationOf_(tx, input.customer);
+      return recorded && (recorded.spreadsheetId !== writeDestination.spreadsheetId ||
+        recorded.sheetName !== writeDestination.sheetName);
+    });
+  var toWrite = (input.transactions || []).filter(function(tx) {
+    var previous = existingById[String(tx.fullTxId || tx.transactionId || '')];
+    return !previous || [TX_STATUS.PREPARED, TX_STATUS.WRITING]
+      .indexOf(previous.transactionStatus) >= 0;
+  });
+  if (elsewhere.length && toWrite.length) {
+    var recordedIds = [];
+    elsewhere.forEach(function(tx) {
+      var id = recordedDestinationOf_(tx, input.customer).spreadsheetId;
+      if (recordedIds.indexOf(id) < 0) recordedIds.push(id);
+    });
+    throw new IntegrityError('DESTINATION_MISMATCH',
+      'fileId=' + String(input.file.id) + ', recorded=' + recordedIds.join(',') +
+      ', current=' + writeDestination.spreadsheetId + ', elsewhere=' + elsewhere.length);
+  }
   (input.transactions || []).forEach(function(tx) {
     var existing = existingById[String(tx.fullTxId || tx.transactionId || '')];
     var rejoinedUnresolved = Boolean(existing) &&
@@ -148,6 +183,19 @@ function runPreValidationBlock(input) {
     });
   });
   markPhase(input, 'pre:bridge');
+  // 作り直す取引単位の要確認は、**取引が実際に居る転記先**を M・N列に持つ。
+  // 上の番人を通った実行で既存行が別の転記先に居るのは「書くものが無い再合流」
+  // だけであり、そこで今回の書込先を載せると、採用が無関係な行へ F 列と取引ID列を
+  // 書く（読取確認も同じシートを読むので通ってしまう）。
+  pendingReviews.forEach(function(entry) {
+    if (!entry.fullTxId || !isTransactionScopedReviewType(entry.reviewType)) return;
+    var existing = existingById[String(entry.fullTxId)];
+    var recorded = existing && recordedDestinationOf_(existing, input.customer);
+    if (recorded) {
+      entry.destinationSpreadsheetId = recorded.spreadsheetId;
+      entry.destinationSheetName = recorded.sheetName;
+    }
+  });
   var reviewedTxIds = {};
   pendingReviews.forEach(function(entry) {
     if (entry.fullTxId && isTransactionScopedReviewType(entry.reviewType)) {
@@ -166,7 +214,11 @@ function runPreValidationBlock(input) {
     var txId = String(tx.fullTxId || tx.transactionId);
     var planned = Object.assign({}, tx.planned || {});
     if (blankDate[txId]) planned.b = '';
-    return Object.assign({}, tx, {
+    var destination = txDestinationEmpty_(input.customer.destinationSpreadsheetId) ? {} : {
+      destinationSpreadsheetId: String(input.customer.destinationSpreadsheetId),
+      destinationSheetName: String(input.customer.destinationSheetName)
+    };
+    return Object.assign({}, tx, destination, {
       planned: planned,
       plannedFinalStatus: derivePlannedFinalStatus({
         hasOpenReview: reviewedTxIds[txId] === true,
@@ -334,7 +386,10 @@ function runWriteBlock(input) {
         // `tx`は取引ログから読んだ行なので、8-12で空欄化した予定値が反映済み。
         toSettle.push({
           fullTxId: tx.fullTxId, planned: tx.planned, verified: v.values,
-          destinationRow: v.rowNumber, fromStatus: tx.transactionStatus,
+          destinationRow: v.rowNumber,
+          destinationSpreadsheetId: customer.destinationSpreadsheetId,
+          destinationSheetName: customer.destinationSheetName,
+          fromStatus: tx.transactionStatus,
           toStatus: tx.plannedFinalStatus
         });
       });

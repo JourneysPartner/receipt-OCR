@@ -36,7 +36,7 @@ function acceptManualChange(fullTxId, actor, options) {
     throw new StateTransitionError(
       'Manual changes are only accepted on committed transactions, not ' + tx.transactionStatus);
   }
-  var customer = options.customer || getCustomerById(tx.customerId);
+  var customer = options.customer || customerForRecordedDestination_(getCustomerById(tx.customerId), tx);
   // 1行のために全シートを読まない（INV-08）。対象行だけを1リクエストで読む。
   var current = options.index
     ? getValuesByRow(options.index, Number(tx.destinationRow))
@@ -82,7 +82,7 @@ function revertManualChange(fullTxId, actor, options) {
     throw new StateTransitionError(
       'Only a committed transaction can be reverted, not ' + tx.transactionStatus);
   }
-  var customer = options.customer || getCustomerById(tx.customerId);
+  var customer = options.customer || customerForRecordedDestination_(getCustomerById(tx.customerId), tx);
   var leaseId = acquireLease(tx.customerId, tx.fileId, options.runId || null,
     actor, LEASE_PURPOSE.WRITE_ONLY);
   try {
@@ -147,7 +147,7 @@ function restoreRow(fullTxId, actor, options) {
   var tx = getTransaction(fullTxId);
   if (!tx) throw new IntegrityError(null, 'Transaction not found: ' + fullTxId);
 
-  var customer = options.customer || getCustomerById(tx.customerId);
+  var customer = options.customer || customerForRecordedDestination_(getCustomerById(tx.customerId), tx);
   var leaseId = acquireLease(tx.customerId, tx.fileId, options.runId || null,
     actor, LEASE_PURPOSE.WRITE_ONLY);
   try {
@@ -171,7 +171,7 @@ function restoreRow(fullTxId, actor, options) {
         'The row could not be restored for ' + fullTxId);
     }
     updateWrittenValues(fullTxId, tx.planned, verified[0].values);
-    updateTransactionLocation(fullTxId, entry.rowNumber);
+    updateTransactionLocation(fullTxId, entry.rowNumber, customer);
 
     appendAudit({
       type: 'ROW_RESTORE', actor: actor, approver: actor,
@@ -269,10 +269,11 @@ function resolveIntegrityReview(reviewId, operation, input) {
       // 不整合が残ったまま閉じると、問題は直らず見えなくなるだけである。
       var recheck = input.recheck;
       if (!recheck) {
-        var customer2 = getCustomerById(review.customerId);
+        var committedTxs = getTransactionsByStatus(review.fileId, [TX_STATUS.COMMITTED]);
+        var customer2 = resolveFileDestination_(getCustomerById(review.customerId), committedTxs).customer;
         recheck = runIntegrityCheck({
           index: buildIndex(customer2),
-          txLogs: getTransactionsByStatus(review.fileId, [TX_STATUS.COMMITTED]),
+          txLogs: committedTxs,
           fileState: getFileState(review.fileId)
         });
       }
