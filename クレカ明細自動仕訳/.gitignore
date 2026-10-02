@@ -15,3 +15,6 @@ client_secret_*.json
 # 容量が勝る。結論は out-*.txt に残るのでそちらは追跡する。
 tools/codex-logs/err-*.txt
 tools/codex-logs/out-*.txt
+
+# Claude Code の個人設定（clasp push の許可など。コミットしない）。
+.claude/settings.local.json
