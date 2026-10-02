@@ -49,7 +49,7 @@ function formatDate(date, timezone, pattern) {
   throw new Error(`Unsupported Utilities.formatDate pattern in test stub: ${pattern}`);
 }
 
-function createUtilitiesStub() {
+function createUtilitiesStub(onSleep) {
   return Object.freeze({
     DigestAlgorithm: Object.freeze({SHA_256: 'SHA_256'}),
     computeDigest(algorithm, bytes) {
@@ -71,7 +71,9 @@ function createUtilitiesStub() {
     },
     formatDate,
     getUuid: () => crypto.randomUUID(),
-    sleep: () => {}
+    sleep: (milliseconds) => {
+      if (typeof onSleep === 'function') onSleep(Number(milliseconds) || 0);
+    }
   });
 }
 
@@ -420,11 +422,18 @@ class MemoryScriptLock {
 }
 
 function createGasStubs() {
-  const Utilities = createUtilitiesStub();
+  const sleepCalls = [];
+  let sleepHook = null;
+  const Utilities = createUtilitiesStub((milliseconds) => {
+    sleepCalls.push(milliseconds);
+    if (sleepHook) sleepHook(milliseconds);
+  });
   const spreadsheets = new Map(); const files = new Map(); const folders = new Map(); const properties = new Map();
+  const scriptCacheValues = new Map();
   let spreadsheetCopyCounter = 0;
   let sheetsBatchGetFailures = [];
   let getScriptPropertiesFailures = [];
+  const scriptCacheFailures = {getScriptCache: [], get: [], put: [], remove: []};
   const triggers = [];
   const apiCallCounts = {batchGet: 0, cellsRead: 0, batchUpdate: 0, rangesWritten: 0, cellsWritten: 0};
   const scriptLock = new MemoryScriptLock(); let activeSpreadsheetId = null;
@@ -841,6 +850,40 @@ function createGasStubs() {
       return scriptProperties;
     }
   };
+  function scriptCacheFailure(operation) {
+    const failures = scriptCacheFailures[operation];
+    if (!failures.length) return;
+    const failure = failures.shift();
+    if (failure) throw (failure instanceof Error ? failure : new Error(String(failure)));
+  }
+  const scriptCache = {
+    get(key) {
+      scriptCacheFailure('get');
+      const item = scriptCacheValues.get(String(key));
+      if (!item) return null;
+      if (item.expiresAt && item.expiresAt <= Date.now()) {
+        scriptCacheValues.delete(String(key));
+        return null;
+      }
+      return item.value;
+    },
+    put(key, value, expirationInSeconds) {
+      scriptCacheFailure('put');
+      const expiration = Number(expirationInSeconds || 0);
+      scriptCacheValues.set(String(key), {value: String(value),
+        expiresAt: expiration > 0 ? Date.now() + expiration * 1000 : 0});
+    },
+    remove(key) {
+      scriptCacheFailure('remove');
+      scriptCacheValues.delete(String(key));
+    }
+  };
+  const CacheService = {
+    getScriptCache() {
+      scriptCacheFailure('getScriptCache');
+      return scriptCache;
+    }
+  };
 
   // 時間主導トリガー。実GASの ScriptApp のうち、取込の定期実行に使う分だけ。
   const ScriptApp = {
@@ -955,6 +998,25 @@ function createGasStubs() {
     getMenus: () => menus.slice(),
     setSheetsBatchGetFailures(failures) { sheetsBatchGetFailures = failures.slice(); },
     setGetScriptPropertiesFailures(failures) { getScriptPropertiesFailures = (failures || []).slice(); },
+    setScriptCacheFailures(failures = {}) {
+      Object.keys(scriptCacheFailures).forEach((key) => {
+        scriptCacheFailures[key] = (failures[key] || []).slice();
+      });
+    },
+    setScriptCacheValue(key, value) {
+      scriptCacheValues.set(String(key), {value: String(value), expiresAt: 0});
+    },
+    getScriptCacheValue(key) {
+      const item = scriptCacheValues.get(String(key));
+      return item ? item.value : null;
+    },
+    getScriptCacheEntries() {
+      return Object.fromEntries(Array.from(scriptCacheValues, ([key, item]) => [key, item.value]));
+    },
+    setSleepHook(fn) { sleepHook = typeof fn === 'function' ? fn : null; },
+    getSleepCalls() { return sleepCalls.slice(); },
+    getLogs() { return logLines.slice(); },
+    clearLogs() { logLines.length = 0; },
     getScriptLock: () => scriptLock,
     // 読取量の計上。INV-08 の違反はスタブ上では速度に現れないため、
     // 回数で見るしかない。
@@ -967,10 +1029,10 @@ function createGasStubs() {
     roundTrips() { return {rangeReads: roundTrips.rangeReads, rangeWrites: roundTrips.rangeWrites, flushes: roundTrips.flushes}; },
     resetRoundTrips() { roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; },
     resetApiCallCounts() { apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; },
-    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptLock.reset(); sheetsBatchGetFailures = []; getScriptPropertiesFailures = []; spreadsheetCopyCounter = 0; htmlTemplates.clear(); activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; effectiveUserEmail = 'tester@example.com'; mailQuota = 100; mailFailures = []; sentMails.length = 0; propertyWrites.length = 0; Object.keys(propertyCallCounts).forEach((key) => { propertyCallCounts[key] = 0; }); uiAvailable = true; uiEvents.length = 0; menus.length = 0; promptResponses = []; alertResponses = []; apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; driveListFailures = []; triggers.length = 0; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; }
+    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptCacheValues.clear(); Object.keys(scriptCacheFailures).forEach((key) => { scriptCacheFailures[key] = []; }); scriptLock.reset(); sheetsBatchGetFailures = []; getScriptPropertiesFailures = []; spreadsheetCopyCounter = 0; htmlTemplates.clear(); activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; effectiveUserEmail = 'tester@example.com'; mailQuota = 100; mailFailures = []; sentMails.length = 0; propertyWrites.length = 0; Object.keys(propertyCallCounts).forEach((key) => { propertyCallCounts[key] = 0; }); uiAvailable = true; uiEvents.length = 0; menus.length = 0; promptResponses = []; alertResponses = []; apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; sleepCalls.length = 0; sleepHook = null; driveListFailures = []; triggers.length = 0; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; }
   };
   return {Utilities, SpreadsheetApp, Sheets, DriveApp, Drive, Logger, LockService, Session,
-    PropertiesService, ScriptApp, MailApp, HtmlService, control};
+    PropertiesService, CacheService, ScriptApp, MailApp, HtmlService, control};
 }
 
 module.exports = {createUtilitiesStub, createGasStubs, columnToNumber, numberToColumn, parseA1};
