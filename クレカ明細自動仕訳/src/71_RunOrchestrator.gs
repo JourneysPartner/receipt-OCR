@@ -160,13 +160,18 @@ function detectionKeywordUnion_(definitions) {
  * この検査の目的は**壊れた転記先へ書き足さないこと**であり、今回触らない
  * 完了済みのファイルは、この実行では壊しようがない。
  *
+ * **取引ごとに、取引ログ AC・AD が指す転記先の索引で検査する**（K-W9。
+ * AC が空の旧い行だけ雛形）。複製に居る取引を雛形の索引と突き合わせても
+ * 何も見つからず、複製の中の二重転記（STOP）も誤報の `DESTINATION_ROW_MISSING`
+ * も区別できなかった。索引は転記先ごとに1回・必要になるまで作らない。
+ *
  * **過去ぶんの検査を捨てたわけではない。**人が古い行を書き換えた場合の
- * 発見は、取込の前ではなく別の定期実行の仕事である ── そしてそれは
- * K-W9（索引が雛形1枚しか見ない）を直してからでないと意味がない。
- * いま複製に居る取引を雛形の索引と突き合わせても、何も見つからない。
+ * 発見は、取込の前ではなく読むだけの `opsCheckIntegrityAllDestinations`
+ * （97）の仕事である ── 範囲を絞らず、全部の複製を見る。
  */
-function runCustomerIntegrityCheck_(customer, index, fileIdsInScope) {
+function runCustomerIntegrityCheck_(customer, fileIdsInScope) {
   var findings = [];
+  var resolver = makeDestinationIndexResolver_(customer);
   var inScope = Object.create(null);
   (fileIdsInScope || []).forEach(function(fileId) { inScope[String(fileId)] = true; });
   var unfinished = [FILE_STATE.VALIDATING, FILE_STATE.WRITING, FILE_STATE.REVIEW_WAIT];
@@ -182,7 +187,7 @@ function runCustomerIntegrityCheck_(customer, index, fileIdsInScope) {
       ]);
       var processRecord = getProcessLogRecord_(row.fileId);
       var outcome = runIntegrityCheck({
-        index: index,
+        indexForTransaction: resolver.indexFor,
         txLogs: txLogs,
         fileState: row.state,
         processLogState: processRecord ?
@@ -191,9 +196,16 @@ function runCustomerIntegrityCheck_(customer, index, fileIdsInScope) {
       });
       findings = findings.concat(outcome.findings);
     });
+  resolver.stats().unreadable.forEach(function(destination) {
+    findings.push(integrityFinding_('DESTINATION_UNREADABLE', 'REVIEW', {
+      spreadsheetId: destination.spreadsheetId,
+      sheetName: destination.sheetName,
+      transactions: destination.transactions
+    }));
+  });
   return {ok: findings.length === 0,
     stop: findings.some(function(f) { return f.severity === 'STOP'; }),
-    findings: findings};
+    findings: findings, indexesBuilt: resolver.stats().built};
 }
 
 /**
@@ -289,8 +301,7 @@ function runImport(options) {
       }
 
       // step 4：事前整合性チェック（監査ログ連鎖は通知のみ。INV-29）。
-      var index = buildIndex(customer, {});
-      var integrity = runCustomerIntegrityCheck_(customer, index,
+      var integrity = runCustomerIntegrityCheck_(customer,
         candidates.map(function(candidate) { return candidate.fileId; }));
       customerReport.integrity = integrity;
 

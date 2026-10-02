@@ -3260,4 +3260,563 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(candidate({ruleId: null, id: null, dictId: null}).ruleId, '');
   });
 
+  function kw9SeedWebFile(customer, fileId, options = {}) {
+    const rows = options.rows || (options.count
+      ? Array.from({length: options.count}, (_, index) =>
+        `2025/12/${String(10 + (index % 20)).padStart(2, '0')},未登録店,${1000 + index},仕入れ`)
+      : [`2025/12/10,未登録店,${fileId === 'kw9_privacy' ? 1000 :
+        2000 + Array.from(String(fileId)).reduce((sum, char) => sum + char.charCodeAt(0), 0)},仕入れ`]);
+    putCsv(customer, {fileId, rows});
+    const importOptions = {fileIds: [fileId]};
+    if (options.destinationSpreadsheetId) {
+      importOptions.destinationSpreadsheetId = options.destinationSpreadsheetId;
+    }
+    const result = webImport(customer, importOptions);
+    const reviews = openReviewsFor(customer.customerId, {fileId})
+      .filter((row) => row.reviewType === 'PARTNER');
+    if (reviews.length) {
+      resolveLoop(customer.customerId,
+        reviews.map((review) => decision(review, '株式会社テスト')));
+    }
+    const transactions = call('getTransactionsForFile_', [fileId]);
+    assert.equal(transactions.length, options.count || 1, `${fileId} の取引がある`);
+    forceFileState(fileId, options.state || 'REVIEW_WAIT');
+    return {fileId, destinationSpreadsheetId: result.destinationSpreadsheetId,
+      transactions};
+  }
+
+  function kw9SeedScheduledFile(customer, fileId) {
+    const amount = 3000 + Array.from(String(fileId))
+      .reduce((sum, char) => sum + char.charCodeAt(0), 0);
+    putCsv(customer, {fileId, rows: [`2025/12/10,未登録店,${amount},仕入れ`]});
+    call('runImport', [{customerIds: [customer.customerId], fileIds: [fileId]}]);
+    const reviews = openReviewsFor(customer.customerId, {fileId})
+      .filter((row) => row.reviewType === 'PARTNER');
+    if (reviews.length) {
+      webResolve(customer.customerId,
+        reviews.map((review) => decision(review, '株式会社テスト')), `kw9-scheduled-${fileId}`);
+    }
+    const transactions = call('getTransactionsForFile_', [fileId]);
+    assert.equal(transactions.length, 1, `${fileId} の取引がある`);
+    forceFileState(fileId, 'REVIEW_WAIT');
+    return {fileId, destinationSpreadsheetId: customer.destinationId, transactions};
+  }
+
+  function kw9Preflight(customerId) {
+    const report = call('runImport', [{customerIds: [customerId],
+      fileIds: ['NO_SUCH_FILE']}]);
+    return report.customers.find((item) => String(item.customerId) === String(customerId));
+  }
+
+  function kw9ColumnMapping(customer) {
+    return call('getCustomerById', [customer.customerId]).columnMapping;
+  }
+
+  function kw9WriteDuplicate(tx, customer) {
+    const destination = gas.stubs.getSpreadsheet(tx.destinationSpreadsheetId)
+      .getSheetByName(tx.destinationSheetName);
+    const row = destination.getLastRow() + 1;
+    destination.getRange(row, Number(kw9ColumnMapping(customer).txId)).setValue(tx.fullTxId);
+    return row;
+  }
+
+  function kw9ClearDestinationId(tx, customer) {
+    gas.stubs.getSpreadsheet(tx.destinationSpreadsheetId)
+      .getSheetByName(tx.destinationSheetName)
+      .getRange(Number(tx.destinationRow), Number(kw9ColumnMapping(customer).txId)).setValue('');
+  }
+
+  function kw9SetManualChange(tx, customer, value = 'KW9_SECRET_REPLACED', field = 'F') {
+    gas.stubs.getSpreadsheet(tx.destinationSpreadsheetId)
+      .getSheetByName(tx.destinationSheetName)
+      .getRange(Number(tx.destinationRow), Number(kw9ColumnMapping(customer)[field])).setValue(value);
+  }
+
+  function kw9Ops(customerId, options) {
+    return call('opsCheckIntegrityAllDestinations', [customerId, options]);
+  }
+
+  function kw9SheetSnapshot(sheet) {
+    const range = sheet.getDataRange();
+    return {values: range.getValues(), formulas: range.getFormulas()};
+  }
+
+  function kw9ReadOnlySnapshot(destinationIds) {
+    const master = gas.stubs.getSpreadsheet('master');
+    const masterNames = ['クレカ取引ログ', '恒久ファイルインデックス', 'クレカ処理ログ',
+      '要確認', '監査ログ'];
+    const result = {master: {}, destinations: {}};
+    masterNames.forEach((name) => {
+      result.master[name] = kw9SheetSnapshot(master.getSheetByName(name));
+    });
+    [...new Set(destinationIds)].sort().forEach((id) => {
+      const spreadsheet = gas.stubs.getSpreadsheet(id);
+      result.destinations[id] = spreadsheet.getSheets().map((sheet) => ({
+        name: sheet.getName(), snapshot: kw9SheetSnapshot(sheet)
+      }));
+    });
+    return result;
+  }
+
+  test('kw9 1: duplicate transaction rows in the web clone stop the import', () => {
+    const {customer} = setupWorld();
+    const seeded = kw9SeedWebFile(customer, 'kw9_duplicate');
+    const tx = seeded.transactions[0];
+    kw9WriteDuplicate(tx, customer);
+    const report = kw9Preflight(customer.customerId);
+    const finding = report.integrity.findings.find((item) =>
+      item.check === 'DUPLICATE_DESTINATION_ROW');
+    assert.equal(report.integrity.stop, true);
+    assert.ok(finding);
+    assert.equal(finding.detail.fullTxId, tx.fullTxId);
+    assert.equal(finding.detail.matchCount, 2);
+    assert.equal(report.skipped, 'INTEGRITY_STOP');
+  });
+
+  test('kw9 2: a committed clone transaction has no false integrity finding', () => {
+    const {customer} = setupWorld();
+    kw9SeedWebFile(customer, 'kw9_clean');
+    const report = kw9Preflight(customer.customerId);
+    assert.equal(report.integrity.ok, true);
+    assert.deepEqual(report.integrity.findings, []);
+    assert.equal(report.integrity.indexesBuilt, 1);
+  });
+
+  test('kw9 3: manual edits and missing rows in the clone are reported', () => {
+    const first = setupWorld();
+    const edited = kw9SeedWebFile(first.customer, 'kw9_manual');
+    const tx = edited.transactions[0];
+    kw9SetManualChange(tx, first.customer, 'KW9_SECRET_REPLACED');
+    const manual = kw9Preflight(first.customer.customerId).integrity;
+    const manualFinding = manual.findings.find((item) => item.check === 'MANUAL_CHANGE');
+    assert.ok(manualFinding);
+    assert.equal(manualFinding.detail.fullTxId, tx.fullTxId);
+    assert.equal(manualFinding.detail.column, 'f');
+    assert.equal(manualFinding.detail.rowNumber, Number(tx.destinationRow));
+    assert.equal(manual.stop, false);
+
+    const second = setupWorld();
+    const missing = kw9SeedWebFile(second.customer, 'kw9_missing');
+    kw9ClearDestinationId(missing.transactions[0], second.customer);
+    const missingReport = kw9Preflight(second.customer.customerId).integrity;
+    const missingFinding = missingReport.findings.find((item) =>
+      item.check === 'DESTINATION_ROW_MISSING');
+    assert.ok(missingFinding);
+    assert.equal(missingFinding.detail.fullTxId, missing.transactions[0].fullTxId);
+    assert.equal(missingReport.stop, false);
+  });
+
+  test('kw9 4: transactions without AC AD use the template index', () => {
+    const web = setupWorld();
+    const clone = kw9SeedWebFile(web.customer, 'kw9_legacy_clone');
+    clearRecordedDestinationsForFile(clone.fileId);
+    const legacyClone = kw9Preflight(web.customer.customerId).integrity;
+    assert.ok(legacyClone.findings.some((item) => item.check === 'DESTINATION_ROW_MISSING'));
+
+    const scheduled = setupWorld();
+    const template = kw9SeedScheduledFile(scheduled.customer, 'kw9_legacy_template');
+    clearRecordedDestinationsForFile(template.fileId);
+    const legacyTemplate = kw9Preflight(scheduled.customer.customerId).integrity;
+    assert.equal(legacyTemplate.findings.some((item) =>
+      item.check === 'DESTINATION_ROW_MISSING'), false);
+    assert.equal(legacyClone.indexesBuilt, 1);
+  });
+
+  test('kw9 5: one cached index per destination routes each file to its own clone', () => {
+    const separate = setupWorld();
+    const fileB = kw9SeedWebFile(separate.customer, 'kw9_dest_b');
+    forceFileState(fileB.fileId, 'COMPLETED');
+    const fileC = kw9SeedWebFile(separate.customer, 'kw9_dest_c');
+    forceFileState(fileB.fileId, 'REVIEW_WAIT');
+    forceFileState(fileC.fileId, 'REVIEW_WAIT');
+    assert.notEqual(fileB.destinationSpreadsheetId, fileC.destinationSpreadsheetId);
+    kw9ClearDestinationId(fileB.transactions[0], separate.customer);
+    const separateReport = kw9Preflight(separate.customer.customerId).integrity;
+    const missing = separateReport.findings.filter((item) =>
+      item.check === 'DESTINATION_ROW_MISSING');
+    assert.equal(separateReport.indexesBuilt, 2);
+    assert.deepEqual(missing.map((item) => item.detail.fullTxId),
+      [fileB.transactions[0].fullTxId]);
+
+    const shared = setupWorld();
+    const sameB = kw9SeedWebFile(shared.customer, 'kw9_same_b1');
+    forceFileState(sameB.fileId, 'COMPLETED');
+    const sameB2 = kw9SeedWebFile(shared.customer, 'kw9_same_b2', {
+      destinationSpreadsheetId: sameB.destinationSpreadsheetId
+    });
+    forceFileState(sameB.fileId, 'REVIEW_WAIT');
+    forceFileState(sameB2.fileId, 'REVIEW_WAIT');
+    assert.equal(sameB.destinationSpreadsheetId, sameB2.destinationSpreadsheetId);
+    const sharedReport = kw9Preflight(shared.customer.customerId).integrity;
+    assert.equal(sharedReport.indexesBuilt, 1);
+    assert.deepEqual(sharedReport.findings, []);
+  });
+
+  test('kw9 6: no in-scope transactions means no preflight index read', () => {
+    const {customer} = setupWorld();
+    const seeded = kw9SeedWebFile(customer, 'kw9_scope_empty', {state: 'COMPLETED'});
+    forceFileState(seeded.fileId, 'COMPLETED');
+    let builds = 0;
+    let valuesOnlyBuilds = 0;
+    const original = gas.context.buildIndex;
+    gas.context.buildIndex = function(target, options) {
+      builds += 1;
+      if (options && options.valuesOnly === true) valuesOnlyBuilds += 1;
+      return original.apply(this, arguments);
+    };
+    try {
+      const report = kw9Preflight(customer.customerId);
+      assert.equal(valuesOnlyBuilds, 0);
+      assert.equal(builds, 0);
+      assert.equal(report.integrity.indexesBuilt, 0);
+    } finally {
+      gas.context.buildIndex = original;
+    }
+  });
+
+  test('kw9 7: unreadable destinations are review findings, transient errors propagate', () => {
+    const {customer} = setupWorld();
+    const seeded = kw9SeedWebFile(customer, 'kw9_unreadable');
+    const spreadsheetApp = gas.context.SpreadsheetApp;
+    const originalOpen = spreadsheetApp.openById;
+    spreadsheetApp.openById = function(id) {
+      if (String(id) === String(seeded.destinationSpreadsheetId)) {
+        throw new Error('destination unavailable');
+      }
+      return originalOpen.apply(this, arguments);
+    };
+    let permanent;
+    try {
+      permanent = kw9Preflight(customer.customerId);
+    } finally {
+      spreadsheetApp.openById = originalOpen;
+    }
+    const unreadable = permanent.integrity.findings.find((item) =>
+      item.check === 'DESTINATION_UNREADABLE');
+    assert.ok(unreadable);
+    assert.equal(unreadable.severity, 'REVIEW');
+    assert.equal(unreadable.detail.spreadsheetId, seeded.destinationSpreadsheetId);
+    assert.equal(unreadable.detail.transactions, 1);
+    assert.equal(permanent.integrity.stop, false);
+    assert.notEqual(permanent.skipped, 'INTEGRITY_STOP');
+
+    const spreadsheetAppAgain = gas.context.SpreadsheetApp;
+    const originalOpenAgain = spreadsheetAppAgain.openById;
+    spreadsheetAppAgain.openById = function(id) {
+      if (String(id) === String(seeded.destinationSpreadsheetId)) {
+        const error = new Error('temporary Sheets failure');
+        error.code = 'TRANSIENT_SHEETS_ERROR';
+        throw error;
+      }
+      return originalOpenAgain.apply(this, arguments);
+    };
+    let transient;
+    try {
+      transient = kw9Preflight(customer.customerId);
+    } finally {
+      spreadsheetAppAgain.openById = originalOpenAgain;
+    }
+    assert.ok(JSON.stringify(transient).includes('TRANSIENT_SHEETS_ERROR'));
+    assert.notEqual(transient.skipped, 'INTEGRITY_STOP');
+  });
+
+  test('kw9 8: valuesOnly skips formulas and disables formula-dependent checks', () => {
+    const {customer} = setupWorld();
+    const target = call('getCustomerById', [customer.customerId]);
+    const valuesApi = gas.context.Sheets.Spreadsheets.Values;
+    const originalBatchGet = valuesApi.batchGet;
+    let formulaReads = 0;
+    valuesApi.batchGet = function(spreadsheetId, request) {
+      if (request.valueRenderOption === 'FORMULA') formulaReads += 1;
+      return originalBatchGet.apply(this, arguments);
+    };
+    let onlyValues;
+    let normal;
+    const formulaRow = Number(target.dataStartRow || 2);
+    try {
+      normal = gas.call('buildIndex', [target, {}]);
+      assert.ok(formulaReads > 0);
+      assert.ok(gas.call('getFormulasByRow', [normal, formulaRow])
+        .some((formula) => Boolean(formula)));
+      formulaReads = 0;
+      onlyValues = gas.call('buildIndex', [target, {valuesOnly: true}]);
+      assert.equal(formulaReads, 0);
+    } finally {
+      valuesApi.batchGet = originalBatchGet;
+    }
+    assert.deepEqual([...onlyValues.byTxId], [...normal.byTxId]);
+    assert.deepEqual([...onlyValues.valuesByRow], [...normal.valuesByRow]);
+    assert.equal(gas.call('getFormulasByRow', [onlyValues, formulaRow]), null);
+    assert.throws(() => gas.call('isRowEmpty', [onlyValues, formulaRow, target]),
+      (error) => error.name === 'RangeError');
+    assert.ok(gas.call('getFormulasByRow', [normal, formulaRow])
+      .some((formula) => Boolean(formula)));
+  });
+
+  test('kw9 9: indexForTransaction routes checks and leaves file checks ungrouped', () => {
+    const {customer} = setupWorld();
+    const fileA = kw9SeedWebFile(customer, 'kw9_route_a');
+    forceFileState(fileA.fileId, 'COMPLETED');
+    const fileB = kw9SeedWebFile(customer, 'kw9_route_b');
+    const txA = Object.assign({}, fileA.transactions[0], {transactionStatus: 'PREPARED'});
+    const txB = Object.assign({}, fileB.transactions[0], {transactionStatus: 'PREPARED'});
+    kw9WriteDuplicate(txA, customer);
+    kw9WriteDuplicate(txB, customer);
+    const indexA = gas.call('buildIndex', [call('customerForRecordedDestination_',
+      [call('getCustomerById', [customer.customerId]), txA]), {valuesOnly: true}]);
+    const indexB = gas.call('buildIndex', [call('customerForRecordedDestination_',
+      [call('getCustomerById', [customer.customerId]), txB]), {valuesOnly: true}]);
+    const missingIndexError = caught(() => gas.call('runIntegrityCheck', [{txLogs: []}]));
+    assert.equal(missingIndexError.name, 'TypeError');
+    assert.equal(missingIndexError.message, 'runIntegrityCheck requires a destination index');
+    const routed = Object.create(null);
+    const outcome = plain(gas.call('runIntegrityCheck', [{index: indexA,
+      indexForTransaction(tx) {
+        routed[tx.fullTxId] = (routed[tx.fullTxId] || 0) + 1;
+        return tx.fullTxId === txA.fullTxId ? indexA : indexB;
+      }, txLogs: [txA, txB], fileState: 'COMPLETED',
+      processLogState: 'WRITING', permanentIndexState: 'COMPLETED'}]));
+    assert.deepEqual(Object.entries(routed).sort(),
+      [[txA.fullTxId, 1], [txB.fullTxId, 1]].sort());
+    const duplicates = outcome.findings.filter((item) =>
+      item.check === 'DUPLICATE_DESTINATION_ROW');
+    assert.deepEqual(duplicates.map((item) => item.detail.fullTxId),
+      [txA.fullTxId, txB.fullTxId]);
+    assert.equal(outcome.findings.filter((item) =>
+      item.check === 'FILE_STATE_TX_MISMATCH').length, 2);
+    assert.equal(outcome.findings.filter((item) =>
+      item.check === 'PERMANENT_INDEX_DESYNC').length, 1);
+
+    const skippedNull = plain(gas.call('runIntegrityCheck', [{index: indexA,
+      indexForTransaction: () => null, txLogs: [txA]}]));
+    assert.equal(skippedNull.findings.some((item) =>
+      ['DUPLICATE_DESTINATION_ROW', 'DESTINATION_ROW_MISSING', 'MANUAL_CHANGE']
+        .includes(item.check)), false);
+  });
+
+  test('kw9 10: all destinations are checked without changing any sheet', () => {
+    const {customer} = setupWorld();
+    const cloneB = kw9SeedWebFile(customer, 'kw9_ops_b', {state: 'COMPLETED'});
+    const cloneC = kw9SeedWebFile(customer, 'kw9_ops_c', {state: 'COMPLETED'});
+    const template = kw9SeedScheduledFile(customer, 'kw9_ops_template');
+    clearRecordedDestinationsForFile(template.fileId);
+    cloneB.transactions.forEach((tx) => kw9WriteDuplicate(tx, customer));
+    kw9SetManualChange(cloneC.transactions[0], customer, 'KW9_SECRET_OPS_EDIT');
+    const before = kw9ReadOnlySnapshot([customer.destinationId,
+      cloneB.destinationSpreadsheetId, cloneC.destinationSpreadsheetId]);
+    const report = kw9Ops();
+    const after = kw9ReadOnlySnapshot([customer.destinationId,
+      cloneB.destinationSpreadsheetId, cloneC.destinationSpreadsheetId]);
+    assert.deepEqual(after, before);
+    const item = report.customers.find((entry) => entry.customerId === customer.customerId);
+    assert.ok(item);
+    assert.equal(item.transactions, 3);
+    assert.equal(item.legacyTransactions, template.transactions.length);
+    const byDestination = Object.fromEntries(item.destinations.map((entry) =>
+      [entry.spreadsheetId, entry]));
+    assert.equal(byDestination[cloneB.destinationSpreadsheetId].transactions, 1);
+    assert.equal(byDestination[cloneB.destinationSpreadsheetId]
+      .findings.DUPLICATE_DESTINATION_ROW, 1);
+    assert.equal(byDestination[cloneC.destinationSpreadsheetId].transactions, 1);
+    assert.equal(byDestination[cloneC.destinationSpreadsheetId].findings.MANUAL_CHANGE, 1);
+    assert.equal(byDestination[customer.destinationId].transactions, 1);
+    assert.equal(item.findings.DUPLICATE_DESTINATION_ROW, 1);
+    assert.equal(item.findings.MANUAL_CHANGE, 1);
+  });
+
+  test('kw9 11: the all-destination scan includes completed files', () => {
+    const {customer} = setupWorld();
+    const seeded = kw9SeedWebFile(customer, 'kw9_ops_completed', {state: 'COMPLETED'});
+    forceFileState(seeded.fileId, 'COMPLETED');
+    kw9SetManualChange(seeded.transactions[0], customer, 'KW9_COMPLETED_EDIT');
+    const preflight = kw9Preflight(customer.customerId).integrity;
+    assert.equal(preflight.findings.some((item) => item.check === 'MANUAL_CHANGE'), false);
+    const report = kw9Ops(customer.customerId);
+    assert.ok(report.customers[0].findings.MANUAL_CHANGE >= 1);
+  });
+
+  test('kw9 12: customerId limits the all-destination scan', () => {
+    const {world, customer} = setupWorld();
+    const second = addCustomer(world, {suffix: '2', customerId: 'C002', customerName: '顧客二'});
+    kw9SeedWebFile(customer, 'kw9_customer_1');
+    kw9SeedWebFile(second, 'kw9_customer_2');
+    const selected = kw9Ops('C001');
+    const all = kw9Ops();
+    assert.deepEqual(selected.customers.map((entry) => entry.customerId), ['C001']);
+    assert.deepEqual(all.customers.map((entry) => entry.customerId).sort(), ['C001', 'C002']);
+  });
+
+  test('kw9 13: operations samples omit transaction values and are capped at twenty', () => {
+    const {customer} = setupWorld();
+    const seeded = kw9SeedWebFile(customer, 'kw9_privacy', {count: 21});
+    seeded.transactions.forEach((tx, index) => {
+      kw9SetManualChange(tx, customer, `KW9_SECRET_VALUE_${index}_F`);
+      kw9SetManualChange(tx, customer, `KW9_SECRET_VALUE_${index}_I`, 'I');
+    });
+    const report = kw9Ops(customer.customerId);
+    const serialized = JSON.stringify(report) + JSON.stringify(gas.stubs.getLogLines().at(-1));
+    ['KW9_SECRET_VALUE_0', '未登録店', '1000', '仕入れ'].forEach((value) =>
+      assert.equal(serialized.includes(value), false, `leaked ${value}`));
+    assert.equal(report.customers[0].samples.length, 20);
+  });
+
+  test('kw9 14: unreadable clone destinations do not stop other destination scans', () => {
+    const {customer} = setupWorld();
+    const unreadable = kw9SeedWebFile(customer, 'kw9_ops_unreadable', {state: 'COMPLETED'});
+    const readable = kw9SeedWebFile(customer, 'kw9_ops_readable', {state: 'COMPLETED'});
+    kw9SetManualChange(readable.transactions[0], customer, 'KW9_READABLE_EDIT');
+    const spreadsheetApp = gas.context.SpreadsheetApp;
+    const originalOpen = spreadsheetApp.openById;
+    spreadsheetApp.openById = function(id) {
+      if (String(id) === String(unreadable.destinationSpreadsheetId)) {
+        throw new Error('destination unavailable');
+      }
+      return originalOpen.apply(this, arguments);
+    };
+    let report;
+    try {
+      report = kw9Ops(customer.customerId);
+    } finally {
+      spreadsheetApp.openById = originalOpen;
+    }
+    const item = report.customers[0];
+    assert.deepEqual(item.unreadable, [{spreadsheetId: unreadable.destinationSpreadsheetId,
+      sheetName: '入力用シート', transactions: 1}]);
+    assert.ok(item.findings.MANUAL_CHANGE >= 1);
+    assert.equal(item.findings.DESTINATION_UNREADABLE, undefined);
+  });
+
+  test('kw9 15: a zero time budget defers every destination without building an index', () => {
+    const {customer} = setupWorld();
+    const first = kw9SeedWebFile(customer, 'kw9_budget_b', {state: 'COMPLETED'});
+    forceFileState(first.fileId, 'COMPLETED');
+    kw9SeedWebFile(customer, 'kw9_budget_c');
+    let builds = 0;
+    const original = gas.context.buildIndex;
+    gas.context.buildIndex = function() {
+      builds += 1;
+      return original.apply(this, arguments);
+    };
+    let report;
+    try {
+      report = kw9Ops(undefined, {timeBudgetMs: 0});
+    } finally {
+      gas.context.buildIndex = original;
+    }
+    assert.equal(report.stoppedBy, 'TIME_BUDGET');
+    assert.deepEqual(report.deferredDestinations.map((item) => item.spreadsheetId).sort(),
+      report.customers[0].destinations.map((item) => item.spreadsheetId).sort());
+    assert.equal(builds, 0);
+    assert.deepEqual(report.customers[0].unreadable, []);
+  });
+
+  // 16〜20 は監査（2026-10-01）で足した。Codex の変異 M1〜M18 は通ったが、次の変異は
+  // 緑のまま通った：開けない転記先の取引数が増えない（実装の不具合でもあった ── 一覧が
+  // 数え上げるエントリと別のオブジェクトだった）・全複製の検査がファイル状態を見ない・
+  // 合計を足さない・前検査の索引が FORMULA を読む・容量超過（429）を「開けない」に丸める。
+  // kw9 19（予算切れの転記先を 1 回だけ並べる）は、変異では赤にならない（`opsCheck…` が
+  // 転記先の一覧から作るので、解決器の側の重複は外から見えない）。一覧が重ならない回帰として残す。
+  function kw9BlockOpen(spreadsheetId, makeError) {
+    const spreadsheetApp = gas.context.SpreadsheetApp;
+    const originalOpen = spreadsheetApp.openById;
+    spreadsheetApp.openById = function(id) {
+      if (String(id) === String(spreadsheetId)) throw makeError();
+      return originalOpen.apply(this, arguments);
+    };
+    return () => { spreadsheetApp.openById = originalOpen; };
+  }
+
+  test('kw9 16: an unreadable destination is reported once with every transaction it holds', () => {
+    const {customer} = setupWorld();
+    const seeded = kw9SeedWebFile(customer, 'kw9_unreadable_many', {count: 3});
+    const restore = kw9BlockOpen(seeded.destinationSpreadsheetId,
+      () => new Error('destination unavailable'));
+    let preflight;
+    let scan;
+    try {
+      preflight = kw9Preflight(customer.customerId).integrity;
+      scan = kw9Ops(customer.customerId);
+    } finally {
+      restore();
+    }
+    const findings = preflight.findings.filter((item) =>
+      item.check === 'DESTINATION_UNREADABLE');
+    assert.equal(findings.length, 1);
+    assert.equal(findings[0].detail.transactions, 3);
+    assert.deepEqual(scan.customers[0].unreadable, [{
+      spreadsheetId: seeded.destinationSpreadsheetId, sheetName: '入力用シート',
+      transactions: 3
+    }]);
+    assert.equal(scan.totals.unreadable, 1);
+  });
+
+  test('kw9 17: the all-destination scan reports file state mismatches and sums the totals', () => {
+    const {customer} = setupWorld();
+    const fileId = putCsv(customer, {fileId: 'kw9_state_mismatch',
+      rows: ['2025/12/10,未登録店,4321,仕入れ']});
+    webImport(customer, {fileIds: [fileId]});
+    const transactions = call('getTransactionsForFile_', [fileId]);
+    assert.equal(transactions.length, 1);
+    assert.notEqual(transactions[0].transactionStatus, 'COMMITTED');
+    forceFileState(fileId, 'COMPLETED');
+    const report = kw9Ops(customer.customerId);
+    const item = report.customers[0];
+    assert.ok(item.findings.FILE_STATE_TX_MISMATCH >= 1);
+    assert.equal(report.totals.findings.FILE_STATE_TX_MISMATCH,
+      item.findings.FILE_STATE_TX_MISMATCH);
+    assert.equal(report.totals.customers, 1);
+    assert.equal(report.totals.files, 1);
+    assert.equal(report.totals.transactions, 1);
+  });
+
+  test('kw9 18: the preflight index of a clone reads values only', () => {
+    const {customer} = setupWorld();
+    const seeded = kw9SeedWebFile(customer, 'kw9_values_only');
+    const valuesApi = gas.context.Sheets.Spreadsheets.Values;
+    const originalBatchGet = valuesApi.batchGet;
+    const reads = {formula: 0, values: 0};
+    valuesApi.batchGet = function(spreadsheetId, request) {
+      if (String(spreadsheetId) === String(seeded.destinationSpreadsheetId)) {
+        if (request.valueRenderOption === 'FORMULA') reads.formula += 1;
+        else reads.values += 1;
+      }
+      return originalBatchGet.apply(this, arguments);
+    };
+    try {
+      assert.equal(kw9Preflight(customer.customerId).integrity.indexesBuilt, 1);
+    } finally {
+      valuesApi.batchGet = originalBatchGet;
+    }
+    assert.equal(reads.formula, 0);
+    assert.ok(reads.values > 0);
+  });
+
+  test('kw9 19: a deferred destination is listed once however many transactions it holds', () => {
+    const {customer} = setupWorld();
+    const seeded = kw9SeedWebFile(customer, 'kw9_deferred_once', {count: 2});
+    const report = kw9Ops(undefined, {timeBudgetMs: 0});
+    assert.equal(report.stoppedBy, 'TIME_BUDGET');
+    assert.deepEqual(report.deferredDestinations, [{customerId: customer.customerId,
+      spreadsheetId: seeded.destinationSpreadsheetId, sheetName: '入力用シート'}]);
+  });
+
+  test('kw9 20: a quota error is not folded into an unreadable destination', () => {
+    const {customer} = setupWorld();
+    const seeded = kw9SeedWebFile(customer, 'kw9_quota');
+    const restore = kw9BlockOpen(seeded.destinationSpreadsheetId, () => {
+      const error = new Error('Quota exceeded for quota metric Read requests per minute');
+      error.code = 429;
+      return error;
+    });
+    let report;
+    try {
+      report = kw9Preflight(customer.customerId);
+    } finally {
+      restore();
+    }
+    assert.equal(report.integrity, undefined);
+    assert.ok(String(report.error).includes('Quota exceeded'));
+    assert.equal(JSON.stringify(report).includes('DESTINATION_UNREADABLE'), false);
+  });
+
 };

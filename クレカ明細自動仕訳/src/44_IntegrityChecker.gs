@@ -123,12 +123,48 @@ function checkPermanentIndexSync(processLogState, permanentIndexState) {
  * `stop`が真のときは処理を進めず担当者の判断を求める。
  */
 function runIntegrityCheck(input) {
-  if (!input || !input.index) throw new TypeError('runIntegrityCheck requires a destination index');
+  var indexForTransaction = input && input.indexForTransaction;
+  var hasResolver = typeof indexForTransaction === 'function';
+  if (!input || (!input.index && !hasResolver)) {
+    throw new TypeError('runIntegrityCheck requires a destination index');
+  }
   var txLogs = input.txLogs || [];
-  var findings = []
-    .concat(checkDuplicateDestinationRows(input.index, txLogs))
-    .concat(checkMissingDestinationRows(input.index, txLogs))
-    .concat(checkManualChanges(input.index, txLogs))
+  var findings = [];
+  if (hasResolver) {
+    var groups = [];
+    txLogs.forEach(function(tx) {
+      var index = indexForTransaction(tx);
+      if (index === null || index === undefined) return;
+      var group = groups.filter(function(item) { return item.index === index; })[0];
+      if (!group) {
+        group = {index: index, txLogs: []};
+        groups.push(group);
+      }
+      group.txLogs.push(tx);
+    });
+    groups.forEach(function(group) {
+      var duplicates = checkDuplicateDestinationRows(group.index, group.txLogs);
+      var duplicateIds = Object.create(null);
+      duplicates.forEach(function(finding) {
+        duplicateIds[String(finding.detail.fullTxId)] = true;
+      });
+      findings = findings
+        .concat(duplicates)
+        .concat(checkMissingDestinationRows(group.index, group.txLogs))
+        // A duplicate has no unique rowNumber for the manual-value comparison.
+        // The STOP finding above reports it; avoid asking checkManualChanges to
+        // read an ambiguous row (its implementation is intentionally unchanged).
+        .concat(checkManualChanges(group.index, group.txLogs.filter(function(tx) {
+          return !duplicateIds[String(tx.fullTxId)];
+        })));
+    });
+  } else {
+    findings = findings
+      .concat(checkDuplicateDestinationRows(input.index, txLogs))
+      .concat(checkMissingDestinationRows(input.index, txLogs))
+      .concat(checkManualChanges(input.index, txLogs));
+  }
+  findings = findings
     .concat(checkFileStateConsistency(input.fileState, txLogs))
     .concat(checkPermanentIndexSync(input.processLogState, input.permanentIndexState));
   return {

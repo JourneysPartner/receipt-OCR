@@ -36,6 +36,7 @@ function padDestinationRows_(rows, count, width, formulas) {
 
 function buildIndex(customer, options) {
   options = options || {};
+  var valuesOnly = options.valuesOnly === true;
   var spreadsheet = SpreadsheetApp.openById(customer.destinationSpreadsheetId);
   var sheet = requireSheet_(spreadsheet, customer.destinationSheetName);
   var firstRow = Number(options.startRow || options.rangeStart || 1);
@@ -49,19 +50,23 @@ function buildIndex(customer, options) {
     var end = Math.min(lastRow, start + chunkSize - 1);
     var range = quoteSheetName_(sheet.getName()) + '!A' + start + ':' + columnLetter_(lastColumn) + end;
     var values = padDestinationRows_(destinationRangeValues_(spreadsheet.getId(), range, 'UNFORMATTED_VALUE'), end - start + 1, lastColumn, false);
-    var formulas = padDestinationRows_(destinationRangeValues_(spreadsheet.getId(), range, 'FORMULA'), end - start + 1, lastColumn, true);
+    var formulas = valuesOnly ? null :
+      padDestinationRows_(destinationRangeValues_(spreadsheet.getId(), range, 'FORMULA'), end - start + 1, lastColumn, true);
     values.forEach(function(rowValues, offset) {
       var rowNumber = start + offset;
-      valuesByRow.set(rowNumber, rowValues); formulasByRow.set(rowNumber, formulas[offset]);
+      valuesByRow.set(rowNumber, rowValues);
+      if (!valuesOnly) formulasByRow.set(rowNumber, formulas[offset]);
       var txId = rowValues[customer.columnMapping.txId - 1];
       if (txId !== '' && txId !== null && txId !== undefined) {
         var key = String(txId); if (!byTxId.has(key)) byTxId.set(key, []); byTxId.get(key).push(rowNumber);
       }
     });
   }
-  return {customerId: customer.customerId, spreadsheetId: customer.destinationSpreadsheetId, sheetName: customer.destinationSheetName,
+  var index = {customerId: customer.customerId, spreadsheetId: customer.destinationSpreadsheetId, sheetName: customer.destinationSheetName,
     firstColumn: 1, lastColumn: lastColumn, rangeStart: firstRow, rangeEnd: lastRow, byTxId: byTxId,
     valuesByRow: valuesByRow, formulasByRow: formulasByRow, builtAt: nowIso_(), valid: true};
+  if (valuesOnly) index.valuesOnly = true;
+  return index;
 }
 
 function requireValidDestinationIndex_(index) {
@@ -104,6 +109,7 @@ function getAllValuesByRow(index, rowNumber) {
 
 function getFormulasByRow(index, rowNumber) {
   requireValidDestinationIndex_(index);
+  if (index.valuesOnly === true) return null;
   var row = index.formulasByRow.get(Number(rowNumber));
   return row ? row.slice() : null;
 }
@@ -217,3 +223,71 @@ buildIndex = function(customer, options) {
   index.columnMapping = customer.columnMapping;
   return index;
 };
+
+/**
+ * 検査対象の取引が記録された転記先ごとに、索引を遅延作成して共有する。
+ * 同じ転記先の成功・失敗はどちらもキャッシュし、同じファイル群からは1回だけ開く。
+ */
+function makeDestinationIndexResolver_(customer) {
+  var entries = Object.create(null);
+  var unreadable = [];
+  var built = 0;
+  var buildGuard = null;
+
+  function destinationKey(spreadsheetId, sheetName) {
+    return JSON.stringify([String(spreadsheetId), String(sheetName)]);
+  }
+
+  function indexFor(tx) {
+    var recorded = recordedDestinationOf_(tx, customer);
+    var destination = recorded || {spreadsheetId: String(customer.destinationSpreadsheetId),
+      sheetName: String(customer.destinationSheetName)};
+    var key = destinationKey(destination.spreadsheetId, destination.sheetName);
+    var known = entries[key];
+    if (known) {
+      if (known.status === 'UNREADABLE') known.transactions += 1;
+      return known.status === 'BUILT' ? known.index : null;
+    }
+    if (buildGuard && buildGuard(destination, tx) === false) {
+      entries[key] = {status: 'DEFERRED', destination: destination};
+      return null;
+    }
+
+    var target = Object.assign({}, customer, {
+      destinationSpreadsheetId: destination.spreadsheetId,
+      destinationSheetName: destination.sheetName
+    });
+    try {
+      var index = buildIndex(target, {valuesOnly: true});
+      entries[key] = {status: 'BUILT', destination: destination, index: index};
+      built += 1;
+      return index;
+    } catch (error) {
+      var transient = Boolean(error && error.code === 'TRANSIENT_SHEETS_ERROR');
+      if (!transient && typeof isSheetsQuotaError_ === 'function') {
+        transient = isSheetsQuotaError_(error);
+      }
+      if (transient) throw error;
+      // 一覧は同じエントリを指す。別のオブジェクトにすると、後から数え足す
+      // `known.transactions += 1` が一覧に届かず、取引数が常に 1 になる。
+      entries[key] = {status: 'UNREADABLE', destination: destination, transactions: 1};
+      unreadable.push(entries[key]);
+      return null;
+    }
+  }
+
+  return {
+    indexFor: indexFor,
+    setBuildGuard: function(fn) { buildGuard = typeof fn === 'function' ? fn : null; },
+    stats: function() {
+      return {built: built, unreadable: unreadable.map(function(item) {
+        return {spreadsheetId: item.destination.spreadsheetId,
+          sheetName: item.destination.sheetName, transactions: item.transactions};
+      })};
+    },
+    statusOf: function(spreadsheetId, sheetName) {
+      var entry = entries[destinationKey(spreadsheetId, sheetName)];
+      return entry ? entry.status : null;
+    }
+  };
+}

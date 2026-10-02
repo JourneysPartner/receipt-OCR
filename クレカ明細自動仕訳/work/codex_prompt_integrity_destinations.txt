@@ -1,0 +1,50 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の、**整合性チェックが、取引の居る転記先（取引ログ AC・AD が指す複製）を見る**ようにする直し（K-W9、`spec_webapp.md` §15-3）を受け取ります。
+
+作業ツリーの未コミットの物は、仕様書 `work/spec_integrity_destinations.md` とこの指示書だけです（どちらも Claude が置いた）。開始時の `node test/run-tests.js` の本数は、始める前に自分で数えて報告に書いてください（1289/1289 のはずです）。
+
+## 仕様書
+
+`work/spec_integrity_destinations.md`（1.0、未コミット）。**全部読んでから始めてください。**
+
+## 直すこと（要点。詳細は仕様書）
+
+1. 取込の前検査（`src/71_RunOrchestrator.gs` の `runCustomerIntegrityCheck_`）は、いま顧客の雛形の索引 1 つで検査している。Web アプリの取引は複製に居るので、複製の中の二重転記（`DUPLICATE_DESTINATION_ROW`、索引に依る唯一の STOP）を見つけられず、`COMMITTED` の取引を毎回「行が無い」と誤報する。取引ごとに、取引ログ AC・AD の転記先（無ければ雛形）の索引で検査する。
+2. 部品：`makeDestinationIndexResolver_`（45、転記先ごとに 1 回だけ・遅延・開けない転記先は `null`・一過性の失敗は投げる）、`buildIndex` の `valuesOnly`（45、`FORMULA` を読まない）、`runIntegrityCheck` の `indexForTransaction`（44、ファイル 1 件につき `runIntegrityCheck` 1 回のまま、検査 4・5 は索引ごとに繰り返さない）。
+3. 運用関数 `opsCheckIntegrityAllDestinations(customerId, options)`（97）：全部の複製を、範囲を絞らずに**読むだけ**で検査する。取引の値は戻り値に出さない。
+
+---
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。**
+2. **git を操作しないこと**（commit・stash・reset・checkout・clean・add）。
+3. **`src/` で変えてよいのは `src/44_IntegrityChecker.gs`・`src/45_DestinationIndex.gs`・`src/71_RunOrchestrator.gs`・`src/97_Ops.gs` の 4 つだけ。**71 は `runCustomerIntegrityCheck_` と `runImport` の step 4（`buildIndex(customer, {})` の行とその呼出し）だけ。97 は `opsCheckIntegrityAllDestinations` を足すだけ。検査：終わったとき `git status --porcelain -- src/` がこの 4 行だけであること。
+4. **`src/97_Ops.gs` には文字列の中に生の NUL バイトが 2 つある。**消したり増やしたりしないこと（エディタやツールで書き戻すときに落ちやすい）。終わったら数が 2 のままか確かめて報告すること（例：`node -e "console.log(require('fs').readFileSync('src/97_Ops.gs').filter(b=>b===0).length)"`）。
+5. テストの変更は、`test/phase8-webapp.test.js` に `kw9 N: …` を**足すことだけ**（補助を足してよい）。既存のテストと `test/fixtures/` は 1 文字も変えないこと。`test/gas-stubs.js`・`test/gas-harness.js` は、足りない API を足すだけなら変えてよい（足したものは報告する）。
+6. **テストを先に赤にしてから直すこと。**kw9 1〜15 を書き、いまの実装で赤になることを確かめてから直す。いまでも緑になる確かめ（kw9 4 の (b)、kw9 8 の `valuesOnly` を付けない側、kw9 9 の `TypeError` など）はどれかを報告する。
+7. 既存のテストを 1 つも壊さないこと。**既存のテストの期待を変えて緑にしてはならない。**特に `scope 1`・`scope 2`・`scope 3`（`runIntegrityCheck` の呼出し回数）と `the fixed cost of one file stays within budget`（往復）は変えない。変えないと通らないものがあれば、変えずに止めて理由を報告すること。
+8. リポジトリの親フォルダの `.codex/config.toml` に触らないこと。
+9. 仕様書を変えないこと（間違いを見つけたら報告する）。`ERROR_CATALOG`・取引ログの列・書込経路（`reserveDestinationRows` ほか）・54 の再検査には触らない。
+10. 仕様書に無い判断で安全側を外さないこと。迷ったら止めて報告すること。
+
+## 進め方
+
+1. 仕様書を読む。`src/44_IntegrityChecker.gs` 全部、`src/45_DestinationIndex.gs` 全部（特に末尾の `buildIndex` の包み直し）、`src/71_RunOrchestrator.gs` の `runCustomerIntegrityCheck_`（150〜197 行）と `runImport` の step 4（290〜315 行）、`src/61_TransactionLog.gs` の `recordedDestinationOf_`・`classifyRecordedDestinations_`（51〜140 行）、`src/97_Ops.gs` の `opsBackfillTransactionDestinations`（末尾。`readSheetRows_`・`txLogFromRecord_`・`permanentIndexRowsForScan_` の使い方の見本）、`test/phase6-round-trips.test.js` の `scope 1`〜`scope 3`、`test/phase8-webapp.test.js` の `txdest` と補助を読む
+2. kw9 1〜15 を書く → 赤を確かめる
+3. 直す
+4. `node test/run-tests.js` を全部緑にする
+5. 仕様書 §5 の M1〜M18 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら `git diff` が変異を入れる前と同じか確かめる）
+6. `git status --porcelain -- src/ test/` と `git diff --stat -- src/` を確かめる
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 直す前に kw9 1〜15 のどの確かめが赤だったか（緑だったものも）
+- kw9 の各テストをどのファイルに置いたか
+- M1〜M18 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て
+- 仕様書が間違っていた箇所（黙って直さないこと）
+- 自分で決めた箇所（全部）
+- `src/97_Ops.gs` の NUL バイトの数（前と後）
+- `git status --porcelain -- src/ test/` と `git diff --stat -- src/` の出力（始める前と後）
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。
