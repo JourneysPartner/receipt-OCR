@@ -1,0 +1,51 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の、**Web アプリの取込を 1 回の呼出しで複数ファイルにする**直し（`spec_webapp.md` §15-6 の第一手）を受け取ります。
+
+作業ツリーの未コミットの物は、仕様書 `work/spec_import_multi_file.md` とこの指示書だけです（どちらも Claude が置いた。親フォルダの `../.codex/config.toml` の変更は無関係なので触らない）。開始時の `node test/run-tests.js` の本数は、始める前に自分で数えて報告に書いてください（1309/1309 のはずです）。
+
+## 仕様書
+
+`work/spec_import_multi_file.md`（1.0、未コミット）。**全部読んでから始めてください。**
+
+## 直すこと（要点。詳細は仕様書）
+
+1. `runImport`（71）に任意の `options.fileStartGate` を足す。2 本目以降のファイルは「経過 ＋ 2 × max(60 秒, この呼出しで処理したファイルの所要の最大値) ≦ 300 秒」のときだけ始める。`FAILED`／`LEASE_CONFLICT` の後は始めない。始めなかったファイルは `files` に入れず `customerReport.gate` に理由を書く。時計は新しい `importClockNow_()`。**`fileStartGate` が無いときの動きは変えない。**
+2. `webAppRunImport`（80）は `maxFilesPerCustomer: WEBAPP_MAX_FILES_PER_IMPORT_`（6）と門を渡す。`fileResults` から始めていないファイルを除く。`FAILED` があれば `stoppedBy 'FILE_FAILED'`。画面（81）の `stoppedByMessage` に `FILE_FAILED: TEXT.stuckFile` を足す。
+3. 前の呼出しの読取時刻をスクリプトキャッシュで窓へ引き継ぐ（01 の `loadSharedReadWindow_`／`saveSharedReadWindow_`。失敗は握りつぶす）。
+4. 計器：01 に実行の寿命の数え（`apiReadCount_`・`apiQuotaHitCount_`・`apiBackoffTotalMs_`）、71 の `report.stages` と `PHASES` の `reads`・`runId`、80 の `IMPORT_CALL` の 1 行（明細の内容を出さない）。
+
+---
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。**
+2. **git を操作しないこと**（commit・stash・reset・checkout・clean・add）。
+3. **`src/` で変えてよいのは `src/01_DataAccessCore.gs`・`src/71_RunOrchestrator.gs`・`src/80_WebApp.gs`・`src/81_WebAppUi.html` の 4 つだけ。**81 は `stoppedByMessage` の対応表に 1 行足すだけ。71 は `runImport`・`processDiscoveredFile_`（`reads` と `PHASES` の 2 鍵）・新しい `importClockNow_` だけ。検査：終わったとき `git status --porcelain -- src/` がこの 4 行だけであること。
+4. テストの変更は、`test/phase8-webapp.test.js` に `multi N: …` を**足すこと**（補助を足してよい）。**既存のテストは、仕様書 §4 の 15 に当たるもの（「1 回の呼出しで 1 ファイル」を前提にしたシナリオ）だけ、補助で 1 本ずつに固定する行を足してよい。期待（assert）は 1 つも変えないこと。**それ以外の理由で既存のテストが赤になったら、変えずに止めて理由を報告すること。`test/fixtures/` は変えない。`test/gas-stubs.js`・`test/gas-harness.js` は、足りない API（`CacheService` など）を足すだけなら変えてよい（足したものは報告する）。
+5. **テストを先に赤にしてから直すこと。**multi 1〜14 を書き、いまの実装で赤になることを確かめてから直す。いまでも緑になる確かめ（例：multi 10、multi 11 の一部）はどれかを報告する。
+6. 既存のテストを 1 つも壊さないこと。特に `budget 1`・`budget 2`・`cache 1`・`pace 1`・`scope 1〜3`・`webapp 44`・`webapp 45`・`webapp 45q`・`kw9 1〜20` の期待は変えない。
+7. **日本語のコメントは UTF-8 で書くこと。**前回、あなたの書いたコメントが `?` の羅列に化けた。終わったら `grep -n '???' src/01_DataAccessCore.gs src/71_RunOrchestrator.gs src/80_WebApp.gs src/81_WebAppUi.html` が、始める前と同じ結果であることを確かめて報告すること。
+8. 仕様書を変えないこと（間違いを見つけたら報告する）。`processDiscoveredFile_` の中の処理・書込経路・状態遷移・整合性チェック・要確認の確定には触らない。
+9. 仕様書に無い判断で安全側を外さないこと。迷ったら止めて報告すること。
+
+## 進め方
+
+1. 仕様書を読む。`src/01_DataAccessCore.gs` の 139〜348 行（窓・均し・`sheetsBatchGetPaced_`・`sheetsReadRanges_`）、`src/71_RunOrchestrator.gs` の `runImport`（211〜357 行）と `processDiscoveredFile_` の頭と `PHASES` の行（366〜410 行・735〜760 行あたり）、`src/80_WebApp.gs` の冒頭の定数・`webAppRunImport`（300〜407 行）・`webAppImportResult_`・`webAppInvoke_`、`src/81_WebAppUi.html` の `startImport`（1040〜1112 行）と `stoppedByMessage`、`test/phase8-webapp.test.js` の補助（1〜345 行）と `webapp 36`・`webapp 45q`、`test/phase6-round-trips.test.js` の `apiReads`・`budget 1`・`pace 1`、`test/gas-stubs.js` の `Logger`・`PropertiesService`・`reset()` を読む
+2. multi 1〜14 を書く → 赤を確かめる
+3. 直す
+4. `node test/run-tests.js` を全部緑にする（§4 の 15 に当たる既存テストは補助で固定し、名前を記録する）
+5. 仕様書 §5 の M1〜M21 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら `git diff` が変異を入れる前と同じか確かめる）
+6. `git status --porcelain -- src/ test/` と `git diff --stat -- src/ test/` を確かめる
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 直す前に multi 1〜14 のどの確かめが赤だったか（緑だったものも）
+- multi 14 で実測した読取の数（1 ファイルの呼出し・4 ファイルの呼出し・1 本増やすごと・呼出しの固定費）と、置いた上限
+- 補助で 1 本ずつに固定した既存テストの名前（全部）と、足した補助
+- M1〜M21 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て
+- 仕様書が間違っていた箇所（黙って直さないこと）
+- 自分で決めた箇所（全部）
+- `???` の grep の結果（前と後）
+- `git status --porcelain -- src/ test/` と `git diff --stat -- src/ test/` の出力（始める前と後）
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。

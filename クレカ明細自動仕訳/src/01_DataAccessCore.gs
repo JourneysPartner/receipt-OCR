@@ -165,6 +165,10 @@ var READ_QUOTA_FLOOR_ = 20;
 var apiReadWindow_ = [];
 var apiReadBudget_ = 55;
 var apiReadLastAt_ = 0;
+var apiReadCount_ = 0;
+var apiQuotaHitCount_ = 0;
+var apiBackoffTotalMs_ = 0;
+var apiSharedReadWindowErrors_ = 0;
 /**
  * この実行で先回りに待った合計。**窓と同じ寿命**である ── `apiBackoff_` は
  * ファイルごとに初期化されるので（PHASES はファイル単位で見る）、実行全体の
@@ -237,11 +241,80 @@ function resetApiReadWindow_() {
   apiReadLastAt_ = 0;
   apiReadPacedTotalMs_ = 0;
   apiReadSmoothing_ = false;
+  apiReadCount_ = 0;
+  apiQuotaHitCount_ = 0;
+  apiBackoffTotalMs_ = 0;
+  apiSharedReadWindowErrors_ = 0;
 }
 
 function trimApiReadWindow_(now) {
   var cutoff = now - 60000;
   while (apiReadWindow_.length && apiReadWindow_[0] <= cutoff) apiReadWindow_.shift();
+}
+
+/**
+ * **前の実行が出した読取の時刻を、窓へ引き継ぐ。**
+ *
+ * 窓は実行ごとに空から始まるので、Web アプリの取込の呼出しが続くと、
+ * 直前の呼出しが1分以内に出した読取を数えられずに上限（60回/分）を越え、
+ * 20秒の罰を受ける（2026-09-27、15ファイル中3回）。Web アプリは配備者として
+ * 動くので、誰が押しても枠は1人分 ── だから置き場はスクリプトキャッシュである。
+ *
+ * **速さのためだけにある。**どんな失敗も握りつぶして取込を止めない
+ * （数えは `apiSharedReadWindowErrors_`）。Sheets を読まないので枠も使わない。
+ * @return {number} 取り込んだ時刻の数
+ */
+function loadSharedReadWindow_() {
+  try {
+    var now = apiClockNow_();
+    var raw = CacheService.getScriptCache().get('SHEETS_READ_WINDOW_V1');
+    if (raw === null || raw === undefined || raw === '') {
+      apiReadWindow_ = apiReadWindow_.filter(function(at) {
+        return typeof at === 'number' && Number.isFinite(at) && at > now - 60000 && at <= now;
+      });
+      apiReadLastAt_ = Math.max(Number(apiReadLastAt_) || 0, now);
+      return 0;
+    }
+    var cached = JSON.parse(raw);
+    if (!Array.isArray(cached)) throw new TypeError('Invalid shared read window');
+    var imported = cached.filter(function(at) {
+      return typeof at === 'number' && Number.isFinite(at) && at > now - 60000 && at <= now;
+    });
+    var merged = apiReadWindow_.filter(function(at) {
+      return typeof at === 'number' && Number.isFinite(at) && at > now - 60000 && at <= now;
+    }).concat(imported).sort(function(a, b) { return a - b; });
+    var unique = [];
+    merged.forEach(function(at) {
+      if (!unique.length || unique[unique.length - 1] !== at) unique.push(at);
+    });
+    if (unique.length > READ_QUOTA_PER_MINUTE_) {
+      unique = unique.slice(unique.length - READ_QUOTA_PER_MINUTE_);
+    }
+    apiReadWindow_ = unique;
+    apiReadLastAt_ = Math.max(Number(apiReadLastAt_) || 0,
+      unique.length ? unique[unique.length - 1] : 0, now);
+    return imported.filter(function(at, index) {
+      return imported.indexOf(at) === index && unique.indexOf(at) >= 0;
+    }).length;
+  } catch (ignored) {
+    apiSharedReadWindowErrors_ += 1;
+    return 0;
+  }
+}
+
+/** 直前60秒の読取時刻を、次の実行のために残す。失敗は握りつぶす。 */
+function saveSharedReadWindow_() {
+  try {
+    var now = apiClockNow_();
+    var recent = apiReadWindow_.filter(function(at) {
+      return typeof at === 'number' && Number.isFinite(at) && at > now - 60000 && at <= now;
+    });
+    CacheService.getScriptCache().put('SHEETS_READ_WINDOW_V1', JSON.stringify(recent), 120);
+    return recent.length;
+  } catch (ignored) {
+    apiSharedReadWindowErrors_ += 1;
+    return 0;
+  }
 }
 
 /**
@@ -300,6 +373,7 @@ function noteSheetsQuotaExceeded_() {
  */
 function sheetsBatchGetPaced_(spreadsheetId, request) {
   paceSheetsRead_();
+  apiReadCount_ += 1;
   return Sheets.Spreadsheets.Values.batchGet(spreadsheetId, request);
 }
 
@@ -326,7 +400,10 @@ function sheetsReadRanges_(sheet, ranges) {
       var status = Number(error && (error.code || error.status));
       var message = String(error && error.message || '');
       var quotaExceeded = isSheetsQuotaError_(error);
-      if (quotaExceeded) noteSheetsQuotaExceeded_();
+      if (quotaExceeded) {
+        apiQuotaHitCount_ += 1;
+        noteSheetsQuotaExceeded_();
+      }
       var transientFailure = quotaExceeded || status === 500 || status === 503 ||
         /(?:^|\D)(?:500|503)(?:\D|$)/.test(message);
       if (!transientFailure || attempt === 4) throw error;
@@ -340,6 +417,7 @@ function sheetsReadRanges_(sheet, ranges) {
       // 60回/分の割当をほぼ使い切るため、連続取込では必ず当たる。
       apiBackoff_.count += 1;
       apiBackoff_.ms += waitMs;
+      apiBackoffTotalMs_ += waitMs;
       if (quotaExceeded) apiBackoff_.quotaCount += 1;
       Utilities.sleep(waitMs);
     }
@@ -620,4 +698,3 @@ function updateColumns_(sheet, rowNumber, updates) {
     sheet.getRange(rowNumber, Number(column)).setValue(updates[column]);
   });
 }
-

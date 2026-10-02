@@ -208,6 +208,8 @@ function runCustomerIntegrityCheck_(customer, fileIdsInScope) {
     findings: findings, indexesBuilt: resolver.stats().built};
 }
 
+function importClockNow_() { return Date.now(); }
+
 /**
  * 実行の入口（6.1 step 1〜7'）。
  *
@@ -219,32 +221,48 @@ function runImport(options) {
   var opts = options || {};
   var runId = generateId('RUN');
   var startedAt = Date.now();
-  var report = {runId: runId, customers: [], stoppedBy: null};
-
-  // Script Propertiesの導入設定を読む。GASの実行はグローバルを保持しない
-  // ため、**毎実行の最初に読み直さないと`SETTINGS`は既定値のまま**であり、
-  // 設定検証（step 2）が「未設定」で必ず落ちる。
-  loadSettingsFromProperties();
-
-  // step 1：認可。メニュー実行者が担当する顧客だけを対象にする。
-  var user = activeUserEmail_();
-  var customers = getAuthorizedCustomers(user);
-  if (Array.isArray(opts.customerIds) && opts.customerIds.length) {
-    customers = customers.filter(function(customer) {
-      return opts.customerIds.indexOf(customer.customerId) >= 0;
-    });
+  var report = {runId: runId, customers: [], stoppedBy: null, stages: []};
+  function runStage(name, fn) {
+    var at = Date.now();
+    var readsAt = Number(apiReadCount_) || 0;
+    try {
+      return fn();
+    } finally {
+      report.stages.push({name: name, ms: Date.now() - at,
+        reads: (Number(apiReadCount_) || 0) - readsAt});
+    }
   }
+
+  var startup = runStage('settings', function() {
+    // Script Propertiesの導入設定を読む。GASの実行はグローバルを保持しない
+    // ため、**毎実行の最初に読み直さないと`SETTINGS`は既定値のまま**であり、
+    // 設定検証（step 2）が「未設定」で必ず落ちる。
+    loadSettingsFromProperties();
+
+    // step 1：認可。メニュー実行者が担当する顧客だけを対象にする。
+    var user = activeUserEmail_();
+    var authorized = getAuthorizedCustomers(user);
+    if (Array.isArray(opts.customerIds) && opts.customerIds.length) {
+      authorized = authorized.filter(function(customer) {
+        return opts.customerIds.indexOf(customer.customerId) >= 0;
+      });
+    }
+    if (!authorized.length) return {customers: authorized, settings: null};
+    var validSettings = validateSettings(VALIDATION_SCOPE.IMPORT, {
+      customerFolderIds: authorized.map(function(c) { return c.sourceFolderId; }),
+      corpusFolderAccessible: true,
+      corpusFolderAncestors: []
+    });
+    return {customers: authorized, settings: validSettings};
+  });
+  var customers = startup.customers;
   if (!customers.length) {
     report.stoppedBy = 'NO_AUTHORIZED_CUSTOMER';
     return report;
   }
 
   // step 2：設定検証（IMPORTスコープ。無関係な検査で止めない。CR-5）。
-  var settings = validateSettings(VALIDATION_SCOPE.IMPORT, {
-    customerFolderIds: customers.map(function(c) { return c.sourceFolderId; }),
-    corpusFolderAccessible: true,
-    corpusFolderAncestors: []
-  });
+  var settings = startup.settings;
   if (!settings.ok) {
     report.stoppedBy = 'SETTINGS_INVALID';
     report.settingsProblems = settings.problems;
@@ -252,7 +270,7 @@ function runImport(options) {
   }
 
   // step 3：容量チェック。停止閾値超なら書込を始めない。
-  var capacity = checkLogCapacityForRun_();
+  var capacity = runStage('capacity', function() { return checkLogCapacityForRun_(); });
   if (!capacity.ok) {
     report.stoppedBy = 'LOG_CAPACITY_EXCEEDED';
     report.capacity = capacity.exceeded;
@@ -283,26 +301,31 @@ function runImport(options) {
     report.customers.push(customerReport);
     try {
       // step 7：名称変更の再試行。1件の例外で顧客ループを中断しない。
-      retryPendingRenames(customer.customerId);
+      runStage('renames', function() { return retryPendingRenames(customer.customerId); });
 
       // step 5：未処理ファイル検索（モード1）。**step 4 より先に行う** ──
       // 前検査は「今回触るファイル」を知らないと範囲を絞れない。走査は
       // 読むだけなので、前検査が止めた場合に無駄になるのは走査の2秒だけである。
-      var candidates = scanUnprocessedFiles(customer.customerId, {now: opts.now});
+      var candidates = runStage('scan', function() {
+        return scanUnprocessedFiles(customer.customerId, {now: opts.now});
+      });
       // step 6：担当者のファイル選択（メニュー）。指定があれば絞る。
       if (Array.isArray(opts.fileIds) && opts.fileIds.length) {
         candidates = candidates.filter(function(candidate) {
           return opts.fileIds.indexOf(candidate.fileId) >= 0;
         });
       }
+      var candidateCountBeforeLimit = candidates.length;
       var maxFiles = Number(opts.maxFilesPerCustomer);
       if (Number.isInteger(maxFiles) && maxFiles > 0) {
         candidates = candidates.slice(0, maxFiles);
       }
 
       // step 4：事前整合性チェック（監査ログ連鎖は通知のみ。INV-29）。
-      var integrity = runCustomerIntegrityCheck_(customer,
-        candidates.map(function(candidate) { return candidate.fileId; }));
+      var integrity = runStage('precheck', function() {
+        return runCustomerIntegrityCheck_(customer,
+          candidates.map(function(candidate) { return candidate.fileId; }));
+      });
       customerReport.integrity = integrity;
 
       // 監査ログ連鎖の検証は**往復ではなく計算**である ── 直近500行の
@@ -315,7 +338,7 @@ function runImport(options) {
       // 「1押下の最初の呼出し」に絞る（80_WebApp）── 押下ごとには必ず
       // 走るので、破損の発見が実質的に遅れることはない。
       if (opts.verifyAuditChain !== false) {
-        var audit = verifyChain('RECENT');
+        var audit = runStage('auditChain', function() { return verifyChain('RECENT'); });
         if (audit && audit.ok === false) {
           customerReport.auditChain = 'BROKEN_NOTIFY_ONLY';
         }
@@ -328,21 +351,73 @@ function runImport(options) {
       // step 8以降：ファイルループ。
       filesPlanned += candidates.length;
       setReadQuotaSmoothing_(filesPlanned > 1);
-      candidates.forEach(function(candidate) {
+      // **次のファイルを始める門**（Web アプリだけが渡す。spec_import_multi_file §2.1）。
+      //
+      // 1呼出し1ファイルだと、呼出しの固定費（認可・走査・前検査・マスターの
+      // 読込み）をファイルごとに払い、読取の均しも効かない ── 実機で1ファイル
+      // 約80秒、まとめれば約43秒だった（2026-09-27／09-21）。ただし始めた
+      // ファイルは途中で切れないので、要確認の多いファイルが呼出しの後半から
+      // 始まると6分の上限で殺される（K-W11）。そこで**この呼出しで既に
+      // 処理したファイルの所要の最大値**から次の1本を見積もり、その2倍が
+      // 締切までに残っているときだけ始める。最大値であって直前の1本ではない
+      // ── 同じカードの続きの月は似た重さなので、重い月の後に軽い月が来ても
+      // 見積もりを軽くしない。経過は**呼出しの頭から**数える（6分の上限は
+      // そこから数えられる）。失敗やリース衝突の後は始めない ── 押下を止めて
+      // 人に知らせる（80 の `FILE_FAILED`）。
+      var fileGate = opts.fileStartGate && typeof opts.fileStartGate === 'object' ?
+        opts.fileStartGate : null;
+      var gate = fileGate ? {stoppedBy: null, filesStarted: 0, filesNotStarted: 0,
+        elapsedMs: null, predictedMs: null} : null;
+      var gateStopped = false;
+      var maxFileElapsedMs = 0;
+      var priorStopReason = null;
+      candidates.forEach(function(candidate, candidateIndex) {
+        if (gateStopped) return;
+        if (fileGate && gate.filesStarted > 0 && priorStopReason) {
+          var priorPredictedMs = Math.max(Number(fileGate.floorMs) || 0, maxFileElapsedMs);
+          var priorElapsedMs = importClockNow_() - Number(fileGate.startedAt);
+          gateStopped = true;
+          gate.stoppedBy = priorStopReason;
+          gate.filesNotStarted = candidateCountBeforeLimit - gate.filesStarted;
+          gate.elapsedMs = priorElapsedMs;
+          gate.predictedMs = priorPredictedMs;
+          return;
+        }
         if (deadline && Date.now() >= deadline) {
           customerReport.files.push({fileId: candidate.fileId, outcome: 'DEFERRED_TIME_BUDGET'});
           return;
         }
+        if (fileGate && gate.filesStarted > 0) {
+          var predictedMs = Math.max(Number(fileGate.floorMs) || 0, maxFileElapsedMs);
+          var gateElapsedMs = importClockNow_() - Number(fileGate.startedAt);
+          if (gateElapsedMs + Number(fileGate.factor) * predictedMs >
+              Number(fileGate.deadlineMs)) {
+            gateStopped = true;
+            gate.stoppedBy = 'GATE';
+            gate.filesNotStarted = candidateCountBeforeLimit - gate.filesStarted;
+            gate.elapsedMs = gateElapsedMs;
+            gate.predictedMs = predictedMs;
+            return;
+          }
+        }
         // 1ファイルの所要時間を報告に残す。6分上限に当たったとき、どの
         // ファイルのどの段階で溶けたのかを知る材料がこれしかない。
-        var fileStartedAt = Date.now();
+        var fileStartedAt = fileGate ? importClockNow_() : Date.now();
         var writeCustomer = opts.destinationSpreadsheetId ?
           Object.assign({}, customer,
             {destinationSpreadsheetId: String(opts.destinationSpreadsheetId)}) : customer;
         var fileOutcome = processDiscoveredFile_(runId, writeCustomer, candidate, opts);
-        fileOutcome.elapsedMs = Date.now() - fileStartedAt;
+        fileOutcome.elapsedMs = fileGate ? importClockNow_() - fileStartedAt : Date.now() - fileStartedAt;
         customerReport.files.push(fileOutcome);
+        if (fileGate) {
+          gate.filesStarted += 1;
+          maxFileElapsedMs = Math.max(maxFileElapsedMs, Number(fileOutcome.elapsedMs) || 0);
+          if (fileOutcome.outcome === 'FAILED' || fileOutcome.outcome === 'LEASE_CONFLICT') {
+            priorStopReason = fileOutcome.outcome;
+          }
+        }
       });
+      if (fileGate) customerReport.gate = gate;
     } catch (error) {
       customerReport.skipped = (error && error.code) || 'CUSTOMER_ERROR';
       customerReport.error = String(error && error.message);
@@ -364,9 +439,10 @@ function runImport(options) {
  * ループを止めない。
  */
 function processDiscoveredFile_(runId, customer, candidate, options) {
+  var readsStarted = Number(apiReadCount_) || 0;
   var fileId = candidate.fileId;
   var fileName = candidate.name;
-  var outcome = {fileId: fileId, fileName: fileName, outcome: null, nextState: null};
+  var outcome = {fileId: fileId, fileName: fileName, outcome: null, nextState: null, reads: 0};
   var leaseId = null;
   var stateNow = null;
 
@@ -404,6 +480,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
       activeUserEmail_(), LEASE_PURPOSE.PROCESS);
   } catch (error) {
     outcome.outcome = 'LEASE_CONFLICT';
+    outcome.reads = (Number(apiReadCount_) || 0) - readsStarted;
     return outcome;
   }
 
@@ -742,7 +819,9 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
       paceCount: apiBackoff_.paceCount, paceMs: apiBackoff_.paceMs,
       paceWorstMs: apiBackoff_.paceWorstMs, budget: apiReadBudget_,
       ms: apiBackoff_.ms};
-    Logger.log('PHASES ' + JSON.stringify({file: fileName, backoff: outcome.backoff,
+    outcome.reads = (Number(apiReadCount_) || 0) - readsStarted;
+    Logger.log('PHASES ' + JSON.stringify({file: fileName, runId: runId,
+      reads: outcome.reads, backoff: outcome.backoff,
       waits: outcome.waits, steps: stepTimes_,
       phases: outcome.phases}));
 
@@ -756,6 +835,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
   } catch (error) {
     // 例外＝`FAILED`。リースを解放し、ループを止めない（6.1の帰着）。
     outcome.outcome = 'FAILED';
+    outcome.reads = (Number(apiReadCount_) || 0) - readsStarted;
     outcome.error = String((error && error.code) || (error && error.message) || error);
     // 本文へ機微情報を含み得るmessageを渡さず、固定語彙だけで原因を束ねる。
     outcome.errorCode = (error && error.code) || null;

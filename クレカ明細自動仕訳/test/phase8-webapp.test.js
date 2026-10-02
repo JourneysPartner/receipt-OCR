@@ -320,6 +320,93 @@ module.exports = ({test, assert, gas}) => {
     return Array.isArray(result.fileResults) ? result.fileResults : [];
   }
 
+  function latestImportCall() {
+    const lines = gas.stubs.getLogs().filter((line) => line.startsWith('IMPORT_CALL '));
+    return lines.length ? JSON.parse(lines[lines.length - 1].slice('IMPORT_CALL '.length)) : null;
+  }
+
+  function importCalls() {
+    return gas.stubs.getLogs().filter((line) => line.startsWith('IMPORT_CALL '))
+      .map((line) => JSON.parse(line.slice('IMPORT_CALL '.length)));
+  }
+
+  function withImportTiming(durations, fn, options = {}) {
+    const priorClock = gas.context.importClockNow_;
+    const priorProcess = gas.context.processDiscoveredFile_;
+    const priorAcquire = gas.context.acquireLease;
+    const priorFolder = gas.context.webAppDirectChildFolder_;
+    let now = Date.now();
+    let index = 0;
+    gas.context.importClockNow_ = () => now;
+    if (options.overheadMs) {
+      // 呼出しの準備（フォルダの列挙）に時間がかかったことにする。
+      gas.context.webAppDirectChildFolder_ = function(...args) {
+        now += Number(options.overheadMs);
+        return priorFolder.apply(this, args);
+      };
+    }
+    gas.context.processDiscoveredFile_ = function(runId, customer, candidate, importOptions) {
+      const ordinal = index++;
+      const duration = Number(durations[ordinal] || 0);
+      if (options.failAt === ordinal) {
+        now += duration;
+        return {fileId: candidate.fileId, fileName: candidate.name, outcome: 'FAILED',
+          nextState: 'FAILED', waits: {}, reads: 0};
+      }
+      const outcome = priorProcess.call(this, runId, customer, candidate, importOptions);
+      now += duration;
+      return outcome;
+    };
+    if (options.leaseConflictFileId) {
+      gas.context.acquireLease = function(customerId, fileId, ...args) {
+        if (String(fileId) === String(options.leaseConflictFileId)) {
+          const error = new Error('test lease conflict');
+          error.code = 'LEASE_CONFLICT';
+          throw error;
+        }
+        return priorAcquire.call(this, customerId, fileId, ...args);
+      };
+    }
+    try {
+      return fn({now: () => now, started: () => index});
+    } finally {
+      gas.context.importClockNow_ = priorClock;
+      gas.context.processDiscoveredFile_ = priorProcess;
+      gas.context.acquireLease = priorAcquire;
+      gas.context.webAppDirectChildFolder_ = priorFolder;
+    }
+  }
+
+  function withPinnedOneFilePerCall(fn) {
+    return withImportTiming(Array(20).fill(200000), fn);
+  }
+
+  function createWebDestination(customer) {
+    const importedCustomer = call('getCustomerById', [customer.customerId]);
+    const clone = call('webAppCloneDestination_', [importedCustomer, new Date()]);
+    return clone.destinationSpreadsheetId;
+  }
+
+  function discoveredFileIds(customer) {
+    return call('scanUnprocessedFiles', [customer.customerId, {}])
+      .map((candidate) => String(candidate.fileId));
+  }
+
+  function readCountByImport(fileCount) {
+    const {customer} = setupWorld({knownMerchant: true});
+    for (let index = 0; index < fileCount; index += 1) {
+      putCsv(customer, {fileId: `multi_budget_${fileCount}_${index}`,
+        rows: [`2025/12/${String(10 + index).padStart(2, '0')},既知店,${2000 + index},仕入れ`]});
+    }
+    const destinationSpreadsheetId = createWebDestination(customer);
+    gas.evaluate('resetApiReadWindow_()');
+    gas.stubs.resetApiCallCounts();
+    const before = gas.stubs.getApiCallCounts().batchGet;
+    const result = webImport(customer, {destinationSpreadsheetId});
+    const after = gas.stubs.getApiCallCounts().batchGet;
+    return {reads: after - before, result, record: latestImportCall()};
+  }
+
 
   /** クライアントの関数を1つ取り出して呼ぶ（`clientStoppedByMessage` と同じ手）。 */
   function clientEval(expression) {
@@ -1058,7 +1145,8 @@ module.exports = ({test, assert, gas}) => {
     assert.deepEqual(second.reviews.map((row) => row.reviewId), ['RV_LIVE_99']);
   });
 
-  test('webapp 36: three import calls keep passing one destination and create one copy', () => {
+  test('webapp 36: three import calls keep passing one destination and create one copy', () =>
+    withPinnedOneFilePerCall(() => {
     requireWebFunction('webAppRunImport');
     const {customer} = setupWorld({knownMerchant: true});
     const fileIds = [0, 1, 2].map((index) => putCsv(customer, {
@@ -1082,7 +1170,7 @@ module.exports = ({test, assert, gas}) => {
       assert.equal(call('getTransactionsByStatus', [fileId, ['COMMITTED']]).length, 1);
       assert.equal(gas.call('getFileState', [fileId]), 'COMPLETED');
     });
-  });
+  }));
 
   test('webapp 37: import checks assignee registration before making a copy', () => {
     requireWebFunction('webAppRunImport');
@@ -2342,7 +2430,8 @@ module.exports = ({test, assert, gas}) => {
     assert.deepEqual(txIdRowsIn(clone, customerId), cloneRowsBefore, '複製の行も増えない');
   });
 
-  test('webapp 45q: the audit chain is verified once per press, not once per file', () => {
+  test('webapp 45q: the audit chain is verified once per press, not once per file', () =>
+    withPinnedOneFilePerCall(() => {
     requireWebFunction('webAppRunImport');
     // 監査ログ連鎖の検証は往復ではなく計算で、実機で 41 秒かかる（500行の
     // SHA-256。2026-09-20 実測）。結果は通知に載るだけで取込の判断を変えない。
@@ -2378,6 +2467,379 @@ module.exports = ({test, assert, gas}) => {
       call('webAppRunImport', [seeded.customer.customerId, seeded.customer.cardId, {}]);
     });
     assert.equal(verified, 2, '新しい押下では必ず検査する');
+  }));
+
+  test('multi 1: four light files import in one call', () => {
+    const {customer} = setupWorld({knownMerchant: true});
+    for (let index = 0; index < 4; index += 1) {
+      putCsv(customer, {fileId: `multi_light_${index}`,
+        rows: [`2025/12/${10 + index},既知店,${2000 + index},仕入れ`]});
+    }
+    gas.evaluate('resetApiReadWindow_()');
+    const result = withImportTiming([45000, 45000, 45000, 45000], () => webImport(customer));
+    assert.deepEqual(importFileResults(result).map((file) => file.outcome),
+      ['WRITTEN', 'WRITTEN', 'WRITTEN', 'WRITTEN']);
+    assert.equal(result.done, 4);
+    assert.equal(result.remaining, 0);
+    assert.equal(latestImportCall().gate.stoppedBy, null);
+  });
+
+  test('multi 2: a heavy file stops the call and the next call reuses one copy', () => {
+    const {customer} = setupWorld({knownMerchant: true});
+    const fileIds = [0, 1, 2].map((index) => putCsv(customer, {
+      fileId: `multi_heavy_${index}`,
+      rows: [`2025/12/${10 + index},既知店,${2100 + index},仕入れ`]
+    }));
+    const before = spreadsheetIds();
+    const first = withImportTiming([130000, 0, 0], () => webImport(customer));
+    const gate = latestImportCall().gate;
+    assert.equal(first.fileResults.length, 1);
+    assert.equal(first.remaining, 2);
+    assert.equal(gate.stoppedBy, 'GATE');
+    assert.equal(gate.filesNotStarted, 2);
+    assert.equal(gate.predictedMs, 130000);
+    const discovered = discoveredFileIds(customer);
+    assert.ok(discovered.includes(fileIds[1]));
+    assert.ok(discovered.includes(fileIds[2]));
+
+    const second = withImportTiming([0, 0], () => webImport(customer,
+      {destinationSpreadsheetId: first.destinationSpreadsheetId}));
+    assert.equal(second.done, 2);
+    assert.equal(second.remaining, 0);
+    assert.deepEqual(createdIds(before), [first.destinationSpreadsheetId]);
+  });
+
+  test('multi 3: prediction keeps the maximum and admits the exact boundary', () => {
+    const {customer} = setupWorld({knownMerchant: true});
+    const fileIds = [0, 1, 2].map((index) => putCsv(customer, {
+      fileId: `multi_max_${index}`,
+      rows: [`2025/12/${10 + index},既知店,${2200 + index},仕入れ`]
+    }));
+    const result = withImportTiming([100000, 10000, 0], () => webImport(customer));
+    const gate = latestImportCall().gate;
+    assert.equal(result.fileResults.length, 2, '経過100秒＋予測200秒の境界は始める');
+    assert.equal(result.remaining, 1);
+    assert.equal(gate.stoppedBy, 'GATE');
+    assert.equal(gate.elapsedMs, 110000);
+    assert.equal(gate.predictedMs, 100000, '直前の10秒で予測を軽くしない');
+    assert.ok(discoveredFileIds(customer).includes(fileIds[2]));
+  });
+
+  test('multi 4: the 60 second floor stops after five 40 second files', () => {
+    const {customer} = setupWorld({knownMerchant: true});
+    const fileIds = Array.from({length: 8}, (_, index) => putCsv(customer, {
+      fileId: `multi_floor_${index}`,
+      rows: [`2025/12/${String(10 + index).padStart(2, '0')},既知店,${2300 + index},仕入れ`]
+    }));
+    const result = withImportTiming(Array(8).fill(40000), () => webImport(customer));
+    const gate = latestImportCall().gate;
+    assert.equal(result.fileResults.length, 5);
+    assert.equal(result.remaining, 3);
+    assert.equal(gate.stoppedBy, 'GATE');
+    assert.equal(gate.filesNotStarted, 3);
+    assert.equal(gate.elapsedMs, 200000);
+    assert.equal(gate.predictedMs, 60000);
+    assert.equal(fileIds.filter((fileId) => discoveredFileIds(customer).includes(fileId)).length, 3);
+  });
+
+  test('multi 5: six files per call is a hard cap', () => {
+    const {customer} = setupWorld({knownMerchant: true});
+    for (let index = 0; index < 8; index += 1) {
+      putCsv(customer, {fileId: `multi_cap_${index}`,
+        rows: [`2025/12/${String(10 + index).padStart(2, '0')},既知店,${2400 + index},仕入れ`]});
+    }
+    const first = withImportTiming(Array(8).fill(0), () => webImport(customer));
+    assert.equal(first.fileResults.length, 6);
+    assert.equal(first.done, 6);
+    assert.equal(first.remaining, 2);
+    const second = withImportTiming([0, 0], () => webImport(customer,
+      {destinationSpreadsheetId: first.destinationSpreadsheetId}));
+    assert.equal(second.fileResults.length, 2);
+    assert.equal(second.remaining, 0);
+  });
+
+  test('multi 6: FAILED stops later files and maps to the stuck-file message', () => {
+    const {customer} = setupWorld({knownMerchant: true});
+    const fileIds = [0, 1, 2].map((index) => putCsv(customer, {
+      fileId: `multi_failed_${index}`,
+      rows: [`2025/12/${10 + index},既知店,${2500 + index},仕入れ`]
+    }));
+    const result = withImportTiming([0, 0, 0], () => webImport(customer), {failAt: 1});
+    const gate = latestImportCall().gate;
+    assert.equal(result.fileResults.length, 2);
+    assert.ok(discoveredFileIds(customer).includes(fileIds[2]));
+    assert.equal(result.done, 1);
+    assert.equal(result.stoppedBy, 'FILE_FAILED');
+    assert.equal(gate.stoppedBy, 'FAILED');
+    assert.equal(clientStoppedByMessage('FILE_FAILED'),
+      'このファイルは処理中のまま止まっています。管理者へ連絡してください。');
+
+    const firstFails = setupWorld({knownMerchant: true});
+    putCsv(firstFails.customer, {fileId: 'multi_failed_first',
+      rows: ['2025/12/10,既知店,2600,仕入れ']});
+    const failed = withImportTiming([0], () => webImport(firstFails.customer), {failAt: 0});
+    assert.equal(failed.done, 0);
+    assert.equal(failed.stoppedBy, 'FILE_FAILED');
+  });
+
+  test('multi 7: a lease conflict stops the remaining candidates', () => {
+    const {customer} = setupWorld({knownMerchant: true});
+    const fileIds = [0, 1, 2].map((index) => putCsv(customer, {
+      fileId: `multi_lease_${index}`,
+      rows: [`2025/12/${10 + index},既知店,${2700 + index},仕入れ`]
+    }));
+    const result = withImportTiming([0, 0, 0], () => webImport(customer),
+      {leaseConflictFileId: fileIds[1]});
+    const gate = latestImportCall().gate;
+    assert.equal(result.fileResults.length, 2);
+    assert.equal(result.stoppedBy, 'LEASE_CONFLICT');
+    assert.equal(gate.stoppedBy, 'LEASE_CONFLICT');
+    assert.ok(discoveredFileIds(customer).includes(fileIds[2]));
+  });
+
+  test('multi 8: unstarted files are absent from results but remain in total', () => {
+    const {customer} = setupWorld({knownMerchant: true});
+    for (let index = 0; index < 3; index += 1) {
+      putCsv(customer, {fileId: `multi_omitted_${index}`,
+        rows: [`2025/12/${10 + index},既知店,${2800 + index},仕入れ`]});
+    }
+    const result = withImportTiming([130000, 0, 0], () => webImport(customer));
+    assert.equal(result.fileResults.length, 1);
+    assert.ok(result.fileResults.every((file) => file.outcome !== 'DEFERRED_TIME_BUDGET'));
+    assert.equal(result.total, 3);
+    assert.equal(result.remaining, 2);
+
+    const destinationSpreadsheetId = createWebDestination(customer);
+    const deferred = withMocks({runImport: () => ({runId: 'RUN_DEFERRED', stages: [],
+      stoppedBy: null, customers: [{integrity: {findings: [], stop: false, indexesBuilt: 0},
+        gate: {stoppedBy: null, filesStarted: 1, filesNotStarted: 0,
+          elapsedMs: null, predictedMs: null},
+        files: [{fileId: 'unstarted', outcome: 'DEFERRED_TIME_BUDGET'},
+          {fileId: 'started', outcome: 'WRITTEN', elapsedMs: 1, reads: 0, waits: {}}]}]})},
+    () => webImport(customer, {destinationSpreadsheetId}));
+    assert.equal(deferred.fileResults.length, 1);
+    assert.equal(deferred.fileResults[0].outcome, 'WRITTEN');
+  });
+
+  test('multi 9: multiple candidates enable smoothing only during file work', () => {
+    const {customer} = setupWorld({knownMerchant: true});
+    putCsv(customer, {fileId: 'multi_smooth_1',
+      rows: ['2025/12/10,既知店,2900,仕入れ']});
+    putCsv(customer, {fileId: 'multi_smooth_2',
+      rows: ['2025/12/11,既知店,2901,仕入れ']});
+    const observed = [];
+    const real = gas.context.processDiscoveredFile_;
+    gas.context.processDiscoveredFile_ = function(...args) {
+      observed.push(Boolean(gas.context.apiReadSmoothing_));
+      return real.apply(this, args);
+    };
+    try {
+      withImportTiming([0, 0], () => webImport(customer));
+    } finally {
+      gas.context.processDiscoveredFile_ = real;
+    }
+    assert.ok(observed.length >= 2);
+    assert.ok(observed.every(Boolean));
+    assert.equal(gas.context.apiReadSmoothing_, false);
+  });
+
+  test('multi 10: audit chain runs once per press across multiple calls', () => {
+    const {customer} = setupWorld({knownMerchant: true});
+    for (let index = 0; index < 3; index += 1) {
+      putCsv(customer, {fileId: `multi_audit_${index}`,
+        rows: [`2025/12/${10 + index},既知店,${3000 + index},仕入れ`]});
+    }
+    let verified = 0;
+    const real = gas.context.verifyChain;
+    const counting = {verifyChain(scope) { verified += 1; return real(scope); }};
+    let first;
+    withMocks(counting, () => {
+      first = withImportTiming([130000, 0, 0], () => webImport(customer));
+    });
+    assert.equal(verified, 1);
+    withMocks(counting, () => withImportTiming([0, 0], () => webImport(customer,
+      {destinationSpreadsheetId: first.destinationSpreadsheetId})));
+    assert.equal(verified, 1);
+
+    putCsv(customer, {fileId: 'multi_audit_new',
+      rows: ['2025/12/20,既知店,3030,仕入れ']});
+    withMocks(counting, () => withImportTiming([0], () => webImport(customer)));
+    assert.equal(verified, 2);
+  });
+
+  test('multi 11: runImport without fileStartGate keeps processing every capped candidate', () => {
+    const {customer} = setupWorld({knownMerchant: true});
+    const fileIds = [0, 1, 2].map((index) => putCsv(customer, {
+      fileId: `multi_no_gate_${index}`,
+      rows: [`2025/12/${10 + index},既知店,${3100 + index},仕入れ`]
+    }));
+    const report = withImportTiming([200000, 200000, 200000], () => call('runImport', [{
+      customerIds: [customer.customerId], fileIds, maxFilesPerCustomer: 3
+    }]));
+    assert.equal(report.customers[0].files.length, 3);
+    assert.equal(Object.hasOwn(report.customers[0], 'gate'), false);
+    assert.equal(report.customers[0].files.every((file) => file.outcome === 'WRITTEN'), true);
+  });
+
+  test('multi 12: IMPORT_CALL and PHASES report safe counts, including early returns', () => {
+    const {customer} = setupWorld({knownMerchant: true,
+      customer: {customerName: 'SECRET_CUSTOMER_NAME'}});
+    const fileId = putCsv(customer, {fileId: 'SECRET_FILE_ID',
+      name: 'SECRET_FILENAME.csv',
+      rows: ['2025/12/10,SECRET_MERCHANT,918273645,仕入れ']});
+    const destinationSpreadsheetId = createWebDestination(customer);
+    gas.evaluate('resetApiReadWindow_()');
+    gas.stubs.setSheetsBatchGetFailures([{code: 503, message: '503 transient'}]);
+    gas.stubs.resetApiCallCounts();
+    const beforeReads = gas.stubs.getApiCallCounts().batchGet;
+    const result = webImport(customer, {destinationSpreadsheetId});
+    const afterReads = gas.stubs.getApiCallCounts().batchGet;
+    const record = latestImportCall();
+    assert.ok(record);
+    assert.equal(importCalls().length, 1);
+    assert.equal(record.files.length, result.fileResults.length);
+    assert.equal(record.totalReads, afterReads - beforeReads);
+    assert.equal(record.runId, record.files.length ? gas.stubs.getLogs()
+      .filter((line) => line.startsWith('PHASES ')).map((line) =>
+        JSON.parse(line.slice('PHASES '.length))).at(-1).runId : null);
+    assert.ok(['authorize', 'folder', 'scan', 'leases', 'runImport'].every((name) =>
+      record.stages.some((stage) => stage.name === name)));
+    assert.ok(['settings', 'capacity', 'renames', 'scan', 'precheck'].every((name) =>
+      record.run.some((stage) => stage.name === name)));
+    assert.equal(record.totalReads,
+      record.stages.reduce((sum, stage) => sum + stage.reads, 0));
+    const runStage = record.stages.find((stage) => stage.name === 'runImport');
+    assert.equal(runStage.reads,
+      record.run.reduce((sum, stage) => sum + stage.reads, 0) +
+      record.files.reduce((sum, file) => sum + file.reads, 0));
+    assert.equal(record.pacedMs, 0);
+    assert.ok(record.backoffMs > 0);
+    assert.equal(record.quotaHits, 0);
+    const phases = gas.stubs.getLogs().filter((line) => line.startsWith('PHASES '))
+      .map((line) => JSON.parse(line.slice('PHASES '.length)));
+    const filePhase = phases.find((entry) => entry.file === 'SECRET_FILENAME.csv');
+    assert.ok(filePhase);
+    assert.equal(typeof filePhase.reads, 'number');
+    assert.equal(filePhase.runId, record.runId);
+    const importText = gas.stubs.getLogs().filter((line) => line.startsWith('IMPORT_CALL ')).join('\n');
+    ['SECRET_FILENAME.csv', fileId, 'SECRET_MERCHANT', '918273645', 'SECRET_CUSTOMER_NAME']
+      .forEach((secret) => assert.equal(importText.includes(secret), false));
+
+    gas.stubs.clearLogs();
+    const empty = webImport(customer, {destinationSpreadsheetId});
+    assert.equal(empty.total, 0);
+    assert.equal(importCalls().length, 1, 'ファイルが無い早期 return でも記録する');
+  });
+
+  test('multi 13: shared read window loads, filters, saves, and tolerates cache failures', () => {
+    const {customer} = setupWorld({knownMerchant: true});
+    putCsv(customer, {fileId: 'multi_cache_save',
+      rows: ['2025/12/10,既知店,3200,仕入れ']});
+    let destinationSpreadsheetId = createWebDestination(customer);
+    gas.evaluate('resetApiReadWindow_()');
+    webImport(customer, {destinationSpreadsheetId});
+    const saved = JSON.parse(gas.stubs.getScriptCacheValue('SHEETS_READ_WINDOW_V1'));
+    assert.ok(saved.length > 0, '呼出し後の読取時刻がキャッシュにある');
+
+    const busy = setupWorld({knownMerchant: true});
+    putCsv(busy.customer, {fileId: 'multi_cache_busy_1',
+      rows: ['2025/12/10,既知店,3210,仕入れ']});
+    putCsv(busy.customer, {fileId: 'multi_cache_busy_2',
+      rows: ['2025/12/11,既知店,3211,仕入れ']});
+    destinationSpreadsheetId = createWebDestination(busy.customer);
+    gas.evaluate('resetApiReadWindow_()');
+    let apiNow = Date.now();
+    gas.context.apiClockNow_ = () => apiNow;
+    gas.stubs.setScriptCacheValue('SHEETS_READ_WINDOW_V1', JSON.stringify(
+      Array.from({length: 54}, (_, index) => apiNow - 54000 + index * 1000)));
+    gas.stubs.setSleepHook((milliseconds) => { apiNow += milliseconds; });
+    try {
+      webImport(busy.customer, {destinationSpreadsheetId});
+    } finally {
+      gas.stubs.setSleepHook(null);
+      gas.context.apiClockNow_ = Date.now;
+    }
+    // **待ったことだけでは足りない。**2ファイルの呼出しは均し（1回約1.1秒）でも
+    // 眠り、途中で読取が固まれば長くも眠るので、引き継いだ窓が効いていなくても
+    // 緑になる（変異で確かめた）。見るのは**最初の待ち**である ── 直前60秒に
+    // 54回ある窓なら、均しが入る前の2回目の読取で、最も古い時刻が窓から出るまで
+    // 約6秒待つ。
+    const sleeps = gas.stubs.getSleepCalls();
+    assert.ok(sleeps.length && sleeps[0] > 2000,
+      `引き継いだ窓で最初に待っていない: ${JSON.stringify(sleeps.slice(0, 5))}`);
+    assert.ok(latestImportCall().sharedWindow.loaded > 0);
+
+    // 早く戻る呼出し（ファイル無し）でも、出した読取を次の呼出しへ渡す。
+    const idle = setupWorld({knownMerchant: true});
+    gas.evaluate('resetApiReadWindow_()');
+    webImport(idle.customer);
+    const idleSaved = JSON.parse(gas.stubs.getScriptCacheValue('SHEETS_READ_WINDOW_V1') || '[]');
+    assert.ok(idleSaved.length > 0, '早く戻った呼出しの読取時刻もキャッシュにある');
+
+    setupWorld();
+    gas.evaluate('resetApiReadWindow_()');
+    const apiNowForFilter = Date.now();
+    const priorClock = gas.context.apiClockNow_;
+    gas.context.apiClockNow_ = () => apiNowForFilter;
+    try {
+      gas.stubs.setScriptCacheValue('SHEETS_READ_WINDOW_V1', JSON.stringify([
+        apiNowForFilter - 61000, 'not-a-number', apiNowForFilter - 30000
+      ]));
+      assert.equal(call('loadSharedReadWindow_'), 1);
+      assert.deepEqual(gas.json('apiReadWindow_'), [apiNowForFilter - 30000]);
+      gas.stubs.setScriptCacheValue('SHEETS_READ_WINDOW_V1', '{broken json');
+      assert.equal(call('loadSharedReadWindow_'), 0);
+    } finally {
+      gas.context.apiClockNow_ = priorClock;
+    }
+
+    const failureWorld = setupWorld({knownMerchant: true});
+    putCsv(failureWorld.customer, {fileId: 'multi_cache_failure',
+      rows: ['2025/12/10,既知店,3220,仕入れ']});
+    destinationSpreadsheetId = createWebDestination(failureWorld.customer);
+    gas.evaluate('resetApiReadWindow_()');
+    gas.stubs.setScriptCacheFailures({getScriptCache: ['cache unavailable']});
+    const successful = webImport(failureWorld.customer,
+      {destinationSpreadsheetId});
+    assert.equal(successful.done, 1);
+    assert.ok(latestImportCall().sharedWindow.errors >= 1);
+  });
+
+  test('multi 14: four files add at most 25 reads each and fixed reads stay at measured cost', () => {
+    const one = readCountByImport(1);
+    const four = readCountByImport(4);
+    const perFile = (four.reads - one.reads) / 3;
+    const fixedReads = one.reads - perFile;
+    assert.ok(Number.isInteger(perFile) && perFile > 0,
+      `1本増えるごとの読取を測定できる: 1=${one.reads}, 4=${four.reads}`);
+    assert.ok(perFile <= 25, `1本増えるごとの読取は${perFile}回（上限25）`);
+    assert.equal(one.record.totalReads, one.reads);
+    assert.equal(four.record.totalReads, four.reads);
+    // **上限は実測値そのもの**（2026-10-02：1ファイル43回・4ファイル118回、
+    // 呼出しの固定費18回）。固定費は押下のたびではなく呼出しのたびに払うので、
+    // 1回増やすのは12ヶ月で3〜4回ぶんの決定である。記録に残して上げること。
+    assert.ok(fixedReads <= 18,
+      `呼出しの固定費が${fixedReads}回（上限18）。1=${one.reads}, 4=${four.reads}`);
+  });
+
+  test('multi 15: the call overhead before the first file counts toward the gate', () => {
+    // 6分の上限は**呼出しの頭から**数える。実機では認可・フォルダの列挙・
+    // 前検査などで最初のファイルまでに20〜40秒かかる（2026-09-27）。門が
+    // ファイル処理に入ってからの時間で測ると、その分だけ余裕を食い潰す。
+    const {customer} = setupWorld({knownMerchant: true});
+    const fileIds = [0, 1, 2].map((index) => putCsv(customer, {
+      fileId: `multi_overhead_${index}`,
+      rows: [`2025/12/${10 + index},既知店,${3300 + index},仕入れ`]
+    }));
+    const result = withImportTiming([100000, 100000, 100000], () => webImport(customer),
+      {overheadMs: 50000});
+    const gate = latestImportCall().gate;
+    // 準備50秒＋1本目100秒＝150秒、予測100秒×2を足すと350秒 > 300秒。
+    // 準備を数えないと100＋200＝300秒で、境界ちょうどなので2本目を始めてしまう。
+    assert.equal(result.fileResults.length, 1);
+    assert.equal(gate.stoppedBy, 'GATE');
+    assert.equal(gate.elapsedMs, 150000);
+    assert.ok(discoveredFileIds(customer).includes(fileIds[1]));
   });
 
   // Case 46 is the whole-suite acceptance condition, not an independent test.

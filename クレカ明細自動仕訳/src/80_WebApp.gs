@@ -12,6 +12,11 @@
  * 次の 1 値はまだ実機で測れていない（受入 11。取込が 6 分に当たって
  * 完走しなかった ── K-W11）。
  * - WEBAPP_IMPORT_BASE_TRIPS_
+ *
+ * 複数ファイル取込の安全値：
+ * - WEBAPP_MAX_FILES_PER_IMPORT_ 1回で触る候補を6本に制限する。
+ * - WEBAPP_IMPORT_FILE_FLOOR_MS_ 軽いファイルでも次の所要を60秒と見積もる。
+ * - WEBAPP_IMPORT_FILE_FACTOR_ 見積所要の2倍を残して次のファイルを始める。
  */
 var WEBAPP_MAX_DECISIONS_ = 15;
 var WEBAPP_MAX_PER_CALL_ = 8;
@@ -23,6 +28,9 @@ var WEBAPP_IMPORT_TRIPS_PER_REVIEW_ = 7;
 var WEBAPP_CLONE_TRIPS_ = 3;
 var WEBAPP_TRIP_WORST_MS_ = 400;
 var WEBAPP_DEADLINE_MS_ = 300000;
+var WEBAPP_MAX_FILES_PER_IMPORT_ = 6;
+var WEBAPP_IMPORT_FILE_FLOOR_MS_ = 60000;
+var WEBAPP_IMPORT_FILE_FACTOR_ = 2;
 var WEBAPP_FORMAT_FILE_WORST_MS_ = 20000;
 var WEBAPP_FORMAT_SIBLING_LIMIT_ = 6;
 var WEBAPP_FORMAT_REQUEUE_LIMIT_ = 6;
@@ -297,113 +305,223 @@ function webAppListReviews(customerId, limit, offset) {
   });
 }
 
-/** 選択したカードフォルダから最大 1 ファイルを取り込む。 */
+/**
+ * 選択したカードフォルダから、時間の許す限り複数のファイルを取り込む。
+ *
+ * 次のファイルを始めるかは `runImport` の門が決める（71、`fileStartGate`）。
+ * 呼出しの頭で前の呼出しの読取時刻を窓へ引き継ぎ（01）、終わりに残す ──
+ * 窓は実行ごとに空から始まるので、引き継がないと呼出しの頭で読取の上限
+ * （60回/分）を越えて20秒の罰を受ける。
+ *
+ * 呼出しごとに `IMPORT_CALL` を1行ログへ出す（段階ごとの時間と読取回数）。
+ * 速さの話を推測から始めないための計器であり、明細の内容は入れない。
+ */
 function webAppRunImport(customerId, folderId, options) {
-  return webAppInvoke_(function() {
-    var opts = options || {};
-    var startedAt = Date.now();
-    var now = new Date(startedAt);
-    var selected = webAppAuthorizeCustomer_(customerId, 'WEBAPP:記帳');
-    var customer = selected.customer;
-    var suppliedDestinationId = opts.destinationSpreadsheetId === null ||
-      opts.destinationSpreadsheetId === undefined || opts.destinationSpreadsheetId === '' ?
-      null : String(opts.destinationSpreadsheetId);
-
-    if (suppliedDestinationId) {
-      webAppValidateDestination_(customer, suppliedDestinationId);
+  var opts = options || {};
+  var startedAt = importClockNow_();
+  var startReads = Number(apiReadCount_) || 0;
+  var startPacedMs = Number(apiReadPacedTotalMs_) || 0;
+  var startBackoffMs = Number(apiBackoffTotalMs_) || 0;
+  var startQuotaHits = Number(apiQuotaHitCount_) || 0;
+  var startWindowErrors = Number(apiSharedReadWindowErrors_) || 0;
+  var loaded = 0;
+  var saved = 0;
+  var stages = [];
+  var report = null;
+  var finalResult = null;
+  var loggedError = null;
+  function measureStage(name, fn) {
+    var at = importClockNow_();
+    var readsAt = Number(apiReadCount_) || 0;
+    try {
+      return fn();
+    } finally {
+      stages.push({name: name, ms: importClockNow_() - at,
+        reads: (Number(apiReadCount_) || 0) - readsAt});
     }
+  }
 
-    var importAuthorized = getAuthorizedCustomers(selected.scope.userEmail).some(function(candidate) {
-      return String(candidate.customerId) === String(customer.customerId);
-    });
-    if (!importAuthorized) {
-      return webAppImportResult_(0, 0, suppliedDestinationId, [],
-        'NO_AUTHORIZED_CUSTOMER', null);
-    }
-
-    var folder = webAppDirectChildFolder_(customer, folderId);
-    var directFileIds = Object.create(null);
-    webAppIteratorToArray_(folder.getFiles()).forEach(function(file) {
-      directFileIds[String(file.getId())] = true;
-    });
-    if (!Object.keys(directFileIds).length) {
-      return webAppImportResult_(0, 0, suppliedDestinationId, [], null, null);
-    }
-    var candidatesBeforeLease = scanUnprocessedFiles(customer.customerId, {now: now})
-      .filter(function(candidate) {
-        return Boolean(directFileIds[String(candidate.fileId)]);
+  try {
+    loaded = loadSharedReadWindow_();
+    finalResult = webAppInvoke_(function() {
+      var now = new Date(startedAt);
+      var selected = measureStage('authorize', function() {
+        return webAppAuthorizeCustomer_(customerId, 'WEBAPP:記帳');
       });
+      var customer = selected.customer;
+      var suppliedDestinationId = opts.destinationSpreadsheetId === null ||
+        opts.destinationSpreadsheetId === undefined || opts.destinationSpreadsheetId === '' ?
+        null : String(opts.destinationSpreadsheetId);
 
-    var leaseByFileId = Object.create(null);
-    activeLeases_().forEach(function(lease) {
-      leaseByFileId[String(lease.fileId)] = lease;
-    });
-    var candidates = candidatesBeforeLease.filter(function(candidate) {
-      return !leaseByFileId[String(candidate.fileId)];
-    });
-    if (!candidates.length) {
-      return webAppImportResult_(0, 0, suppliedDestinationId, [],
-        candidatesBeforeLease.length ? 'LEASE_CONFLICT' : null, null);
-    }
-
-    var total = candidates.length;
-    var elapsed = Date.now() - startedAt;
-    if (elapsed + WEBAPP_IMPORT_BASE_TRIPS_ * WEBAPP_TRIP_WORST_MS_ >
-        WEBAPP_DEADLINE_MS_) {
-      return webAppImportResult_(0, total, suppliedDestinationId, [],
-        'TIME_BUDGET', null);
-    }
-
-    var destinationSpreadsheetId = suppliedDestinationId;
-    var schemaValidation = null;
-    if (!destinationSpreadsheetId) {
-      var clone = webAppCloneDestination_(customer, now);
-      schemaValidation = clone.schemaValidation;
-      if (!schemaValidation.ok) {
-        return webAppImportResult_(0, total, undefined, [],
-          schemaValidation.code || 'DESTINATION_SCHEMA_MISMATCH', schemaValidation);
+      if (suppliedDestinationId) {
+        measureStage('destination', function() {
+          return webAppValidateDestination_(customer, suppliedDestinationId);
+        });
       }
-      destinationSpreadsheetId = clone.destinationSpreadsheetId;
-    }
 
-    var report = runImport({
-      customerIds: [String(customer.customerId)],
-      fileIds: candidates.map(function(candidate) { return String(candidate.fileId); }),
-      maxFilesPerCustomer: 1,
-      destinationSpreadsheetId: destinationSpreadsheetId,
-      // 監査ログ連鎖の検証は**1押下につき1回**にする。1呼出し1ファイルなので、
-      // 毎回やると 41 秒（500行のSHA-256。2026-09-20 実測）をファイルの数だけ
-      // 払う ── 12ファイルで 8 分がこれだけに消える。押下の2回目以降は
-      // クライアントが前回の転記先を渡してくるので、それを「同じ押下の続き」の
-      // 印として使う（§7.3.1）。**押下ごとには必ず走る。**
-      verifyAuditChain: !suppliedDestinationId,
-      now: now
-    });
-    var fileResults = [];
-    (report.customers || []).forEach(function(customerReport) {
-      (customerReport.files || []).forEach(function(fileResult) {
-        fileResults.push(fileResult);
+      var importAuthorized = measureStage('authorize', function() {
+        return getAuthorizedCustomers(selected.scope.userEmail).some(function(candidate) {
+          return String(candidate.customerId) === String(customer.customerId);
+        });
       });
-    });
-    var done = fileResults.filter(function(fileResult) {
-      return fileResult.outcome === 'WRITTEN' || fileResult.outcome === 'NO_WRITE';
-    }).length;
+      if (!importAuthorized) {
+        return webAppImportResult_(0, 0, suppliedDestinationId, [],
+          'NO_AUTHORIZED_CUSTOMER', null);
+      }
 
-    var stoppedBy = null;
-    (report.customers || []).some(function(customerReport) {
-      if (!customerReport.skipped) return false;
-      stoppedBy = String(customerReport.skipped);
-      return true;
+      var folderData = measureStage('folder', function() {
+        var folder = webAppDirectChildFolder_(customer, folderId);
+        var directFileIds = Object.create(null);
+        webAppIteratorToArray_(folder.getFiles()).forEach(function(file) {
+          directFileIds[String(file.getId())] = true;
+        });
+        return {folder: folder, directFileIds: directFileIds};
+      });
+      var directFileIds = folderData.directFileIds;
+      if (!Object.keys(directFileIds).length) {
+        return webAppImportResult_(0, 0, suppliedDestinationId, [], null, null);
+      }
+      var candidatesBeforeLease = measureStage('scan', function() {
+        return scanUnprocessedFiles(customer.customerId, {now: now})
+          .filter(function(candidate) {
+            return Boolean(directFileIds[String(candidate.fileId)]);
+          });
+      });
+
+      var candidateData = measureStage('leases', function() {
+        var leaseByFileId = Object.create(null);
+        activeLeases_().forEach(function(lease) {
+          leaseByFileId[String(lease.fileId)] = lease;
+        });
+        return {leaseByFileId: leaseByFileId,
+          candidates: candidatesBeforeLease.filter(function(candidate) {
+            return !leaseByFileId[String(candidate.fileId)];
+          })};
+      });
+      var candidates = candidateData.candidates;
+      if (!candidates.length) {
+        return webAppImportResult_(0, 0, suppliedDestinationId, [],
+          candidatesBeforeLease.length ? 'LEASE_CONFLICT' : null, null);
+      }
+
+      var total = candidates.length;
+      var elapsed = importClockNow_() - startedAt;
+      if (elapsed + WEBAPP_IMPORT_BASE_TRIPS_ * WEBAPP_TRIP_WORST_MS_ >
+          WEBAPP_DEADLINE_MS_) {
+        return webAppImportResult_(0, total, suppliedDestinationId, [],
+          'TIME_BUDGET', null);
+      }
+
+      var destinationSpreadsheetId = suppliedDestinationId;
+      var schemaValidation = null;
+      if (!destinationSpreadsheetId) {
+        var clone = measureStage('clone', function() {
+          return webAppCloneDestination_(customer, now);
+        });
+        schemaValidation = clone.schemaValidation;
+        if (!schemaValidation.ok) {
+          return webAppImportResult_(0, total, undefined, [],
+            schemaValidation.code || 'DESTINATION_SCHEMA_MISMATCH', schemaValidation);
+        }
+        destinationSpreadsheetId = clone.destinationSpreadsheetId;
+      }
+
+      report = measureStage('runImport', function() {
+        return runImport({
+          customerIds: [String(customer.customerId)],
+          fileIds: candidates.map(function(candidate) { return String(candidate.fileId); }),
+          maxFilesPerCustomer: WEBAPP_MAX_FILES_PER_IMPORT_,
+          fileStartGate: {startedAt: startedAt, deadlineMs: WEBAPP_DEADLINE_MS_,
+            floorMs: WEBAPP_IMPORT_FILE_FLOOR_MS_, factor: WEBAPP_IMPORT_FILE_FACTOR_},
+          destinationSpreadsheetId: destinationSpreadsheetId,
+          // 監査ログ連鎖の検証は**1押下につき1回**にする。呼出しごとにやると
+          // 41 秒（500行のSHA-256。2026-09-20 実測）を呼出しの数だけ払う。
+          // 押下の2回目以降はクライアントが前回の転記先を渡してくるので、
+          // それを「同じ押下の続き」の印として使う（§7.3.1）。**押下ごとには必ず走る。**
+          verifyAuditChain: !suppliedDestinationId,
+          now: now
+        });
+      });
+      var fileResults = [];
+      (report.customers || []).forEach(function(customerReport) {
+        (customerReport.files || []).forEach(function(fileResult) {
+          if (fileResult.outcome !== 'DEFERRED_TIME_BUDGET') fileResults.push(fileResult);
+        });
+      });
+      var done = fileResults.filter(function(fileResult) {
+        return fileResult.outcome === 'WRITTEN' || fileResult.outcome === 'NO_WRITE';
+      }).length;
+
+      var stoppedBy = null;
+      (report.customers || []).some(function(customerReport) {
+        if (!customerReport.skipped) return false;
+        stoppedBy = String(customerReport.skipped);
+        return true;
+      });
+      if (report.stoppedBy) stoppedBy = String(report.stoppedBy);
+      // **失敗したファイルがあれば押下を止める。**1呼出し1ファイルの頃は
+      // `done === 0` で画面が止まって「処理中のまま止まっています」を出せた。
+      // 複数ファイルで `done > 0` だと画面は次の呼出しへ進み、失敗した
+      // ファイルを黙って飛ばしてしまう。
+      if (fileResults.some(function(fileResult) {
+        return fileResult.outcome === 'FAILED';
+      })) {
+        stoppedBy = 'FILE_FAILED';
+      }
+      if (fileResults.some(function(fileResult) {
+        return fileResult.outcome === 'LEASE_CONFLICT';
+      })) {
+        stoppedBy = 'LEASE_CONFLICT';
+      }
+      return webAppImportResult_(done, total, destinationSpreadsheetId,
+        fileResults, stoppedBy, schemaValidation);
     });
-    if (report.stoppedBy) stoppedBy = String(report.stoppedBy);
-    if (fileResults.some(function(fileResult) {
-      return fileResult.outcome === 'LEASE_CONFLICT';
-    })) {
-      stoppedBy = 'LEASE_CONFLICT';
-    }
-    return webAppImportResult_(done, total, destinationSpreadsheetId,
-      fileResults, stoppedBy, schemaValidation);
-  });
+    return finalResult;
+  } catch (error) {
+    loggedError = String((error && error.code) || (error && error.name) || 'Error');
+    throw error;
+  } finally {
+    try { saved = saveSharedReadWindow_(); } catch (ignoredSave) { }
+    try {
+      var customerReport = report && (report.customers || []).length ? report.customers[0] : null;
+      var fileResults = finalResult && Array.isArray(finalResult.fileResults) ?
+        finalResult.fileResults : [];
+      var precheck = customerReport && customerReport.integrity ? {
+        findings: (customerReport.integrity.findings || []).length,
+        stop: Boolean(customerReport.integrity.stop),
+        indexesBuilt: Number(customerReport.integrity.indexesBuilt) || 0
+      } : null;
+      var record = {
+        runId: report && report.runId || null,
+        continuation: Boolean(opts.destinationSpreadsheetId),
+        stages: stages,
+        run: report && Array.isArray(report.stages) ? report.stages : [],
+        precheck: precheck,
+        files: fileResults.map(function(fileResult) {
+          var waits = fileResult.waits || {};
+          var waitMs = Object.keys(waits).reduce(function(total, name) {
+            return total + (Number(waits[name]) || 0);
+          }, 0);
+          return {ms: Number(fileResult.elapsedMs) || 0,
+            reads: Number(fileResult.reads) || 0, waitMs: waitMs,
+            outcome: fileResult.outcome || null};
+        }),
+        gate: customerReport && customerReport.gate || null,
+        sharedWindow: {loaded: loaded, saved: saved,
+          errors: (Number(apiSharedReadWindowErrors_) || 0) - startWindowErrors},
+        totalMs: importClockNow_() - startedAt,
+        totalReads: (Number(apiReadCount_) || 0) - startReads,
+        pacedMs: (Number(apiReadPacedTotalMs_) || 0) - startPacedMs,
+        backoffMs: (Number(apiBackoffTotalMs_) || 0) - startBackoffMs,
+        quotaHits: (Number(apiQuotaHitCount_) || 0) - startQuotaHits,
+        done: finalResult ? Number(finalResult.done) || 0 : 0,
+        total: finalResult ? Number(finalResult.total) || 0 : 0,
+        stoppedBy: finalResult && finalResult.stoppedBy || null
+      };
+      if (loggedError) record.error = loggedError;
+      Logger.log('IMPORT_CALL ' + JSON.stringify(record));
+    } catch (ignoredLog) { }
+  }
 }
 
 /** 選択された PARTNER 要確認を、時間予算内で最大件数まで確定する。 */
