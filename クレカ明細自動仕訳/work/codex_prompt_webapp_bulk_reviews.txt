@@ -1,0 +1,51 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の、**Web アプリの要確認を全件表示し、まとめて選んで一括入力する**直しを受け取ります。
+
+この作業フォルダは git の worktree です。**前の作業（取引先の要確認をまとめて確定する部品 `src/55_PartnerBatchResolution.gs` ほか）は、まだコミットされずにインデックスへステージしてあります**（`git diff --cached` で見えます）。あなたの変更は、ステージされていない差分（`git diff`）として見えるようにしてください ── **`git add` しないこと。**開始時の `node test/run-tests.js` の本数は、始める前に自分で数えて報告に書いてください（1351/1351 のはずです）。
+
+## 仕様書
+
+`work/spec_webapp_bulk_reviews.md`（1.0）。前提の部品の仕様は `work/spec_partner_batch_resolution.md`。**両方を全部読んでから始めてください。**
+
+## 直すこと（要点。詳細は仕様書）
+
+1. `webAppListReviews`（80）：取引を行ごとに読まず 1 回でまとめて読む（`webAppTransactionsById_`。有効な行がちょうど 1 つの取引だけ使い、0 か 2 つ以上なら `null` で表を落とさない）。上限 `WEBAPP_REVIEW_LIST_LIMIT_` を 500 に。
+2. `webAppResolveReviews`（80）：要確認は呼出しの頭で 1 回だけ読む。`authorizeOperation` は（操作, 顧客）ごとに 1 回で使い回す。ファイルごとに時間の門（`partnerBatchMayStart_`）を通してから `resolvePartnerReviewsBatch` を呼ぶ（部品の上限で残った件は同じファイルの次のまとまりとして続ける）。1 ファイル制限と件ごとの往復の見積（`WEBAPP_ITEM_TRIPS_`・`WEBAPP_CLEANUP_TRIPS_`）はやめて定数も消す。`WEBAPP_MAX_DECISIONS_`・`WEBAPP_MAX_PER_CALL_` を 500 に。戻り値の鍵・意味・勘定の恒等式は変えない。リース衝突はファイルの先頭 1 件だけ `errors`（`LEASE_CONFLICT`、文言 `menuLeaseConflictText_(null)`）、残りは `skippedByLease`。件ごとの `errors` の文言は仕様書 §2.2.1。
+3. 画面（81）：全件を見出し固定のスクロールで出す。絞り込み（変えたら選択を外す）・表示中の全選択・Shift の範囲選択・取引先の一括入力（入れるだけで確定しない）・選択の解除。取引先欄の値と選択は `reviewId` で持つ。確認ダイアログは（店名, 取引先, 辞書の扱い）でまとめた要約＋1 件ずつの一覧を `<details>` に。純関数 `reviewMatchesFilter`・`rangeIds`・`applyBulkPartner`・`confirmationGroups` を置く。
+
+---
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。**
+2. **git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。ステージ済みの前の作業に触らないこと。
+3. **`src/` で変えてよいのは `src/80_WebApp.gs` と `src/81_WebAppUi.html` の 2 つだけ。**`src/55_PartnerBatchResolution.gs` は使うだけで変えない（足りないものがあれば止めて報告する）。80 は `webAppListReviews`・`webAppResolveReviews`・定数・新しい補助関数だけ、81 は要確認の表・道具の帯・確認ダイアログ・`startResolve`・`openConfirmation` のまわりだけ（取込・形式・最終確認の部分には触らない）。検査：終わったとき `git diff --name-only -- src/` がこの 2 つだけであること。
+4. テストの変更は、`test/phase8-webapp.test.js` に `bulk N: …`（仕様書 §4 の 1〜14）を**足すこと**（補助を足してよい）。**既存のテストは、仕様書 §4.1 の表に挙げた 7 本（webapp 30・35・38・39・44・45・47）だけ、表に書いた形で変えてよい。**それ以外の既存テストの期待（assert）は 1 つも変えないこと。それ以外の既存テストが赤になったら、変えずに止めて理由を報告すること。`test/fixtures/` は変えない。`test/gas-stubs.js`・`test/gas-harness.js` は、足りない API を足すだけなら変えてよい（足したものは報告する）。
+5. **テストを先に赤にしてから直すこと。**bulk 1〜14 を書き、いまの実装で赤になることを確かめてから直す。いまでも緑になる確かめはどれかを報告する。
+6. 既存のテストを 1 つも壊さないこと。特に `webapp 09`・`10`・`20b`・`21`・`22`・`23`・`28`・`34`・`40`・`46`・`48`〜`54`・`batch 1`〜`27`・`multi 1`〜`15`・`budget 1`・`pace 1`。
+7. **Sheets API の読取は既存の口だけを通すこと**（`readSheetRows_`・`findRowsByColumnValues_`・`getTransactionsForFile_` など）。`Sheets.Spreadsheets.Values.batchGet` を直に呼ばない。
+8. 画面の文言は日本語で、利用者が次に何をすればよいか分かる形にする。**画面にもログにも、明細の値をむやみに増やさない**（今の表に出ている列以上の値を出さない）。
+9. **日本語のコメントは UTF-8 で書くこと。**以前、あなたの書いたコメントが `?` の羅列に化けた。終わったら `grep -n '???' src/*.gs src/*.html` が空であること（始める前も空）を確かめて報告すること。コメントは周りのコードと同じ密度・語り口（「なぜ」を書く）で。
+10. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断で安全側を外さないこと。迷ったら止めて報告すること。
+
+## 進め方
+
+1. 両方の仕様書を読む。次を読む：`src/80_WebApp.gs` の冒頭の定数・`webAppListReviews`・`webAppResolveReviews`・`webAppResolveOutcome_`・`webAppDecisionError_`・`webAppFileError_`・`webAppUniquePartners_`、`src/55_PartnerBatchResolution.gs` 全部、`src/81_WebAppUi.html` の要確認の表（`renderReviews`・`collectSelectedReviews`・`freezeSameMerchantConflict`・`dictionaryMessage`・`openConfirmation`・`startResolve`・`updateActionButtons`・`formatConfirm`・CSS の表まわり・`TEXT`・`state`・イベントの登録）、`src/96_Menu.gs` の `menuLeaseConflictText_`・`menuOperationErrorMessage_`・`menuReviewCandidates_`・`menuDisplayFileName_`、`test/phase8-webapp.test.js` の補助（1〜440 行）と `webapp 09`〜`54`・`batch 1`〜`27`
+2. bulk 1〜14 を書く → 赤を確かめる
+3. 直す。§4.1 の 7 本を表のとおりに変える
+4. `node test/run-tests.js` を全部緑にする
+5. 仕様書 §5 の N1〜N17 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら `git diff` が変異を入れる前と同じか確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する
+6. `git diff --stat -- src/ test/` を確かめる（ステージ済みの差分は `--cached` で別に見える）
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 直す前に bulk 1〜14 のどれが赤だったか（緑だったものも）
+- bulk 1 と bulk 3 で実測した読取の数
+- §4.1 の 7 本をどう変えたか（1 本ずつ）
+- N1〜N17 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て（足したテストがあればその名前）
+- 仕様書が間違っていた・足りなかった箇所（黙って直さないこと）
+- 自分で決めた箇所（全部）
+- `???` の grep の結果（前と後）
+- `git diff --stat -- src/ test/` の出力（始める前と後）
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。

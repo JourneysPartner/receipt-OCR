@@ -1,14 +1,6 @@
 /**
  * Web アプリから呼ぶ関数だけは Apps Script の制約により末尾に `_` を付けない。
  *
- * 次の 2 値は 2026-09-16 の実機受入 12 で測り直した（§13）。
- * `webAppResolveReviews` を 1 件で呼び、13.787 秒 ÷ 108 往復 ＝ **128 ms**。
- * 一覧側の最悪も 223 ms（15.136 秒 ÷ 68 往復）で、worst に 400 ms を採ると
- * 実測の約 3 倍の余裕がある。上限 8 件は 8×74＋36＝628 往復で、worst を
- * 踏んでも 251 秒 ── 締切ゲート（245.6 秒で停止）のほうが先に効く。
- * - WEBAPP_MAX_PER_CALL_  1 → 8
- * - WEBAPP_TRIP_WORST_MS_ 1600 → 400
- *
  * 次の 1 値はまだ実機で測れていない（受入 11。取込が 6 分に当たって
  * 完走しなかった ── K-W11）。
  * - WEBAPP_IMPORT_BASE_TRIPS_
@@ -18,11 +10,14 @@
  * - WEBAPP_IMPORT_FILE_FLOOR_MS_ 軽いファイルでも次の所要を60秒と見積もる。
  * - WEBAPP_IMPORT_FILE_FACTOR_ 見積所要の2倍を残して次のファイルを始める。
  */
-var WEBAPP_MAX_DECISIONS_ = 15;
-var WEBAPP_MAX_PER_CALL_ = 8;
-var WEBAPP_ITEM_TRIPS_ = 74;
-var WEBAPP_CLEANUP_TRIPS_ = 62;
-var WEBAPP_REVIEW_LIST_LIMIT_ = 15;
+// 要確認の一覧・1 押下・1 呼出しの上限（spec_webapp_bulk_reviews、2026-10-03）。
+// 新しいカードの初回取込で 1 顧客 250 件超が実際に立ったので、その倍を 1 画面に
+// 収める。確定はファイルごとにまとめ確定（55）へ渡し、時間は 55 の門が守るので、
+// 以前の「1 件 74 往復 × 単価」の見積と 1 呼出し 8 件・1 ファイルの制限はやめた。
+// **一覧と 1 押下の上限は同じ値にする** ── 画面に出ていない件は選べない。
+var WEBAPP_MAX_DECISIONS_ = 500;
+var WEBAPP_MAX_PER_CALL_ = 500;
+var WEBAPP_REVIEW_LIST_LIMIT_ = 500;
 var WEBAPP_IMPORT_BASE_TRIPS_ = 164;
 var WEBAPP_IMPORT_TRIPS_PER_REVIEW_ = 7;
 var WEBAPP_CLONE_TRIPS_ = 3;
@@ -273,8 +268,12 @@ function webAppListReviews(customerId, limit, offset) {
     if (partnerReviews.length && actualOffset >= partnerReviews.length) actualOffset = 0;
     if (!partnerReviews.length) actualOffset = 0;
 
-    var rows = partnerReviews.slice(actualOffset, actualOffset + actualLimit).map(function(review) {
-      var tx = getTransaction(review.fullTxId);
+    var pageReviews = partnerReviews.slice(actualOffset, actualOffset + actualLimit);
+    var transactionsById = webAppTransactionsById_(pageReviews.map(function(review) {
+      return review.fullTxId;
+    }));
+    var rows = pageReviews.map(function(review) {
+      var tx = transactionsById[String(review.fullTxId)] || null;
       var planned = tx && tx.planned ? tx.planned : null;
       var learnBlockedBy = null;
       if (!review.merchantNormalized) {
@@ -303,6 +302,36 @@ function webAppListReviews(customerId, limit, offset) {
       limit: actualLimit
     };
   });
+}
+
+/** 一覧に必要な取引行をまとめて読み、一意に有効な行だけを表示に使う。 */
+function webAppTransactionsById_(ids) {
+  var wanted = [];
+  var seen = Object.create(null);
+  (ids || []).forEach(function(id) {
+    var key = String(id === null || id === undefined ? '' : id);
+    if (!key || seen[key]) return;
+    seen[key] = true;
+    wanted.push(key);
+  });
+
+  var byId = Object.create(null);
+  wanted.forEach(function(id) { byId[id] = []; });
+  var recordsById = findRowsByColumnValues_(transactionLogSheet_(), 1, wanted,
+    TRANSACTION_LOG_WIDTH_);
+  wanted.forEach(function(id) {
+    (recordsById[id] || []).forEach(function(record) {
+      try {
+        var tx = txLogFromRecord_(record);
+        if (tx.active === true) byId[id].push(tx);
+      } catch (ignored) {
+        // 壊れた1行で一覧全体を落とさず、その取引だけ表示値を空にする。
+      }
+    });
+    if (byId[id].length !== 1) byId[id] = null;
+    else byId[id] = byId[id][0];
+  });
+  return byId;
 }
 
 /**
@@ -524,20 +553,34 @@ function webAppRunImport(customerId, folderId, options) {
   }
 }
 
-/** 選択された PARTNER 要確認を、時間予算内で最大件数まで確定する。 */
+/**
+ * 選択された PARTNER 要確認を、時間の許す限り確定する。
+ *
+ * 件ごとの読取（要確認・認可・取引）をやめ、要確認は頭で 1 回、認可は
+ * （操作, 顧客）ごとに 1 回、取引はファイルごとに 1 回だけ読む。確定そのものは
+ * ファイルごとにまとめ確定（55）へ渡し、ファイルを始める前に 55 の門を通す。
+ * 戻り値の鍵と勘定の恒等式は以前と同じ（画面の繰り返しがそれで残りを決める）。
+ */
 function webAppResolveReviews(customerId, decisions, options) {
   return webAppInvoke_(function() {
-    var startedAt = Date.now();
+    var startedAt = partnerBatchClockNow_();
     var opts = options || {};
     var batchId = opts.batchId === null || opts.batchId === undefined ? '' :
       String(opts.batchId);
     var operation = 'WEBAPP:要確認を確定' + (batchId ? ':' + batchId : '');
     authorize(ROLE.REVIEWER, String(customerId), {operation: operation});
-    var customer = getCustomerById(String(customerId));
+    var wantedCustomerId = String(customerId);
+    var customer = getCustomerById(wantedCustomerId);
+    var reviewsById = Object.create(null);
+    allReviewRecords_().forEach(function(review) {
+      if (!Object.prototype.hasOwnProperty.call(reviewsById, String(review.reviewId))) {
+        reviewsById[String(review.reviewId)] = review;
+      }
+    });
+
     var source = Array.isArray(decisions) ? decisions : [];
     var outcome = webAppResolveOutcome_();
     var prepared = [];
-
     for (var overflow = WEBAPP_MAX_DECISIONS_; overflow < source.length; overflow += 1) {
       var overflowDecision = source[overflow] || {};
       webAppDecisionError_(outcome, overflowDecision.reviewId,
@@ -545,12 +588,13 @@ function webAppResolveReviews(customerId, decisions, options) {
         WEBAPP_MAX_DECISIONS_ + ' 件までです。');
     }
 
+    var authorizationCache = Object.create(null);
     var acceptedCount = Math.min(source.length, WEBAPP_MAX_DECISIONS_);
     for (var index = 0; index < acceptedCount; index += 1) {
       var decision = source[index] || {};
       var reviewId = decision.reviewId === null || decision.reviewId === undefined ? '' :
         String(decision.reviewId);
-      var review = getReviewById(reviewId);
+      var review = reviewsById[reviewId];
       if (!review) {
         webAppDecisionError_(outcome, reviewId, 'REVIEW_NOT_FOUND',
           'この要確認は見つかりませんでした。他の担当者が確定したか、取り消された可能性があります。画面を再読み込みしてください。');
@@ -564,16 +608,27 @@ function webAppResolveReviews(customerId, decisions, options) {
       // F列と辞書に実在しない取引先を入れない。
       var code = isPartnerUnknownLabel(partnerName) ? 'RESOLVE_PARTNER_UNKNOWN' :
         (partnerName ? 'ADOPT_EXISTING_PARTNER' : 'RESOLVE_WITHOUT_PARTNER');
-      var itemAuth;
-      try {
-        itemAuth = authorizeOperation(code, String(review.customerId), {});
-      } catch (authorizationError) {
+      var reviewCustomerId = String(review.customerId);
+      var authKey = JSON.stringify([code, reviewCustomerId]);
+      var authEntry;
+      if (Object.prototype.hasOwnProperty.call(authorizationCache, authKey)) {
+        authEntry = authorizationCache[authKey];
+      } else {
+        try {
+          authEntry = {value: authorizeOperation(code, reviewCustomerId, {})};
+        } catch (authorizationError) {
+          authEntry = {error: authorizationError};
+        }
+        authorizationCache[authKey] = authEntry;
+      }
+      if (authEntry.error) {
+        var authorizationFailure = authEntry.error;
         webAppDecisionError_(outcome, reviewId,
-          authorizationError && authorizationError.code || 'RESOLVE_FAILED',
-          menuOperationErrorMessage_(authorizationError));
+          authorizationFailure && authorizationFailure.code || 'RESOLVE_FAILED',
+          menuOperationErrorMessage_(authorizationFailure));
         continue;
       }
-      if (String(review.customerId) !== String(customerId)) {
+      if (reviewCustomerId !== wantedCustomerId) {
         webAppDecisionError_(outcome, reviewId, 'REVIEW_CUSTOMER_MISMATCH',
           'この要確認は選択中の顧客のものではありません。画面を再読み込みしてからやり直してください。');
         continue;
@@ -583,139 +638,209 @@ function webAppResolveReviews(customerId, decisions, options) {
           'この要確認はすでに確定済みです。画面を再読み込みしてください。');
         continue;
       }
-      prepared.push({
-        decision: decision,
-        review: review,
-        reviewId: reviewId,
-        partnerName: partnerName,
-        code: code,
-        auth: itemAuth
-      });
+      prepared.push({decision: decision, review: review, reviewId: reviewId,
+        partnerName: partnerName, code: code, auth: authEntry.value});
     }
 
-    var firstFileId = prepared.length ? String(prepared[0].review.fileId) : null;
-    var work = [];
+    var filesById = Object.create(null);
+    var fileGroups = [];
     prepared.forEach(function(item) {
-      if (String(item.review.fileId) === firstFileId) {
-        work.push(item);
-      } else {
-        outcome.deferredByFile += 1;
-        outcome.notAttempted += 1;
+      var fileId = String(item.review.fileId);
+      if (!Object.prototype.hasOwnProperty.call(filesById, fileId)) {
+        filesById[fileId] = {fileId: fileId, items: []};
+        fileGroups.push(filesById[fileId]);
       }
+      filesById[fileId].items.push(item);
     });
 
-    var cleanupFileIds = new Set(work.map(function(item) {
-      return String(item.review.fileId);
-    }));
-    var cleanupWorstMs = WEBAPP_CLEANUP_TRIPS_ * cleanupFileIds.size *
-      WEBAPP_TRIP_WORST_MS_;
-    var touched = Object.create(null);
-    var withoutPartnerLeaseBlocked = Object.create(null);
-    var leaseByFileId = Object.create(null);
-    var leaseRead = false;
-    var resolveCalls = 0;
-
-    for (var workIndex = 0; workIndex < work.length; workIndex += 1) {
-      var item = work[workIndex];
-      var fileId = String(item.review.fileId);
-
-      if (item.code === 'RESOLVE_WITHOUT_PARTNER' &&
-          withoutPartnerLeaseBlocked[fileId]) {
-        outcome.skippedByLease += 1;
-        outcome.skippedByLeaseReviewIds.push(item.reviewId);
-        continue;
-      }
-      if (resolveCalls >= WEBAPP_MAX_PER_CALL_) {
-        outcome.notAttempted += work.length - workIndex;
-        break;
-      }
-      var elapsed = Date.now() - startedAt;
-      if (elapsed + WEBAPP_ITEM_TRIPS_ * WEBAPP_TRIP_WORST_MS_ + cleanupWorstMs >
-          WEBAPP_DEADLINE_MS_) {
-        outcome.notAttempted += work.length - workIndex;
-        break;
-      }
-
-      if (item.code === 'RESOLVE_WITHOUT_PARTNER') {
-        if (!leaseRead) {
-          activeLeases_().forEach(function(lease) {
-            if (!leaseByFileId[String(lease.fileId)]) {
-              leaseByFileId[String(lease.fileId)] = lease;
-            }
-          });
-          leaseRead = true;
-        }
-        if (leaseByFileId[fileId]) {
-          withoutPartnerLeaseBlocked[fileId] = true;
-          webAppDecisionError_(outcome, item.reviewId, 'LEASE_CONFLICT',
-            menuLeaseConflictText_(leaseByFileId[fileId]));
-          continue;
-        }
-      }
-
-      var tx = null;
-      var learn = false;
-      if (item.code === 'ADOPT_EXISTING_PARTNER') {
-        tx = getTransaction(item.review.fullTxId);
-        var transactionStatus = tx && tx.transactionStatus;
-        if ([TX_STATUS.REVIEW_REQUIRED, TX_STATUS.COMMITTED].indexOf(transactionStatus) < 0) {
-          webAppDecisionError_(outcome, item.reviewId, 'STATE_TRANSITION',
-            'この取引は既に取り消されたか除外されています（状態 ' +
-            (transactionStatus || '不明') + '）。画面を再読み込みしてください。');
-          continue;
-        }
-        learn = Boolean(item.review.merchantNormalized) &&
-          !isCardNamePartnerPurpose(customer, tx && tx.planned ? tx.planned.i : '') &&
-          !Boolean(item.decision.sameMerchantConflict);
-      }
-
-      var input = {
-        actor: item.auth.userEmail,
-        role: item.auth.role,
-        runId: null,
-        partnerName: item.partnerName,
-        learn: learn
-      };
-      touched[fileId] = true;
-      resolveCalls += 1;
-      try {
-        var result = resolveReview(item.reviewId, item.code, input);
-        outcome.resolved += 1;
-        outcome.resolvedReviewIds.push(item.reviewId);
-        if (result.committed) outcome.committed += 1;
-        if (result.unmetConditions && result.unmetConditions.length) {
-          outcome.unmet.push({
-            reviewId: item.reviewId,
-            unmetConditions: result.unmetConditions.slice(),
-            openReviewTypes: (result.openReviewTypes || []).slice(),
-            transactionStatus: result.transactionStatus || TX_STATUS.REVIEW_REQUIRED
-          });
-        }
-      } catch (resolveError) {
-        webAppDecisionError_(outcome, item.reviewId,
-          resolveError && resolveError.code || 'RESOLVE_FAILED',
-          menuOperationErrorMessage_(resolveError));
+    var maxBatchMs = 0;
+    var attemptedCount = 0;
+    var perCallLimit = Math.max(0, Math.floor(Number(WEBAPP_MAX_PER_CALL_) || 0));
+    function deferUnstartedFiles(firstIndex) {
+      for (var deferredIndex = firstIndex; deferredIndex < fileGroups.length; deferredIndex += 1) {
+        var deferredCount = fileGroups[deferredIndex].items.length;
+        outcome.notAttempted += deferredCount;
+        outcome.deferredByFile += deferredCount;
       }
     }
 
-    Object.keys(touched).forEach(function(fileId) {
-      try {
-        var committed = commitSettledTransactions_(fileId);
-        outcome.deferredCommits += Number(committed.deferred || 0);
-      } catch (commitError) {
-        webAppFileError_(outcome, fileId, commitError);
+    var stopAfterFile = false;
+    for (var fileIndex = 0; fileIndex < fileGroups.length; fileIndex += 1) {
+      var fileGroup = fileGroups[fileIndex];
+      if (attemptedCount >= perCallLimit) {
+        deferUnstartedFiles(fileIndex);
+        break;
       }
-      try {
-        outcome.completedFiles.push(completeFileIfFullyResolved_(fileId,
-          {readLeases: activeLeases_}));
-      } catch (completeError) {
-        webAppFileError_(outcome, fileId, completeError);
+
+      var fileId = fileGroup.fileId;
+      var queue = fileGroup.items.slice();
+      var txsById = Object.create(null);
+      var fileStartedAt = null;
+      var fileTouched = false;
+      var leaseConflict = false;
+      var leaseErrorReported = false;
+
+      while (queue.length) {
+        var gateMaxBatchMs = maxBatchMs;
+        if (fileStartedAt !== null) {
+          gateMaxBatchMs = Math.max(gateMaxBatchMs, partnerBatchClockNow_() - fileStartedAt);
+        }
+        if (!partnerBatchMayStart_({startedAt: startedAt, deadlineMs: WEBAPP_DEADLINE_MS_,
+            floorMs: PARTNER_BATCH_FLOOR_MS_, factor: PARTNER_BATCH_FACTOR_,
+            maxBatchMs: gateMaxBatchMs})) {
+          outcome.notAttempted += queue.length;
+          if (fileStartedAt === null) outcome.deferredByFile += queue.length;
+          stopAfterFile = true;
+          break;
+        }
+
+        if (fileStartedAt === null) {
+          fileStartedAt = partnerBatchClockNow_();
+          try {
+            getTransactionsForFile_(fileId).forEach(function(tx) {
+              var key = String(tx.fullTxId);
+              if (!txsById[key]) txsById[key] = [];
+              txsById[key].push(tx);
+            });
+          } catch (transactionReadError) {
+            var readCode = transactionReadError && transactionReadError.code || 'RESOLVE_FAILED';
+            queue.forEach(function(item) {
+              webAppDecisionError_(outcome, item.reviewId, readCode,
+                menuOperationErrorMessage_(transactionReadError));
+            });
+            attemptedCount += queue.length;
+            queue = [];
+            break;
+          }
+        }
+
+        var available = perCallLimit - attemptedCount;
+        if (available < 1) {
+          outcome.notAttempted += queue.length;
+          stopAfterFile = true;
+          break;
+        }
+        var sendCount = Math.min(queue.length, available);
+        var sentItems = queue.slice(0, sendCount);
+        var laterItems = queue.slice(sendCount);
+        var batchDecisions = sentItems.map(function(item) {
+          var transactions = txsById[String(item.review.fullTxId || '')] || [];
+          var tx = transactions.length === 1 ? transactions[0] : null;
+          var learn = item.code === 'ADOPT_EXISTING_PARTNER' &&
+            Boolean(item.review.merchantNormalized) &&
+            !isCardNamePartnerPurpose(customer, tx && tx.planned ? tx.planned.i : '') &&
+            !Boolean(item.decision.sameMerchantConflict);
+          return {reviewId: item.reviewId, operation: item.code,
+            partnerName: item.partnerName, learn: learn};
+        });
+
+        var componentResult;
+        try {
+          componentResult = resolvePartnerReviewsBatch(wantedCustomerId, fileId, batchDecisions,
+            {actor: sentItems[0].auth.userEmail, customer: customer});
+        } catch (componentError) {
+          var componentCode = componentError && componentError.code || 'RESOLVE_FAILED';
+          sentItems.forEach(function(item) {
+            webAppDecisionError_(outcome, item.reviewId, componentCode,
+              menuOperationErrorMessage_(componentError));
+          });
+          attemptedCount += sentItems.length;
+          fileTouched = true;
+          queue = laterItems;
+          continue;
+        }
+
+        var returnedNotAttempted = componentResult.notAttemptedReviewIds || [];
+        var processedNow = Math.max(0, sentItems.length - returnedNotAttempted.length);
+        (componentResult.resolvedReviewIds || []).forEach(function(reviewId) {
+          outcome.resolved += 1;
+          outcome.resolvedReviewIds.push(String(reviewId));
+        });
+        outcome.committed += (componentResult.committedReviewIds || []).length;
+        (componentResult.unmet || []).forEach(function(item) { outcome.unmet.push(item); });
+        (componentResult.errors || []).forEach(function(error) {
+          var itemReview = reviewsById[String(error.reviewId)];
+          var errorCode = error && error.code || 'RESOLVE_FAILED';
+          webAppDecisionError_(outcome, error && error.reviewId, errorCode,
+            webAppResolveErrorMessage_(errorCode, error && error.message,
+              itemReview, txsById));
+        });
+
+        var skippedIds = (componentResult.skippedByLeaseReviewIds || []).map(String);
+        if (componentResult.leaseConflict) {
+          var leasePendingIds = skippedIds.concat(returnedNotAttempted.map(String))
+            .concat(laterItems.map(function(item) { return item.reviewId; }));
+          if (!leaseErrorReported && leasePendingIds.length) {
+            webAppDecisionError_(outcome, leasePendingIds[0], 'LEASE_CONFLICT',
+              menuLeaseConflictText_(null));
+            leaseErrorReported = true;
+            leasePendingIds.shift();
+          }
+          outcome.skippedByLease += leasePendingIds.length;
+          outcome.skippedByLeaseReviewIds =
+            outcome.skippedByLeaseReviewIds.concat(leasePendingIds);
+          attemptedCount += processedNow;
+          fileTouched = fileTouched || processedNow > 0;
+          leaseConflict = true;
+          queue = [];
+          break;
+        }
+
+        outcome.skippedByLease += skippedIds.length;
+        outcome.skippedByLeaseReviewIds = outcome.skippedByLeaseReviewIds.concat(skippedIds);
+        attemptedCount += processedNow;
+        fileTouched = fileTouched || processedNow > 0;
+        queue = sentItems.slice(processedNow).concat(laterItems);
+        if (!processedNow && queue.length) {
+          outcome.notAttempted += queue.length;
+          if (!fileTouched) outcome.deferredByFile += queue.length;
+          queue = [];
+          stopAfterFile = true;
+          break;
+        }
       }
-    });
+
+      if (fileTouched && !leaseConflict) {
+        try {
+          var committed = commitSettledTransactions_(fileId);
+          outcome.deferredCommits += Number(committed && committed.deferred || 0);
+        } catch (commitError) {
+          webAppFileError_(outcome, fileId, commitError);
+        }
+        try {
+          outcome.completedFiles.push(completeFileIfFullyResolved_(fileId,
+            {readLeases: activeLeases_}));
+        } catch (completeError) {
+          webAppFileError_(outcome, fileId, completeError);
+        }
+      }
+      if (fileStartedAt !== null) {
+        maxBatchMs = Math.max(maxBatchMs, partnerBatchClockNow_() - fileStartedAt);
+      }
+      if (stopAfterFile) {
+        deferUnstartedFiles(fileIndex + 1);
+        break;
+      }
+    }
+
     outcome.remaining = outcome.notAttempted;
     return outcome;
   });
 }
+
+function webAppResolveErrorMessage_(code, message, review, txsById) {
+  if (code === 'STATE_TRANSITION') {
+    var transactions = review && txsById[String(review.fullTxId || '')] || [];
+    var status = transactions.length === 1 ? transactions[0].transactionStatus : '不明';
+    return 'この取引は既に取り消されたか除外されています（状態 ' +
+      (status || '不明') + '）。画面を再読み込みしてください。';
+  }
+  if (code === 'LEASE_CONFLICT') return menuLeaseConflictText_(null);
+  if (message) return String(message);
+  return 'この要確認は確定できませんでした（' + code +
+    '）。管理者へ連絡してください。';
+}
+
 
 /** 公開関数の例外を、既存メニューと同じ日本語へ変換する。 */
 function webAppInvoke_(fn) {

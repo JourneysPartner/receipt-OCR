@@ -164,6 +164,13 @@
     .button.danger { border-color: var(--danger); color: #fff; background: var(--danger); }
     .review-table input[type="text"] { width: 170px; border: 1px solid #adb9ca; border-radius: 6px; padding: 6px 7px; }
     .candidate-list { min-width: 120px; color: #475467; }
+    .review-tools { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; margin-bottom: 10px; }
+    .review-tools label { display: grid; gap: 4px; color: #475467; font-size: 12px; }
+    .review-tools input[type="search"], .review-tools input[type="text"] { min-width: 220px; border: 1px solid #adb9ca; border-radius: 6px; padding: 7px 8px; }
+    .review-count { align-self: center; margin-left: auto; color: var(--muted); }
+    .review-table-wrap { max-height: 60vh; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+    .review-table-wrap th { position: sticky; top: 0; z-index: 2; background: #f8fafc; }
+    .review-table-wrap th:first-child, .review-table-wrap td:first-child { width: 34px; text-align: center; }
     .other-reviews { margin: 8px 0; padding: 8px 10px; border-radius: 7px; color: #5e4800; background: #fff7d6; }
     .pager { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
     .pager-controls { display: flex; gap: 6px; }
@@ -194,6 +201,10 @@
     .dialog-body { max-height: 55vh; overflow: auto; padding: 16px 18px; }
     .confirmation-list { margin: 12px 0 0; padding-left: 22px; }
     .confirmation-list li { margin-bottom: 9px; }
+    .confirmation-summary { margin: 12px 0 0; padding-left: 22px; }
+    .confirmation-summary li { margin-bottom: 7px; }
+    .confirmation-details { margin-top: 14px; }
+    .confirmation-details > summary { cursor: pointer; color: var(--brand); }
     .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px 16px; border-top: 1px solid var(--line); }
     @media (max-width: 1120px) {
       body { min-width: 760px; }
@@ -267,8 +278,20 @@
         <div id="review-empty" class="empty">左の一覧から顧客を選んでください。</div>
         <div id="review-content" hidden>
           <div id="other-reviews"></div>
+          <div class="review-tools" aria-label="要確認の絞り込みと一括入力">
+            <label for="review-filter">絞り込み
+              <input id="review-filter" type="search" placeholder="摘要・ファイル名で絞り込み">
+            </label>
+            <span id="review-count" class="review-count"></span>
+            <label for="bulk-partner">選択中に一括入力
+              <input id="bulk-partner" type="text" list="bulk-partner-options" placeholder="取引先を入力">
+              <datalist id="bulk-partner-options"></datalist>
+            </label>
+            <button id="bulk-apply" type="button" class="button" disabled>選択した行に入れる</button>
+            <button id="select-clear" type="button" class="button" disabled>選択を解除</button>
+          </div>
           <div id="review-table"></div>
-          <div class="pager">
+          <div id="review-pager" class="pager" hidden>
             <span id="review-more" class="muted"></span>
             <div class="pager-controls">
               <button id="review-prev" type="button" class="button" disabled>前のページ</button>
@@ -315,7 +338,11 @@
     <div class="dialog-header"><h2 id="confirm-title">要確認の確定</h2></div>
     <div class="dialog-body">
       <div id="confirm-intro"></div>
-      <ol id="confirm-list" class="confirmation-list"></ol>
+      <ul id="confirm-summary" class="confirmation-summary" hidden></ul>
+      <details id="confirm-details" class="confirmation-details" hidden>
+        <summary id="confirm-details-summary">1 件ずつ見る</summary>
+        <ol id="confirm-list" class="confirmation-list"></ol>
+      </details>
     </div>
     <div class="dialog-actions">
       <button id="confirm-cancel" type="button" class="button">戻る</button>
@@ -332,6 +359,7 @@
       selectFolder: 'カードフォルダを選んでください。',
       noFiles: 'このフォルダに取り込めるファイルはありません。',
       noReviews: '確定が必要な要確認はありません。',
+      noFilteredReviews: '絞り込みに一致する要確認はありません。',
       processing: function(done, total) { return '処理中… ' + done + ' / ' + total; },
       leaseConflict: '他の処理と重なりました。10 分ほど待ってからもう一度実行してください。',
       timeBudget: 'いまは取り込めませんでした。もう一度「記帳を実行」を押してください。',
@@ -377,6 +405,11 @@
       folders: [],
       files: [],
       reviews: [],
+      // 表を描き直しても入力と選択を保つため、表示位置でなく要確認 ID を鍵にする。
+      partnerInputs: new Map(),
+      selectedReviewIds: new Set(),
+      lastSelectedReviewId: null,
+      reviewFilter: '',
       partnerTotal: 0,
       otherCounts: {},
       reviewOffset: 0,
@@ -423,10 +456,13 @@
       'selected-customer-name', 'drive-empty', 'drive-content', 'folder-list', 'file-list',
       'import-progress', 'import-disabled-reason', 'import-button', 'review-total',
       'review-window', 'review-empty', 'review-content', 'other-reviews', 'review-table',
+      'review-filter', 'review-count', 'bulk-partner', 'bulk-partner-options', 'bulk-apply',
+      'select-clear', 'review-pager',
       'review-more', 'review-prev', 'review-next', 'resolve-progress', 'resolve-button',
       'excel-button', 'excel-status', 'final-button', 'final-panel', 'final-sheet',
       'final-verdict', 'final-files', 'final-problems', 'final-row-count', 'final-rows',
-      'confirm-dialog', 'confirm-title', 'confirm-intro', 'confirm-list',
+      'confirm-dialog', 'confirm-title', 'confirm-intro', 'confirm-summary',
+      'confirm-details', 'confirm-details-summary', 'confirm-list',
       'confirm-cancel', 'confirm-submit'
       , 'format-panel', 'format-body', 'format-close'
     ].forEach(function(id) { el[id] = document.getElementById(id); });
@@ -691,6 +727,37 @@
       }).filter(Boolean);
     }
 
+    function reviewFilterText(value) {
+      return String(value === null || value === undefined ? '' : value)
+        .normalize('NFKC').toLowerCase().replace(/\s+/g, '');
+    }
+
+    function reviewMatchesFilter(review, text) {
+      var query = reviewFilterText(text);
+      if (!query) return true;
+      return [review && review.merchantOriginal, review && review.fileName].some(function(value) {
+        return reviewFilterText(value).indexOf(query) >= 0;
+      });
+    }
+
+    function rangeIds(orderedIds, fromId, toId) {
+      var ids = (orderedIds || []).map(String);
+      var from = ids.indexOf(String(fromId));
+      var to = ids.indexOf(String(toId));
+      if (from < 0 || to < 0) return [String(toId)];
+      return ids.slice(Math.min(from, to), Math.max(from, to) + 1);
+    }
+
+    function applyBulkPartner(inputs, ids, value) {
+      var partner = String(value === null || value === undefined ? '' : value).trim();
+      var count = 0;
+      (ids || []).forEach(function(id) {
+        inputs.set(String(id), partner);
+        count += 1;
+      });
+      return count;
+    }
+
     /** 取引先欄の値が「取引先不明」の指示か。空白と全角・半角の違いはサーバーと同じく見ない。 */
     function isPartnerUnknownChoice(value) {
       return String(value || '').normalize('NFKC').replace(/\s+/g, '') === TEXT.partnerUnknown;
@@ -726,10 +793,34 @@
       cell.appendChild(link);
     }
 
+    function renderBulkPartnerOptions() {
+      el['bulk-partner-options'].textContent = '';
+      var names = new Set();
+      state.reviews.forEach(function(review) {
+        if (!state.selectedReviewIds.has(String(review.reviewId))) return;
+        candidateNames(review).forEach(function(name) {
+          if (!isPartnerUnknownChoice(name)) names.add(name);
+        });
+      });
+      names.add(TEXT.partnerUnknown);
+      names.forEach(function(name) {
+        var option = document.createElement('option');
+        option.value = name;
+        el['bulk-partner-options'].appendChild(option);
+      });
+    }
+
     function renderReviews() {
       el['review-total'].textContent = String(state.partnerTotal || 0);
+      // 打っている最中に値を入れ直すと、カーソルが末尾へ飛ぶ。違うときだけ入れる。
+      if (el['review-filter'].value !== state.reviewFilter) el['review-filter'].value = state.reviewFilter;
+      el['review-filter'].disabled = isMutationBusy() || state.loadingReviews;
+      el['bulk-partner'].disabled = isMutationBusy();
       renderOtherReviews();
       el['review-table'].textContent = '';
+      var visibleReviews = state.reviews.filter(function(review) {
+        return reviewMatchesFilter(review, state.reviewFilter);
+      });
       if (state.loadingReviews) {
         var loading = document.createElement('div');
         loading.className = 'empty';
@@ -742,12 +833,26 @@
         el['review-table'].appendChild(empty);
       } else {
         var wrap = document.createElement('div');
-        wrap.className = 'table-wrap';
+        wrap.className = 'review-table-wrap';
         var table = document.createElement('table');
         table.className = 'review-table';
         var thead = document.createElement('thead');
         var headRow = document.createElement('tr');
-        ['', '利用日', '金額', '摘要（元店名）', '推測候補', '取引先', '元ファイル', '行']
+        var selectAllCell = document.createElement('th');
+        var selectAll = document.createElement('input');
+        selectAll.type = 'checkbox';
+        selectAll.id = 'review-select-all';
+        selectAll.setAttribute('aria-label', '表示中をすべて選択');
+        var selectedVisibleCount = visibleReviews.filter(function(review) {
+          return state.selectedReviewIds.has(String(review.reviewId));
+        }).length;
+        selectAll.checked = visibleReviews.length > 0 && selectedVisibleCount === visibleReviews.length;
+        selectAll.indeterminate = selectedVisibleCount > 0 && selectedVisibleCount < visibleReviews.length;
+        selectAll.disabled = isMutationBusy() || !visibleReviews.length;
+        selectAll.addEventListener('change', onSelectAllVisibleChanged);
+        selectAllCell.appendChild(selectAll);
+        headRow.appendChild(selectAllCell);
+        ['利用日', '金額', '摘要（元店名）', '推測候補', '取引先', '元ファイル', '行']
           .forEach(function(label) {
             var th = document.createElement('th');
             th.textContent = label;
@@ -756,14 +861,16 @@
         thead.appendChild(headRow);
         table.appendChild(thead);
         var tbody = document.createElement('tbody');
-        state.reviews.forEach(function(review, index) {
+        visibleReviews.forEach(function(review, index) {
+          var reviewId = String(review.reviewId);
           var row = document.createElement('tr');
-          row.dataset.reviewId = String(review.reviewId);
+          row.dataset.reviewId = reviewId;
           row.dataset.fileId = String(review.fileId);
           var selectCell = document.createElement('td');
           var checkbox = document.createElement('input');
           checkbox.type = 'checkbox';
           checkbox.className = 'review-select';
+          checkbox.checked = state.selectedReviewIds.has(reviewId);
           checkbox.setAttribute('aria-label', String(review.merchantOriginal) + 'を確定対象にする');
           checkbox.disabled = isMutationBusy();
           checkbox.addEventListener('change', onReviewSelectionChanged);
@@ -785,6 +892,7 @@
           input.type = 'text';
           input.className = 'partner-input';
           input.placeholder = '空欄＝取引先なし';
+          input.value = state.partnerInputs.has(reviewId) ? state.partnerInputs.get(reviewId) : '';
           input.disabled = isMutationBusy();
           var listId = 'candidate-' + index + '-' + state.reviewRequest;
           input.setAttribute('list', listId);
@@ -794,6 +902,10 @@
             var option = document.createElement('option');
             option.value = name;
             dataList.appendChild(option);
+          });
+          input.addEventListener('input', function() {
+            state.partnerInputs.set(reviewId, input.value);
+            updateActionButtons();
           });
           inputCell.appendChild(dataList);
           inputCell.appendChild(input);
@@ -807,6 +919,14 @@
           row.appendChild(sourceCell);
           tbody.appendChild(row);
         });
+        if (!visibleReviews.length) {
+          var noMatchRow = document.createElement('tr');
+          var noMatchCell = document.createElement('td');
+          noMatchCell.colSpan = 8;
+          noMatchCell.textContent = TEXT.noFilteredReviews;
+          noMatchRow.appendChild(noMatchCell);
+          tbody.appendChild(noMatchRow);
+        }
         table.appendChild(tbody);
         wrap.appendChild(table);
         el['review-table'].appendChild(wrap);
@@ -814,14 +934,18 @@
       var start = state.partnerTotal ? state.reviewOffset + 1 : 0;
       var end = Math.min(state.partnerTotal, state.reviewOffset + state.reviews.length);
       el['review-window'].textContent = state.partnerTotal ? start + '–' + end + ' / ' + state.partnerTotal : '';
+      el['review-count'].textContent = '表示 ' + visibleReviews.length + ' 件 / 全 ' +
+        state.partnerTotal + ' 件・選択 ' + state.selectedReviewIds.size + ' 件';
       var after = Math.max(0, state.partnerTotal - end);
       el['review-more'].textContent = after ? '他 ' + after + ' 件' : '';
       if (state.reviewLimit > 0) {
         el['review-prev'].textContent = '前の ' + state.reviewLimit + ' 件';
         el['review-next'].textContent = '次の ' + state.reviewLimit + ' 件';
       }
+      el['review-pager'].hidden = !(state.reviewLimit > 0 && state.partnerTotal > state.reviewLimit);
       el['review-prev'].disabled = state.loadingReviews || isMutationBusy() || state.reviewOffset <= 0;
       el['review-next'].disabled = state.loadingReviews || isMutationBusy() || end >= state.partnerTotal;
+      renderBulkPartnerOptions();
       updateActionButtons();
     }
 
@@ -849,10 +973,13 @@
 
     function updateActionButtons() {
       var customer = selectedCustomer();
-      var selectedCount = document.querySelectorAll('.review-select:checked').length;
+      var selectedCount = state.selectedReviewIds.size;
       el['import-button'].disabled = !customer || !customer.canImport || !state.selectedFolderId ||
         state.loadingFiles || isMutationBusy();
       el['resolve-button'].disabled = !customer || selectedCount === 0 || isMutationBusy();
+      el['resolve-button'].textContent = '選択 ' + selectedCount + ' 件を確定';
+      el['bulk-apply'].disabled = selectedCount === 0 || isMutationBusy();
+      el['select-clear'].disabled = selectedCount === 0 || isMutationBusy();
       el['final-button'].disabled = !state.lastCompletedDestinationSpreadsheetId ||
         isMutationBusy() || state.finalLoading;
       // **最終確認を開くまでダウンロードさせない。**段階として挟むご要望であり、
@@ -888,9 +1015,15 @@
       state.folders = [];
       state.files = [];
       state.reviews = [];
+      state.partnerInputs.clear();
+      state.selectedReviewIds.clear();
+      state.lastSelectedReviewId = null;
+      state.reviewFilter = '';
       state.partnerTotal = 0;
       state.otherCounts = {};
       state.reviewOffset = 0;
+      state.reviewLimit = 0;
+      el['review-filter'].value = '';
       state.activeImportDestinationSpreadsheetId = null;
       state.lastCompletedDestinationSpreadsheetId = null;
       // 別の顧客の転記先を最終確認に出したままにしない。
@@ -977,6 +1110,10 @@
     }
 
     async function loadReviews(customerId, offset, generation) {
+      if (Number(offset || 0) !== Number(state.reviewOffset || 0)) {
+        state.selectedReviewIds.clear();
+        state.lastSelectedReviewId = null;
+      }
       var request = ++state.reviewRequest;
       state.loadingReviews = true;
       renderReviews();
@@ -1112,25 +1249,122 @@
       }
     }
 
+    function visibleReviews() {
+      return state.reviews.filter(function(review) {
+        return reviewMatchesFilter(review, state.reviewFilter);
+      });
+    }
+
     /**
-     * **元ファイルを跨いで選べる。**
+     * 絞り込みを変えたら**選択を全部外す**（仕様 §2.3）。
      *
-     * 以前は1回の押下を同じ元ファイルの要確認だけに限っていた。根拠は
-     * 「2ファイルだと経過時間0でも1件目が始まらない」だったが、実機で
-     * 1往復128msと分かって上限を400msに置き直した時点で成り立たなくなって
-     * いる（v1.1 で仕様書自身がそう記録し、規則だけを残していた）。
-     *
-     * **1回の呼出しが触るファイルは、いまも必ず1つである**
-     * （`80_WebApp.gs` が `firstFileId` 以外を次回送りにする）。だから
-     * 後始末の最悪値は選んだファイル数に関係なく1ファイル分で、
-     * 締切の見積もりは何も変わらない。変わるのは押下全体の所要時間だけで、
-     * 件数の上限（`WEBAPP_MAX_DECISIONS_`）が今までどおりそれを抑える。
-     *
-     * 跨げないと、6ファイルに散った12件が12回の押下になる（2026-09-21、
-     * 実際にそうなった）。
+     * 選択を残すと、見えなくなった行が「選択 n 件を確定」に紛れ込み、利用者が
+     * 画面で確かめていない件まで確定に送られる。freee は残すが、取り消せない
+     * 書込の前では、見えない行を送る事故のほうが重い。取引先欄の値は
+     * `reviewId` で持っているので、絞り込みを戻せば入力は残っている。
      */
-    function onReviewSelectionChanged() {
+    function onReviewFilterChanged(event) {
+      if (isMutationBusy()) return;
+      var target = event && (event.currentTarget || event.target) || el['review-filter'];
+      var value = String(target.value || '');
+      if (value === state.reviewFilter) return;
+      state.reviewFilter = value;
+      state.selectedReviewIds.clear();
+      state.lastSelectedReviewId = null;
+      renderReviews();
+    }
+
+    /**
+     * 選択だけが変わったときは、**表を作り直さずに印と件数だけを合わせる。**
+     *
+     * 作り直すと表を包む箱ごと入れ替わり、500 行のうち下のほうを見ながら
+     * チェックした瞬間に先頭へ戻される（2026-10-03 の監査で見つけた）。
+     * 取引先欄の値も同じ理由で、一括入力はその場の欄へ書く。
+     */
+    function syncReviewSelectionView() {
+      var table = el['review-table'];
+      var boxes = table && typeof table.querySelectorAll === 'function' ?
+        table.querySelectorAll('.review-select') : [];
+      Array.prototype.forEach.call(boxes, function(box) {
+        var row = box.closest('tr');
+        if (row) box.checked = state.selectedReviewIds.has(String(row.dataset.reviewId));
+      });
+      var visible = visibleReviews();
+      var selectedVisible = visible.filter(function(review) {
+        return state.selectedReviewIds.has(String(review.reviewId));
+      }).length;
+      var selectAll = table && typeof table.querySelector === 'function' ?
+        table.querySelector('#review-select-all') : null;
+      if (selectAll) {
+        selectAll.checked = visible.length > 0 && selectedVisible === visible.length;
+        selectAll.indeterminate = selectedVisible > 0 && selectedVisible < visible.length;
+      }
+      if (el['review-count']) {
+        el['review-count'].textContent = '表示 ' + visible.length + ' 件 / 全 ' +
+          state.partnerTotal + ' 件・選択 ' + state.selectedReviewIds.size + ' 件';
+      }
+      renderBulkPartnerOptions();
       updateActionButtons();
+    }
+
+    function syncPartnerInputsView() {
+      var table = el['review-table'];
+      var inputs = table && typeof table.querySelectorAll === 'function' ?
+        table.querySelectorAll('.partner-input') : [];
+      Array.prototype.forEach.call(inputs, function(input) {
+        var row = input.closest('tr');
+        if (!row) return;
+        var reviewId = String(row.dataset.reviewId);
+        input.value = state.partnerInputs.has(reviewId) ? state.partnerInputs.get(reviewId) : '';
+      });
+      updateActionButtons();
+    }
+
+    function onSelectAllVisibleChanged(event) {
+      if (isMutationBusy()) return;
+      var target = event && (event.currentTarget || event.target);
+      var checked = Boolean(target && target.checked);
+      var visibleIds = visibleReviews().map(function(review) { return String(review.reviewId); });
+      visibleIds.forEach(function(reviewId) {
+        if (checked) state.selectedReviewIds.add(reviewId);
+        else state.selectedReviewIds.delete(reviewId);
+      });
+      state.lastSelectedReviewId = visibleIds.length ? visibleIds[visibleIds.length - 1] : null;
+      syncReviewSelectionView();
+    }
+
+    /** Shift を押しながらなら、直前に押した行からこの行までの表示中の行を同じ状態にする。 */
+    function onReviewSelectionChanged(event) {
+      if (isMutationBusy()) return;
+      var target = event && (event.currentTarget || event.target);
+      var row = target && target.closest('tr');
+      if (!row) return;
+      var reviewId = String(row.dataset.reviewId);
+      var orderedIds = visibleReviews().map(function(review) { return String(review.reviewId); });
+      var shouldSelect = Boolean(target.checked);
+      var selectedIds = event.shiftKey && state.lastSelectedReviewId ?
+        rangeIds(orderedIds, state.lastSelectedReviewId, reviewId) : [reviewId];
+      selectedIds.forEach(function(id) {
+        if (shouldSelect) state.selectedReviewIds.add(id);
+        else state.selectedReviewIds.delete(id);
+      });
+      state.lastSelectedReviewId = reviewId;
+      syncReviewSelectionView();
+    }
+
+    function clearReviewSelection() {
+      if (isMutationBusy()) return;
+      state.selectedReviewIds.clear();
+      state.lastSelectedReviewId = null;
+      syncReviewSelectionView();
+    }
+
+    /** 選択中の行の取引先欄に入れるだけ。確定は「選択 n 件を確定」→ 確認を経る。 */
+    function applyBulkPartnerToSelection() {
+      if (isMutationBusy()) return;
+      applyBulkPartner(state.partnerInputs, Array.from(state.selectedReviewIds),
+        el['bulk-partner'].value);
+      syncPartnerInputsView();
     }
 
     /**
@@ -1146,17 +1380,15 @@
     }
 
     function collectSelectedReviews() {
-      var byId = new Map(state.reviews.map(function(review) {
-        return [String(review.reviewId), review];
-      }));
-      return Array.prototype.map.call(document.querySelectorAll('.review-select:checked'), function(box) {
-        var row = box.closest('tr');
-        var review = byId.get(String(row.dataset.reviewId));
+      return state.reviews.filter(function(review) {
+        return state.selectedReviewIds.has(String(review.reviewId));
+      }).map(function(review) {
+        var reviewId = String(review.reviewId);
         return {
           review: review,
-          reviewId: String(review.reviewId),
+          reviewId: reviewId,
           fileId: String(review.fileId),
-          partnerName: row.querySelector('.partner-input').value.trim(),
+          partnerName: String(state.partnerInputs.get(reviewId) || '').trim(),
           sameMerchantConflict: false,
           conflictReason: null
         };
@@ -1201,6 +1433,22 @@
       return TEXT.learnYes;
     }
 
+    function confirmationGroups(items) {
+      var groups = new Map();
+      (items || []).forEach(function(item) {
+        var merchant = String(item.review && item.review.merchantOriginal || '（店名を表示できません）');
+        var partner = String(item.partnerName || '').trim() || '取引先なし';
+        var message = dictionaryMessage(item);
+        var key = JSON.stringify([merchant, partner, message]);
+        if (!groups.has(key)) groups.set(key, {merchant: merchant, partner: partner,
+          message: message, count: 0});
+        groups.get(key).count += 1;
+      });
+      return Array.from(groups.values()).sort(function(left, right) {
+        return right.count - left.count || left.merchant.localeCompare(right.merchant);
+      });
+    }
+
     function openConfirmation() {
       var items = collectSelectedReviews();
       if (!items.length) { showNotice(TEXT.chooseReview, 'warning'); return; }
@@ -1226,6 +1474,16 @@
       el['confirm-title'].textContent = '要確認の確定';
       el['confirm-submit'].textContent = '確定する';
       el['confirm-intro'].textContent = '次の ' + items.length + ' 件を確定します。取り消せません。';
+      el['confirm-summary'].textContent = '';
+      confirmationGroups(items).forEach(function(group) {
+        var li = document.createElement('li');
+        li.textContent = group.merchant + ' → ' + group.partner + '（' + group.message + '）× ' +
+          group.count + ' 件';
+        el['confirm-summary'].appendChild(li);
+      });
+      el['confirm-summary'].hidden = false;
+      el['confirm-details-summary'].textContent = '1 件ずつ見る（' + items.length + ' 件）';
+      el['confirm-details'].hidden = false;
       el['confirm-list'].textContent = '';
       items.forEach(function(item) {
         var review = item.review;
@@ -1355,6 +1613,8 @@
       } finally {
         if (token === state.resolveRun && generation === state.viewGeneration) {
           state.resolveBusy = false;
+          state.selectedReviewIds.clear();
+          state.lastSelectedReviewId = null;
           // 転記先の中身が変わった。開いていた最終確認はもう正しくない。
           markFinalReviewStale();
           renderSelection();
@@ -2443,6 +2703,9 @@
         state.formatConfirmResolve = resolve;
         el['confirm-title'].textContent = title;
         el['confirm-intro'].textContent = message;
+        el['confirm-summary'].textContent = '';
+        el['confirm-summary'].hidden = true;
+        el['confirm-details'].hidden = true;
         el['confirm-list'].textContent = '';
         el['confirm-submit'].textContent = '実行する';
         if (typeof el['confirm-dialog'].showModal === 'function')
@@ -2567,6 +2830,9 @@
     }
 
     el['customer-search'].addEventListener('input', renderCustomers);
+    el['review-filter'].addEventListener('input', onReviewFilterChanged);
+    el['bulk-apply'].addEventListener('click', applyBulkPartnerToSelection);
+    el['select-clear'].addEventListener('click', clearReviewSelection);
     el['format-close'].addEventListener('click', async function() {
       if (isMutationBusy()) return;
       if (state.formatSaved && !await formatConfirm('保存結果を閉じる',
