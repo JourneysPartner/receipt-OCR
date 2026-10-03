@@ -324,6 +324,31 @@ function applyExclusionRules(row, rowNumber, cardFormat) {
     }
     if (hit) return {excluded: true, ruleId: String(entry.id)};
   }
+
+  // **日付・店名・用途が空で、金額の列が数として読めない行は取引ではない**
+  // （2026-10-03）。家族カードの名義人ごとの小計行がこの形をしている ──
+  // ドコモカード 11 列では利用金額の列に「＜甲野 太郎 様」、支払い金額の列に
+  // 小計が入る。日付と金額が両方空の規則では金額の列の名前の文字で除外されず、
+  // 店名も用途も無い取引になってファイルごと要修正に落ちた（本番で 11 本）。
+  //
+  // **金額の列が数として読める行は対象にしない。**日付や店名が欠けた本物の
+  // 取引を黙って落とすと、過少計上がどこにも出ない（そちらは今までどおり
+  // 要修正で人に返す）。店名か用途のどちらかがあっても落とさない ── 会員値引の
+  // ような日付の無い取引や、顧客が用途を書いた行である。形式の個別の規則より
+  // 後に見るので、個別の規則に当たった行はその規則の ID で記録される。
+  // 形式ごとに `excludeWhenNoTransactionValue: false` で止められる。
+  var noValueDefault = rule.excludeWhenNoTransactionValue === undefined ?
+    true : toBool(rule.excludeWhenNoTransactionValue);
+  if (noValueDefault && dateBlank && amountIndex >= 0) {
+    var amountCell = interpretAmountCell(row[amountIndex]);
+    var merchantIndex = parserColumnIndex_(format.merchantColumn);
+    var purposeIndex = parserColumnIndex_(format.purposeColumn);
+    if (!amountCell.ok && !amountCell.blank &&
+        (merchantIndex < 0 || isParserBlank_(row[merchantIndex])) &&
+        (purposeIndex < 0 || isParserBlank_(row[purposeIndex]))) {
+      return {excluded: true, ruleId: '_noTransactionValue'};
+    }
+  }
   return {excluded: false, ruleId: null};
 }
 
