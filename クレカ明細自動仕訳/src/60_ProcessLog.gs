@@ -79,6 +79,86 @@ function getPermanentFileIndexRecord_(fileId) {
     FILE_INDEX_WIDTH_, 'Duplicate permanent file index fileId');
 }
 
+/**
+ * 覚えた2つの行を同じ要求で読み、両方の鍵列を検算する。
+ *
+ * 2枚は同じマスターにあり、比較更新の材料を別々に読む必要はない。
+ * ただし位置がずれていた側は従来の鍵列走査へ戻し、もう片方の読取は使う。
+ */
+function getFileRecordsPair_(fileId) {
+  var key = String(fileId);
+  var processRowNumber = fileRowNumberCache_.process[key];
+  var indexRowNumber = fileRowNumberCache_.index[key];
+  if (!processRowNumber || !indexRowNumber) {
+    return {
+      process: getProcessLogRecord_(fileId),
+      permanent: getPermanentFileIndexRecord_(fileId)
+    };
+  }
+
+  var processSheet = processLogSheet_();
+  var indexSheet = permanentFileIndexSheet_();
+  var fetched = sheetsReadRanges_(processSheet, [
+    a1Range_(processSheet.getName(), processRowNumber, 1, PROCESS_LOG_WIDTH_),
+    a1Range_(indexSheet.getName(), indexRowNumber, 1, FILE_INDEX_WIDTH_)
+  ]);
+  var processValues = padRowValues_(fetched[0] && fetched[0][0], PROCESS_LOG_WIDTH_);
+  var indexValues = padRowValues_(fetched[1] && fetched[1][0], FILE_INDEX_WIDTH_);
+  var process = String(processValues[7]) === key ?
+    {rowNumber: processRowNumber, values: processValues} : null;
+  var permanent = String(indexValues[0]) === key ?
+    {rowNumber: indexRowNumber, values: indexValues} : null;
+
+  if (!process) {
+    delete fileRowNumberCache_.process[key];
+    process = getProcessLogRecord_(fileId);
+  }
+  if (!permanent) {
+    delete fileRowNumberCache_.index[key];
+    permanent = getPermanentFileIndexRecord_(fileId);
+  }
+  return {process: process, permanent: permanent};
+}
+
+/** INV-07の判定と内容ハッシュの書込範囲を、両方の表で同じ形に組み立てる。 */
+function submittedContentHashWrite_(sheetName, rowNumber, column, currentValue,
+    submittedHash, errorMessage, stringifyValues) {
+  var current = stringifyValues ? String(currentValue || '') : currentValue;
+  var proposed = stringifyValues ? String(submittedHash) : submittedHash;
+  var occupied = stringifyValues ? current !== '' : !!current;
+  return {
+    error: occupied && current !== proposed ? new IntegrityError(null, errorMessage) : null,
+    data: {
+      range: a1Range_(sheetName, rowNumber, column, column),
+      values: [[proposed]]
+    }
+  };
+}
+
+/** 全体読取から、findRowsByColumnValue_ と同じ鍵比較で1行だけ取り出す。 */
+function fileRecordFromRows_(rows, keyColumn, fileId, width, duplicateDetail) {
+  var key = String(fileId);
+  var matches = [];
+  for (var offset = 1; offset < rows.length; offset += 1) {
+    var row = rows[offset] || [];
+    var cell = row[keyColumn - 1];
+    if (String(cell === undefined ? '' : cell) === key) {
+      matches.push({rowNumber: offset + 1, values: padRowValues_(row, width)});
+    }
+  }
+  if (matches.length > 1) {
+    throw new IntegrityError('TRANSACTION_LOG_AMBIGUOUS', duplicateDetail);
+  }
+  return matches.length ? matches[0] : null;
+}
+
+/** apiLastDataRows_ と同じく、見出し行を含め末尾の全空行を落とす。 */
+function lastDataRowFromValues_(rows) {
+  var last = rows.length;
+  while (last > 0 && !rowHasAnyValue_(rows[last - 1])) last -= 1;
+  return last;
+}
+
 function fileProperty_(file, names, fallback) {
   for (var index = 0; index < names.length; index += 1) {
     var name = names[index];
@@ -90,7 +170,7 @@ function fileProperty_(file, names, fallback) {
 
 /**
  * @param {Object=} knownProcess 呼出側が直前に読んだ処理ログの行。
- *   渡されたときは読み直さない（同じ行を2回読まないため、v1.7）。
+ *   どちらの行番号も未記憶なら、ロック内で読み直した結果を優先する。
  */
 function createOrUpdateProcessLog(runId, customer, file, knownProcess) {
   var fileId = String(fileProperty_(file, ['getId', 'fileId', 'id'], ''));
@@ -98,8 +178,41 @@ function createOrUpdateProcessLog(runId, customer, file, knownProcess) {
   return withScriptLock_(function() {
     var processSheet = processLogSheet_();
     var indexSheet = permanentFileIndexSheet_();
-    var process = knownProcess === undefined ? getProcessLogRecord_(fileId) : knownProcess;
-    var permanent = getPermanentFileIndexRecord_(fileId);
+    var key = String(fileId);
+    var noRememberedRows = !fileRowNumberCache_.process[key] && !fileRowNumberCache_.index[key];
+    var process;
+    var permanent;
+    var lastRows;
+    if (noRememberedRows) {
+      // どちらの位置も分からない新規登録は、2表全体と追記末尾を1要求でそろえる。
+      // 渡された行はロック外の読取かもしれず、ここで読んだ最新値を土台にする。
+      var allRows = sheetsReadRanges_(processSheet, [
+        quoteSheetName_(processSheet.getName()) + '!A1:' + columnLetter_(PROCESS_LOG_WIDTH_),
+        quoteSheetName_(indexSheet.getName()) + '!A1:' + columnLetter_(FILE_INDEX_WIDTH_)
+      ]);
+      var processRows = allRows[0] || [];
+      var indexRows = allRows[1] || [];
+      process = fileRecordFromRows_(processRows, 8, fileId, PROCESS_LOG_WIDTH_,
+        'Duplicate process log fileId');
+      permanent = fileRecordFromRows_(indexRows, 1, fileId, FILE_INDEX_WIDTH_,
+        'Duplicate permanent file index fileId');
+      // **無い側の末尾だけを、無い順に並べる。**下の `cursor` は「足りない行の
+      // 末尾を、処理ログ → 恒久ファイルインデックスの順に詰めた配列」を前提に
+      // している（`apiLastDataRows_` へ渡す側と同じ）。両方の末尾を常に入れると、
+      // 処理ログの行だけが在るファイルで、恒久ファイルインデックスの追記先を
+      // 処理ログの末尾から決めてしまい、別のファイルの行を上書きし得る
+      // （2026-10-03 の監査で見つけた）。
+      lastRows = [];
+      if (!process) lastRows.push(lastDataRowFromValues_(processRows));
+      if (!permanent) lastRows.push(lastDataRowFromValues_(indexRows));
+    } else {
+      process = knownProcess === undefined ? getProcessLogRecord_(fileId) : knownProcess;
+      permanent = getPermanentFileIndexRecord_(fileId);
+      var needLast = [];
+      if (!process) needLast.push({sheet: processSheet, columns: PROCESS_LOG_WIDTH_});
+      if (!permanent) needLast.push({sheet: indexSheet, columns: FILE_INDEX_WIDTH_});
+      lastRows = needLast.length ? apiLastDataRows_(needLast) : [];
+    }
     var now = nowIso_();
     var originalName = String(fileProperty_(file, ['originalFileName', 'getName', 'name'], ''));
     var binaryHash = String(fileProperty_(file, ['binaryHash', 'fileBinaryHash'], ''));
@@ -130,10 +243,6 @@ function createOrUpdateProcessLog(runId, customer, file, knownProcess) {
     // 追記行はSheets APIの読取で数える。getLastRow()はSheets APIで足した
     // 行を数え落とし、2ファイル目が1ファイル目の行を上書きし得る。
     // 2枚とも新規なら末尾行は1回の要求でそろえる（同じスプレッドシート）。
-    var needLast = [];
-    if (!process) needLast.push({sheet: processSheet, columns: PROCESS_LOG_WIDTH_});
-    if (!permanent) needLast.push({sheet: indexSheet, columns: FILE_INDEX_WIDTH_});
-    var lastRows = needLast.length ? apiLastDataRows_(needLast) : [];
     var cursor = 0;
     var processRowNumber = process ? process.rowNumber : lastRows[cursor++] + 1;
     var indexRowNumber = permanent ? permanent.rowNumber : lastRows[cursor++] + 1;
@@ -167,7 +276,7 @@ function createOrUpdateProcessLog(runId, customer, file, knownProcess) {
  * インデックスと食い違って`PERMANENT_INDEX_DESYNC`になった）。
  * 列単位の書込なら、読取が古くても壊れるのは書こうとした列だけである。
  */
-function updateProcessLogUnlocked_(fileId, fields, knownRecord) {
+function updateProcessLogUnlocked_(fileId, fields, knownRecord, knownPermanent) {
     // **呼出側が今読んだ行を渡せる。**同じ行を同じ処理の中で読み直さないため。
     // `transitionFileState` は1回で処理ログを5回読んでいた ── 読取クォータ
     // （60回/分）が取込の天井なので、読み直しはそのまま遅さになる（v1.6）。
@@ -175,8 +284,21 @@ function updateProcessLogUnlocked_(fileId, fields, knownRecord) {
     // **提出時点の内容ハッシュを書くときは渡された行を使わない。**あの列の
     // 不変条件は「現在の値が空か、同じ値か」で判定するので、古い値で判定すると
     // 書き換えを通してしまう（INV-07）。
-    var record = (knownRecord && fields && fields.submittedContentHash === undefined) ?
-      knownRecord : getProcessLogRecord_(fileId);
+    var hasInternalState = fields && fields.internalState !== undefined;
+    var checksSubmittedHash = fields && fields.submittedContentHash !== undefined;
+    var pair = null;
+    var record;
+    if (!knownRecord && hasInternalState) {
+      // 状態更新で両方の材料が要るときは、ロック内の同じ時点でまとめて読む。
+      // 内容ハッシュの不変条件も、この新しい読取行で検算する。
+      pair = getFileRecordsPair_(fileId);
+      record = pair.process;
+    } else if (knownRecord && !checksSubmittedHash) {
+      record = knownRecord;
+    } else {
+      // INV-07 は渡された古い行で判定せず、現在の処理ログを読み直す。
+      record = getProcessLogRecord_(fileId);
+    }
     if (!record) throw makeCatalogError_('REQUIRED_LOG_WRITE_FAILED', 'Process log not found: ' + fileId);
     var rowNumber = record.rowNumber;
     var current = record.values;
@@ -185,16 +307,19 @@ function updateProcessLogUnlocked_(fileId, fields, knownRecord) {
     Object.keys(fields || {}).forEach(function(name) {
       var column = PROCESS_FIELD_COLUMNS_[name];
       if (!column) throw new TypeError('Unknown process log field: ' + name);
-      if (name === 'submittedContentHash' && current[column - 1] &&
-          current[column - 1] !== fields[name]) {
-        throw new IntegrityError(null, 'Submitted content hash is immutable');
+      if (name === 'submittedContentHash') {
+        var hashWrite = submittedContentHashWrite_(sheetName, rowNumber, column,
+          current[column - 1], fields[name], 'Submitted content hash is immutable', false);
+        if (hashWrite.error) throw hashWrite.error;
+        data.push(hashWrite.data);
+      } else {
+        data.push({range: a1Range_(sheetName, rowNumber, column, column),
+          values: [[fields[name]]]});
       }
-      data.push({range: a1Range_(sheetName, rowNumber, column, column),
-        values: [[fields[name]]]});
     });
     var permanent = null;
-    if (fields.internalState !== undefined) {
-      permanent = getPermanentFileIndexRecord_(fileId);
+    if (hasInternalState) {
+      permanent = knownPermanent || (pair && pair.permanent) || getPermanentFileIndexRecord_(fileId);
       if (!permanent) throw makeCatalogError_('REQUIRED_LOG_WRITE_FAILED', 'Permanent file index not found: ' + fileId);
       var indexName = permanentFileIndexSheet_().getName();
       data.push({range: a1Range_(indexName, permanent.rowNumber, 4, 4), values: [[fields.internalState]]});
@@ -226,7 +351,7 @@ function writtenRecords_(process, permanent, fields) {
   var out = {process: {rowNumber: process.rowNumber, values: processValues}, permanent: null};
   if (permanent) {
     var indexValues = permanent.values.slice();
-    indexValues[3] = fields.internalState;
+    if (fields.internalState !== undefined) indexValues[3] = fields.internalState;
     out.permanent = {rowNumber: permanent.rowNumber, values: indexValues};
   }
   return out;
@@ -275,21 +400,70 @@ function syncPermanentContentHash(fileId, contentHash) {
   return withScriptLock_(function() {
     var permanent = getPermanentFileIndexRecord_(fileId);
     if (!permanent) throw makeCatalogError_('REQUIRED_LOG_WRITE_FAILED', 'Permanent file index not found: ' + fileId);
-    var current = String(permanent.values[5] || '');
-    if (current !== '' && current !== String(contentHash)) {
-      throw new IntegrityError(null, 'Submitted content hash is immutable (INV-07)');
-    }
     var indexName = permanentFileIndexSheet_().getName();
+    var hashWrite = submittedContentHashWrite_(indexName, permanent.rowNumber, 6,
+      permanent.values[5], contentHash,
+      'Submitted content hash is immutable (INV-07)', true);
+    if (hashWrite.error) throw hashWrite.error;
     Sheets.Spreadsheets.Values.batchUpdate({valueInputOption: 'RAW', data: [
-      {range: a1Range_(indexName, permanent.rowNumber, 6, 6), values: [[String(contentHash)]]},
+      hashWrite.data,
       {range: a1Range_(indexName, permanent.rowNumber, 12, 12), values: [[nowIso_()]]}
     ]}, masterSpreadsheet_().getId());
   });
 }
 
-function updateProcessLog(fileId, fields, knownRecord) {
+/**
+ * 提出時点の内容ハッシュを、2行を読み直してから一括で書く。
+ * 片方だけにハッシュが残ると再提出の重複判定が崩れるため、両方のINV-07を
+ * 先に確かめ、1つのSheets API書込にまとめる。
+ */
+function updateProcessLogAndContentHash_(fileId, fields) {
+  if (!fields || fields.submittedContentHash === undefined) {
+    throw new TypeError('submittedContentHash is required');
+  }
   return withScriptLock_(function() {
-    return updateProcessLogUnlocked_(fileId, fields, knownRecord);
+    var pair = getFileRecordsPair_(fileId);
+    var record = pair.process;
+    var permanent = pair.permanent;
+    if (!record) throw makeCatalogError_('REQUIRED_LOG_WRITE_FAILED', 'Process log not found: ' + fileId);
+    if (!permanent) throw makeCatalogError_('REQUIRED_LOG_WRITE_FAILED', 'Permanent file index not found: ' + fileId);
+
+    var processSheetName = processLogSheet_().getName();
+    var indexSheetName = permanentFileIndexSheet_().getName();
+    var processHashWrite = submittedContentHashWrite_(processSheetName, record.rowNumber,
+      PROCESS_FIELD_COLUMNS_.submittedContentHash,
+      record.values[PROCESS_FIELD_COLUMNS_.submittedContentHash - 1],
+      fields.submittedContentHash, 'Submitted content hash is immutable', false);
+    var indexHashWrite = submittedContentHashWrite_(indexSheetName, permanent.rowNumber, 6,
+      permanent.values[5], fields.submittedContentHash,
+      'Submitted content hash is immutable (INV-07)', true);
+    // 両方の判定を済ませてから、どちらかの不変条件違反を返す。
+    if (processHashWrite.error) throw processHashWrite.error;
+    if (indexHashWrite.error) throw indexHashWrite.error;
+
+    var data = [];
+    Object.keys(fields).forEach(function(name) {
+      var column = PROCESS_FIELD_COLUMNS_[name];
+      if (!column) throw new TypeError('Unknown process log field: ' + name);
+      if (name === 'submittedContentHash') data.push(processHashWrite.data);
+      else data.push({range: a1Range_(processSheetName, record.rowNumber, column, column),
+        values: [[fields[name]]]});
+    });
+    data.push(indexHashWrite.data);
+    if (fields.internalState !== undefined) {
+      data.push({range: a1Range_(indexSheetName, permanent.rowNumber, 4, 4),
+        values: [[fields.internalState]]});
+    }
+    data.push({range: a1Range_(indexSheetName, permanent.rowNumber, 12, 12),
+      values: [[nowIso_()]]});
+    Sheets.Spreadsheets.Values.batchUpdate({valueInputOption: 'RAW', data: data}, masterSpreadsheet_().getId());
+    return writtenRecords_(record, permanent, fields);
+  });
+}
+
+function updateProcessLog(fileId, fields, knownRecord, knownPermanent) {
+  return withScriptLock_(function() {
+    return updateProcessLogUnlocked_(fileId, fields, knownRecord, knownPermanent);
   });
 }
 

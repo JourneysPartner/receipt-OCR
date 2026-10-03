@@ -2804,19 +2804,19 @@ module.exports = ({test, assert, gas}) => {
     assert.ok(latestImportCall().sharedWindow.errors >= 1);
   });
 
-  test('multi 14: four files add at most 25 reads each and fixed reads stay at measured cost', () => {
+  test('multi 14: four files add at most 20 reads each and fixed reads stay at measured cost', () => {
     const one = readCountByImport(1);
     const four = readCountByImport(4);
     const perFile = (four.reads - one.reads) / 3;
     const fixedReads = one.reads - perFile;
     assert.ok(Number.isInteger(perFile) && perFile > 0,
       `1本増えるごとの読取を測定できる: 1=${one.reads}, 4=${four.reads}`);
-    assert.ok(perFile <= 25, `1本増えるごとの読取は${perFile}回（上限25）`);
+    assert.ok(perFile <= 20, `1本増えるごとの読取は${perFile}回（上限20）`);
     assert.equal(one.record.totalReads, one.reads);
     assert.equal(four.record.totalReads, four.reads);
-    // **上限は実測値そのもの**（2026-10-02：1ファイル43回・4ファイル118回、
-    // 呼出しの固定費18回）。固定費は押下のたびではなく呼出しのたびに払うので、
-    // 1回増やすのは12ヶ月で3〜4回ぶんの決定である。記録に残して上げること。
+    // 変更前（2026-10-02）：1ファイル43回・4ファイル118回、固定費18回。
+    // 変更後（2026-10-03）：1ファイル38回・4ファイル98回、固定費18回、
+    // 1本増えるごと20回。上限はこの実測値に合わせる。
     assert.ok(fixedReads <= 18,
       `呼出しの固定費が${fixedReads}回（上限18）。1=${one.reads}, 4=${four.reads}`);
   });
@@ -5622,6 +5622,286 @@ module.exports = ({test, assert, gas}) => {
     })()`));
     assert.ok(hints.imp.includes('取り込んでいる'), hints.imp);
     assert.ok(hints.res.includes('確定している'), hints.res);
+  });
+
+  function seedPrefetchFile(customer, fileId, options = {}) {
+    const name = options.name || `${fileId}.csv`;
+    gas.stubs.createFile(fileId, {name, data: 'a,b\n1,2\n'});
+    return call('createOrUpdateProcessLog', [options.runId || 'RUN_' + fileId,
+      customer, {
+        id: fileId, originalFileName: name, binaryHash: options.binaryHash || '',
+        contentHash: options.contentHash || '', hashVersion: '3',
+        state: options.state || 'DISCOVERED'
+      }]);
+  }
+
+  test('pf 1: importing two files reduces the second file to the measured 20 reads', () => {
+    const {customer} = setupWorld({knownMerchant: true});
+    [0, 1].forEach((index) => putCsv(customer, {fileId: `pf_one_${index}`,
+      rows: [`2025/12/${10 + index},既知店,${1000 + index},仕入れ`]}));
+    const result = webImport(customer);
+    const files = importFileResults(result);
+    assert.equal(result.done, 2);
+    assert.equal(files.length, 2);
+    assert.equal(files[1].reads, 20,
+      `2本目の読取は${files[1].reads}回（5回減った実測20回のはず）: ${JSON.stringify(files[1])}`);
+  });
+
+  test('pf 2: transition reads both remembered rows in one batchGet and updates both', () => {
+    const {customer} = setupWorld();
+    seedPrefetchFile(customer, 'pf_pair');
+    gas.stubs.resetApiCallCounts();
+    call('transitionFileState', ['pf_pair', 'DISCOVERED', 'VALIDATING', 'RUN_pf_pair']);
+    const master = gas.stubs.getSpreadsheet('master');
+    const process = master.getSheetByName('クレカ処理ログ').getRange(2, 1, 1, 40).getValues()[0];
+    const permanent = master.getSheetByName('恒久ファイルインデックス').getRange(2, 1, 1, 13).getValues()[0];
+    assert.equal(gas.stubs.getApiCallCounts().batchGet, 1,
+      `比較更新の読取は${gas.stubs.getApiCallCounts().batchGet}回`);
+    assert.equal(process[16], 'VALIDATING');
+    assert.equal(permanent[3], 'VALIDATING');
+  });
+
+  test('pf 3: a stale remembered key rereads only that record and leaves the other file alone', () => {
+    const {customer} = setupWorld();
+    const first = seedPrefetchFile(customer, 'pf_stale_a');
+    const second = seedPrefetchFile(customer, 'pf_stale_b');
+    gas.context.fileRowNumberCache_.index.pf_stale_a = second.permanent.rowNumber;
+    gas.stubs.resetApiCallCounts();
+    call('transitionFileState', ['pf_stale_a', 'DISCOVERED', 'VALIDATING', 'RUN_pf_stale_a']);
+    assert.equal(gas.stubs.getApiCallCounts().batchGet, 3,
+      '恒久索引だけが外れたとき、ペア読取とその表だけの鍵列・行読取を行う');
+    const master = gas.stubs.getSpreadsheet('master');
+    const processSheet = master.getSheetByName('クレカ処理ログ');
+    const indexSheet = master.getSheetByName('恒久ファイルインデックス');
+    assert.equal(processSheet.getRange(first.process.rowNumber, 17).getValue(), 'VALIDATING');
+    assert.equal(indexSheet.getRange(first.permanent.rowNumber, 4).getValue(), 'VALIDATING');
+    assert.equal(processSheet.getRange(second.process.rowNumber, 17).getValue(), 'DISCOVERED');
+    assert.equal(indexSheet.getRange(second.permanent.rowNumber, 4).getValue(), 'DISCOVERED');
+
+    gas.context.fileRowNumberCache_.process.pf_stale_a = second.process.rowNumber;
+    gas.stubs.resetApiCallCounts();
+    call('transitionFileState', ['pf_stale_a', 'VALIDATING', 'WRITING', 'RUN_pf_stale_a']);
+    assert.equal(gas.stubs.getApiCallCounts().batchGet, 3,
+      '処理ログだけが外れたとき、ペア読取とその表だけの鍵列・行読取を行う');
+    assert.equal(processSheet.getRange(first.process.rowNumber, 17).getValue(), 'WRITING');
+    assert.equal(processSheet.getRange(second.process.rowNumber, 17).getValue(), 'DISCOVERED');
+    assert.equal(indexSheet.getRange(first.permanent.rowNumber, 4).getValue(), 'WRITING');
+    assert.equal(indexSheet.getRange(second.permanent.rowNumber, 4).getValue(), 'DISCOVERED');
+  });
+
+  test('pf 4: compare-and-set and required permanent row errors stay unchanged', () => {
+    const {customer} = setupWorld();
+    const seeded = seedPrefetchFile(customer, 'pf_compare');
+    const mismatch = caught(() => call('transitionFileState',
+      ['pf_compare', 'VALIDATING', 'WRITING', 'RUN_pf_compare']));
+    assert.match(mismatch.message, /File compare-and-set failed/);
+    gas.stubs.getSpreadsheet('master').getSheetByName('恒久ファイルインデックス')
+      .deleteRow(seeded.permanent.rowNumber);
+    const missing = caught(() => call('transitionFileState',
+      ['pf_compare', 'DISCOVERED', 'VALIDATING', 'RUN_pf_compare']));
+    assert.equal(missing.code, 'REQUIRED_LOG_WRITE_FAILED');
+  });
+
+  test('pf 5: submitted content hash still checks the current row despite both known records', () => {
+    const {customer} = setupWorld();
+    const seeded = seedPrefetchFile(customer, 'pf_hash');
+    call('updateProcessLog', ['pf_hash', {submittedContentHash: 'HASH_A'}]);
+    const error = caught(() => call('updateProcessLog',
+      ['pf_hash', {submittedContentHash: 'HASH_B'}, seeded.process, seeded.permanent]));
+    assert.match(error.message, /Submitted content hash is immutable/);
+    const row = gas.stubs.getSpreadsheet('master').getSheetByName('クレカ処理ログ')
+      .getRange(seeded.process.rowNumber, 13).getValue();
+    assert.equal(row, 'HASH_A');
+  });
+
+  test('pf 6: a fresh registration locates both rows and both append positions in one read', () => {
+    const {customer} = setupWorld();
+    call('forgetFileRowNumbers_', []);
+    gas.stubs.resetApiCallCounts();
+    const registered = seedPrefetchFile(customer, 'pf_new');
+    assert.equal(gas.stubs.getApiCallCounts().batchGet, 1,
+      `新規登録の読取は${gas.stubs.getApiCallCounts().batchGet}回`);
+    assert.equal(registered.process.rowNumber, 2);
+    assert.equal(registered.permanent.rowNumber, 2);
+    assert.equal(gas.context.fileRowNumberCache_.process.pf_new, 2);
+    assert.equal(gas.context.fileRowNumberCache_.index.pf_new, 2);
+
+    const headerWorld = setupWorld();
+    const master = gas.stubs.getSpreadsheet('master');
+    master.getSheetByName('クレカ処理ログ').getRange(1, 8).setValue('pf_header_key');
+    master.getSheetByName('恒久ファイルインデックス').getRange(1, 1).setValue('pf_header_key');
+    call('forgetFileRowNumbers_', []);
+    const headerMatch = call('createOrUpdateProcessLog', ['RUN_pf_header_key',
+      headerWorld.customer, {id: 'pf_header_key'}]);
+    assert.equal(headerMatch.process.rowNumber, 2, '見出しをデータ行として扱っている');
+    assert.equal(headerMatch.permanent.rowNumber, 2, '見出しをデータ行として扱っている');
+  });
+
+  test('pf 7: an unremembered registration updates existing rows without appending', () => {
+    const {customer} = setupWorld();
+    const seeded = seedPrefetchFile(customer, 'pf_existing');
+    gas.stubs.getSpreadsheet('master').getSheetByName('クレカ処理ログ')
+      .getRange(seeded.process.rowNumber, 13).setValue('HASH_CURRENT');
+    call('forgetFileRowNumbers_', []);
+    gas.stubs.resetApiCallCounts();
+    const updated = call('createOrUpdateProcessLog', ['RUN_pf_existing_again',
+      customer, {
+        id: 'pf_existing', originalFileName: 'pf_existing.csv', state: 'DISCOVERED'
+      }, seeded.process]);
+    const master = gas.stubs.getSpreadsheet('master');
+    assert.equal(gas.stubs.getApiCallCounts().batchGet, 1);
+    assert.equal(master.getSheetByName('クレカ処理ログ').getLastRow(), 2);
+    assert.equal(master.getSheetByName('恒久ファイルインデックス').getLastRow(), 2);
+    assert.equal(updated.process.rowNumber, seeded.process.rowNumber);
+    assert.equal(updated.permanent.rowNumber, seeded.permanent.rowNumber);
+    assert.equal(updated.process.values[0], 'RUN_pf_existing_again');
+    assert.equal(updated.process.values[12], 'HASH_CURRENT',
+      'ロック外で渡された古い処理ログ行を優先している');
+  });
+
+  test('pf 8: the combined registration scan rejects duplicate keys without writing', () => {
+    const cases = [
+      {sheet: 'クレカ処理ログ', keyColumn: 8, duplicateDetail: 'Duplicate process log fileId'},
+      {sheet: '恒久ファイルインデックス', keyColumn: 1,
+        duplicateDetail: 'Duplicate permanent file index fileId'}
+    ];
+    cases.forEach((entry, index) => {
+      const {customer} = setupWorld();
+      const seeded = seedPrefetchFile(customer, `pf_duplicate_${index}`);
+      const sheet = gas.stubs.getSpreadsheet('master').getSheetByName(entry.sheet);
+      const record = index === 0 ? seeded.process : seeded.permanent;
+      sheet.appendRow(record.values);
+      call('forgetFileRowNumbers_', []);
+      gas.stubs.resetApiCallCounts();
+      const writesBefore = gas.stubs.getApiCallCounts().batchUpdate;
+      const error = caught(() => call('createOrUpdateProcessLog', ['RUN_duplicate',
+        call('getCustomerById', [customer.customerId]), {id: `pf_duplicate_${index}`} ]));
+      assert.equal(error.code, 'TRANSACTION_LOG_AMBIGUOUS');
+      assert.ok(error.message.endsWith(entry.duplicateDetail), error.message);
+      assert.equal(gas.stubs.getApiCallCounts().batchUpdate, writesBefore);
+      assert.equal(sheet.getLastRow(), 3);
+    });
+  });
+
+  test('pf 14: 処理ログの行だけが在るファイルの登録は、恒久ファイルインデックスの末尾の次へ足す', () => {
+    // 1 回読みにした登録で、無い側の末尾を取り違えると、恒久ファイルインデックスの
+    // 追記先を処理ログの末尾から決めてしまい、別のファイルの行を上書きする（監査で発見）。
+    const {customer} = setupWorld();
+    seedPrefetchFile(customer, 'pf_order_a');
+    const b = seedPrefetchFile(customer, 'pf_order_b');
+    const master = gas.stubs.getSpreadsheet('master');
+    const processSheet = master.getSheetByName('クレカ処理ログ');
+    const indexSheet = master.getSheetByName('恒久ファイルインデックス');
+    // 処理ログ：a・c（c は恒久ファイルインデックスに行が無い）。恒久ファイルインデックス：a・b・d。
+    processSheet.getRange(b.process.rowNumber, 8).setValue('pf_order_c');
+    const dRow = indexSheet.getRange(b.permanent.rowNumber, 1, 1, 13).getValues()[0].slice();
+    dRow[0] = 'pf_order_d';
+    indexSheet.appendRow(dRow);
+    assert.equal(processSheet.getLastRow(), 3);
+    assert.equal(indexSheet.getLastRow(), 4);
+    call('forgetFileRowNumbers_', []);
+    gas.stubs.createFile('pf_order_c', {name: 'pf_order_c.csv', data: 'a,b\n1,2\n'});
+    const updated = call('createOrUpdateProcessLog', ['RUN_pf_order_c', customer,
+      {id: 'pf_order_c', originalFileName: 'pf_order_c.csv', state: 'DISCOVERED'}]);
+    assert.equal(updated.process.rowNumber, b.process.rowNumber, '処理ログは在る行を使う');
+    assert.equal(updated.permanent.rowNumber, 5, '恒久ファイルインデックスは自分の末尾の次');
+    assert.equal(indexSheet.getRange(4, 1).getValue(), 'pf_order_d', '別のファイルの行を上書きしない');
+    assert.equal(indexSheet.getRange(5, 1).getValue(), 'pf_order_c');
+  });
+
+  test('pf 9: unremembered registration skips trailing blank rows like apiLastDataRows_', () => {
+    assert.equal(call('lastDataRowFromValues_', [[['header'], ['data'], [], []]]), 2,
+      '返却範囲に含まれる末尾の全空行を追記行に数えている');
+    const {customer} = setupWorld();
+    const master = gas.stubs.getSpreadsheet('master');
+    const processSheet = master.getSheetByName('クレカ処理ログ');
+    const indexSheet = master.getSheetByName('恒久ファイルインデックス');
+    processSheet.getRange(10, 2).setValue('tail-marker');
+    indexSheet.getRange(12, 2).setValue('tail-marker');
+    processSheet.getRange(11, 1, 4, 40).setValues(matrix(4, 40));
+    indexSheet.getRange(13, 1, 4, 13).setValues(matrix(4, 13));
+    const lastRows = gas.evaluate(
+      'apiLastDataRows_([{sheet:processLogSheet_(),columns:PROCESS_LOG_WIDTH_},' +
+      '{sheet:permanentFileIndexSheet_(),columns:FILE_INDEX_WIDTH_}])');
+    call('forgetFileRowNumbers_', []);
+    const registered = call('createOrUpdateProcessLog', ['RUN_pf_tail',
+      call('getCustomerById', [customer.customerId]), {id: 'pf_tail'}]);
+    assert.equal(registered.process.rowNumber, lastRows[0] + 1);
+    assert.equal(registered.permanent.rowNumber, lastRows[1] + 1);
+  });
+
+  test('pf 11: the submitted content hashes use one read and one batchUpdate', () => {
+    const {customer} = setupWorld();
+    const seeded = seedPrefetchFile(customer, 'pf_hash_pair');
+    gas.stubs.resetApiCallCounts();
+    call('updateProcessLogAndContentHash_', ['pf_hash_pair', {
+      submittedContentHash: 'HASH_PAIR', currentContentHash: 'HASH_PAIR'
+    }]);
+    const counts = gas.stubs.getApiCallCounts();
+    const master = gas.stubs.getSpreadsheet('master');
+    assert.equal(counts.batchGet, 1, `ハッシュ判定の読取は${counts.batchGet}回`);
+    assert.equal(counts.batchUpdate, 1, `2表の書込は${counts.batchUpdate}回`);
+    assert.equal(master.getSheetByName('クレカ処理ログ')
+      .getRange(seeded.process.rowNumber, 13).getValue(), 'HASH_PAIR');
+    assert.equal(master.getSheetByName('恒久ファイルインデックス')
+      .getRange(seeded.permanent.rowNumber, 6).getValue(), 'HASH_PAIR');
+  });
+
+  test('pf 12: both submitted hash columns enforce INV-07 before either table is written', () => {
+    const cases = [
+      {name: 'process log', processHash: 'HASH_OLD', permanentHash: '',
+        message: /Submitted content hash is immutable/},
+      {name: 'permanent index', processHash: '', permanentHash: 'HASH_OLD',
+        message: /Submitted content hash is immutable \(INV-07\)/}
+    ];
+    cases.forEach((entry, index) => {
+      const {customer} = setupWorld();
+      const seeded = seedPrefetchFile(customer, `pf_hash_conflict_${index}`);
+      const master = gas.stubs.getSpreadsheet('master');
+      const processSheet = master.getSheetByName('クレカ処理ログ');
+      const indexSheet = master.getSheetByName('恒久ファイルインデックス');
+      processSheet.getRange(seeded.process.rowNumber, 13).setValue(entry.processHash);
+      indexSheet.getRange(seeded.permanent.rowNumber, 6).setValue(entry.permanentHash);
+      gas.stubs.resetApiCallCounts();
+      const error = caught(() => call('updateProcessLogAndContentHash_', [
+        `pf_hash_conflict_${index}`, {
+          submittedContentHash: 'HASH_NEW', currentContentHash: 'CANARY'
+        }
+      ]));
+      assert.match(error.message, entry.message, entry.name);
+      assert.equal(gas.stubs.getApiCallCounts().batchGet, 1, entry.name);
+      assert.equal(gas.stubs.getApiCallCounts().batchUpdate, 0, entry.name);
+      assert.equal(processSheet.getRange(seeded.process.rowNumber, 13).getValue(), entry.processHash,
+        entry.name);
+      assert.equal(processSheet.getRange(seeded.process.rowNumber, 14).getValue(), '', entry.name);
+      assert.equal(indexSheet.getRange(seeded.permanent.rowNumber, 6).getValue(), entry.permanentHash,
+        entry.name);
+    });
+  });
+
+  test('pf 13: a failed combined batchUpdate leaves both submitted hashes untouched', () => {
+    const {customer} = setupWorld();
+    const seeded = seedPrefetchFile(customer, 'pf_hash_atomic');
+    gas.stubs.resetApiCallCounts();
+    const valuesApi = gas.context.Sheets.Spreadsheets.Values;
+    const realBatchUpdate = valuesApi.batchUpdate;
+    valuesApi.batchUpdate = function() { throw new Error('combined hash write stopped'); };
+    let error;
+    try {
+      error = caught(() => call('updateProcessLogAndContentHash_', ['pf_hash_atomic', {
+        submittedContentHash: 'HASH_ATOMIC', currentContentHash: 'HASH_ATOMIC'
+      }]));
+    } finally {
+      valuesApi.batchUpdate = realBatchUpdate;
+    }
+    assert.equal(error.message, 'combined hash write stopped');
+    const master = gas.stubs.getSpreadsheet('master');
+    assert.equal(master.getSheetByName('クレカ処理ログ')
+      .getRange(seeded.process.rowNumber, 13).getValue(), '');
+    assert.equal(master.getSheetByName('クレカ処理ログ')
+      .getRange(seeded.process.rowNumber, 14).getValue(), '');
+    assert.equal(master.getSheetByName('恒久ファイルインデックス')
+      .getRange(seeded.permanent.rowNumber, 6).getValue(), '');
   });
 
 };

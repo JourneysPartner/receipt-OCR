@@ -527,7 +527,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
     phase('binaryHash');
 
     // 処理ログ・恒久ファイルインデックスへ登録し、`VALIDATING`にする。
-    var existing = getProcessLogRecord_(fileId);
+    var existing = fileRowNumberCache_.process[String(fileId)] ? getProcessLogRecord_(fileId) : undefined;
     // いま読んだ行を渡す。登録の中でもう一度読ませない。
     var registered = createOrUpdateProcessLog(runId, customer, {
       id: fileId,
@@ -693,9 +693,13 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
           validation.purposeRevision = {candidate: false};
         }
         // **版の列も同じ書込に入れる。**分けると同じ行をもう一度読むことになる
-        // （`updateProcessLog` は書く前に行を読む）。読取クォータが取込の
-        // 天井なので、続けて同じ行へ書くなら1回にまとめる（v1.8）。
-        updateProcessLog(fileId, Object.assign({
+        // （読取クォータが取込の天井。v1.8）。
+        // 提出時点の内容ハッシュは、処理ログと恒久ファイルインデックスF列の両方へ
+        // **1つのロックの中で、両方の INV-07 を判定してから1回で書く**（v2.0、
+        // spec_import_prefetch §2.3）。F列が空のままだと同一内容の再提出を重複として
+        // 検出できない（INV-05）。以前は別々のロックで書いていたので、間で殺されると
+        // 処理ログにだけハッシュが入った。
+        updateProcessLogAndContentHash_(fileId, Object.assign({
           formatId: cardFormat.formatId,
           sourceSheetName: resolvedSheet.name === null ? '' : String(resolvedSheet.name),
           submittedContentHash: contentHash,
@@ -707,11 +711,6 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
           readCount: parsed.txs.length
         }, versionFields_({codeVersion: VERSIONS.CODE, formatVersion: cardFormat.version,
           hashVersion: VERSIONS.HASH, sheetSchemaVersion: VERSIONS.SHEET_SCHEMA})));
-        // 恒久ファイルインデックスF列（明細内容ハッシュ・提出時点で不変）を
-        // 同期する。ここが空のままだと、同一内容の再提出が重複として
-        // 検出できない（仕様12.2は本シートだけで完結する。INV-05）。
-        syncPermanentContentHash(fileId, contentHash);
-
         phase('duplicate');
         // 8-7：転記先構成検証（`WRITING`遷移前）。
         validation.destinationSchema = destinationSchemaForRun_(customer);

@@ -1,0 +1,49 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の、**取込のファイル 1 本の中の読取をまとめる（先読み）**直しを受け取ります。
+
+この作業フォルダは git の worktree です。**前の 3 つの作業はまだコミットされずにインデックスへステージしてあります**（`git diff --cached`）。あなたの変更は、ステージされていない差分（`git diff`）として見えるようにしてください ── **`git add` しないこと。**開始時の `node test/run-tests.js` の本数は、始める前に自分で数えて報告に書いてください（1382/1382 のはずです）。
+
+## 仕様書
+
+`work/spec_import_prefetch.md`（1.0）。**全部読んでから始めてください。**
+
+## 直すこと（要点。詳細は仕様書）
+
+1. `getFileRecordsPair_(fileId)`（60）：両方の行番号を覚えているとき、処理ログの行と恒久ファイルインデックスの行を 1 回の要求で読み、それぞれの鍵を検算する（外れた方だけ今までどおり読み直す）。`updateProcessLogUnlocked_`／`updateProcessLog` に任意の第 4 引数 `knownPermanent`。`transitionFileState`（11）はこれで比較更新の材料を読み、両方の行を渡す。**提出時点の内容ハッシュ（INV-07）の書込は今までどおり読み直した行で判定する。**
+2. `createOrUpdateProcessLog`（60）：どちらの行番号も覚えていないとき、ロックの中で処理ログ全体と恒久ファイルインデックス全体を 1 回で読み、鍵の照合（`findRowsByColumnValue_` と同じ比較・2 行目以降・重複は今と同じ例外）と末尾の行（`apiLastDataRows_` と同じ規則）をそこから出す。`processDiscoveredFile_`（71）の登録の前の `getProcessLogRecord_` は、行番号を覚えていないときは呼ばない。
+
+---
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。**
+2. **git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。ステージ済みの前の作業に触らないこと。
+3. **`src/` で変えてよいのは `src/60_ProcessLog.gs`・`src/11_FileStateManager.gs`・`src/71_RunOrchestrator.gs` の 3 つだけ。**11 は `transitionFileState` だけ、71 は `processDiscoveredFile_` の登録の前の行だけ。検査：終わったとき `git diff --name-only -- src/` がこの 3 つ以下であること。
+4. テストの変更は、`test/phase8-webapp.test.js`（または近い既存のファイル）に `pf N: …`（仕様書 §4 の 1〜9）を**足すこと**（補助を足してよい）。**既存のテストで変えてよいのは、仕様書 §4 の 10 のとおり、読取の回数の上限を減った実測に合わせて下げることだけ**（上げない。下げた値と根拠を報告する）。それ以外の既存テストの期待（assert）は 1 つも変えないこと。読取の回数を等号で固定しているテストが減ったことで赤になるなら、変えずに止めて報告すること。`test/fixtures/` は変えない。`test/gas-stubs.js`・`test/gas-harness.js` は、足りない API を足すだけなら変えてよい（足したものは報告する）。
+5. **テストを先に赤にしてから直すこと。**pf 1〜9 を書き、いまの実装で赤になることを確かめてから直す。いまでも緑になる確かめはどれかを報告する。
+6. 既存のテストを 1 つも壊さないこと。特に `flush 1`・`pace 1`・`budget 1`・`budget 2`・`multi 1`〜`15`・`INV-07` に当たるテスト・処理ログと恒久ファイルインデックスの食い違い（`PERMANENT_INDEX_DESYNC`）に当たるテスト・`webapp 45f`〜`45p`（止まったファイルの回復）・`batch`・`bulk`・`imp` の全部。
+7. **Sheets API の読取は既存の口（`sheetsReadRanges_` など）だけを通すこと。**`Sheets.Spreadsheets.Values.batchGet` を直に呼ばない。**処理ログと恒久ファイルインデックスは Sheets API でしか書かない**（`SHEETS_API_ONLY_SHEETS_`、`flush 1` が見張る）── SpreadsheetApp で書く行を足さないこと。
+8. **値を実行のあいだ覚えないこと。**覚えてよいのは今までどおり行番号だけ（2026-09-02 の巻き戻り事故の形にしない）。
+9. **日本語のコメントは UTF-8 で書くこと。**以前、あなたの書いたコメントが `?` の羅列に化けた。終わったら `grep -n '???' src/*.gs src/*.html` が空であること（始める前も空）を確かめて報告すること。コメントは周りのコードと同じ密度・語り口（「なぜ」を書く）で。
+10. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断で安全側を外さないこと。迷ったら止めて報告すること。
+
+## 進め方
+
+1. 仕様書を読む。次を読む：`src/60_ProcessLog.gs` 全部、`src/11_FileStateManager.gs` の `transitionFileState`・`updateFilePrefix`、`src/71_RunOrchestrator.gs` の `processDiscoveredFile_`（頭から登録まで）、`src/01_DataAccessCore.gs` の `sheetsReadRanges_`・`readSheetRows_`・`apiLastDataRows_`・`findRowsByColumnValue_`・`SHEETS_API_ONLY_SHEETS_`、`test/phase8-webapp.test.js` の補助（1〜440 行）と `multi 14`、`test/phase6-round-trips.test.js`、処理ログ・恒久ファイルインデックスを扱う既存テスト（`phase2-data-access`・`phase3-*`）
+2. pf 1〜9 を書く → 赤を確かめる
+3. 直す
+4. `node test/run-tests.js` を全部緑にする。仕様書 §4 の 10 のとおり上限を下げる
+5. 仕様書 §5 の Q1〜Q8 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら `git diff` が変異を入れる前と同じか確かめる。食い違ったら原因を突き止めてから先へ進む）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する
+6. `git diff --stat -- src/ test/` を確かめる
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 直す前に pf 1〜9 のどれが赤だったか（緑だったものも）
+- 実測した読取の数：1 ファイル（2 本目以降、直す前と後）、`multi 14` の 1 本ごと・固定費（直す前と後）
+- 下げた上限（テスト名・前の値・新しい値・根拠）
+- Q1〜Q8 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て（足したテストがあればその名前）
+- 仕様書が間違っていた・足りなかった箇所（黙って直さないこと）、自分で決めた箇所（全部）
+- `???` の grep の結果（前と後）
+- `git diff --stat -- src/ test/` の出力（始める前と後）
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。
