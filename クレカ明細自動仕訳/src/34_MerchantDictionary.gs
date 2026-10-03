@@ -49,23 +49,98 @@ function readDictionary_(common) {
   return rows.map(dictionaryRow_);
 }
 
+function resolutionDictionarySpec_(customerId, original, normalized, partnerName, actor) {
+  var customer = String(customerId);
+  var source = String(original);
+  var key = String(normalized);
+  var partner = String(partnerName);
+  var registeredBy = String(actor);
+  return {
+    key: JSON.stringify([source, key, partner]),
+    matches: function(row) {
+      return row.active === true &&
+        String(row.customerId || '') === customer &&
+        row.original === source && row.normalized === key &&
+        row.partnerName === partner && row.matchMethod === 'exact_normalized' &&
+        row.validFrom === null && row.validTo === null && row.priority === null;
+    },
+    row: function(dictId, now) {
+      return [dictId, source, key, partner, 'exact_normalized', '', customer,
+        '', '', false, registeredBy, '', now, 1, true, false, '', ''];
+    },
+    audit: function(dictId) {
+      return {type: 'DICT_REGISTER', actor: actor, targetType: 'DICT',
+        targetId: dictId, customerId: customerId, before: null,
+        after: {B: source, C: key, D: partner, E: 'exact_normalized', O: true}};
+    }
+  };
+}
+
 function learnFromResolution(customerId, original, normalized, partnerName, actor) {
   var expected = normalizeMerchant(original);
   if (String(normalized) !== expected) throw new MasterDataError('Normalized merchant must equal normalizeMerchant(original)');
-  var equivalent = readDictionary_(false).filter(function(row) {
-    return row.active === true &&
-      String(row.customerId || '') === String(customerId) &&
-      row.original === String(original) && row.normalized === expected &&
-      row.partnerName === String(partnerName) && row.matchMethod === 'exact_normalized' &&
-      row.validFrom === null && row.validTo === null && row.priority === null;
-  }).sort(function(left, right) { return left._rowNumber - right._rowNumber; });
+  var spec = resolutionDictionarySpec_(customerId, original, expected, partnerName, actor);
+  var equivalent = readDictionary_(false).filter(spec.matches)
+    .sort(function(left, right) { return left._rowNumber - right._rowNumber; });
   if (equivalent.length) return equivalent[0].dictId;
   var dictId = generateId('DICT'); var now = nowIso_();
-  dictionaryWriteSheet_(false).appendRow([dictId, String(original), expected, String(partnerName), 'exact_normalized', '',
-    String(customerId), '', '', false, String(actor), '', now, 1, true, false, '', '']);
-  appendAudit({type: 'DICT_REGISTER', actor: actor, targetType: 'DICT', targetId: dictId, customerId: customerId,
-    before: null, after: {B: String(original), C: expected, D: String(partnerName), E: 'exact_normalized', O: true}});
+  dictionaryWriteSheet_(false).appendRow(spec.row(dictId, now));
+  appendAudit(spec.audit(dictId));
   return dictId;
+}
+
+/** 同じ押下で解決した複数の取引先を、同じ規則で一度に学習する。 */
+function learnFromResolutionBatch(customerId, entries, actor) {
+  if (!Array.isArray(entries)) throw new TypeError('entries must be an array');
+  var prepared = entries.map(function(entry) {
+    var expected = normalizeMerchant(entry.original);
+    if (String(entry.normalized) !== expected) {
+      throw new MasterDataError('Normalized merchant must equal normalizeMerchant(original)');
+    }
+    return {spec: resolutionDictionarySpec_(customerId, entry.original, expected,
+      entry.partnerName, actor)};
+  });
+  if (!prepared.length) return [];
+
+  return withScriptLock_(function() {
+    var rows = readDictionary_(false);
+    var existingByKey = Object.create(null);
+    var idsByKey = Object.create(null);
+    var newRows = [];
+    var auditEntries = [];
+    var addedIds = [];
+    var now = nowIso_();
+
+    prepared.forEach(function(item) {
+      var spec = item.spec;
+      if (!Object.prototype.hasOwnProperty.call(existingByKey, spec.key)) {
+        existingByKey[spec.key] = rows.filter(spec.matches)
+          .sort(function(left, right) { return left._rowNumber - right._rowNumber; });
+      }
+      if (existingByKey[spec.key].length) {
+        idsByKey[spec.key] = existingByKey[spec.key][0].dictId;
+        return;
+      }
+      if (!Object.prototype.hasOwnProperty.call(idsByKey, spec.key)) {
+        var dictId = generateId('DICT');
+        idsByKey[spec.key] = dictId;
+        newRows.push(spec.row(dictId, now));
+        auditEntries.push(spec.audit(dictId));
+        addedIds.push(dictId);
+      }
+    });
+
+    if (newRows.length) {
+      appendRowsBatched_(dictionaryWriteSheet_(false), newRows, DICTIONARY_WIDTH_,
+        'resolution-batch');
+      appendAuditRowsUnlocked_(auditEntries);
+    }
+    var result = prepared.map(function(item) { return idsByKey[item.spec.key]; });
+    // 呼出側は通常の配列戻り値を保ったまま、まとまりの結果には新規IDだけを
+    // 出せるよう、非列挙の内部情報に追加分を添える。
+    Object.defineProperty(result, 'addedDictIds', {value: addedIds, enumerable: false});
+    return result;
+  });
 }
 
 /**

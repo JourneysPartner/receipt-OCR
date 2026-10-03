@@ -4281,4 +4281,622 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(JSON.stringify(report).includes('DESTINATION_UNREADABLE'), false);
   });
 
+  function batchResolve(customer, fileId, decisions, options = {}) {
+    return call('resolvePartnerReviewsBatch', [customer.customerId, fileId, decisions,
+      Object.assign({actor: 'reviewer@example.com'}, options)]);
+  }
+
+  function batchComparable(seeded) {
+    const master = gas.stubs.getSpreadsheet('master');
+    const reviewSheet = master.getSheetByName('要確認');
+    const txSheet = master.getSheetByName('クレカ取引ログ');
+    const customerDict = master.getSheetByName('顧客別取引先辞書');
+    const auditSheet = master.getSheetByName('監査ログ');
+    const items = seeded.reviews.map((seed) => {
+      const review = reviewById(seed.reviewId);
+      const tx = transactionFor(seed);
+      const txRow = txSheet.getRange(tx._rowNumber, 1, 1, 47).getValues()[0];
+      const reviewRow = reviewSheet.getRange(review._rowNumber, 1, 1, 32).getValues()[0];
+      const destination = gas.stubs.getSpreadsheet(review.destinationSpreadsheetId)
+        .getSheetByName(review.destinationSheetName);
+      return {sourceRow: Number(review.sourceRow), destination: [
+        destination.getRange(tx.destinationRow, 3).getValue(),
+        destination.getRange(tx.destinationRow, 4).getValue()
+      ], tx: [txRow[9], txRow[11], ...txRow.slice(18, 28), txRow[45], txRow[46]],
+      review: [reviewRow[1], reviewRow[17], reviewRow[27], reviewRow[29], reviewRow[31]]};
+    }).sort((a, b) => a.sourceRow - b.sourceRow);
+    const dictionaryRows = customerDict.getDataRange().getValues().slice(1)
+      .filter((row) => String(row[6]) === String(seeded.customer.customerId) && row[0])
+      .map((row) => [...row.slice(1, 12), ...row.slice(13, 18)])
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+    const allTransactions = txSheet.getDataRange().getValues();
+    const events = auditSheet.getDataRange().getValues().slice(1)
+      .filter((row) => ['REVIEW_RESOLVE', 'DICT_REGISTER'].includes(String(row[2])))
+      .map((row) => {
+        let target = String(row[7]);
+        if (row[2] === 'DICT_REGISTER') {
+          const dict = dictionaryRows.find((item) => String(item[0]) === target);
+          const originalId = customerDict.getDataRange().getValues().slice(1)
+            .find((item) => String(item[0]) === target);
+          target = originalId ? `${originalId[1]}|${originalId[3]}` : target;
+        } else {
+          const tx = allTransactions.find((item) => String(item[0]) === target);
+          target = tx ? String(tx[6]) : target;
+        }
+        return [row[2], row[6], target, row[8], row[10]];
+      }).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    return {items, dictionaryRows, events};
+  }
+
+  function seedAutoAdoptionFiles(sizes, prefix = 'batch_auto') {
+    const {customer} = setupWorld();
+    const files = [];
+    sizes.forEach((size, fileIndex) => {
+      const fileId = `${prefix}_${fileIndex + 1}`;
+      const rows = Array.from({length: size}, (_, rowIndex) =>
+        `2025/12/${String(10 + fileIndex * 10 + rowIndex).padStart(2, '0')},自動採用店,${2000 + fileIndex * 100 + rowIndex},仕入れ`);
+      putCsv(customer, {fileId, rows});
+      webImport(customer, {fileIds: [fileId]});
+      files.push(fileId);
+    });
+    const normalized = call('normalizeMerchant', ['自動採用店']);
+    call('learnFromResolution', [customer.customerId, '自動採用店', normalized,
+      '株式会社自動採用', 'owner@example.com']);
+    return {customer, files};
+  }
+
+  function withPartnerTiming(durations, fn) {
+    const priorClock = gas.context.partnerBatchClockNow_;
+    const priorBatch = gas.context.resolvePartnerReviewsBatch;
+    let now = 1000;
+    let index = 0;
+    gas.context.partnerBatchClockNow_ = () => now;
+    gas.context.resolvePartnerReviewsBatch = function(...args) {
+      const result = priorBatch.apply(this, args);
+      now += Number(durations[index++] || 0);
+      return result;
+    };
+    try { return fn({now: () => now}); }
+    finally {
+      gas.context.partnerBatchClockNow_ = priorClock;
+      gas.context.resolvePartnerReviewsBatch = priorBatch;
+    }
+  }
+
+  test('batch 1: ADOPT の3件は1件ずつの経路と転記・取引ログ・要確認・辞書・監査が同値', () => {
+    const rows = ['2025/12/10,比較店A,1000,仕入れ',
+      '2025/12/11,比較店B,2000,仕入れ', '2025/12/12,比較店C,3000,仕入れ'];
+    const singles = seedPartnerViaWeb({rows});
+    singles.reviews.forEach((review) => call('resolveReview', [review.reviewId,
+      'ADOPT_EXISTING_PARTNER', {partnerName: '株式会社比較先', learn: true,
+        actor: 'reviewer@example.com'}]));
+    const singleSnapshot = batchComparable(singles);
+    const batched = seedPartnerViaWeb({rows});
+    const result = batchResolve(batched.customer, batched.fileId, batched.reviews.map((review) => ({
+      reviewId: review.reviewId, operation: 'ADOPT_EXISTING_PARTNER',
+      partnerName: '株式会社比較先', learn: true
+    })));
+    assert.equal(result.resolvedReviewIds.length, 3);
+    assert.deepEqual(batchComparable(batched), singleSnapshot);
+  });
+
+  test('batch 2: ADOPT・WITHOUT・UNKNOWN の混在も1件ずつの経路と同値', () => {
+    const run = (batched) => {
+      const seeded = seedPartnerViaWeb({rows: ['2025/12/10,混在店A,1000,仕入れ',
+        '2025/12/11,混在店B,2000,仕入れ', '2025/12/12,混在店C,3000,仕入れ']});
+      const operations = [
+        {operation: 'ADOPT_EXISTING_PARTNER', partnerName: '株式会社混在先', learn: false},
+        {operation: 'RESOLVE_WITHOUT_PARTNER'},
+        {operation: 'RESOLVE_PARTNER_UNKNOWN'}
+      ];
+      if (batched) batchResolve(seeded.customer, seeded.fileId, seeded.reviews.map((review, index) =>
+        Object.assign({reviewId: review.reviewId}, operations[index])));
+      else seeded.reviews.forEach((review, index) => call('resolveReview', [review.reviewId,
+        operations[index].operation, operations[index]]));
+      return batchComparable(seeded);
+    };
+    assert.deepEqual(run(true), run(false));
+  });
+
+  test('batch 3: 2件と20件でbatchGet回数が同じで上限20以下', () => {
+    const measure = (count) => {
+      const seeded = seedPartnerViaWeb({count, merchant: '読取件数店'});
+      gas.stubs.resetApiCallCounts();
+      const before = gas.stubs.getApiCallCounts().batchGet;
+      const result = batchResolve(seeded.customer, seeded.fileId, seeded.reviews.map((review) => ({
+        reviewId: review.reviewId, operation: 'ADOPT_EXISTING_PARTNER',
+        partnerName: '株式会社読取先', learn: false
+      })));
+      return {reads: gas.stubs.getApiCallCounts().batchGet - before, result};
+    };
+    const two = measure(2);
+    const twenty = measure(20);
+    assert.equal(two.reads, twenty.reads);
+    assert.ok(two.reads <= 20, `batch read ceiling: ${two.reads}`);
+    assert.equal(two.result.reads, twenty.result.reads);
+  });
+
+  test('batch 4: ファイルのリース衝突では全件を飛ばし、他者のリースとデータを保つ', () => {
+    const seeded = seedPartnerViaWeb({count: 2});
+    call('acquireLease', [seeded.customer.customerId, seeded.fileId, 'OTHER_RUN',
+      'other@example.com', 'WRITE_ONLY']);
+    const txBefore = seeded.reviews.map((review) => transactionFor(review));
+    const reviewBefore = seeded.reviews.map((review) => reviewById(review.reviewId));
+    const auditBefore = gas.stubs.getSpreadsheet('master').getSheetByName('監査ログ')
+      .getDataRange().getValues().filter((row) => row[2] === 'REVIEW_RESOLVE').length;
+    const result = batchResolve(seeded.customer, seeded.fileId, seeded.reviews.map((review) => ({
+      reviewId: review.reviewId, operation: 'ADOPT_EXISTING_PARTNER',
+      partnerName: '株式会社競合なし', learn: true
+    })));
+    assert.deepEqual(result.skippedByLeaseReviewIds, seeded.reviews.map((review) => review.reviewId));
+    assert.ok(result.leaseConflict);
+    assert.deepEqual(seeded.reviews.map((review) => transactionFor(review)), txBefore);
+    assert.deepEqual(seeded.reviews.map((review) => reviewById(review.reviewId)), reviewBefore);
+    assert.equal(gas.stubs.getSpreadsheet('master').getSheetByName('監査ログ')
+      .getDataRange().getValues().filter((row) => row[2] === 'REVIEW_RESOLVE').length, auditBefore);
+    assert.deepEqual(call('activeLeases_', []).map((lease) => lease.runId), ['OTHER_RUN']);
+  });
+
+  test('batch 5: 手順6で例外が出ても呼出側へ出てリースを返す', () => {
+    const seeded = seedPartnerViaWeb();
+    const failure = new Error('step six fault');
+    const error = caught(() => withMocks({readRowsByNumbers_: () => { throw failure; }}, () =>
+      batchResolve(seeded.customer, seeded.fileId, [{reviewId: seeded.reviews[0].reviewId,
+        operation: 'ADOPT_EXISTING_PARTNER', partnerName: '株式会社失敗', learn: false}])));
+    assert.equal(error.message, failure.message);
+    assert.equal(call('activeLeases_', []).filter((lease) => lease.fileId === seeded.fileId).length, 0);
+  });
+
+  test('batch 6: item errors は独立し、呼出側の入力誤りは読む前にTypeError', () => {
+    const seeded = seedPartnerViaWeb({rows: ['2025/12/10,一件成功店,1000,仕入れ',
+      '2025/12/11,空名店,2000,仕入れ', '2025/12/12,未知名店,3000,仕入れ',
+      '日付不明,日付確認店,4000,仕入れ']});
+    const {world, customer} = seeded;
+    gas.stubs.setActiveUser('owner@example.com');
+    const otherCustomer = addCustomer(world, {suffix: '2', customerId: 'C002',
+      customerName: '別顧客', reviewers: 'reviewer@example.com'});
+    gas.stubs.setActiveUser('reviewer@example.com');
+    const otherFileId = putCsv(customer, {fileId: 'batch_other_file',
+      rows: ['2025/12/19,別ファイル店,9000,仕入れ']});
+    webImport(customer, {fileIds: [otherFileId]});
+    const otherCustomerFileId = putCsv(otherCustomer, {fileId: 'batch_other_customer',
+      rows: ['2025/12/18,別顧客店,8000,仕入れ']});
+    webImport(otherCustomer, {fileIds: [otherCustomerFileId]});
+    const otherCustomerReview = openReviewsFor(otherCustomer.customerId, {fileId: otherCustomerFileId})
+      .find((review) => review.reviewType === 'PARTNER');
+    gas.stubs.getSpreadsheet('master').getSheetByName('要確認')
+      .getRange(otherCustomerReview._rowNumber, 9).setValue(seeded.fileId);
+    const otherFileReview = openReviewsFor(customer.customerId, {fileId: otherFileId})
+      .find((review) => review.reviewType === 'PARTNER');
+    const dateReview = openReviewsFor(customer.customerId, {fileId: seeded.fileId})
+      .find((review) => review.reviewType === 'DATE');
+    const settled = seeded.reviews[0];
+    call('updateReviewStatus', [settled.reviewId, 'RESOLVED', {actor: 'reviewer@example.com'}]);
+    const decisions = [
+      {reviewId: 'RV_DOES_NOT_EXIST', operation: 'ADOPT_EXISTING_PARTNER', partnerName: '甲社', learn: false},
+      {reviewId: otherCustomerReview.reviewId, operation: 'ADOPT_EXISTING_PARTNER', partnerName: '乙社', learn: false},
+      {reviewId: otherFileReview.reviewId, operation: 'ADOPT_EXISTING_PARTNER', partnerName: '丙社', learn: false},
+      {reviewId: settled.reviewId, operation: 'ADOPT_EXISTING_PARTNER', partnerName: '丁社', learn: false},
+      {reviewId: dateReview.reviewId, operation: 'ADOPT_EXISTING_PARTNER', partnerName: '戊社', learn: false},
+      {reviewId: seeded.reviews[1].reviewId, operation: 'ADOPT_EXISTING_PARTNER', partnerName: '  ', learn: false},
+      {reviewId: seeded.reviews[2].reviewId, operation: 'ADOPT_EXISTING_PARTNER', partnerName: '取引先不明', learn: false},
+      {reviewId: seeded.reviews[3].reviewId, operation: 'ADOPT_EXISTING_PARTNER', partnerName: '株式会社成功', learn: false}
+    ];
+    const result = batchResolve(customer, seeded.fileId, decisions);
+    const codes = Object.fromEntries(result.errors.map((entry) => [entry.reviewId, entry.code]));
+    assert.equal(codes.RV_DOES_NOT_EXIST, 'REVIEW_NOT_FOUND');
+    assert.equal(codes[otherCustomerReview.reviewId], 'REVIEW_CUSTOMER_MISMATCH');
+    assert.equal(codes[otherFileReview.reviewId], 'REVIEW_FILE_MISMATCH');
+    assert.equal(codes[settled.reviewId], 'ALREADY_SETTLED');
+    assert.equal(codes[dateReview.reviewId], 'OPERATION_NOT_OFFERED');
+    assert.equal(codes[seeded.reviews[1].reviewId], 'INVALID_PARTNER_NAME');
+    assert.equal(codes[seeded.reviews[2].reviewId], 'INVALID_PARTNER_NAME');
+    assert.deepEqual(result.resolvedReviewIds, [seeded.reviews[3].reviewId]);
+    assert.equal(decisions.length, result.resolvedReviewIds.length + result.errors.length +
+      result.skippedByLeaseReviewIds.length + result.notAttemptedReviewIds.length);
+    const reads = gas.stubs.getApiCallCounts().batchGet;
+    const badInput = caught(() => batchResolve(customer, seeded.fileId, [{reviewId: 'x',
+      operation: 'BAD_OPERATION'}]));
+    assert.equal(badInput.name, 'TypeError');
+    assert.equal(gas.stubs.getApiCallCounts().batchGet, reads);
+  });
+
+  test('batch 7: EXCLUDE 済み取引への ADOPT は書く前に止まる', () => {
+    const seeded = seedPartnerViaWeb({rows: ['日付不明,取消対象店,1000,仕入れ']});
+    const reviews = openReviewsFor(seeded.customer.customerId, {fileId: seeded.fileId});
+    const partner = reviews.find((review) => review.reviewType === 'PARTNER');
+    const date = reviews.find((review) => review.reviewType === 'DATE');
+    const tx = transactionFor(partner);
+    call('resolveReview', [date.reviewId, 'EXCLUDE', {}]);
+    const before = gas.stubs.getSpreadsheet(seeded.destinationSpreadsheetId)
+      .getSheetByName('入力用シート').getRange(tx.destinationRow, 2, 1, 6).getValues();
+    const result = batchResolve(seeded.customer, seeded.fileId, [{reviewId: partner.reviewId,
+      operation: 'ADOPT_EXISTING_PARTNER', partnerName: '株式会社幽霊', learn: false}]);
+    assert.equal(result.errors[0].code, 'STATE_TRANSITION');
+    assert.deepEqual(gas.stubs.getSpreadsheet(seeded.destinationSpreadsheetId)
+      .getSheetByName('入力用シート').getRange(tx.destinationRow, 2, 1, 6).getValues(), before);
+  });
+
+  test('batch 8: 読み返しの不一致だけを除外し、同じ転記先の他件は確定する', () => {
+    const seeded = seedPartnerViaWeb({count: 2, merchant: '読戻し店'});
+    const bad = seeded.reviews[0];
+    const before = transactionFor(bad);
+    const realRead = gas.context.readDestinationRows_;
+    const result = withMocks({readDestinationRows_(customer, rowNumbers, index) {
+      const rows = realRead(customer, rowNumbers, index);
+      rows[rowNumbers[0]] = Object.assign({}, rows[rowNumbers[0]], {f: '読み返し違い'});
+      return rows;
+    }}, () => batchResolve(seeded.customer, seeded.fileId, seeded.reviews.map((review) => ({
+      reviewId: review.reviewId, operation: 'ADOPT_EXISTING_PARTNER',
+      partnerName: '株式会社読戻し先', learn: false
+    }))));
+    assert.equal(result.errors.find((entry) => entry.reviewId === bad.reviewId).code,
+      'DESTINATION_VALUE_MISMATCH');
+    assert.equal(reviewById(bad.reviewId).status, 'OPEN');
+    assert.equal(transactionFor(bad).partnerResolutionStatus, before.partnerResolutionStatus);
+    assert.equal(result.resolvedReviewIds.length, 1);
+  });
+
+  test('batch 9: 同等学習は1行に畳み、既存行とlearn=falseは増やさない', () => {
+    const seeded = seedPartnerViaWeb({count: 2, merchant: '同一学習店'});
+    const before = dictionaryCount();
+    const result = batchResolve(seeded.customer, seeded.fileId, seeded.reviews.map((review) => ({
+      reviewId: review.reviewId, operation: 'ADOPT_EXISTING_PARTNER',
+      partnerName: '株式会社同一学習先', learn: true
+    })));
+    assert.equal(dictionaryCount(), before + 1);
+    assert.equal(result.learnedDictIds.length, 1);
+
+    const existing = seedPartnerViaWeb({merchant: '既存学習店'});
+    const normalized = call('normalizeMerchant', ['既存学習店']);
+    call('learnFromResolution', [existing.customer.customerId, '既存学習店', normalized,
+      '株式会社既存学習先', 'reviewer@example.com']);
+    const beforeExisting = dictionaryCount();
+    const existingResult = batchResolve(existing.customer, existing.fileId, [{
+      reviewId: existing.reviews[0].reviewId, operation: 'ADOPT_EXISTING_PARTNER',
+      partnerName: '株式会社既存学習先', learn: true
+    }]);
+    assert.equal(dictionaryCount(), beforeExisting);
+    assert.deepEqual(existingResult.learnedDictIds, []);
+
+    const noLearn = seedPartnerViaWeb({merchant: '学習なし店'});
+    const beforeNoLearn = dictionaryCount();
+    batchResolve(noLearn.customer, noLearn.fileId, [{reviewId: noLearn.reviews[0].reviewId,
+      operation: 'ADOPT_EXISTING_PARTNER', partnerName: '株式会社学習なし先', learn: false}]);
+    assert.equal(dictionaryCount(), beforeNoLearn);
+  });
+
+  test('batch 10: merchantNormalized が空のlearn=trueはF列を書く前に拒否', () => {
+    const seeded = seedPartnerViaWeb({merchant: '\u0001'});
+    const review = seeded.reviews[0];
+    const tx = transactionFor(review);
+    const result = batchResolve(seeded.customer, seeded.fileId, [{reviewId: review.reviewId,
+      operation: 'ADOPT_EXISTING_PARTNER', partnerName: '株式会社前提失敗', learn: true}]);
+    assert.equal(result.errors[0].code, 'LEARN_PRECONDITION');
+    assert.equal(destinationValue(seeded.destinationSpreadsheetId, tx.destinationRow, 3), '');
+  });
+
+  test('batch 11: DATE の未解決を数え、確定理由はcommitBlockingReasons_から返す', () => {
+    const seeded = seedPartnerViaWeb({rows: ['日付不明,確定条件店,1000,仕入れ']});
+    const reviews = openReviewsFor(seeded.customer.customerId, {fileId: seeded.fileId});
+    const partner = reviews.find((review) => review.reviewType === 'PARTNER');
+    const date = reviews.find((review) => review.reviewType === 'DATE');
+    const tx = transactionFor(partner);
+    gas.stubs.getSpreadsheet('master').getSheetByName('クレカ取引ログ')
+      .getRange(tx._rowNumber, 19).setValue('2025-12-10');
+    const result = batchResolve(seeded.customer, seeded.fileId, [{reviewId: partner.reviewId,
+      operation: 'ADOPT_EXISTING_PARTNER', partnerName: '株式会社条件先', learn: false}]);
+    assert.equal(result.committedReviewIds.length, 0);
+    assert.deepEqual(result.unmet[0].openReviewTypes, ['DATE']);
+    assert.deepEqual(result.unmet[0].unmetConditions, ['OPEN_REVIEW_REMAINS']);
+    assert.equal(reviewById(date.reviewId).status, 'OPEN');
+  });
+
+  test('batch 12: 監査3件は1回のsetValuesで連鎖し、GENESISと単件ハッシュも一致', () => {
+    const entries = [1, 2, 3].map((index) => ({auditId: `AUDIT_BATCH_${index}`,
+      at: '2026-09-01T00:00:00.000Z', type: 'SYNC', actor: 'audit@example.com',
+      targetType: 'LOG', targetId: String(index), after: {index}}));
+    const fixedNow = '2026-09-01T00:00:00.000Z';
+    const seedAudit = () => {
+      const sheet = gas.stubs.getSpreadsheet('master').getSheetByName('監査ログ');
+      const genesis = call('makeAuditRow_', [{auditId: 'AUDIT_GENESIS', at: fixedNow,
+        type: 'CHAIN_ANCHOR', actor: 'seed', targetType: 'AUDIT', targetId: 'GENESIS',
+        after: {kind: 'GENESIS', createdAt: fixedNow}}, 'GENESIS', true]);
+      sheet.appendRow(genesis);
+      call('appendAudit', [{auditId: 'AUDIT_SEED', at: fixedNow, type: 'SYNC',
+        actor: 'seed', targetType: 'LOG', targetId: 'seed'}]);
+    };
+    setupWorld();
+    withMocks({nowIso_: () => fixedNow}, seedAudit);
+    const writesBefore = gas.stubs.roundTrips().rangeWrites;
+    withMocks({nowIso_: () => fixedNow}, () => call('appendAuditBatch', [entries]));
+    const writes = gas.stubs.roundTrips().rangeWrites - writesBefore;
+    const batchRows = gas.stubs.getSpreadsheet('master').getSheetByName('監査ログ')
+      .getDataRange().getValues().slice(1);
+    const batchHashes = batchRows.map((row) => [row[0], row[13], row[14]]);
+    setupWorld();
+    withMocks({nowIso_: () => fixedNow}, () => {
+      seedAudit();
+      entries.forEach((entry) => call('appendAudit', [entry]));
+    });
+    const singleRows = gas.stubs.getSpreadsheet('master').getSheetByName('監査ログ')
+      .getDataRange().getValues().slice(1).map((row) => [row[0], row[13], row[14]]);
+    assert.equal(writes, 1);
+    assert.deepEqual(batchHashes.slice(1), singleRows.slice(1));
+    assert.equal(call('verifyChain', ['FULL']).ok, true);
+    const empty = setupWorld();
+    const emptySheet = gas.stubs.getSpreadsheet('master').getSheetByName('監査ログ');
+    assert.deepEqual(call('appendAuditBatch', [[]]), []);
+    assert.equal(emptySheet.getLastRow(), 1);
+    call('appendAuditBatch', [[entries[0]]]);
+    assert.equal(emptySheet.getRange(2, 3).getValue(), 'CHAIN_ANCHOR');
+    assert.equal(emptySheet.getRange(2, 8).getValue(), 'GENESIS');
+    assert.equal(emptySheet.getRange(2, 14).getValue(), 'GENESIS');
+    assert.equal(call('verifyChain', ['FULL']).ok, true);
+  });
+
+  test('batch 13: PARTNER_BATCH_MAX_ITEMS_ 超過分はnotAttemptedReviewIdsへ残る', () => {
+    const seeded = seedPartnerViaWeb({count: 3});
+    const result = withMocks({PARTNER_BATCH_MAX_ITEMS_: 2}, () => batchResolve(
+      seeded.customer, seeded.fileId, seeded.reviews.map((review) => ({reviewId: review.reviewId,
+        operation: 'ADOPT_EXISTING_PARTNER', partnerName: '株式会社上限先', learn: false}))));
+    assert.equal(result.resolvedReviewIds.length, 2);
+    assert.deepEqual(result.notAttemptedReviewIds, [seeded.reviews[2].reviewId]);
+  });
+
+  test('batch 14: 同じreviewIdの2回目と同じ転記行を指す2件を拒否', () => {
+    const duplicate = seedPartnerViaWeb();
+    const entry = {reviewId: duplicate.reviews[0].reviewId,
+      operation: 'ADOPT_EXISTING_PARTNER', partnerName: '株式会社重複先', learn: false};
+    const duplicateResult = batchResolve(duplicate.customer, duplicate.fileId, [entry, entry]);
+    assert.equal(duplicateResult.errors.find((item) => item.code === 'DUPLICATE_DECISION').reviewId,
+      entry.reviewId);
+    // 1 回目は確定し、2 回目だけが重複として返る。印を要確認 ID で付けると
+    // 1 回目まで後の段から外れ、どこにも数えられずに消えていた（監査で発見）。
+    assert.deepEqual(duplicateResult.resolvedReviewIds, [entry.reviewId]);
+    assert.equal(reviewById(entry.reviewId).status, 'RESOLVED');
+    assert.equal(2, duplicateResult.resolvedReviewIds.length + duplicateResult.errors.length +
+      duplicateResult.skippedByLeaseReviewIds.length + duplicateResult.notAttemptedReviewIds.length);
+
+    const conflict = seedPartnerViaWeb({count: 2, merchant: '行衝突店'});
+    const first = transactionFor(conflict.reviews[0]);
+    const second = transactionFor(conflict.reviews[1]);
+    gas.stubs.getSpreadsheet('master').getSheetByName('クレカ取引ログ')
+      .getRange(second._rowNumber, 31).setValue(first.destinationRow);
+    const conflictResult = batchResolve(conflict.customer, conflict.fileId,
+      conflict.reviews.map((review) => ({reviewId: review.reviewId,
+        operation: 'ADOPT_EXISTING_PARTNER', partnerName: '株式会社行衝突先', learn: false})));
+    assert.deepEqual(conflictResult.errors.map((item) => item.code),
+      ['DESTINATION_ROW_CONFLICT', 'DESTINATION_ROW_CONFLICT']);
+    assert.equal(destinationValue(conflict.destinationSpreadsheetId, first.destinationRow, 3), '');
+  });
+
+  test('batch 15: M・Nの異なる転記先へそれぞれ正しい行を書く', () => {
+    const seeded = seedPartnerViaWeb({count: 2, merchant: '二転記先店'});
+    const second = seeded.reviews[1];
+    const secondTx = transactionFor(second);
+    const alternateId = createWebDestination(seeded.customer);
+    gas.stubs.getSpreadsheet('master').getSheetByName('要確認')
+      .getRange(second._rowNumber, 13, 1, 2).setValues([[alternateId, '入力用シート']]);
+    const result = batchResolve(seeded.customer, seeded.fileId, seeded.reviews.map((review) => ({
+      reviewId: review.reviewId, operation: 'ADOPT_EXISTING_PARTNER',
+      partnerName: '株式会社転記先', learn: false
+    })));
+    assert.equal(result.resolvedReviewIds.length, 2);
+    assert.equal(destinationValue(seeded.destinationSpreadsheetId,
+      transactionFor(seeded.reviews[0]).destinationRow, 3), '株式会社転記先');
+    assert.equal(gas.stubs.getSpreadsheet(alternateId).getSheetByName('入力用シート')
+      .getRange(secondTx.destinationRow, 3).getValue(), '株式会社転記先');
+  });
+
+  test('batch 16: IN_PROGRESS のPARTNER要確認もADOPTでRESOLVEDになる', () => {
+    const seeded = seedPartnerViaWeb();
+    call('updateReviewStatus', [seeded.reviews[0].reviewId, 'IN_PROGRESS',
+      {actor: 'reviewer@example.com', operation: 'REQUEST_NEW_PARTNER'}]);
+    const result = batchResolve(seeded.customer, seeded.fileId, [{reviewId: seeded.reviews[0].reviewId,
+      operation: 'ADOPT_EXISTING_PARTNER', partnerName: '株式会社承認待ち先', learn: false}]);
+    assert.deepEqual(result.resolvedReviewIds, [seeded.reviews[0].reviewId]);
+    assert.equal(reviewById(seeded.reviews[0].reviewId).status, 'RESOLVED');
+  });
+
+  test('batch 17: 手順6直後の停止後に再実行して辞書・監査を二重にしない', () => {
+    const seeded = seedPartnerViaWeb({merchant: '再実行店'});
+    const review = seeded.reviews[0];
+    const realLock = gas.context.withScriptLock_;
+    let lockCount = 0;
+    const error = caught(() => withMocks({withScriptLock_(callback) {
+      lockCount += 1;
+      const value = realLock(callback);
+      if (lockCount === 2) throw new Error('stopped after transaction log write');
+      return value;
+    }}, () => batchResolve(seeded.customer, seeded.fileId, [{reviewId: review.reviewId,
+      operation: 'ADOPT_EXISTING_PARTNER', partnerName: '株式会社再実行先', learn: true}])));
+    assert.ok(error.message.includes('stopped after transaction log write'));
+    assert.equal(reviewById(review.reviewId).status, 'OPEN');
+    assert.equal(transactionFor(review).partnerResolutionStatus, 'RESOLVED_WITH_PARTNER');
+    const result = batchResolve(seeded.customer, seeded.fileId, [{reviewId: review.reviewId,
+      operation: 'ADOPT_EXISTING_PARTNER', partnerName: '株式会社再実行先', learn: true}]);
+    assert.deepEqual(result.resolvedReviewIds, [review.reviewId]);
+    const customerRows = gas.stubs.getSpreadsheet('master').getSheetByName('顧客別取引先辞書')
+      .getDataRange().getValues().slice(1).filter((row) => row[0]);
+    const auditRows = gas.stubs.getSpreadsheet('master').getSheetByName('監査ログ')
+      .getDataRange().getValues().slice(1);
+    assert.equal(customerRows.filter((row) => row[1] === '再実行店').length, 1);
+    assert.equal(auditRows.filter((row) => row[2] === 'DICT_REGISTER' && row[10].includes('再実行店')).length, 1);
+    assert.equal(auditRows.filter((row) => row[2] === 'REVIEW_RESOLVE' && row[7] === review.fullTxId).length, 1);
+
+    const ordered = seedPartnerViaWeb({merchant: '順序確認店'});
+    const valuesApi = gas.context.Sheets.Spreadsheets.Values;
+    const realBatchUpdate = valuesApi.batchUpdate;
+    valuesApi.batchUpdate = function(request, spreadsheetId) {
+      if (String(spreadsheetId) === 'master' && request.data.some((item) =>
+          String(item.range).indexOf('要確認') >= 0)) throw new Error('review write stop');
+      return realBatchUpdate.apply(this, arguments);
+    };
+    let orderedError;
+    try {
+      orderedError = caught(() => batchResolve(ordered.customer, ordered.fileId, [{
+        reviewId: ordered.reviews[0].reviewId, operation: 'ADOPT_EXISTING_PARTNER',
+        partnerName: '株式会社順序先', learn: false
+      }]));
+    } finally { valuesApi.batchUpdate = realBatchUpdate; }
+    assert.equal(orderedError.message, 'review write stop');
+    assert.equal(reviewById(ordered.reviews[0].reviewId).status, 'OPEN');
+    assert.equal(transactionFor(ordered.reviews[0]).transactionStatus, 'REVIEW_REQUIRED');
+  });
+
+  test('batch 18: 時間の門は境界を含み、maxBatchMsがfloorMsより大きければ使う', () => {
+    const now = gas.context.partnerBatchClockNow_;
+    try {
+      gas.context.partnerBatchClockNow_ = () => 41000;
+      assert.equal(gas.call('partnerBatchMayStart_', [{startedAt: 1000, deadlineMs: 60000,
+        floorMs: 10000, factor: 2, maxBatchMs: 0}]), true);
+      gas.context.partnerBatchClockNow_ = () => 41001;
+      assert.equal(gas.call('partnerBatchMayStart_', [{startedAt: 1000, deadlineMs: 60000,
+        floorMs: 10000, factor: 2, maxBatchMs: 0}]), false);
+      gas.context.partnerBatchClockNow_ = () => 1000;
+      assert.equal(gas.call('partnerBatchMayStart_', [{startedAt: 1000, deadlineMs: 60000,
+        floorMs: 10000, factor: 2, maxBatchMs: 30000}]), true);
+      assert.equal(gas.call('partnerBatchMayStart_', [{startedAt: 1000, deadlineMs: 59999,
+        floorMs: 10000, factor: 2, maxBatchMs: 30000}]), false);
+    } finally { gas.context.partnerBatchClockNow_ = now; }
+  });
+
+  test('batch 19: 2ファイルの自動採用は全件処理し、ファイル別読取が件数に依らない', () => {
+    const seeded = seedAutoAdoptionFiles([2, 10], 'batch_auto_reads');
+    gas.stubs.resetApiCallCounts();
+    const summary = call('opsAutoAdoptPartners', []);
+    assert.equal(summary.adopted, 12);
+    assert.equal(summary.files.length, 2);
+    assert.deepEqual(summary.completedFiles, seeded.files);
+    assert.equal(summary.files[0].reads, summary.files[1].reads);
+    assert.ok(summary.files[0].reads <= 20);
+    assert.equal(summary.remaining, 0);
+  });
+
+  test('batch 20: 自動採用は重いファイル後の時間門で止まり、再実行で続く', () => {
+    const seeded = seedAutoAdoptionFiles([1, 1], 'batch_auto_time');
+    const first = withPartnerTiming([200000], () => call('opsAutoAdoptPartners', []));
+    assert.equal(first.adopted, 1, JSON.stringify(first));
+    assert.equal(first.remaining, 1);
+    assert.equal(first.stoppedBy, 'TIME');
+    assert.equal(first.completedFiles.includes(seeded.files[0]), true);
+    assert.equal(call('activeLeases_', []).filter((lease) => seeded.files.includes(lease.fileId)).length, 0);
+    const second = withPartnerTiming([0], () => call('opsAutoAdoptPartners', []));
+    assert.equal(second.adopted, 1);
+    assert.equal(second.remaining, 0);
+    assert.deepEqual(second.completedFiles, [seeded.files[1]]);
+
+    const maxHistory = seedAutoAdoptionFiles([1, 1, 1], 'batch_auto_max_history');
+    const third = withPartnerTiming([95000, 20000, 0], () => call('opsAutoAdoptPartners', []));
+    assert.equal(third.adopted, 2);
+    assert.equal(third.stoppedBy, 'TIME');
+    assert.ok(third.results.some((entry) => entry.reviewId === openReviewsFor(
+      maxHistory.customer.customerId, {fileId: maxHistory.files[2]})[0].reviewId && entry.deferred === 'TIME'));
+  });
+
+  test('batch 21: 締切まで床時間が無いとき完了掃除を省略する', () => {
+    const seeded = seedAutoAdoptionFiles([1, 1], 'batch_auto_sweep');
+    const summary = withPartnerTiming([250000], () => call('opsAutoAdoptPartners', []));
+    assert.equal(summary.stoppedBy, 'TIME', JSON.stringify(summary));
+    assert.equal(summary.completionSweep, 'SKIPPED_TIME');
+    assert.equal(summary.remaining, 1);
+    assert.ok(summary.completedFiles.includes(seeded.files[0]));
+  });
+
+  test('batch 22: PARTNER_BATCHログに店名・取引先名・金額を含めない', () => {
+    const merchant = '秘密の明細店ZXQ';
+    const partner = '秘密の取引先QZX';
+    const seeded = seedPartnerViaWeb({rows: [`2025/12/10,${merchant},987654321,仕入れ`]});
+    batchResolve(seeded.customer, seeded.fileId, [{reviewId: seeded.reviews[0].reviewId,
+      operation: 'ADOPT_EXISTING_PARTNER', partnerName: partner, learn: false}]);
+    const lines = gas.stubs.getLogs().filter((line) => line.startsWith('PARTNER_BATCH '));
+    assert.equal(lines.length, 1);
+    assert.equal(lines.join('\n').includes(merchant), false);
+    assert.equal(lines.join('\n').includes(partner), false);
+    assert.equal(lines.join('\n').includes('987654321'), false);
+  });
+
+  test('batch 23: 自動採用は部品の例外を受け止めて次のファイルへ進み、リースを残さない', () => {
+    const seeded = seedAutoAdoptionFiles([1, 1], 'batch_auto_fault');
+    const real = gas.context.resolvePartnerReviewsBatch;
+    let calls = 0;
+    const summary = withMocks({resolvePartnerReviewsBatch(...args) {
+      calls += 1;
+      if (calls === 1) {
+        const fault = new Error('transient sheets failure');
+        fault.code = 'SHEETS_500';
+        throw fault;
+      }
+      return real.apply(this, args);
+    }}, () => call('opsAutoAdoptPartners', []));
+    assert.equal(summary.errors, 1, JSON.stringify(summary.results));
+    assert.ok(summary.results.some((entry) => entry.error === 'SHEETS_500'));
+    assert.equal(summary.adopted, 1, '2 本目のファイルは採用される');
+    assert.equal(call('activeLeases_', []).filter((lease) =>
+      seeded.files.includes(lease.fileId)).length, 0);
+  });
+
+  test('batch 24: 自動採用の完了の掃除はリース表を 1 回だけ読む', () => {
+    const seeded = seedAutoAdoptionFiles([1, 1, 1], 'batch_auto_sweep_leases');
+    // 採用できない状態（辞書を消す）にして、3 本とも REVIEW_WAIT のまま掃除へ進める。
+    const dict = gas.stubs.getSpreadsheet('master').getSheetByName('顧客別取引先辞書');
+    dict.getRange(2, 15).setValue(false);
+    const real = gas.context.activeLeases_;
+    // 掃除は最後の一覧読取（恒久ファイルインデックス）の後に走る。頭の
+    // 取りこぼし確定も同じ一覧を読むので、最後の読取以降だけを数える。
+    let sweepReads = 0;
+    const realScan = gas.context.permanentIndexRowsForScan_;
+    let summary;
+    withMocks({
+      permanentIndexRowsForScan_() { sweepReads = 0; return realScan(); },
+      activeLeases_() { sweepReads += 1; return real(); }
+    }, () => { summary = call('opsAutoAdoptPartners', []); });
+    assert.equal(summary.completionSweep, 'DONE');
+    seeded.files.forEach((fileId) => assert.equal(fileStateOf(fileId), 'REVIEW_WAIT'));
+    assert.ok(sweepReads <= 1, `掃除でリース表を ${sweepReads} 回読んだ`);
+  });
+
+  test('batch 25: 自動採用は部品の上限で残った件を同じ実行の中で続けて採用する', () => {
+    const seeded = seedAutoAdoptionFiles([3], 'batch_auto_cap');
+    const summary = withMocks({PARTNER_BATCH_MAX_ITEMS_: 1},
+      () => call('opsAutoAdoptPartners', []));
+    assert.equal(summary.adopted, 3, JSON.stringify(summary.results));
+    assert.equal(summary.remaining, 0);
+    assert.deepEqual(summary.completedFiles, seeded.files);
+    assert.equal(openReviewsFor(seeded.customer.customerId, {fileId: seeded.files[0]}).length, 0);
+  });
+
+  test('batch 26: 書く途中で別の経路が閉じた要確認は上書きせず ALREADY_SETTLED', () => {
+    const seeded = seedPartnerViaWeb({count: 2, merchant: '途中で閉じる店'});
+    const [closed, normal] = seeded.reviews;
+    const realLearn = gas.context.learnFromResolutionBatch;
+    const result = withMocks({learnFromResolutionBatch(...args) {
+      // 学習の段（取引ログの後・要確認の前）で、別の経路が 1 件を除外した形にする。
+      gas.call('updateReviewStatus', [closed.reviewId, 'EXCLUDED',
+        {actor: 'other@example.com', operation: 'EXCLUDE', excludeReason: 'REVIEWER_JUDGEMENT'}]);
+      return realLearn.apply(this, args);
+    }}, () => batchResolve(seeded.customer, seeded.fileId, seeded.reviews.map((review) => ({
+      reviewId: review.reviewId, operation: 'ADOPT_EXISTING_PARTNER',
+      partnerName: '株式会社途中先', learn: true}))));
+    assert.equal(result.errors.find((entry) => entry.reviewId === closed.reviewId).code,
+      'ALREADY_SETTLED');
+    assert.equal(reviewById(closed.reviewId).status, 'EXCLUDED', '閉じた要確認を RESOLVED で上書きしない');
+    assert.deepEqual(result.resolvedReviewIds, [normal.reviewId]);
+  });
+
+  test('batch 27: 書く前に F・I 列を文字列書式にする（電話番号のような取引先名を化けさせない）', () => {
+    const seeded = seedPartnerViaWeb({count: 2, merchant: '書式店'});
+    const sheet = gas.stubs.getSpreadsheet(seeded.destinationSpreadsheetId).getSheetByName('入力用シート');
+    const rows = seeded.reviews.map((review) => Number(transactionFor(review).destinationRow));
+    // 取込が付けた書式を外し、確定の段が自分で付けることを確かめる。
+    rows.forEach((row) => [3, 4].forEach((column) => sheet.getRange(row, column).setNumberFormat('General')));
+    batchResolve(seeded.customer, seeded.fileId, [
+      {reviewId: seeded.reviews[0].reviewId, operation: 'ADOPT_EXISTING_PARTNER',
+        partnerName: '0570-000-000', learn: false},
+      {reviewId: seeded.reviews[1].reviewId, operation: 'RESOLVE_PARTNER_UNKNOWN'}]);
+    assert.equal(sheet.getRange(rows[0], 3).getNumberFormat(), '@', 'F 列');
+    assert.equal(sheet.getRange(rows[1], 4).getNumberFormat(), '@', 'I 列');
+  });
+
 };
