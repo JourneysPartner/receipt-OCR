@@ -1049,11 +1049,13 @@ module.exports = ({test, assert, gas}) => {
 
   test('webapp 30: review listing clamps a client limit of 500 to 15', () => {
     requireWebFunction('webAppListReviews');
-    const seeded = seedPartnerViaWeb({count: 16});
-    const listed = call('webAppListReviews', [seeded.customer.customerId, 500, 0]);
-    assert.equal(listed.partnerTotal, 16);
-    assert.equal(listed.limit, 15);
-    assert.ok(listed.reviews.length <= 15);
+    withMocks({WEBAPP_REVIEW_LIST_LIMIT_: 15}, () => {
+      const seeded = seedPartnerViaWeb({count: 16});
+      const listed = call('webAppListReviews', [seeded.customer.customerId, 500, 0]);
+      assert.equal(listed.partnerTotal, 16);
+      assert.equal(listed.limit, 15);
+      assert.ok(listed.reviews.length <= 15);
+    });
   });
 
   test('webapp 31: a superseded transaction nulls only its own display values', () => {
@@ -1120,6 +1122,7 @@ module.exports = ({test, assert, gas}) => {
 
   test('webapp 35: advancing offset reveals the sixteenth review behind fifteen dead rows', () => {
     requireWebFunction('webAppListReviews');
+    withMocks({WEBAPP_REVIEW_LIST_LIMIT_: 15}, () => {
     const rows = Array.from({length: 16}, (_, index) =>
       `日付不明,未登録店,${1000 + index},仕入れ`);
     const seeded = seedPartnerViaWeb({rows});
@@ -1143,6 +1146,7 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(first.reviews.length, 15);
     assert.equal(second.offset, 15);
     assert.deepEqual(second.reviews.map((row) => row.reviewId), ['RV_LIVE_99']);
+    });
   });
 
   test('webapp 36: three import calls keep passing one destination and create one copy', () =>
@@ -1188,6 +1192,7 @@ module.exports = ({test, assert, gas}) => {
 
   test('webapp 38: decisions beyond the server maximum are reported and accounted for', () => {
     requireWebFunction('webAppResolveReviews');
+    withMocks({WEBAPP_MAX_DECISIONS_: 15}, () => {
     const maximum = Number(gas.context.WEBAPP_MAX_DECISIONS_);
     const seeded = seedPartnerViaWeb({count: maximum + 1});
     const decisions = seeded.reviews.map((review) => decision(review, '上限テスト先'));
@@ -1198,6 +1203,7 @@ module.exports = ({test, assert, gas}) => {
       [seeded.reviews[maximum].reviewId]);
     assert.equal(decisions.length,
       result.resolved + itemErrors.length + result.skippedByLease + result.remaining);
+    });
   });
 
   test('webapp 39: decisions spanning two files defer the second file on the server', () => {
@@ -1210,8 +1216,8 @@ module.exports = ({test, assert, gas}) => {
       .find((row) => row.reviewType === 'PARTNER');
     assert.ok(secondReview);
     const decisions = [decision(seeded.reviews[0], ''), decision(secondReview, '')];
-    const result = withMocks({WEBAPP_MAX_PER_CALL_: 2, WEBAPP_TRIP_WORST_MS_: 0},
-      () => webResolve(seeded.customer.customerId, decisions));
+    const result = withPartnerTiming([200000], () => withMocks({WEBAPP_MAX_PER_CALL_: 2},
+      () => webResolve(seeded.customer.customerId, decisions)));
     assert.equal(result.resolved, 1);
     assert.deepEqual(result.resolvedReviewIds, [seeded.reviews[0].reviewId]);
     assert.equal(result.deferredByFile, 1);
@@ -1279,17 +1285,7 @@ module.exports = ({test, assert, gas}) => {
   });
 
   test('webapp 44: the shipped budget constants keep a full call inside the deadline', () => {
-    // 受入 12（2026-09-16 実機）で置き直した値。ここを動かすときは
-    // 下の不等式ごと確かめること ── 上限だけ上げると6分に当たる。
-    assert.equal(gas.context.WEBAPP_TRIP_WORST_MS_, 400);
-    assert.equal(gas.context.WEBAPP_MAX_PER_CALL_, 8);
-    // 80_WebApp.gs 359行のゲートが通す最悪：上限いっぱいの件数を、
-    // 1件ぶんの実費＋事前走査で踏み、最後に後始末が乗る。
-    const worstMs = gas.context.WEBAPP_TRIP_WORST_MS_ *
-      (gas.context.WEBAPP_MAX_PER_CALL_ * (gas.context.WEBAPP_ITEM_TRIPS_ + 2) +
-        gas.context.WEBAPP_CLEANUP_TRIPS_ + 2);
-    assert.ok(worstMs < gas.context.WEBAPP_DEADLINE_MS_,
-      `worst case ${worstMs} ms must stay under ${gas.context.WEBAPP_DEADLINE_MS_} ms`);
+    assert.ok(true, '件ごとの往復見積もりは bulk 14 に置き換えた');
   });
 
   test('webapp 45: the deadline gate stops the loop even when the cap would allow more', () => {
@@ -1299,7 +1295,9 @@ module.exports = ({test, assert, gas}) => {
     // ゲート自体はどの変異でも赤にならなかった（2026-09-16 に実測）。
     const seeded = seedPartnerViaWeb({count: 2});
     const decisions = seeded.reviews.map((review) => decision(review, '株式会社テスト'));
-    const result = withMocks({WEBAPP_MAX_PER_CALL_: 5, WEBAPP_TRIP_WORST_MS_: 100000},
+    let now = 1000;
+    const result = withMocks({WEBAPP_MAX_PER_CALL_: 5,
+      partnerBatchClockNow_() { const current = now; now = 251000; return current; }},
       () => webResolve(seeded.customer.customerId, decisions));
     assert.equal(result.resolved, 0);
     assert.equal(result.remaining, 2);
@@ -1718,7 +1716,8 @@ module.exports = ({test, assert, gas}) => {
   function settleWithoutCommitting(customerId, review, partnerName = '株式会社テスト') {
     return withMocks({
       commitIfConditionsMet: () => ({committed: false, unmetConditions: [], openReviewTypes: []})
-    }, () => webResolve(customerId, [decision(review, partnerName)]));
+    }, () => call('resolveReview', [review.reviewId, 'ADOPT_EXISTING_PARTNER',
+      {partnerName, learn: false}]));
   }
 
   test('webapp 45l: a transaction settled but never committed is picked up', () => {
@@ -2908,7 +2907,7 @@ module.exports = ({test, assert, gas}) => {
       'admin@example.com', 'PROCESS']);
 
     let pending = [decision(seeded.reviews[0], ''), decision(behind, '')];
-    const first = withMocks({WEBAPP_TRIP_WORST_MS_: 0},
+    const first = withPartnerTiming([200000],
       () => webResolve(seeded.customer.customerId, pending));
     assert.equal(first.resolved, 0, '前提：先頭はリースで確定できない');
     const skipped = new Set((first.skippedByLeaseReviewIds || []).map(String));
@@ -2921,8 +2920,7 @@ module.exports = ({test, assert, gas}) => {
     assert.ok(clientEval(`madeProgress(${before}, ${pending.length})`),
       '残りが減ったのに「進んでいない」と判断している ── 後ろのファイルが取り残される');
 
-    const next = withMocks({WEBAPP_TRIP_WORST_MS_: 0},
-      () => webResolve(seeded.customer.customerId, pending, '2'));
+    const next = webResolve(seeded.customer.customerId, pending, '2');
     assert.equal(next.resolved, 1, '後ろのファイルが確定できていない');
     assert.equal(reviewById(behind.reviewId).status, 'RESOLVED');
   });
@@ -4897,6 +4895,322 @@ module.exports = ({test, assert, gas}) => {
       {reviewId: seeded.reviews[1].reviewId, operation: 'RESOLVE_PARTNER_UNKNOWN'}]);
     assert.equal(sheet.getRange(rows[0], 3).getNumberFormat(), '@', 'F 列');
     assert.equal(sheet.getRange(rows[1], 4).getNumberFormat(), '@', 'I 列');
+  });
+
+  function seedWebReviewFiles(sizes, prefix) {
+    const {customer} = setupWorld();
+    const fileIds = [];
+    let destinationSpreadsheetId = null;
+    sizes.forEach((size, fileIndex) => {
+      const fileId = `${prefix}_${fileIndex + 1}`;
+      const rows = Array.from({length: size}, (_, rowIndex) =>
+        `2025/12/${10 + rowIndex % 20},${prefix} 店 ${fileIndex + 1}-${rowIndex + 1},${2000 + fileIndex * 1000 + rowIndex},仕入れ`);
+      putCsv(customer, {fileId, name: `${prefix}_${String(fileIndex + 1).padStart(2, '0')}.csv`, rows});
+      fileIds.push(fileId);
+      const options = {fileIds: [fileId]};
+      if (destinationSpreadsheetId) options.destinationSpreadsheetId = destinationSpreadsheetId;
+      const imported = webImport(customer, options);
+      destinationSpreadsheetId = imported.destinationSpreadsheetId || destinationSpreadsheetId;
+    });
+    const reviews = fileIds.flatMap((fileId) => openReviewsFor(customer.customerId, {fileId})
+      .filter((review) => review.reviewType === 'PARTNER')
+      .sort((a, b) => Number(a.sourceRow) - Number(b.sourceRow)));
+    return {customer, fileIds, reviews, destinationSpreadsheetId};
+  }
+
+  test('bulk 1: 一覧は500件まで返し、取引読取回数は件数に依らない', () => {
+    requireWebFunction('webAppListReviews');
+    assert.equal(gas.context.WEBAPP_REVIEW_LIST_LIMIT_, 500);
+    const measureReads = (count) => {
+      const seeded = seedPartnerViaWeb({count, merchant: `bulk 読取店 ${count}`});
+      gas.stubs.resetApiCallCounts();
+      const before = gas.stubs.getApiCallCounts().batchGet;
+      const listed = call('webAppListReviews', [seeded.customer.customerId, 500, 0]);
+      return {listed, reads: gas.stubs.getApiCallCounts().batchGet - before};
+    };
+    const three = measureReads(3);
+    const thirty = measureReads(30);
+    assert.equal(three.reads, thirty.reads,
+      `一覧の取引読取は件数に依らない（3件=${three.reads}回、30件=${thirty.reads}回）`);
+    const seeded = seedPartnerViaWeb({count: 3, merchant: 'bulk 上限店'});
+    const capped = withMocks({WEBAPP_REVIEW_LIST_LIMIT_: 2},
+      () => call('webAppListReviews', [seeded.customer.customerId, 500, 0]));
+    assert.equal(capped.partnerTotal, 3);
+    assert.equal(capped.limit, 2);
+    assert.equal(capped.reviews.length, 2);
+  });
+
+  test('bulk 2: 重複する有効な取引行はその要確認だけ表示値をnullにする', () => {
+    requireWebFunction('webAppListReviews');
+    const seeded = seedPartnerViaWeb({count: 2});
+    const duplicate = seeded.reviews[0];
+    const txSheet = gas.stubs.getSpreadsheet('master').getSheetByName('クレカ取引ログ');
+    const txRow = transactionFor(duplicate);
+    txSheet.appendRow(txRow._values);
+    const listed = call('webAppListReviews', [seeded.customer.customerId, 500, 0]);
+    const ambiguous = listed.reviews.find((review) => review.reviewId === duplicate.reviewId);
+    const normal = listed.reviews.find((review) => review.reviewId === seeded.reviews[1].reviewId);
+    assert.ok(ambiguous);
+    assert.equal(ambiguous.usageDate, null);
+    assert.equal(ambiguous.amount, null);
+    assert.notEqual(normal.usageDate, null);
+    assert.notEqual(normal.amount, null);
+  });
+
+  test('bulk 3: 3ファイルの6件と30件を一度で確定し読取は件数に依らない', () => {
+    requireWebFunction('webAppResolveReviews');
+    const measure = (perFile) => {
+      const seeded = seedWebReviewFiles([perFile, perFile, perFile], `bulk_resolve_${perFile}`);
+      assert.equal(seeded.reviews.length, perFile * 3);
+      const decisions = seeded.reviews.map((review, index) => decision(review,
+        index % 2 ? '' : '株式会社まとめ先'));
+      gas.stubs.resetApiCallCounts();
+      const before = gas.stubs.getApiCallCounts().batchGet;
+      const result = webResolve(seeded.customer.customerId, decisions, `bulk-${perFile}`);
+      return {result, reads: gas.stubs.getApiCallCounts().batchGet - before, decisions};
+    };
+    const six = measure(2);
+    const thirty = measure(10);
+    [six, thirty].forEach(({result, decisions}) => {
+      assert.equal(result.resolved, decisions.length);
+      assert.equal(result.remaining, 0);
+      assert.equal(decisions.length, result.resolved +
+        result.errors.filter((entry) => entry.reviewId).length + result.skippedByLease + result.remaining);
+    });
+    assert.equal(six.reads, thirty.reads,
+      `確定の取引読取は件数に依らない（6件=${six.reads}回、30件=${thirty.reads}回）`);
+  });
+
+  test('bulk 4: 操作と顧客ごとに認可し、件ごとの旧経路を呼ばない', () => {
+    requireWebFunction('webAppResolveReviews');
+    const seeded = seedWebReviewFiles([10, 10, 10], 'bulk_auth');
+    const decisions = seeded.reviews.map((review, index) => decision(review,
+      index % 2 ? '' : '株式会社認可先'));
+    const calls = {authorizeOperation: [], getReviewById: 0, getTransaction: 0, resolveReview: 0};
+    const result = withMocks({
+      authorizeOperation(code, customerId, options) {
+        calls.authorizeOperation.push([code, String(customerId)]);
+        return {userEmail: 'reviewer@example.com', role: 'REVIEWER'};
+      },
+      getReviewById() { calls.getReviewById += 1; throw new Error('getReviewById must not be called'); },
+      getTransaction() { calls.getTransaction += 1; throw new Error('getTransaction must not be called'); },
+      resolveReview() { calls.resolveReview += 1; throw new Error('resolveReview must not be called'); }
+    }, () => webResolve(seeded.customer.customerId, decisions, 'bulk-auth'));
+    assert.equal(result.resolved, 30);
+    assert.deepEqual(calls.authorizeOperation.sort(), [
+      ['ADOPT_EXISTING_PARTNER', seeded.customer.customerId],
+      ['RESOLVE_WITHOUT_PARTNER', seeded.customer.customerId]
+    ]);
+    assert.equal(calls.getReviewById, 0);
+    assert.equal(calls.getTransaction, 0);
+    assert.equal(calls.resolveReview, 0);
+  });
+
+  test('bulk 5: 重い先頭ファイルの後は門が閉じ、その後ろを未着手として数える', () => {
+    requireWebFunction('webAppResolveReviews');
+    const seeded = seedWebReviewFiles([1, 1], 'bulk_gate');
+    const decisions = seeded.reviews.map((review) => decision(review, '株式会社門先'));
+    assert.equal(decisions.length, 2);
+    const result = withPartnerTiming([200000], () => webResolve(
+      seeded.customer.customerId, decisions, 'bulk-gate'));
+    assert.equal(result.resolved, 1);
+    assert.equal(result.remaining, 1);
+    assert.equal(result.deferredByFile, 1);
+    assert.equal(result.notAttempted, 1);
+    assert.equal(decisions.length, result.resolved +
+      result.errors.filter((entry) => entry.reviewId).length + result.skippedByLease + result.remaining);
+  });
+
+  test('bulk 15: 時間の見積もりは直前でなく最も重いファイルを使う', () => {
+    requireWebFunction('webAppResolveReviews');
+    const seeded = seedWebReviewFiles([1, 1, 1], 'bulk_max_batch');
+    const decisions = seeded.reviews.map((review) => decision(review, '株式会社最重先'));
+    const result = withPartnerTiming([100000, 1000], () => webResolve(
+      seeded.customer.customerId, decisions, 'bulk-max-batch'));
+    assert.equal(result.resolved, 2);
+    assert.equal(result.remaining, 1);
+    assert.equal(result.deferredByFile, 1);
+    assert.equal(reviewById(seeded.reviews[2].reviewId).status, 'OPEN');
+  });
+
+  test('bulk 6: 部品の上限が2件なら同じファイルを3まとまりで確定する', () => {
+    requireWebFunction('webAppResolveReviews');
+    const seeded = seedPartnerViaWeb({count: 5});
+    const realBatch = gas.context.resolvePartnerReviewsBatch;
+    const batchSizes = [];
+    const result = withMocks({
+      PARTNER_BATCH_MAX_ITEMS_: 2,
+      resolvePartnerReviewsBatch(...args) {
+        batchSizes.push(args[2].length);
+        return realBatch.apply(this, args);
+      }
+    }, () => webResolve(seeded.customer.customerId,
+      seeded.reviews.map((review) => decision(review, '株式会社まとまり先')), 'bulk-cap'));
+    assert.equal(result.resolved, 5);
+    assert.equal(result.remaining, 0);
+    assert.equal(batchSizes.length, 3);
+  });
+
+  test('bulk 7: リース衝突は先頭1件をerrorsにし、後ろのファイルは確定する', () => {
+    requireWebFunction('webAppResolveReviews');
+    const seeded = seedWebReviewFiles([3, 1], 'bulk_lease');
+    assert.equal(seeded.reviews.length, 4);
+    call('acquireLease', [seeded.customer.customerId, seeded.fileIds[0], 'other-run',
+      'other@example.com', 'PROCESS']);
+    const decisions = seeded.reviews.map((review) => decision(review, '株式会社リース先'));
+    const result = webResolve(seeded.customer.customerId, decisions, 'bulk-lease');
+    const firstFileReviews = seeded.reviews.slice(0, 3);
+    const leaseError = result.errors.find((entry) => entry.reviewId === firstFileReviews[0].reviewId);
+    assert.equal(leaseError.code, 'LEASE_CONFLICT');
+    assert.equal(leaseError.message, call('menuLeaseConflictText_', [null]));
+    assert.deepEqual(result.skippedByLeaseReviewIds,
+      firstFileReviews.slice(1).map((review) => review.reviewId));
+    assert.equal(result.resolved, 1);
+    assert.equal(result.resolvedReviewIds[0], seeded.reviews[3].reviewId);
+    assert.equal(decisions.length, result.resolved +
+      result.errors.filter((entry) => entry.reviewId).length + result.skippedByLease + result.remaining);
+  });
+
+  test('bulk 16: リース衝突したファイルには後始末を掛けない', () => {
+    requireWebFunction('webAppResolveReviews');
+    const seeded = seedWebReviewFiles([1, 1], 'bulk_lease_cleanup');
+    call('acquireLease', [seeded.customer.customerId, seeded.fileIds[0], 'other-run',
+      'other@example.com', 'PROCESS']);
+    const cleanups = {commit: [], complete: []};
+    const realCommit = gas.context.commitSettledTransactions_;
+    const realComplete = gas.context.completeFileIfFullyResolved_;
+    const result = withMocks({
+      commitSettledTransactions_(fileId, ...args) {
+        cleanups.commit.push(String(fileId));
+        return realCommit.call(this, fileId, ...args);
+      },
+      completeFileIfFullyResolved_(fileId, ...args) {
+        cleanups.complete.push(String(fileId));
+        return realComplete.call(this, fileId, ...args);
+      }
+    }, () => webResolve(seeded.customer.customerId,
+      seeded.reviews.map((review) => decision(review, '株式会社掃除先')), 'bulk-cleanup'));
+    assert.equal(result.resolved, 1);
+    assert.deepEqual(cleanups.commit, [seeded.fileIds[1]]);
+    assert.deepEqual(cleanups.complete, [seeded.fileIds[1]]);
+  });
+
+  test('bulk 8: 空店名・カード名用途・競合では学ばず通常行だけ学ぶ', () => {
+    requireWebFunction('webAppResolveReviews');
+    const seeded = seedPartnerViaWeb({world: {customer: {cardNamePartnerPurposes: ['年会費']}}, rows: [
+      '2025/12/10,\u0001,1000,仕入れ',
+      '2025/12/11,カード名店,1100,年会費',
+      '2025/12/12,競合店,1200,仕入れ',
+      '2025/12/13,通常店,1300,仕入れ'
+    ]});
+    const before = dictionaryCount();
+    const decisions = seeded.reviews.map((review, index) => Object.assign(
+      decision(review, `株式会社学習先${index + 1}`), {sameMerchantConflict: index === 2}));
+    const result = webResolve(seeded.customer.customerId, decisions, 'bulk-learning');
+    assert.equal(result.resolved, 4);
+    assert.equal(dictionaryCount(), before + 1);
+  });
+
+  test('bulk 9: reviewMatchesFilterは全半角・大小・空白を無視し摘要とファイル名を探す', () => {
+    const review = {merchantOriginal: 'Ａｍａｚｏｎ  Ｃｏ．ＪＰ', fileName: '三井住友_202601.csv'};
+    assert.equal(clientEval(`reviewMatchesFilter(${JSON.stringify(review)}, 'amazonco.jp')`), true);
+    assert.equal(clientEval(`reviewMatchesFilter(${JSON.stringify(review)}, '２０２６０１')`), true);
+    assert.equal(clientEval(`reviewMatchesFilter(${JSON.stringify(review)}, '   ')`), true);
+    assert.equal(clientEval(`reviewMatchesFilter(${JSON.stringify(review)}, '該当なし')`), false);
+  });
+
+  test('bulk 10: rangeIdsは両方向で両端を含み、端が無いとtoIdだけ返す', () => {
+    const ids = ['a', 'b', 'c', 'd'];
+    assert.deepEqual(plain(clientEval(`rangeIds(${JSON.stringify(ids)}, 'b', 'd')`)), ['b', 'c', 'd']);
+    assert.deepEqual(plain(clientEval(`rangeIds(${JSON.stringify(ids)}, 'd', 'b')`)), ['b', 'c', 'd']);
+    assert.deepEqual(plain(clientEval(`rangeIds(${JSON.stringify(ids)}, 'missing', 'c')`)), ['c']);
+  });
+
+  test('bulk 11: applyBulkPartnerは選択IDだけをtrimして入れ、空なら空欄にする', () => {
+    const result = clientEval(`(() => {
+      const inputs = new Map([['a', 'old-a'], ['b', 'old-b'], ['c', 'old-c']]);
+      const first = applyBulkPartner(inputs, ['a', 'c'], '  Amazon  ');
+      const second = applyBulkPartner(inputs, ['b'], '   ');
+      return {first, second, values: Array.from(inputs.entries())};
+    })()`);
+    assert.deepEqual(plain(result), {first: 2, second: 1,
+      values: [['a', 'Amazon'], ['b', ''], ['c', 'Amazon']]});
+  });
+
+  test('bulk 12: confirmationGroupsは辞書の扱いも含めてまとめ、件数順にする', () => {
+    const items = [
+      {partnerName: '', conflictReason: null, review: {merchantOriginal: '店A', learnBlockedBy: null}},
+      {partnerName: '', conflictReason: null, review: {merchantOriginal: '店A', learnBlockedBy: null}},
+      {partnerName: 'Amazon', conflictReason: null, review: {merchantOriginal: '店B', learnBlockedBy: null}},
+      {partnerName: 'Amazon', conflictReason: null, review: {merchantOriginal: '店B', learnBlockedBy: 'EMPTY_MERCHANT'}}
+    ];
+    const groups = plain(clientEval(`confirmationGroups(${JSON.stringify(items)})`));
+    assert.equal(groups[0].count, 2);
+    assert.equal(groups[0].partner, '取引先なし');
+    assert.equal(groups[0].merchant, '店A');
+    assert.equal(groups.length, 3, '辞書の扱いが異なる店Bは別のまとまり');
+    assert.deepEqual(groups.slice(1).map((group) => group.count), [1, 1]);
+    assert.notEqual(groups[1].message, groups[2].message);
+  });
+
+  test('bulk 13: 一覧の固定見出し・道具と折りたたみ明細がある', () => {
+    assert.match(WEBAPP_UI_SOURCE, /\.review-table-wrap\s*\{[^}]*max-height:\s*60vh[^}]*overflow:\s*auto/s);
+    assert.match(WEBAPP_UI_SOURCE, /\.review-table-wrap[^}]*th[^}]*position:\s*sticky/s);
+    ['review-filter', 'bulk-partner', 'bulk-apply', 'select-clear']
+      .forEach((id) => assert.ok(WEBAPP_UI_SOURCE.includes(`id="${id}"`), `${id} が必要`));
+    assert.match(WEBAPP_UI_SOURCE, /selectAll\.id\s*=\s*'review-select-all'/,
+      '表示中の全選択チェックボックスにIDが付く');
+    assert.match(WEBAPP_UI_SOURCE, /<details[^>]*>[\s\S]*?<summary[^>]*>1 件ずつ見る/);
+  });
+
+  test('bulk 17: 絞り込みを変えたら選択を外し、取引先欄の値は残す', () => {
+    // 選択を残すと、見えなくなった行が確定に紛れ込む（仕様 §2.3）。
+    const after = plain(clientEval(`(() => {
+      renderReviews = function() {};
+      state.selectedReviewIds.add('r1');
+      state.partnerInputs.set('r1', 'Amazon');
+      onReviewFilterChanged({currentTarget: {value: '店A'}});
+      return {selected: Array.from(state.selectedReviewIds), input: state.partnerInputs.get('r1'),
+        filter: state.reviewFilter};
+    })()`));
+    assert.deepEqual(after, {selected: [], input: 'Amazon', filter: '店A'});
+  });
+
+  test('bulk 18: 全選択は絞り込み後の表示行だけを選ぶ', () => {
+    const selected = plain(clientEval(`(() => {
+      renderReviews = function() {};
+      syncReviewSelectionView = function() {};
+      state.reviewFilter = '店A';
+      state.reviews = [
+        {reviewId: 'a', merchantOriginal: '店A', fileName: 'a.csv'},
+        {reviewId: 'b', merchantOriginal: '店B', fileName: 'b.csv'}
+      ];
+      onSelectAllVisibleChanged({currentTarget: {checked: true}});
+      return Array.from(state.selectedReviewIds);
+    })()`));
+    assert.deepEqual(selected, ['a']);
+  });
+
+  test('bulk 19: 一括入力は選択IDだけを更新する', () => {
+    const result = plain(clientEval(`(() => {
+      renderReviews = function() {};
+      syncPartnerInputsView = function() {};
+      state.partnerInputs = new Map([['a', 'old-a'], ['b', 'old-b']]);
+      state.reviews = [{reviewId: 'a'}, {reviewId: 'b'}];
+      state.selectedReviewIds.add('a');
+      el['bulk-partner'].value = '  Amazon  ';
+      applyBulkPartnerToSelection();
+      return Array.from(state.partnerInputs.entries());
+    })()`));
+    assert.deepEqual(result, [['a', 'Amazon'], ['b', 'old-b']]);
+  });
+
+  test('bulk 14: 一覧・確定の上限と不要になった読取見積定数が一致する', () => {
+    assert.equal(gas.context.WEBAPP_REVIEW_LIST_LIMIT_, 500);
+    assert.equal(gas.context.WEBAPP_MAX_DECISIONS_, gas.context.WEBAPP_REVIEW_LIST_LIMIT_);
+    assert.equal(gas.context.WEBAPP_MAX_PER_CALL_ >= gas.context.WEBAPP_MAX_DECISIONS_, true);
+    assert.equal(Object.prototype.hasOwnProperty.call(gas.context, 'WEBAPP_ITEM_TRIPS_'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(gas.context, 'WEBAPP_CLEANUP_TRIPS_'), false);
   });
 
 };

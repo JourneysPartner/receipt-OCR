@@ -1403,6 +1403,8 @@ module.exports = ({test, assert, gas}) => {
     const box = world.document.createElement('input'); box.className = 'review-select'; box.checked = true;
     const partner = world.document.createElement('input'); partner.className = 'partner-input';
     partner.value = '店A'; row.appendChild(box); row.appendChild(partner); world.root.appendChild(row);
+    world.ui.state.selectedReviewIds.add('r1');
+    world.ui.state.partnerInputs.set('r1', '店A');
     world.ui.state.reviews = [{reviewId: 'r1', fileId: 'target', merchantOriginal: '店A',
       merchantNormalized: '店A', fileName: 'target', sourceRow: 2}];
     world.ids['resolve-button'].disabled = false;
@@ -1412,6 +1414,40 @@ module.exports = ({test, assert, gas}) => {
     const retry = control(world, 'button', 'この登録を取り消す').fire('click')[0];
     world.ids['confirm-submit'].fire('click'); await retry;
     assert.equal(world.calls.find((call) => call.name === 'webAppWithdrawFormat').args[1], 'saved_id');
+  });
+
+  // 要確認の表（spec_webapp_bulk_reviews §2.3）。表を作り直すと、500 行の下のほうを
+  // 見ながらチェックした瞬間に先頭へ戻される。選択と一括入力はその場で合わせる。
+  test('bulk 20: チェック・全選択・一括入力で表を作り直さず、絞り込みでは選択を外す', () => {
+    const world = browserWorld({});
+    const {state, renderSelection} = world.ui;
+    state.reviews = ['a', 'b', 'c'].map((id, index) => ({reviewId: id, fileId: 'f',
+      fileName: 'f.csv', sourceRow: index + 2, merchantOriginal: '店' + id,
+      merchantNormalized: '店' + id.toUpperCase(), candidates: []}));
+    state.partnerTotal = 3; state.reviewLimit = 500;
+    renderSelection();
+    const table = world.ids['review-table'];
+    const wrap = table.children[0];
+    const boxes = table.querySelectorAll('.review-select');
+    assert.equal(boxes.length, 3);
+    boxes[1].checked = true; boxes[1].fire('change');
+    assert.equal(table.children[0], wrap, 'チェックで表を作り直した');
+    assert.deepEqual(Array.from(state.selectedReviewIds), ['b']);
+    const selectAll = table.querySelector('#review-select-all');
+    assert.equal(selectAll.indeterminate, true);
+    assert.ok(world.ids['review-count'].textContent.includes('選択 1 件'));
+    world.ids['bulk-partner'].value = ' Amazon ';
+    world.ids['bulk-apply'].fire('click');
+    assert.equal(table.children[0], wrap, '一括入力で表を作り直した');
+    assert.deepEqual(table.querySelectorAll('.partner-input').map((input) => input.value),
+      ['', 'Amazon', '']);
+    selectAll.checked = true; selectAll.fire('change');
+    assert.equal(table.children[0], wrap, '全選択で表を作り直した');
+    assert.deepEqual(boxes.map((box) => box.checked), [true, true, true]);
+    world.ids['review-filter'].value = '店a';
+    world.ids['review-filter'].fire('input');
+    assert.deepEqual(Array.from(state.selectedReviewIds), [], '絞り込みで選択を外す');
+    assert.equal(state.partnerInputs.get('b'), 'Amazon', '取引先欄の値は残す');
   });
 
   test('fmt 93: diagnosis warnings and selected-column provenance appear before inputs', () => {

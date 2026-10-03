@@ -1,0 +1,30 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の、**Web アプリの要確認を全件表示し、まとめて選んで一括入力する**直しの続きを受け取ります。
+
+前の回（`work/codex_prompt_webapp_bulk_reviews.txt`）で、あなたは `src/80_WebApp.gs`・`src/81_WebAppUi.html`・`test/phase8-webapp.test.js` を変え、変更を許されていない既存テスト 3 本（webapp 45l・45m・fmt 92）が赤になったので、正しく止まりました。その変更はステージされていない差分として残っています（`git diff`）。前の作業（`55` ほか）はステージ済みです（`git diff --cached`）。仕様書は `work/spec_webapp_bulk_reviews.md`・`work/spec_partner_batch_resolution.md`。前の回の指示書の「絶対に守ること」は全部そのまま有効です（`git add` しない・`clasp` を使わない・`src/` は 80 と 81 だけ・等）。
+
+## 仕様書の作者（Claude）の決定
+
+1. **webapp 45l・45m**：補助 `settleWithoutCommitting`（`test/phase8-webapp.test.js`）だけを変えてよい。「要確認は解決済み・取引先も解決済み・取引だけ `REVIEW_REQUIRED`」という状態を作るのが目的なので、画面の確定（`webResolve`）を通すのをやめ、**変えていない 1 件ずつの経路** `resolveReview(review.reviewId, 'ADOPT_EXISTING_PARTNER', {partnerName, learn: false})` を `commitIfConditionsMet` を差し替えた中で呼ぶ形にする。45l・45m・ほかこの補助を使うテストの assert は変えない。
+2. **fmt 92**（`test/phase9-format-registration.test.js`）：準備の部分だけを変えてよい。チェックボックスの印に加えて、新しい画面が選択と取引先欄の値を持つ場所（あなたが 81 に置いた `state` の集合と Map）に `r1` と `店A` を登録する。assert と、確認ダイアログを開く操作（`resolve-button` の click）は変えない。**選択の正本は `state` の集合のままにする**（DOM のチェックから選択を拾い直す形に戻さない）── 絞り込みで描き直しても選択が残る・見えない行を拾わない、のが仕様である。
+3. **bulk 1**：500 件の取込で準備しない（重すぎて取込が途中で止まる）。上限の値は定数を直接見て確かめ（`WEBAPP_REVIEW_LIST_LIMIT_ === 500`）、読取が件数に依らないことは 3 件と 30 件で比べる（仕様書 §4 の 1 のとおり）。上限で切ることは `WEBAPP_REVIEW_LIST_LIMIT_` を小さく差し替えて確かめてよい。
+4. **bulk 13**：要素が HTML に直に無く JavaScript で作られるなら、スクリプトの中の作り方（ID の文字列）で確かめてよい。確かめる中身（見出しの固定・全選択・絞り込み・一括入力・選択解除・`<details>`）は減らさない。
+
+## やること
+
+1. 上の 1〜4 を直し、`node test/run-tests.js` を全部緑にする。
+2. bulk 1 と bulk 3 の読取の実測値を出して報告する（テストの中で数え、`console.log` でなく assert の失敗文や報告に書く形でよい）。
+3. 仕様書 §5 の N1〜N17 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら `git diff` が変異を入れる前と同じか確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する。
+4. `git diff --stat -- src/ test/` を確かめる。
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 1〜4 で変えたテスト（名前と変え方）
+- bulk 1・bulk 3 の読取の数
+- §4.1 の 7 本をどう変えたか（前の回の分も含めて 1 本ずつ）
+- N1〜N17 それぞれで赤になったテストの名前、赤にならなかった変異とその理由の見立て、足したテスト
+- 仕様書が間違っていた・足りなかった箇所、自分で決めた箇所（前の回の分も含めて全部）
+- `grep -n '???' src/*.gs src/*.html` の結果
+- `git diff --stat -- src/ test/` の出力
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。
