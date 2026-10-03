@@ -1,0 +1,48 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の、**取込の要確認の登録と前検査をまとめ、「処理中」に動きを付ける**直しを受け取ります。
+
+この作業フォルダは git の worktree です。**前の 2 つの作業（まとめ確定の部品 `src/55_…` ほかと、Web アプリの要確認の全件表示・一括入力）は、まだコミットされずにインデックスへステージしてあります**（`git diff --cached`）。あなたの変更は、ステージされていない差分（`git diff`）として見えるようにしてください ── **`git add` しないこと。**開始時の `node test/run-tests.js` の本数は、始める前に自分で数えて報告に書いてください（1371/1371 のはずです）。
+
+## 仕様書
+
+`work/spec_import_reviews_precheck.md`（1.0）。**全部読んでから始めてください。**
+
+## 直すこと（要点。詳細は仕様書）
+
+1. `registerPendingReviews`（50）：取引は 1 回でまとめて引き、要確認シートは 1 回だけ読み、登録する行は 1 回の `setValues` で書く。検査（`detail` の形・抑止キー）は書く前に全件。同じまとまりの中の同じ抑止キーは 1 件だけ登録。署名・戻り値・並びは変えない。行を作る処理は `registerReview` と共有する補助関数に出す。
+2. `runCustomerIntegrityCheck_`（71）：対象ファイルの取引と処理ログを、ファイル数に依らない回数でまとめて読む。`runIntegrityCheck` を呼ぶ回数（ファイル 1 件につき 1 回）と渡す材料・所見は変えない。
+3. 画面（81）：取込と確定の進捗に、動く矢印（CSS アニメーション。`prefers-reduced-motion` では止める）と経過時間（1 秒ごと、終わったら必ず止める）、60 秒返らないときの案内を出す。純関数 `formatElapsed`・`progressText`。
+
+---
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。**
+2. **git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。ステージ済みの前の作業に触らないこと。
+3. **`src/` で変えてよいのは `src/50_ReviewStore.gs`・`src/71_RunOrchestrator.gs`・`src/81_WebAppUi.html` の 3 つだけ。**71 は `runCustomerIntegrityCheck_` だけ、81 は進捗の表示まわり（CSS・`TEXT`・進捗の行・新しい補助関数・`startImport`／`startResolve` の進捗の行とタイマーの開始・停止）だけ。要確認の表・一括入力・取込や確定の手順そのものには触らない。検査：終わったとき `git diff --name-only -- src/` がこの 3 つ以下であること。
+4. テストの変更は、`test/phase8-webapp.test.js`（または近い既存のファイル）に `imp N: …`（仕様書 §4 の 1〜10）を**足すこと**（補助を足してよい）。**既存のテストの期待（assert）は 1 つも変えないこと。**既存のテストが赤になったら、変えずに止めて理由を報告すること ── **とくに読取の回数を数えるテスト（`budget 1`・`budget 2`・`multi 14`・`kw9` の読取の数・`scope 1〜3`）が、回数が減ったことで赤になるなら（上限でなく等号で固定しているなら）、変えずに止めて報告すること。**`test/fixtures/` は変えない。`test/gas-stubs.js`・`test/gas-harness.js` は、足りない API を足すだけなら変えてよい（足したものは報告する）。
+5. **テストを先に赤にしてから直すこと。**imp 1〜10 を書き、いまの実装で赤になることを確かめてから直す。いまでも緑になる確かめはどれかを報告する。
+6. 既存のテストを 1 つも壊さないこと。特に `webapp 1`〜`54`・`batch 1`〜`27`・`bulk 1`〜`20`・`multi 1`〜`15`・`kw9 1`〜`20`・`budget 1`・`pace 1`・`flush 1`・`INV-16` に当たるテスト（同じファイルの複数の取引の要確認が全部登録されること）。
+7. **Sheets API の読取は既存の口だけを通すこと**（`readSheetRows_`・`findRowsByColumnValues_`・`activeTransactionRecordsByIds_` など）。`Sheets.Spreadsheets.Values.batchGet` を直に呼ばない。
+8. **日本語のコメントは UTF-8 で書くこと。**以前、あなたの書いたコメントが `?` の羅列に化けた。終わったら `grep -n '???' src/*.gs src/*.html` が空であること（始める前も空）を確かめて報告すること。コメントは周りのコードと同じ密度・語り口（「なぜ」を書く）で。
+9. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断で安全側を外さないこと。迷ったら止めて報告すること。
+
+## 進め方
+
+1. 仕様書を読む。次を読む：`src/50_ReviewStore.gs` 全部、`src/70_ImportFlow.gs` の 9-8（`registerPendingReviews` の呼出し 2 か所）、`src/61_TransactionLog.gs` の `activeTransactionRecordsByIds_`・`rememberedTxRecordsByIds_`・`txLogFromRecord_`、`src/60_ProcessLog.gs` の `getProcessLogRecord_`・`cachedFileRecord_`・`fileRowNumberCache_`、`src/01_DataAccessCore.gs` の `findRowsByColumnValues_`・`ensureRowExists_`・`withScriptLock_`、`src/71_RunOrchestrator.gs` の `runCustomerIntegrityCheck_`・`runImport` の前検査の段、`src/44_IntegrityChecker.gs` の `runIntegrityCheck`、`src/81_WebAppUi.html` の `TEXT.processing`・`startImport`・`startResolve`・CSS、`test/phase8-webapp.test.js` の補助（1〜440 行）と `multi` の読取を数えるテスト、`test/phase6-round-trips.test.js`、`kw9` のテスト
+2. imp 1〜10 を書く → 赤を確かめる
+3. 直す
+4. `node test/run-tests.js` を全部緑にする
+5. 仕様書 §5 の P1〜P11 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら `git diff` が変異を入れる前と同じか確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する
+6. `git diff --stat -- src/ test/` を確かめる
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 直す前に imp 1〜10 のどれが赤だったか（緑だったものも）
+- 実測した読取の数：登録（2 件と 40 件）、取込の結線（要確認 30 件と 0 件のファイル。直す前と後）、前検査（未完了 1 つと 5 つ。直す前と後）
+- P1〜P11 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て（足したテストがあればその名前）
+- 仕様書が間違っていた・足りなかった箇所（黙って直さないこと）、自分で決めた箇所（全部）
+- `???` の grep の結果（前と後）
+- `git diff --stat -- src/ test/` の出力（始める前と後）
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。

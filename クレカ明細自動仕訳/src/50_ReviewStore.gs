@@ -138,6 +138,36 @@ function assertReviewDetailShape_(detail) {
   }
 }
 
+/** `registerReview` とまとめ登録が同じ列の行を作るための唯一の組立て口。 */
+function makeReviewRow_(entry, key) {
+  var reviewId = generateId('RV');
+  var row = new Array(REVIEW_SHEET_WIDTH_).fill('');
+  row[0] = reviewId;
+  row[1] = 'OPEN';
+  row[2] = String(entry.reviewType);
+  row[3] = key;
+  row[4] = entry.fullTxId || '';
+  row[5] = entry.displayTxId || '';
+  row[6] = entry.customerId || '';
+  row[7] = entry.customerName || '';
+  row[8] = entry.fileId || '';
+  row[9] = entry.fileNameOriginal || '';
+  row[10] = entry.sourceSheetName || '';
+  row[11] = entry.sourceRow === undefined || entry.sourceRow === null ? '' : entry.sourceRow;
+  row[12] = entry.destinationSpreadsheetId || '';
+  row[13] = entry.destinationSheetName || '';
+  row[14] = entry.merchantOriginal || '';
+  row[15] = entry.merchantNormalized || '';
+  row[16] = entry.candidates === undefined || entry.candidates === null ? '' : JSON.stringify(entry.candidates);
+  row[18] = entry.originalDate || '';
+  row[19] = entry.originalAmount === undefined || entry.originalAmount === null ? '' : entry.originalAmount;
+  row[20] = entry.originalPurpose || '';
+  row[24] = entry.destinationRow === undefined || entry.destinationRow === null ? '' : entry.destinationRow;
+  row[25] = entry.detail === undefined || entry.detail === null ? '' : JSON.stringify(entry.detail);
+  row[26] = nowIso_();
+  return {reviewId: reviewId, row: row};
+}
+
 function registerReview(entry) {
   if (!entry || !entry.reviewType) throw new TypeError('registerReview requires a reviewType');
   assertReviewDetailShape_(entry.detail);
@@ -151,33 +181,9 @@ function registerReview(entry) {
     })[0];
     if (duplicate) return {registered: false, reviewId: duplicate.reviewId, suppressionKey: key};
 
-    var reviewId = generateId('RV');
-    var row = new Array(REVIEW_SHEET_WIDTH_).fill('');
-    row[0] = reviewId;
-    row[1] = 'OPEN';
-    row[2] = String(entry.reviewType);
-    row[3] = key;
-    row[4] = entry.fullTxId || '';
-    row[5] = entry.displayTxId || '';
-    row[6] = entry.customerId || '';
-    row[7] = entry.customerName || '';
-    row[8] = entry.fileId || '';
-    row[9] = entry.fileNameOriginal || '';
-    row[10] = entry.sourceSheetName || '';
-    row[11] = entry.sourceRow === undefined || entry.sourceRow === null ? '' : entry.sourceRow;
-    row[12] = entry.destinationSpreadsheetId || '';
-    row[13] = entry.destinationSheetName || '';
-    row[14] = entry.merchantOriginal || '';
-    row[15] = entry.merchantNormalized || '';
-    row[16] = entry.candidates === undefined || entry.candidates === null ? '' : JSON.stringify(entry.candidates);
-    row[18] = entry.originalDate || '';
-    row[19] = entry.originalAmount === undefined || entry.originalAmount === null ? '' : entry.originalAmount;
-    row[20] = entry.originalPurpose || '';
-    row[24] = entry.destinationRow === undefined || entry.destinationRow === null ? '' : entry.destinationRow;
-    row[25] = entry.detail === undefined || entry.detail === null ? '' : JSON.stringify(entry.detail);
-    row[26] = nowIso_();
-    reviewSheet_().appendRow(row);
-    return {registered: true, reviewId: reviewId, suppressionKey: key};
+    var built = makeReviewRow_(entry, key);
+    reviewSheet_().appendRow(built.row);
+    return {registered: true, reviewId: built.reviewId, suppressionKey: key};
   });
 }
 
@@ -238,24 +244,82 @@ function registerPendingReviews(entries) {
   var registerable = [TX_STATUS.PREPARED, TX_STATUS.WRITING, TX_STATUS.REVIEW_REQUIRED];
   var results = {registered: [], skipped: []};
 
-  entries.forEach(function(entry) {
-    if (isTransactionScopedReviewType(entry.reviewType)) {
-      var tx = entry.fullTxId ? getTransaction(entry.fullTxId) : null;
-      if (!tx || registerable.indexOf(tx.transactionStatus) < 0) {
-        results.skipped.push({
-          reviewType: entry.reviewType, fullTxId: entry.fullTxId,
-          reason: tx ? 'TRANSACTION_ALREADY_SETTLED' : 'TRANSACTION_NOT_FOUND',
-          transactionStatus: tx ? tx.transactionStatus : null
-        });
-        return;
+  // 先に全件の形と抑止キーを確かめる。途中で入力が壊れていても、
+  // 前の要確認だけがシートに残る半端な登録を避ける。
+  var prepared = entries.map(function(entry) {
+    if (!entry || !entry.reviewType) throw new TypeError('registerReview requires a reviewType');
+    assertReviewDetailShape_(entry.detail);
+    var transactionScoped = isTransactionScopedReviewType(entry.reviewType);
+    // 取引単位で fullTxId が空なら、キーを作らず従来どおり NOT_FOUND にする。
+    var key = transactionScoped && !entry.fullTxId ? null : buildSuppressionKey(entry.reviewType, {
+      fileId: entry.fileId, fullTxId: entry.fullTxId, scope: entry.suppressionScope
+    });
+    return {entry: entry, key: key, transactionScoped: transactionScoped};
+  });
+
+  var ids = [];
+  var seenIds = Object.create(null);
+  prepared.forEach(function(item) {
+    var fullTxId = item.entry.fullTxId;
+    if (item.transactionScoped && fullTxId !== null && fullTxId !== undefined && fullTxId !== '') {
+      var id = String(fullTxId);
+      // 1取引に日付と取引先など複数の要確認が立つ。覚えた行番号を重ねて
+      // 読むと同じ有効行を重複取引と誤認するため、取引IDは一度だけ引く。
+      if (!Object.prototype.hasOwnProperty.call(seenIds, id)) {
+        seenIds[id] = true;
+        ids.push(id);
       }
     }
-    var outcome = registerReview(entry);
-    if (outcome.registered) results.registered.push(outcome);
-    else results.skipped.push({
-      reviewType: entry.reviewType, fullTxId: entry.fullTxId,
-      reason: 'SUPPRESSED', reviewId: outcome.reviewId
+  });
+  var transactions = ids.length ? activeTransactionRecordsByIds_(ids) : Object.create(null);
+
+  var registerableEntries = prepared.map(function(item) {
+    var entry = item.entry;
+    if (!item.transactionScoped) return Object.assign({}, item, {skip: null});
+    var tx = entry.fullTxId ? transactions[String(entry.fullTxId)] : null;
+    if (!tx || registerable.indexOf(tx.transactionStatus) < 0) {
+      return Object.assign({}, item, {skip: {
+        reviewType: entry.reviewType, fullTxId: entry.fullTxId,
+        reason: tx ? 'TRANSACTION_ALREADY_SETTLED' : 'TRANSACTION_NOT_FOUND',
+        transactionStatus: tx ? tx.transactionStatus : null
+      }});
+    }
+    return Object.assign({}, item, {skip: null});
+  });
+
+  withScriptLock_(function() {
+    var openByKey = Object.create(null);
+    allReviewRecords_().forEach(function(review) {
+      if ((review.status === 'OPEN' || review.status === 'IN_PROGRESS') &&
+          !Object.prototype.hasOwnProperty.call(openByKey, review.suppressionKey)) {
+        openByKey[review.suppressionKey] = review.reviewId;
+      }
     });
+
+    var rows = [];
+    registerableEntries.forEach(function(item) {
+      if (item.skip) {
+        results.skipped.push(item.skip);
+        return;
+      }
+      var entry = item.entry;
+      if (Object.prototype.hasOwnProperty.call(openByKey, item.key)) {
+        results.skipped.push({reviewType: entry.reviewType, fullTxId: entry.fullTxId,
+          reason: 'SUPPRESSED', reviewId: openByKey[item.key]});
+        return;
+      }
+      var built = makeReviewRow_(entry, item.key);
+      rows.push(built.row);
+      openByKey[item.key] = built.reviewId;
+      results.registered.push({registered: true, reviewId: built.reviewId,
+        suppressionKey: item.key});
+    });
+    if (rows.length) {
+      var sheet = reviewSheet_();
+      var firstRow = sheet.getLastRow() + 1;
+      ensureRowExists_(sheet, firstRow + rows.length - 1);
+      sheet.getRange(firstRow, 1, rows.length, REVIEW_SHEET_WIDTH_).setValues(rows);
+    }
   });
 
   return results;
