@@ -29,13 +29,14 @@ function getFileState(fileId) {
 
 function transitionFileState(fileId, fromState, toState, runId) {
   if (!isAllowedTransition(fromState, toState)) throw new StateTransitionError('File transition is not allowed: ' + fromState + ' -> ' + toState);
-  var record = getProcessLogRecord_(fileId);
+  var records = getFileRecordsPair_(fileId);
+  var record = records.process;
   if (!record || String(record.values[16]) !== String(fromState)) throw new StateTransitionError('File compare-and-set failed');
   if (runId !== undefined && runId !== null && String(record.values[0]) !== String(runId)) throw new StateTransitionError('Run ID mismatch');
   // いま読んだ行を渡す。比較更新のために読んだばかりで、同じ実行の中で
   // 他者がこの行を書くことはない（ファイルはリースで直列化されている）。
   var written = updateProcessLog(fileId,
-    {internalState: toState, expectedPrefix: STATE_TO_PREFIX[toState]}, record);
+    {internalState: toState, expectedPrefix: STATE_TO_PREFIX[toState]}, record, records.permanent);
   updateFilePrefix(fileId, written);
   if (toState !== FILE_STATE.VALIDATING && toState !== FILE_STATE.WRITING) releaseLease(fileId, runId, 'STATE_TRANSITION:' + toState);
   // 書いた行を返す。直後に同じ行を書く呼出しが読み直さずに済む。
