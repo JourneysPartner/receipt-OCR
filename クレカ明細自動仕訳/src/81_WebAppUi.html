@@ -2166,8 +2166,11 @@
     }
 
     function formatExcludedReason(ruleId) {
-      return ruleId === '_dateAmountEmpty' ? '利用日と金額が空' :
-        '除外の規則「' + ruleId + '」';
+      if (ruleId === '_dateAmountEmpty') return '利用日と金額が空';
+      if (ruleId === '_noTransactionValue') {
+        return '利用日・店名・用途が空で、金額の欄が数でない（名義人ごとの小計など）';
+      }
+      return '除外の規則「' + ruleId + '」';
     }
 
     function formatRequiredColumnMessage(answers) {
