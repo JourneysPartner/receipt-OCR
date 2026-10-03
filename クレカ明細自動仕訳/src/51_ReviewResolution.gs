@@ -390,8 +390,8 @@ function settle_(review, operation, actor, context) {
  *
  * M列が空なら雛形を返す（本仕様より前に立った要確認は雛形に居る）。
  */
-function reviewWriteCustomer_(review) {
-  var customer = getCustomerById(review.customerId);
+function reviewWriteCustomer_(review, customer) {
+  if (customer === undefined) customer = getCustomerById(review.customerId);
   if (!review.destinationSpreadsheetId) return customer;
   return Object.assign({}, customer, {
     destinationSpreadsheetId: String(review.destinationSpreadsheetId),

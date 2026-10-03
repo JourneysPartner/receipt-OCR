@@ -45,15 +45,46 @@ function appendAuditUnlocked_(entry, forceGenesis) {
   return row[0];
 }
 
+/**
+ * 監査行の連鎖を手元でつないでまとめて書く。呼出側がロックを持つ。
+ * 行ごとにappendAuditUnlocked_を呼ぶと、末尾ハッシュの読取と書込が行数分
+ * 繰り返され、同じまとまりの監査記録が途中で割れるため、先に全行を作る。
+ */
+function appendAuditRowsUnlocked_(entries) {
+  if (!Array.isArray(entries)) throw new TypeError('entries must be an array');
+  if (!entries.length) return [];
+
+  var sheet = auditSheet_();
+  if (sheet.getLastRow() < 2) {
+    var createdAt = nowIso_();
+    var firstActor = entries[0] && entries[0].actor || activeUserEmail_();
+    var genesis = makeAuditRow_({type: 'CHAIN_ANCHOR', actor: firstActor,
+      targetType: 'AUDIT', targetId: 'GENESIS',
+      after: {kind: 'GENESIS', createdAt: createdAt}}, CONFIG.AUDIT_CHAIN_GENESIS, true);
+    sheet.appendRow(genesis);
+  }
+
+  var lastRow = sheet.getLastRow();
+  var previousHash = lastRow >= 2 ? String(sheet.getRange(lastRow, 15).getValue() || '') :
+    CONFIG.AUDIT_CHAIN_GENESIS;
+  var rows = entries.map(function(entry) {
+    var row = makeAuditRow_(entry, previousHash, false);
+    previousHash = row[14];
+    return row;
+  });
+  var firstRow = lastRow + 1;
+  ensureRowExists_(sheet, firstRow + rows.length - 1);
+  sheet.getRange(firstRow, 1, rows.length, AUDIT_WIDTH_).setValues(rows);
+  return rows.map(function(row) { return row[0]; });
+}
+
 function appendAudit(entry) {
   return withScriptLock_(function() { return appendAuditUnlocked_(entry, false); });
 }
 
 function appendAuditBatch(entries) {
   if (!Array.isArray(entries)) throw new TypeError('entries must be an array');
-  return withScriptLock_(function() {
-    return entries.map(function(entry) { return appendAuditUnlocked_(entry, false); });
-  });
+  return withScriptLock_(function() { return appendAuditRowsUnlocked_(entries); });
 }
 
 /**
