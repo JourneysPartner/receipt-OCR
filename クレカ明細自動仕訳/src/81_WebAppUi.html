@@ -192,6 +192,10 @@
     .final-verdict.ok { color: #0f5132; background: #e8f5ee; }
     .final-verdict.ng { color: #842029; background: #fdecea; }
     .final-verdict.stale { color: #5e4800; background: #fff7d6; }
+    .final-summary { margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-weight: 700; }
+    .final-summary.ok { color: #0f5132; background: #e8f5ee; }
+    .final-summary.ng { color: #842029; background: #fdecea; }
+    .final-summary.stale, .final-summary.loading { color: #5e4800; background: #fff7d6; }
     .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
     .final-problems { margin: 10px 0 0; padding-left: 20px; color: #842029; }
     .final-problems li { margin-bottom: 4px; }
@@ -323,6 +327,7 @@
             <button id="excel-button" type="button" class="button" disabled>Excel ダウンロード</button>
             <span id="excel-status" class="excel-status"></span>
           </div>
+          <div id="final-summary" class="final-summary" role="status" aria-live="polite" hidden></div>
         </div>
       </div>
     </section>
@@ -482,7 +487,7 @@
       'review-more', 'review-prev', 'review-next', 'resolve-progress', 'resolve-progress-label',
       'resolve-progress-arrows', 'resolve-progress-value', 'resolve-progress-hint', 'resolve-button',
       'excel-button', 'excel-status', 'final-button', 'final-panel', 'final-sheet',
-      'final-verdict', 'final-files', 'final-problems', 'final-row-count', 'final-rows',
+      'final-verdict', 'final-summary', 'final-files', 'final-problems', 'final-row-count', 'final-rows',
       'confirm-dialog', 'confirm-title', 'confirm-intro', 'confirm-summary',
       'confirm-details', 'confirm-details-summary', 'confirm-list',
       'confirm-cancel', 'confirm-submit'
@@ -1769,6 +1774,21 @@
       state.finalReviewedFor = null;
       state.finalRequest += 1;
       el['final-panel'].hidden = true;
+      showFinalSummary(null, '');
+    }
+
+    /**
+     * 最終確認の結論を、押したボタンのすぐ下にも出す。
+     *
+     * 詳しい内容は画面下の「最終確認」の欄に出るが、Web アプリは Google の
+     * ページの中に埋め込まれて動くので、そこまでの自動スクロールが外側の
+     * ページに届かない（2026-10-03、ko-ch さんの画面で確かめた）。押した場所で
+     * 「問題が無いか」が分からないと、毎回下までスクロールすることになる。
+     */
+    function showFinalSummary(kind, text) {
+      el['final-summary'].className = 'final-summary' + (kind ? ' ' + kind : '');
+      el['final-summary'].textContent = text || '';
+      el['final-summary'].hidden = !kind;
     }
 
     function markFinalReviewStale() {
@@ -1777,6 +1797,8 @@
       el['final-verdict'].className = 'final-verdict stale';
       el['final-verdict'].textContent =
         '要確認を確定したため、この表示は古くなりました。「最終確認を表示」を押し直してください。';
+      showFinalSummary('stale',
+        '要確認を確定したため、最終確認の結果は古くなりました。「最終確認を表示」を押し直してください。');
     }
 
     function collectSessionFiles(fileResults) {
@@ -1850,6 +1872,11 @@
       el['final-verdict'].textContent = totals.balanced ?
         '明細と一致しました。漏れ・重複・書き換えはありません。' :
         '明細と一致しません。下の内容を確認してから、ダウンロードしてください。';
+      var problemCount = Array.isArray(recon.problems) ? recon.problems.length : 0;
+      showFinalSummary(totals.balanced ? 'ok' : 'ng', totals.balanced ?
+        '最終確認：明細と一致しました。漏れ・重複・書き換えはありません。Excel をダウンロードできます。' :
+        '最終確認：明細と一致しません' + (problemCount ? '（問題 ' + problemCount + ' 件）' : '') +
+          '。画面下の「最終確認」で内容を確かめてから、ダウンロードしてください。');
 
       // ファイルごとの突き合わせ
       var fileTable = document.createElement('table');
@@ -1925,6 +1952,7 @@
       var request = ++state.finalRequest;
       state.finalLoading = true;
       clearNotice();
+      showFinalSummary('loading', '最終確認を確かめています…');
       updateActionButtons();
       try {
         var result = await gasCall('webAppFinalReview',
@@ -1935,7 +1963,10 @@
         state.finalReviewedFor = destinationId;
         el['final-panel'].scrollIntoView({behavior: 'smooth', block: 'start'});
       } catch (error) {
-        if (request === state.finalRequest) showNotice(failureMessage(error), 'error');
+        if (request === state.finalRequest) {
+          showFinalSummary(null, '');
+          showNotice(failureMessage(error), 'error');
+        }
       } finally {
         if (request === state.finalRequest) {
           state.finalLoading = false;

@@ -1509,6 +1509,41 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(field.focused, true);
   });
 
+  // 最終確認の結論は、押したボタンのすぐ下にも出す。Web アプリは Google のページに
+  // 埋め込まれていて、画面下の欄までの自動スクロールが外側のページに届かない（2026-10-03）。
+  browserAsyncTest('final 19: a balanced final review says so right under the buttons', async () => {
+    const world = mountedFormatWorld({webAppFinalReview: {destinationSpreadsheetId: 'dest',
+      reconciliation: {files: [], totals: {balanced: true}, problems: []}, rows: [], headers: []}});
+    world.ui.state.lastCompletedDestinationSpreadsheetId = 'dest';
+    await world.ui.loadFinalReview();
+    const summary = world.ids['final-summary'];
+    assert.equal(summary.hidden, false);
+    assert.ok(summary.className.split(' ').includes('ok'), summary.className);
+    assert.ok(summary.textContent.includes('明細と一致しました'), summary.textContent);
+    assert.ok(summary.textContent.includes('Excel をダウンロードできます'), summary.textContent);
+  });
+
+  browserAsyncTest('final 20: an unbalanced final review names the problem count under the buttons', async () => {
+    const world = mountedFormatWorld({webAppFinalReview: {destinationSpreadsheetId: 'dest',
+      reconciliation: {files: [], totals: {balanced: false}, problems: [
+        {kind: 'MISSING', txId: 'TX_A', amount: 100}, {kind: 'DUPLICATE', txId: 'TX_B', rowNumbers: [5, 6]}]},
+      rows: [], headers: []}});
+    world.ui.state.lastCompletedDestinationSpreadsheetId = 'dest';
+    await world.ui.loadFinalReview();
+    const summary = world.ids['final-summary'];
+    assert.equal(summary.hidden, false);
+    assert.ok(summary.className.split(' ').includes('ng'), summary.className);
+    assert.ok(summary.textContent.includes('一致しません（問題 2 件）'), summary.textContent);
+  });
+
+  browserAsyncTest('final 21: a failed final review hides the summary and shows the error', async () => {
+    const world = mountedFormatWorld({webAppFinalReview: new Error('読めませんでした')});
+    world.ui.state.lastCompletedDestinationSpreadsheetId = 'dest';
+    await world.ui.loadFinalReview();
+    assert.equal(world.ids['final-summary'].hidden, true);
+    assert.ok(world.ids.notice.textContent.includes('読めませんでした'));
+  });
+
   browserAsyncTest('fmt 97: uncertain save is shown inside the panel and rediagnosed', async () => {
     const world = mountedFormatWorld({webAppSaveFormat: new Error('connection lost'),
       webAppExplainUnknownFile: formatBrowserDiagnosis()});
