@@ -175,17 +175,31 @@ function runCustomerIntegrityCheck_(customer, fileIdsInScope) {
   var inScope = Object.create(null);
   (fileIdsInScope || []).forEach(function(fileId) { inScope[String(fileId)] = true; });
   var unfinished = [FILE_STATE.VALIDATING, FILE_STATE.WRITING, FILE_STATE.REVIEW_WAIT];
-  permanentIndexRowsForScan_()
+  var targetRows = permanentIndexRowsForScan_()
     .filter(function(row) {
       if (row.customerId !== customer.customerId) return false;
       return Boolean(inScope[String(row.fileId)]) || unfinished.indexOf(row.state) >= 0;
-    })
-    .forEach(function(row) {
-      var txLogs = getTransactionsByStatus(row.fileId, [
-        TX_STATUS.PREPARED, TX_STATUS.WRITING, TX_STATUS.COMMITTED,
-        TX_STATUS.REVIEW_REQUIRED
-      ]);
-      var processRecord = getProcessLogRecord_(row.fileId);
+    });
+  if (targetRows.length) {
+    var fileIds = targetRows.map(function(row) { return String(row.fileId); });
+    var txRecordsByFile = findRowsByColumnValues_(transactionLogSheet_(), 5,
+      fileIds, TRANSACTION_LOG_WIDTH_);
+    var processRecordsByFile = findRowsByColumnValues_(processLogSheet_(), 8,
+      fileIds, PROCESS_LOG_WIDTH_);
+    var checkedStatuses = [TX_STATUS.PREPARED, TX_STATUS.WRITING, TX_STATUS.COMMITTED,
+      TX_STATUS.REVIEW_REQUIRED];
+
+    targetRows.forEach(function(row) {
+      var fileId = String(row.fileId);
+      var txLogs = (txRecordsByFile[fileId] || []).map(txLogFromRecord_).filter(function(tx) {
+        return tx.active && checkedStatuses.indexOf(tx.transactionStatus) >= 0;
+      });
+      var processRecords = processRecordsByFile[fileId] || [];
+      if (processRecords.length > 1) {
+        throw new IntegrityError('TRANSACTION_LOG_AMBIGUOUS', 'Duplicate process log fileId');
+      }
+      var processRecord = processRecords.length ? processRecords[0] : null;
+      if (processRecord) fileRowNumberCache_.process[fileId] = processRecord.rowNumber;
       var outcome = runIntegrityCheck({
         indexForTransaction: resolver.indexFor,
         txLogs: txLogs,
@@ -196,6 +210,7 @@ function runCustomerIntegrityCheck_(customer, fileIdsInScope) {
       });
       findings = findings.concat(outcome.findings);
     });
+  }
   resolver.stats().unreadable.forEach(function(destination) {
     findings.push(integrityFinding_('DESTINATION_UNREADABLE', 'REVIEW', {
       spreadsheetId: destination.spreadsheetId,

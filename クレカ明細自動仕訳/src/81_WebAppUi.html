@@ -152,6 +152,18 @@
     .file-name a, .review-file a { color: var(--brand); }
     .file-name a:hover, .review-file a:hover { text-decoration: none; }
     .status-line { min-height: 21px; margin: 8px 0; color: var(--muted); }
+    .progress-arrows { display: inline-flex; margin-right: .35em; }
+    .progress-arrows span { opacity: .25; animation: progress-arrow-pulse 1.2s ease-in-out infinite; }
+    .progress-arrows span:nth-child(2) { animation-delay: .2s; }
+    .progress-arrows span:nth-child(3) { animation-delay: .4s; }
+    @keyframes progress-arrow-pulse {
+      0%, 100% { opacity: .25; }
+      50% { opacity: 1; }
+    }
+    .processing-hint { margin-top: 2px; font-size: 12px; }
+    @media (prefers-reduced-motion: reduce) {
+      .progress-arrows span { animation: none; opacity: 1; }
+    }
     .action-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
     .button {
       border: 1px solid #a9b6c8;
@@ -260,7 +272,10 @@
           <div id="folder-list" class="folder-list"></div>
           <h3 class="subheading">ファイル一覧</h3>
           <div id="file-list"></div>
-          <div id="import-progress" class="status-line" aria-live="polite"></div>
+          <div id="import-progress" class="status-line" aria-live="polite">
+            <span id="import-progress-label"></span><span id="import-progress-arrows" class="progress-arrows" aria-hidden="true" hidden><span>→</span><span>→</span><span>→</span></span><span id="import-progress-value"></span>
+            <div id="import-progress-hint" class="processing-hint" hidden></div>
+          </div>
           <div id="import-disabled-reason" class="muted"></div>
           <div class="action-row">
             <button id="import-button" type="button" class="button primary" disabled>記帳を実行</button>
@@ -298,7 +313,10 @@
               <button id="review-next" type="button" class="button" disabled>次のページ</button>
             </div>
           </div>
-          <div id="resolve-progress" class="status-line" aria-live="polite"></div>
+          <div id="resolve-progress" class="status-line" aria-live="polite">
+            <span id="resolve-progress-label"></span><span id="resolve-progress-arrows" class="progress-arrows" aria-hidden="true" hidden><span>→</span><span>→</span><span>→</span></span><span id="resolve-progress-value"></span>
+            <div id="resolve-progress-hint" class="processing-hint" hidden></div>
+          </div>
           <div class="action-row">
             <button id="resolve-button" type="button" class="button primary" disabled>選択した要確認を確定</button>
             <button id="final-button" type="button" class="button" disabled>最終確認を表示</button>
@@ -361,6 +379,8 @@
       noReviews: '確定が必要な要確認はありません。',
       noFilteredReviews: '絞り込みに一致する要確認はありません。',
       processing: function(done, total) { return '処理中… ' + done + ' / ' + total; },
+      processingHint: '複数のファイルをまとめて取り込んでいるため、表示が進むまで数分かかることがあります。このままお待ちください。',
+      resolvingHint: '複数のファイルの要確認をまとめて確定しているため、表示が進むまで数分かかることがあります。このままお待ちください。',
       leaseConflict: '他の処理と重なりました。10 分ほど待ってからもう一度実行してください。',
       timeBudget: 'いまは取り込めませんでした。もう一度「記帳を実行」を押してください。',
       cloneValidation: function(code) {
@@ -454,11 +474,13 @@
     [
       'actor', 'version', 'notice', 'customer-search', 'customer-count', 'customer-list',
       'selected-customer-name', 'drive-empty', 'drive-content', 'folder-list', 'file-list',
-      'import-progress', 'import-disabled-reason', 'import-button', 'review-total',
+      'import-progress', 'import-progress-label', 'import-progress-arrows',
+      'import-progress-value', 'import-progress-hint', 'import-disabled-reason', 'import-button', 'review-total',
       'review-window', 'review-empty', 'review-content', 'other-reviews', 'review-table',
       'review-filter', 'review-count', 'bulk-partner', 'bulk-partner-options', 'bulk-apply',
       'select-clear', 'review-pager',
-      'review-more', 'review-prev', 'review-next', 'resolve-progress', 'resolve-button',
+      'review-more', 'review-prev', 'review-next', 'resolve-progress', 'resolve-progress-label',
+      'resolve-progress-arrows', 'resolve-progress-value', 'resolve-progress-hint', 'resolve-button',
       'excel-button', 'excel-status', 'final-button', 'final-panel', 'final-sheet',
       'final-verdict', 'final-files', 'final-problems', 'final-row-count', 'final-rows',
       'confirm-dialog', 'confirm-title', 'confirm-intro', 'confirm-summary',
@@ -466,6 +488,7 @@
       'confirm-cancel', 'confirm-submit'
       , 'format-panel', 'format-body', 'format-close'
     ].forEach(function(id) { el[id] = document.getElementById(id); });
+    var activeProgressTimers = Object.create(null);
 
     function gasCall(name, args) {
       return new Promise(function(resolve, reject) {
@@ -511,6 +534,98 @@
     function clearNotice() {
       el.notice.textContent = '';
       el.notice.className = 'notice';
+    }
+
+    function clearProgressDisplay(progressId) {
+      el[progressId + '-label'].textContent = '';
+      el[progressId + '-arrows'].hidden = true;
+      el[progressId + '-value'].textContent = '';
+      el[progressId + '-hint'].hidden = true;
+      el[progressId + '-hint'].textContent = '';
+    }
+
+    function stopProgressTimer(progressId) {
+      var timer = activeProgressTimers[progressId];
+      if (timer) timer.stop();
+    }
+
+    function formatElapsed(ms) {
+      if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '0:00';
+      var seconds = Math.floor(ms / 1000);
+      return Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+    }
+
+    function progressText(done, total, elapsedMs) {
+      return '処理中 ' + done + ' / ' + total + '（経過 ' + formatElapsed(elapsedMs) + '）';
+    }
+
+    function renderProgress(progressId, done, total, elapsedMs, showHint) {
+      var text = progressText(done, total, elapsedMs);
+      var prefix = '処理中 ';
+      el[progressId + '-label'].textContent = prefix;
+      el[progressId + '-arrows'].hidden = false;
+      el[progressId + '-value'].textContent = text.slice(prefix.length);
+      // 取込と確定で待つ理由が違うので、案内も分ける。
+      el[progressId + '-hint'].textContent = progressId === 'resolve-progress' ?
+        TEXT.resolvingHint : TEXT.processingHint;
+      el[progressId + '-hint'].hidden = !showHint;
+    }
+
+    function startProgressTimer(progressId, isCurrent, clock) {
+      stopProgressTimer(progressId);
+      var timerClock = clock || Date;
+      var startedAt = timerClock.now();
+      var callStartedAt = null;
+      var done = 0;
+      var total = 0;
+      var intervalId = null;
+      var stopped = false;
+
+      function stop() {
+        if (stopped) return;
+        stopped = true;
+        if (intervalId !== null) {
+          clearInterval(intervalId);
+          intervalId = null;
+        }
+        if (activeProgressTimers[progressId] === handle) delete activeProgressTimers[progressId];
+        el[progressId + '-arrows'].hidden = true;
+        el[progressId + '-hint'].hidden = true;
+      }
+
+      function refresh() {
+        if (stopped) return;
+        if (typeof isCurrent === 'function' && !isCurrent()) {
+          stop();
+          return;
+        }
+        var now = timerClock.now();
+        renderProgress(progressId, done, total, now - startedAt,
+          callStartedAt !== null && now - callStartedAt > 60000);
+      }
+
+      var handle = {
+        beginCall: function() {
+          callStartedAt = timerClock.now();
+          refresh();
+        },
+        endCall: function() {
+          callStartedAt = null;
+          refresh();
+        },
+        update: function(nextDone, nextTotal) {
+          done = nextDone;
+          total = nextTotal;
+          refresh();
+        },
+        stop: stop
+      };
+      refresh();
+      if (!stopped) {
+        intervalId = setInterval(refresh, 1000);
+        activeProgressTimers[progressId] = handle;
+      }
+      return handle;
     }
 
     function selectedCustomer() {
@@ -992,6 +1107,8 @@
     function invalidateOperations() {
       state.importRun += 1;
       state.resolveRun += 1;
+      stopProgressTimer('import-progress');
+      stopProgressTimer('resolve-progress');
       state.formatRequest += 1;
       state.formatFileId = null;
       state.formatDiagnosis = null;
@@ -1030,8 +1147,8 @@
       forgetFinalReview();
       state.sessionFileIds = [];
       el['excel-status'].textContent = '';
-      el['import-progress'].textContent = '';
-      el['resolve-progress'].textContent = '';
+      clearProgressDisplay('import-progress');
+      clearProgressDisplay('resolve-progress');
       clearNotice();
       renderFormatPanel();
       renderSelection();
@@ -1073,13 +1190,14 @@
       state.formatMessage = null;
       invalidateFormatPreview();
       renderFormatPanel();
+      stopProgressTimer('import-progress');
       state.selectedFolderId = String(folderId);
       state.files = [];
       state.lastCompletedDestinationSpreadsheetId = null;
       forgetFinalReview();
       state.sessionFileIds = [];
       el['excel-status'].textContent = '';
-      el['import-progress'].textContent = '';
+      clearProgressDisplay('import-progress');
       renderFolders();
       renderFiles();
       updateActionButtons();
@@ -1195,14 +1313,23 @@
       state.sessionFileIds = [];
       el['excel-status'].textContent = '';
       clearNotice();
-      el['import-progress'].textContent = TEXT.processing(0, 0);
+      clearProgressDisplay('import-progress');
       renderSelection();
 
+      var progressTimer = null;
       try {
+        progressTimer = startProgressTimer('import-progress', function() {
+          return token === state.importRun && generation === state.viewGeneration &&
+            String(customerId) === String(state.selectedCustomerId) &&
+            String(folderId) === String(state.selectedFolderId);
+        });
+        progressTimer.update(0, 0);
         while (true) {
           var options = state.activeImportDestinationSpreadsheetId ?
             {destinationSpreadsheetId: state.activeImportDestinationSpreadsheetId} : {};
+          progressTimer.beginCall();
           var result = await gasCall('webAppRunImport', [customerId, folderId, options]);
+          progressTimer.endCall();
           if (token !== state.importRun || generation !== state.viewGeneration ||
               String(customerId) !== String(state.selectedCustomerId) ||
               String(folderId) !== String(state.selectedFolderId)) return;
@@ -1215,7 +1342,7 @@
           var done = Number(result.done || 0);
           var remaining = Number(result.remaining || 0);
           cumulativeDone += done;
-          el['import-progress'].textContent = TEXT.processing(cumulativeDone, cumulativeDone + remaining);
+          progressTimer.update(cumulativeDone, cumulativeDone + remaining);
           warnings = warnings.concat(schemaValidationLines(result));
 
           if (remaining > 0 && !result.stoppedBy && done > 0) continue;
@@ -1239,6 +1366,7 @@
           showNotice(failureMessage(error), 'error');
         }
       } finally {
+        if (progressTimer) progressTimer.stop();
         if (token === state.importRun && generation === state.viewGeneration) {
           state.importBusy = false;
           state.activeImportDestinationSpreadsheetId = null;
@@ -1544,13 +1672,21 @@
       var clickBatchId = batchId();
       state.resolveBusy = true;
       clearNotice();
-      el['resolve-progress'].textContent = TEXT.processing(0, total);
+      clearProgressDisplay('resolve-progress');
       renderSelection();
 
+      var progressTimer = null;
       try {
+        progressTimer = startProgressTimer('resolve-progress', function() {
+          return token === state.resolveRun && generation === state.viewGeneration &&
+            String(customerId) === String(state.selectedCustomerId);
+        });
+        progressTimer.update(0, total);
         while (pending.length) {
+          progressTimer.beginCall();
           var result = await gasCall('webAppResolveReviews',
             [customerId, pending, {batchId: clickBatchId}]);
+          progressTimer.endCall();
           if (token !== state.resolveRun || generation !== state.viewGeneration ||
               String(customerId) !== String(state.selectedCustomerId)) return;
 
@@ -1582,7 +1718,7 @@
           var pendingBefore = pending.length;
           pending = pending.filter(function(decision) { return !removed.has(String(decision.reviewId)); });
           resolvedTotal += Number(result.resolved || 0);
-          el['resolve-progress'].textContent = TEXT.processing(resolvedTotal, total);
+          progressTimer.update(resolvedTotal, total);
 
           // **残りが減ったかどうかで進んだと見る。**確定した件数で見ると、
           // 先頭のファイルがリースで全部飛ばされたときに「進んでいない」と
@@ -1611,6 +1747,7 @@
           showNotice(failureMessage(error), 'error');
         }
       } finally {
+        if (progressTimer) progressTimer.stop();
         if (token === state.resolveRun && generation === state.viewGeneration) {
           state.resolveBusy = false;
           state.selectedReviewIds.clear();

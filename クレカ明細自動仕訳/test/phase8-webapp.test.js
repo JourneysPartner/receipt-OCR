@@ -409,14 +409,14 @@ module.exports = ({test, assert, gas}) => {
 
 
   /** クライアントの関数を1つ取り出して呼ぶ（`clientStoppedByMessage` と同じ手）。 */
-  function clientEval(expression) {
+  function clientEval(expression, globals = {}) {
     const scriptMatch = /<script>([\s\S]*?)<\/script>/.exec(WEBAPP_UI_SOURCE);
     assert.ok(scriptMatch, 'Web app script must exist');
     const eventNeedle = "    el['customer-search'].addEventListener";
     assert.ok(scriptMatch[1].includes(eventNeedle), 'client probe insertion point must exist');
     const probe = `    globalThis.__probe = (${expression});\n` + '    return;\n';
     const source = scriptMatch[1].replace(eventNeedle, probe + eventNeedle);
-    const sandbox = {document: {getElementById() { return {}; }}};
+    const sandbox = Object.assign({document: {getElementById() { return {}; }}}, globals);
     vm.runInNewContext(source, sandbox);
     return sandbox.__probe;
   }
@@ -5211,6 +5211,417 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(gas.context.WEBAPP_MAX_PER_CALL_ >= gas.context.WEBAPP_MAX_DECISIONS_, true);
     assert.equal(Object.prototype.hasOwnProperty.call(gas.context, 'WEBAPP_ITEM_TRIPS_'), false);
     assert.equal(Object.prototype.hasOwnProperty.call(gas.context, 'WEBAPP_CLEANUP_TRIPS_'), false);
+  });
+
+  function makePendingEntry(reviewType, fullTxId, overrides = {}) {
+    return Object.assign({
+      reviewType,
+      fullTxId: fullTxId || null,
+      fileId: 'reviews-file',
+      customerId: 'C001',
+      customerName: '顧客一',
+      fileNameOriginal: '利用明細.csv',
+      destinationSpreadsheetId: 'destination-target',
+      destinationSheetName: '入力用シート',
+      sourceSheetName: '明細',
+      sourceRow: 12,
+      displayTxId: fullTxId || '',
+      merchantOriginal: '未登録店',
+      merchantNormalized: '未登録店',
+      candidates: ['候補A'],
+      originalDate: '2025-12-10',
+      originalAmount: 1250,
+      originalPurpose: '仕入れ',
+      destinationRow: 8,
+      detail: reviewType === 'PARTNER' ?
+        {kind: 'PARTNER', matchedBy: 'none', candidates: [], conflict: false} :
+        reviewType === 'DATE_INFERENCE' ?
+          {kind: 'DATE_INFERENCE', status: 'AMBIGUOUS', baseYearMonth: '2025-12',
+            candidates: [], lookbackMonths: 1, forwardMonths: 1} :
+          {kind: 'FORMAT_UNKNOWN', fileName: '利用明細.csv'}
+    }, overrides);
+  }
+
+  function prepareReviewTransactions(ids) {
+    call('registerPrepared', [ids.map((fullTxId) => ({
+      fullTxId,
+      displayTxId: fullTxId,
+      customerId: 'C001',
+      fileId: 'reviews-file',
+      formatId: 'test-format',
+      planned: {b: '2025-12-10', f: '店名', i: '摘要', k: '未登録店', m: 1250}
+    })), 'imp-reviews', {}]);
+  }
+
+  function reviewRowsWithoutIdOrTime() {
+    const sheet = gas.stubs.getSpreadsheet('master').getSheetByName('要確認');
+    return sheet.getDataRange().getValues().slice(1)
+      .filter((row) => row[0] !== '' && row[0] !== null)
+      .map((row) => row.filter((value, index) => index !== 0 && index !== 26));
+  }
+
+  function normalizeReviewResults(result) {
+    const sheet = gas.stubs.getSpreadsheet('master').getSheetByName('要確認');
+    const ids = sheet.getDataRange().getValues().slice(1)
+      .filter((row) => row[0] !== '' && row[0] !== null)
+      .map((row, index) => [String(row[0]), index]);
+    const idOrder = new Map(ids);
+    const normalize = (items) => items.map((item) => {
+      const copy = Object.assign({}, item);
+      if (copy.reviewId) copy.reviewId = idOrder.get(String(copy.reviewId));
+      return copy;
+    });
+    return {registered: normalize(result.registered), skipped: normalize(result.skipped)};
+  }
+
+  function oneByOnePendingReviews(entries) {
+    const result = {registered: [], skipped: []};
+    entries.forEach((entry) => {
+      if (gas.context.isTransactionScopedReviewType(entry.reviewType)) {
+        const transaction = entry.fullTxId ? call('getTransaction', [entry.fullTxId]) : null;
+        if (!transaction || !['PREPARED', 'WRITING', 'REVIEW_REQUIRED']
+          .includes(transaction.transactionStatus)) {
+          result.skipped.push({reviewType: entry.reviewType, fullTxId: entry.fullTxId,
+            reason: transaction ? 'TRANSACTION_ALREADY_SETTLED' : 'TRANSACTION_NOT_FOUND',
+            transactionStatus: transaction ? transaction.transactionStatus : null});
+          return;
+        }
+      }
+      const outcome = call('registerReview', [entry]);
+      if (outcome.registered) result.registered.push(outcome);
+      else result.skipped.push({reviewType: entry.reviewType, fullTxId: entry.fullTxId,
+        reason: 'SUPPRESSED', reviewId: outcome.reviewId});
+    });
+    return result;
+  }
+
+  test('imp 1: まとめ登録は1件ずつの登録と同じ行・結果・並びになる', () => {
+    const entries = [
+      makePendingEntry('PARTNER', 'tx-1'),
+      makePendingEntry('PARTNER', 'tx-2', {sourceRow: 13}),
+      makePendingEntry('DATE_INFERENCE', 'tx-3', {sourceRow: 14}),
+      makePendingEntry('FORMAT_UNKNOWN', null, {fileId: 'file-scoped'}),
+      makePendingEntry('PARTNER', 'tx-suppressed'),
+      makePendingEntry('PARTNER', 'tx-settled'),
+      makePendingEntry('PARTNER', 'tx-missing'),
+      makePendingEntry('PARTNER', null)
+    ];
+    function seed() {
+      setupWorld();
+      prepareReviewTransactions(['tx-1', 'tx-2', 'tx-3', 'tx-settled']);
+      const txSheet = gas.stubs.getSpreadsheet('master').getSheetByName('クレカ取引ログ');
+      const txRows = txSheet.getDataRange().getValues();
+      const settledIndex = txRows.findIndex((row) => String(row[0]) === 'tx-settled');
+      txSheet.getRange(settledIndex + 1, 10).setValue('COMMITTED');
+      call('registerReview', [makePendingEntry('PARTNER', 'tx-suppressed')]);
+    }
+    seed();
+    const single = oneByOnePendingReviews(entries);
+    const singleRows = reviewRowsWithoutIdOrTime();
+    const singleResults = normalizeReviewResults(single);
+
+    seed();
+    const batch = call('registerPendingReviews', [entries]);
+    assert.deepEqual(reviewRowsWithoutIdOrTime(), singleRows,
+      '行の値・列・順が1件ずつの登録と違う');
+    assert.deepEqual(normalizeReviewResults(batch), singleResults,
+      'registered / skipped の値または相対順が違う');
+    assert.ok(reviewRowsWithoutIdOrTime().every((row) => row[11] === 'destination-target'),
+      'M列 destinationSpreadsheetId が全行に残っている');
+  });
+
+  function measurePendingRegistration(count) {
+    setupWorld();
+    const ids = Array.from({length: count}, (_, index) => `imp-tx-${count}-${index}`);
+    call('registerPrepared', [ids.map((fullTxId, index) => ({fullTxId,
+      customerId: 'C001', fileId: 'reviews-file', formatId: 'test-format', sourceRow: index + 2,
+      planned: {b: '2025-12-10', f: '店名', i: '摘要', k: '未登録店', m: 1250}})),
+      'imp-count', {}]);
+    const sheet = gas.stubs.getSpreadsheet('master').getSheetByName('要確認');
+    let setValuesCalls = 0;
+    let appendRowCalls = 0;
+    const getRange = sheet.getRange.bind(sheet);
+    sheet.getRange = (...args) => {
+      const range = getRange(...args);
+      const setValues = range.setValues.bind(range);
+      range.setValues = (values) => { setValuesCalls += 1; return setValues(values); };
+      return range;
+    };
+    const appendRow = sheet.appendRow.bind(sheet);
+    sheet.appendRow = (...args) => { appendRowCalls += 1; return appendRow(...args); };
+    gas.stubs.resetApiCallCounts();
+    const before = gas.stubs.getApiCallCounts().batchGet;
+    const result = call('registerPendingReviews', [ids.map((fullTxId, index) =>
+      makePendingEntry('PARTNER', fullTxId, {sourceRow: index + 2}))]);
+    return {reads: gas.stubs.getApiCallCounts().batchGet - before,
+      setValuesCalls, appendRowCalls, registered: result.registered.length};
+  }
+
+  test('imp 2: 登録の読取は2件と40件で同じで、setValuesを1回だけ呼ぶ', () => {
+    const two = measurePendingRegistration(2);
+    const forty = measurePendingRegistration(40);
+    assert.equal(two.reads, forty.reads,
+      `登録の読取回数が件数に比例している（2件=${two.reads}、40件=${forty.reads}）`);
+    assert.equal(two.setValuesCalls, 1, `2件の一括書込が${two.setValuesCalls}回`);
+    assert.equal(forty.setValuesCalls, 1, `40件の一括書込が${forty.setValuesCalls}回`);
+    assert.equal(two.appendRowCalls + forty.appendRowCalls, 0,
+      'まとめ登録でappendRowを呼んでいる');
+    assert.equal(two.registered, 2);
+    assert.equal(forty.registered, 40);
+  });
+
+  test('imp 3: 同じまとまり内の抑止キー重複は最初のIDで抑止する', () => {
+    setupWorld();
+    gas.context.beginRunScopedReads_();
+    let result;
+    try {
+      prepareReviewTransactions(['duplicate-tx']);
+      result = call('registerPendingReviews', [[
+        makePendingEntry('PARTNER', 'duplicate-tx'),
+        makePendingEntry('PARTNER', 'duplicate-tx', {sourceRow: 13})
+      ]]);
+    } finally {
+      gas.context.endRunScopedReads_();
+    }
+    assert.equal(result.registered.length, 1);
+    assert.deepEqual(result.skipped, [{reviewType: 'PARTNER', fullTxId: 'duplicate-tx',
+      reason: 'SUPPRESSED', reviewId: result.registered[0].reviewId}]);
+    assert.equal(reviewRowsWithoutIdOrTime().length, 1);
+  });
+
+  test('imp 4: 3件目のdetail不正なら要確認シートに1行も書かない', () => {
+    setupWorld();
+    const sheet = gas.stubs.getSpreadsheet('master').getSheetByName('要確認');
+    const before = sheet.getLastRow();
+    const entries = [
+      makePendingEntry('MULTI_SHEET', null, {fileId: 'multi-1',
+        detail: {kind: 'MULTI_SHEET', sheets: ['A']}}),
+      makePendingEntry('MULTI_SHEET', null, {fileId: 'multi-2',
+        detail: {kind: 'MULTI_SHEET', sheets: ['B']}}),
+      makePendingEntry('MULTI_SHEET', null, {fileId: 'multi-3',
+        detail: {kind: 'MULTI_SHEET'}})
+    ];
+    assert.throws(() => call('registerPendingReviews', [entries]),
+      (error) => error && error.name === 'TypeError');
+    assert.equal(sheet.getLastRow(), before, '検査前に先行行を書いている');
+  });
+
+  test('imp 5: まとめ登録の行にdestinationSpreadsheetId列を残す', () => {
+    setupWorld();
+    call('registerPendingReviews', [[makePendingEntry('FORMAT_UNKNOWN', null,
+      {fileId: 'file-column-check', destinationSpreadsheetId: 'clone-target'})]]);
+    const row = gas.stubs.getSpreadsheet('master').getSheetByName('要確認')
+      .getDataRange().getValues().slice(1).find((values) => values[0] !== '');
+    assert.equal(row[12], 'clone-target', 'M列 destinationSpreadsheetId が欠けている');
+  });
+
+  test('imp 6: 前検査の所見とファイル別取引順は旧経路と一致する', () => {
+    setupWorld();
+    const txs = [
+      ['review-1-a', 'review-file-1', 'COMMITTED'],
+      ['review-1-b', 'review-file-1', 'WRITING'],
+      ['review-2-a', 'review-file-2', 'REVIEW_REQUIRED'],
+      ['scope-canceled', 'scope-file', 'CANCELED'],
+      ['scope-committed', 'scope-file', 'COMMITTED'],
+      ['unrelated-review', 'unrelated-file', 'REVIEW_REQUIRED']
+    ];
+    call('registerPrepared', [txs.map(([fullTxId, fileId]) => ({fullTxId, fileId,
+      customerId: 'C001', formatId: 'test-format',
+      planned: {b: '2025-12-10', f: '店名', i: '摘要', k: '店名', m: 1250}})),
+      'imp-precheck', {}]);
+    const txSheet = gas.stubs.getSpreadsheet('master').getSheetByName('クレカ取引ログ');
+    txs.forEach(([fullTxId, , status]) => {
+      const rows = txSheet.getDataRange().getValues();
+      const index = rows.findIndex((row) => String(row[0]) === fullTxId);
+      txSheet.getRange(index + 1, 10).setValue(status);
+    });
+    const indexRows = [
+      {customerId: 'C001', fileId: 'review-file-1', state: 'REVIEW_WAIT'},
+      {customerId: 'C001', fileId: 'review-file-2', state: 'REVIEW_WAIT'},
+      {customerId: 'C001', fileId: 'scope-file', state: 'COMPLETED'},
+      {customerId: 'C002', fileId: 'other-customer', state: 'REVIEW_WAIT'},
+      {customerId: 'C001', fileId: 'unrelated-file', state: 'COMPLETED'}
+    ];
+    const customer = call('getCustomerById', ['C001']);
+    const scopes = ['scope-file'];
+    function legacyResult() {
+      const findings = [];
+      const resolver = gas.context.makeDestinationIndexResolver_(customer);
+      const inScope = Object.create(null);
+      scopes.forEach((fileId) => { inScope[String(fileId)] = true; });
+      const wantedStatuses = ['PREPARED', 'WRITING', 'COMMITTED', 'REVIEW_REQUIRED'];
+      indexRows.filter((row) => row.customerId === customer.customerId &&
+        (inScope[String(row.fileId)] || ['VALIDATING', 'WRITING', 'REVIEW_WAIT'].includes(row.state)))
+        .forEach((row) => {
+          const txLogs = gas.context.getTransactionsByStatus(row.fileId, wantedStatuses);
+          const process = gas.context.getProcessLogRecord_(row.fileId);
+          const outcome = gas.context.runIntegrityCheck({
+            indexForTransaction: resolver.indexFor,
+            txLogs,
+            fileState: row.state,
+            processLogState: process ? String(process.values[16]) : null,
+            permanentIndexState: row.state
+          });
+          findings.push(...outcome.findings);
+        });
+      return {findings, stop: findings.some((finding) => finding.severity === 'STOP'),
+        indexesBuilt: resolver.stats().built};
+    }
+    const callInputs = [];
+    const fakeIntegrityCheck = (input) => {
+      callInputs.push({fileState: input.fileState,
+        txIds: input.txLogs.map((tx) => tx.fullTxId)});
+      return {findings: input.txLogs.map((tx) => ({severity:
+        tx.fullTxId === 'scope-committed' ? 'STOP' : 'REVIEW',
+      detail: {fullTxId: tx.fullTxId}})), stop: false};
+    };
+    const result = withMocks({
+      permanentIndexRowsForScan_: () => indexRows,
+      runIntegrityCheck: fakeIntegrityCheck
+    }, () => {
+      gas.context.forgetFileRowNumbers_();
+      const actual = plain(gas.context.runCustomerIntegrityCheck_(customer, scopes));
+      const actualInputs = callInputs.splice(0);
+      gas.context.forgetFileRowNumbers_();
+      const expected = plain(legacyResult());
+      const expectedInputs = callInputs.splice(0);
+      return {actual, actualInputs, expected, expectedInputs};
+    });
+    assert.deepEqual(result.actual.findings, result.expected.findings);
+    assert.equal(result.actual.stop, result.expected.stop);
+    assert.equal(result.actual.indexesBuilt, result.expected.indexesBuilt);
+    assert.deepEqual(result.actualInputs, result.expectedInputs,
+      '前検査が取引ログの行順、範囲内ファイル、対象顧客を保っていない');
+  });
+
+  function measurePrecheckReads(unfinishedCount) {
+    setupWorld();
+    const indexRows = Array.from({length: unfinishedCount}, (_, index) => ({
+      customerId: 'C001', fileId: `precheck-file-${unfinishedCount}-${index}`, state: 'REVIEW_WAIT'
+    }));
+    const txs = indexRows.map((row, index) => ({
+      fullTxId: `precheck-tx-${unfinishedCount}-${index}`, fileId: row.fileId,
+      customerId: 'C001', formatId: 'test-format',
+      planned: {b: '2025-12-10', f: '店名', i: '摘要', k: '店名', m: 1250}
+    }));
+    call('registerPrepared', [txs, 'imp-precheck-reads', {}]);
+    const customer = call('getCustomerById', ['C001']);
+    return withMocks({
+      permanentIndexRowsForScan_: () => indexRows,
+      runIntegrityCheck: () => ({findings: [], stop: false})
+    }, () => {
+      gas.context.forgetFileRowNumbers_();
+      gas.stubs.resetApiCallCounts();
+      const before = gas.stubs.getApiCallCounts().batchGet;
+      gas.context.runCustomerIntegrityCheck_(customer, []);
+      return gas.stubs.getApiCallCounts().batchGet - before;
+    });
+  }
+
+  test('imp 7: 前検査の読取回数は未完了1ファイルと5ファイルで同じ', () => {
+    const one = measurePrecheckReads(1);
+    const five = measurePrecheckReads(5);
+    assert.equal(one, five, `前検査の読取がファイル数に比例している（1件=${one}、5件=${five}）`);
+  });
+
+  test('imp 8: 同一ファイルの処理ログ重複は既存のIntegrityErrorで止まる', () => {
+    const seeded = seedPartnerViaWeb({fileId: 'imp-duplicate-process', count: 1});
+    const sheet = gas.stubs.getSpreadsheet('master').getSheetByName('クレカ処理ログ');
+    const row = sheet.getDataRange().getValues().find((values) =>
+      String(values[7]) === seeded.fileId);
+    assert.ok(row, '処理ログ行が必要');
+    sheet.appendRow(row);
+    gas.context.forgetFileRowNumbers_();
+    const error = caught(() => gas.context.runCustomerIntegrityCheck_(
+      call('getCustomerById', [seeded.customer.customerId]), []));
+    assert.equal(error.code, 'TRANSACTION_LOG_AMBIGUOUS');
+    assert.ok(error.message.includes('Duplicate process log fileId'), error.message);
+  });
+
+  function measureImportFileReads(reviewCount) {
+    const seeded = setupWorld({knownMerchant: true});
+    const rows = Array.from({length: reviewCount || 1}, (_, index) =>
+      `2025/12/${String(index + 1).padStart(2, '0')},${reviewCount ? '未登録店' : '既知店'},${2000 + index},仕入れ`);
+    const fileId = putCsv(seeded.customer, {fileId: `imp-import-${reviewCount}`, rows});
+    const destinationSpreadsheetId = createWebDestination(seeded.customer);
+    gas.stubs.resetApiCallCounts();
+    const result = webImport(seeded.customer, {destinationSpreadsheetId});
+    const fileResult = importFileResults(result).find((item) => item.fileId === fileId);
+    assert.ok(fileResult, `取込結果に${fileId}が無い`);
+    assert.equal(openReviewsFor(seeded.customer.customerId, {fileId})
+      .filter((review) => review.reviewType === 'PARTNER').length, reviewCount);
+    return fileResult.reads;
+  }
+
+  test('imp 9: 要確認30件と0件の取込でファイル単位の読取差は5以下', () => {
+    const thirty = measureImportFileReads(30);
+    const none = measureImportFileReads(0);
+    assert.ok(Math.abs(thirty - none) <= 5,
+      `30件=${thirty}読取、0件=${none}読取。差は${Math.abs(thirty - none)}`);
+    assert.equal(clientEval('formatElapsed(0)'), '0:00');
+    assert.equal(clientEval('formatElapsed(83000)'), '1:23');
+    assert.equal(clientEval('formatElapsed(3600000)'), '60:00');
+    assert.equal(clientEval('formatElapsed(-1)'), '0:00');
+    assert.equal(clientEval('formatElapsed(NaN)'), '0:00');
+    assert.equal(clientEval('progressText(3, 12, 83000)'),
+      '処理中 3 / 12（経過 1:23）');
+    assert.match(WEBAPP_UI_SOURCE, /@keyframes\s+[\w-]+/);
+    assert.match(WEBAPP_UI_SOURCE, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
+    assert.match(WEBAPP_UI_SOURCE,
+      /processingHint:\s*'複数のファイルをまとめて取り込んでいるため、表示が進むまで数分かかることがあります。このままお待ちください。'/);
+  });
+
+  test('imp 10: 進捗時計は停止後に更新せずfinallyから停止される', () => {
+    const source = WEBAPP_UI_SOURCE;
+    assert.ok((source.match(/progressTimer\.stop\(\);/g) || []).length >= 2,
+      '取込と確定のfinallyから進捗時計を停止していない');
+    const elements = {
+      'import-progress-label': {textContent: ''},
+      'import-progress-arrows': {},
+      'import-progress-value': {textContent: ''},
+      'import-progress-hint': {hidden: true, textContent: ''}
+    };
+    let now = 1000;
+    let tick = null;
+    const cleared = [];
+    const timers = clientEval(`(() => {
+      const timer = startProgressTimer('import-progress', () => true,
+        {now: () => __clock.now()});
+      timer.beginCall();
+      __clock.advance(61000);
+      __tick();
+      const before = {text: el['import-progress-value'].textContent,
+        hint: el['import-progress-hint'].hidden};
+      timer.endCall();
+      timer.stop();
+      const stoppedText = el['import-progress-value'].textContent;
+      __clock.advance(5000);
+      __tick();
+      return {before, stoppedText, afterText: el['import-progress-value'].textContent};
+    })()`, {
+      document: {getElementById(id) { return elements[id] || {}; }},
+      setInterval(callback) { tick = callback; return 17; },
+      clearInterval(id) { cleared.push(id); },
+      __clock: {now: () => now, advance: (ms) => { now += ms; }},
+      __tick() { if (tick) tick(); }
+    });
+    assert.equal(timers.before.hint, false, '60秒を超えた案内が表示されない');
+    assert.equal(timers.afterText, timers.stoppedText, '停止後も経過表示が更新された');
+    assert.deepEqual(cleared, [17], 'setIntervalがclearIntervalで止められていない');
+  });
+
+  test('imp 11: 60 秒返らないときの案内は、取込と確定で待つ理由を分けて言う', () => {
+    const hints = plain(clientEval(`(() => {
+      const nodes = {};
+      ['import-progress', 'resolve-progress'].forEach((id) => {
+        ['-label', '-arrows', '-value', '-hint'].forEach((suffix) => { el[id + suffix] = {}; });
+      });
+      renderProgress('import-progress', 1, 3, 61000, true);
+      renderProgress('resolve-progress', 1, 3, 61000, true);
+      return {imp: el['import-progress-hint'].textContent, res: el['resolve-progress-hint'].textContent};
+    })()`));
+    assert.ok(hints.imp.includes('取り込んでいる'), hints.imp);
+    assert.ok(hints.res.includes('確定している'), hints.res);
   });
 
 };

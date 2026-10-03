@@ -178,7 +178,7 @@ module.exports = ({test, assert, gas}) => {
       '    bootstrap();',
       '    globalThis.__ui = {state, el, renderSelection, renderFormatPanel, previewFormat, saveFormat, returnFormatToCustomer, openFormat, chooseFolder, chooseCustomer, loadFinalReview, formatSetBusy};');
     const sandbox = {document, google: {script: {run: runner}}, window: {open() { return {}; }},
-      setTimeout, clearTimeout, console};
+      setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {}, console};
     vm.runInNewContext(script, sandbox);
     return {ui: sandbox.__ui, document, calls, pending, ids, root, Node};
   }
