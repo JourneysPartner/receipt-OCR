@@ -978,7 +978,7 @@ function webAppValidateDestination_(customer, destinationSpreadsheetId) {
   return destinationId;
 }
 
-/** 雛形を同じフォルダへ複製し、システム所有 6 列だけを空にする。 */
+/** 雛形を同じフォルダへ複製し、システム所有の列（6 列、空き判定が見るなら相手税区分も）だけを空にする。 */
 function webAppCloneDestination_(customer, now) {
   var templateFile = DriveApp.getFileById(customer.destinationSpreadsheetId);
   var parents = webAppIteratorToArray_(templateFile.getParents());
@@ -1003,8 +1003,21 @@ function webAppCloneDestination_(customer, now) {
   }
   var firstDataRow = Number(customer.headerRow) + 1;
   var lastRow = Number(sheet.getLastRow());
+  // 相手税区分（G）もシステムが書く列である（カード会社からの返金に「対象外」）。
+  // ただし雛形がこの列に既定値を持つ顧客もある ── その列は行の空き判定から
+  // 外してある（`rowScanExcludedColumns`）。**空き判定が見る列なら、雛形の
+  // データ行では空のはず**なので、値があれば以前の取込の書き残しである。
+  // 消さないと複製のたびに「対象外」だけの行が残り、その行は使用中と見なされて
+  // 飛ばされ、ダウンロードした Excel に出る（2026-10-03、ドコモの取込の転記先の
+  // 47・56 行目。雛形に初期の取込のキャッシュバック行が残っていた）。
+  var owned = ['B', 'F', 'I', 'K', 'M', 'txId'];
+  var taxColumn = Number(customer.columnMapping.G);
+  if (Number.isInteger(taxColumn) && taxColumn >= 1 &&
+      (customer.rowScanExcludedColumns || []).map(Number).indexOf(taxColumn) < 0) {
+    owned.push('G');
+  }
   if (lastRow >= firstDataRow) {
-    ['B', 'F', 'I', 'K', 'M', 'txId'].forEach(function(key) {
+    owned.forEach(function(key) {
       sheet.getRange(firstDataRow, Number(customer.columnMapping[key]),
         lastRow - firstDataRow + 1, 1).clearContent();
     });

@@ -582,6 +582,39 @@ module.exports = ({test, assert, gas}) => {
     });
   });
 
+  test('webapp 05e: a leftover tax category in the template is cleared from each clone', () => {
+    // 雛形に以前の取込の「対象外」（相手税区分）が残っていると、複製のたびに
+    // その行が使用中と見なされて飛ばされ、「対象外」だけの行が Excel に出た
+    // （2026-10-03、ドコモの取込の転記先の 47・56 行目）。
+    requireWebFunction('webAppRunImport');
+    const {customer} = setupWorld({customer: {rowScanExcludedColumns: [9, 10]}});
+    const template = gas.stubs.getSpreadsheet(customer.destinationId).getSheetByName('入力用シート');
+    // 空き判定が見る G 列（8）の雛形の既定値は、この顧客には無い。残ったのは書き残しの「対象外」だけ。
+    template.getRange(2, 8, 4, 1).setValues([[''], ['対象外'], [''], ['']]);
+    putCsv(customer, {rows: ['2025/12/10,既知店,1000,仕入れ', '2025/12/11,既知店,1100,仕入れ']});
+    gas.stubs.getSpreadsheet('master').getSheetByName('共通取引先辞書').appendRow(knownMerchantRow());
+    const result = webImport(customer);
+    const clone = gas.stubs.getSpreadsheet(result.destinationSpreadsheetId).getSheetByName('入力用シート');
+    assert.deepEqual(plain(clone.getRange(2, 8, 4, 1).getValues()).map((row) => row[0]), ['', '', '', ''],
+      '複製の G 列に書き残しが無い');
+    assert.equal(template.getRange(3, 8).getValue(), '対象外', '雛形そのものには触れない');
+    const rows = call('openReviews', [{}]);
+    const written = plain(clone.getRange(2, 7, 2, 1).getValues()).map((row) => row[0]);
+    assert.ok(written.every((txId) => String(txId) !== ''), '2 行目・3 行目に続けて書かれる（3 行目を飛ばさない）: ' + JSON.stringify(written) + JSON.stringify(rows.length));
+  });
+
+  test('webapp 05f: a tax category column the scan ignores keeps the template defaults', () => {
+    requireWebFunction('webAppRunImport');
+    const {customer} = setupWorld({customer: {ownedSeed: true}});
+    putUnknownFile(customer);
+    const template = gas.stubs.getSpreadsheet(customer.destinationId).getSheetByName('入力用シート');
+    const before = plain(template.getRange(2, 8, 4, 1).getValues());
+    assert.ok(before.some((row) => row[0] !== ''), '前提：雛形の G 列（8）に既定値がある');
+    const result = webImport(customer);
+    const clone = gas.stubs.getSpreadsheet(result.destinationSpreadsheetId).getSheetByName('入力用シート');
+    assert.deepEqual(plain(clone.getRange(2, 8, 4, 1).getValues()), before);
+  });
+
   test('webapp 05b: the six-column clone still has an empty destination row', () => {
     requireWebFunction('webAppRunImport');
     const {customer} = setupWorld({customer: {ownedSeed: true}});
