@@ -442,6 +442,16 @@ function installSmbcXlsxFormat() {
  * 期待する判定結果は`test/phase6-real-samples.test.js`が実サンプルから
  * 生成した固定データで固定している。ここを触ったらそちらも見ること。
  */
+/**
+ * dカードの「ご入金」行を転記しない規則（ko-ch さんの決定、2026-10-03）。
+ * 形式の一覧（下）と後付けの関数（`installDocomoDepositRules`）の両方が使うので、
+ * 一覧より前に置く ── GAS はファイルの上から順に値を入れるので、後ろに置くと
+ * 一覧の側では未定義になる。
+ */
+var DOCOMO_DEPOSIT_RULE_ = Object.freeze({id: 'deposit', target: 'cell', column: 'E',
+  match: 'contains', value: 'ご入金'});
+var DOCOMO_DEPOSIT_FORMAT_IDS_ = Object.freeze(['docomo_family', 'docomo_family_x11']);
+
 var ANNOTATED_FORMAT_SPECS_ = [
   {
     formatId: 'smbc_family_x7', formatName: '三井住友系Excel（7列・用途G）',
@@ -768,8 +778,10 @@ var ANNOTATED_FORMAT_SPECS_ = [
     sectionBreakRule: {patterns: ['キャッシングご返済明細']},
     // 合計行は全セルが空白1つ。空白だけのセルは空欄として扱われるので、
     // 日付・金額が空の行として自然に落ちる。
+    // 利用店名が「ご入金（07／10）」の行はカード会社への支払いの入金で、
+    // 転記しない（ko-ch さんの決定、2026-10-03。dカードでは返金と区別しなくてよい）。
     exclusionRule: {excludeRowRanges: [{from: 1, to: 2}],
-      excludeWhenDateAndAmountEmpty: true, rules: []},
+      excludeWhenDateAndAmountEmpty: true, rules: [DOCOMO_DEPOSIT_RULE_]},
     countTotalRule: {count: {source: 'none'}, total: {source: 'none'}, totalScope: 'all'},
     billingRule: {sources: [
       {id: 'fn_ymd', kind: 'fileName', pattern: '_(20\\d{2})(1[0-2]|0[1-9])[0-3]\\d',
@@ -922,6 +934,14 @@ function patchFormatField_(field, wanted, reason) {
       amountFallbackColumn: current.amountFallbackColumn,
       sectionBreakRule: current.sectionBreakRule,
       parserKind: current.parserKind,
+      // 次の項目も新しい版へ引き継ぐ。落とすと、画面で登録した形式の回答（AB列。
+      // 改訂の初期値と登録の取り消しが使う）や海外利用の列が、後付けのたびに消える。
+      answers: current.answers,
+      foreignCurrencyColumn: current.foreignCurrencyColumn,
+      foreignAmountColumn: current.foreignAmountColumn,
+      exchangeRateColumn: current.exchangeRateColumn,
+      lookbackMonths: current.lookbackMonths === null ? undefined : current.lookbackMonths,
+      forwardMonths: current.forwardMonths === null ? undefined : current.forwardMonths,
       revisionReason: reason, supersede: true
     };
     next[field] = wanted[formatId];
@@ -981,6 +1001,37 @@ function installSectionBreakRules() {
 function installBillingRules() {
   return patchFormatField_('billingRule',
     wantedFormatField_('billingRule', null), 'DEFECT_FIX');
+}
+
+/**
+ * dカードの「ご入金」行を転記しない規則を後付けする（2026-10-03）。
+ *
+ * 明細に「ご入金（07／10）」のような行があり（日付・用途が空、金額はマイナス）、
+ * 用途の空欄でファイルごと要修正に落ちていた（本番で 3 本）。ko-ch さんの決定：
+ * dカードでは、利用店名に「ご入金」とあればカード会社への支払いの入金なので
+ * 転記しない。**他のカードへ一般化しない** ── カード会社からの返金なら転記が
+ * 要り、majica はカードへのチャージが同じ形で現れる（場合によるので形式ごとに決める）。
+ *
+ * 規則は**本番に入っている今の定義に足す**（コードの定義で置き換えない）。
+ * `docomo_family_x11` は画面から登録した形式でコードに定義が無く、9 列の形式も
+ * 本番で後付けが重なっている。足し済みなら何もしない（`ALREADY_SET`）。
+ */
+function installDocomoDepositRules() {
+  var wanted = Object.create(null);
+  DOCOMO_DEPOSIT_FORMAT_IDS_.forEach(function(formatId) {
+    var current = loadFormatDefinitions({formatId: formatId, enabled: true})[0];
+    // 無い・壊れた形式は `patchFormatField_` が理由を付けて飛ばす。
+    if (!current || !current.valid) { wanted[formatId] = null; return; }
+    var rule = JSON.parse(JSON.stringify(current.exclusionRule || {}));
+    rule.rules = Array.isArray(rule.rules) ? rule.rules : [];
+    if (!rule.rules.some(function(entry) { return entry && entry.id === DOCOMO_DEPOSIT_RULE_.id; })) {
+      // 利用店名の列は形式ごとに持つ（どちらも E だが、定義の値を正とする）。
+      rule.rules.push(Object.assign({}, DOCOMO_DEPOSIT_RULE_,
+        {column: current.merchantColumn || DOCOMO_DEPOSIT_RULE_.column}));
+    }
+    wanted[formatId] = rule;
+  });
+  return patchFormatField_('exclusionRule', wanted, 'ENHANCEMENT');
 }
 
 /**
