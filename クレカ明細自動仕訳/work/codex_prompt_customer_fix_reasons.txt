@@ -1,0 +1,52 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の、**「要修正」（区分1）になった理由を処理ログに記録し、Web アプリのファイル一覧と取込のお知らせに出す**直しを受け取ります。
+
+作業ツリーは main の最新（コミット 65a3cc4）で、`src/`・`test/` に未コミットの変更はありません。あなたの変更は、ステージされていない差分（`git diff`）として残してください ── **`git add` しないこと。**開始時の `node test/run-tests.js` の本数は、始める前に自分で数えて報告に書いてください（1409/1409 のはずです）。
+
+## 仕様書
+
+`work/spec_customer_fix_reasons.md`（1.0）。**全部読んでから始めてください。**
+
+## 直すこと（要点。詳細は仕様書）
+
+1. `src/30_TransactionValidator.gs`：純関数 `customerFixReasons(transactions, validation)` と `summarizeCustomerFixReasons(reasons)`、定数 `CUSTOMER_FIX_ROWS_LIMIT_ = 20` を足す。区分の判定（`classifyValidationResult`）は変えない。
+2. `src/70_ImportFlow.gs`：`runPreValidationBlock` が区分1のとき `detail.customerFix` を返す（関数の中で組み立てた `validation` を渡す）。
+3. `src/71_RunOrchestrator.gs`：`processDiscoveredFile_` が区分1のとき、遷移の前に `recordError` で理由を 1 件記録し（失敗は飲み込んでログだけ）、`outcome.customerFix` を返す。
+4. `src/80_WebApp.gs`：`webAppListFolder` が要修正のファイルにだけ `fixReason` を付ける（要修正が無ければ処理ログを読まない・読取の失敗で一覧を失敗させない）。補助 `webAppCustomerFixReason_(errorsCell)`。
+5. `src/81_WebAppUi.html`：純関数 `customerFixReasonLines`・`customerFixNoticeLines`、ファイル一覧の「状態」の下に理由（`textContent`）、取込のお知らせに【要修正】の行。CSS `.fix-reason`。
+
+---
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。**
+2. **git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。
+3. **`src/` で変えてよいのは `30_TransactionValidator.gs`・`70_ImportFlow.gs`・`71_RunOrchestrator.gs`・`80_WebApp.gs`・`81_WebAppUi.html` の 5 つだけ。**30 は新しい関数と定数の追加だけ（既存の関数は 1 文字も変えない）。70 は `runPreValidationBlock` の区分1・区分2の戻りの箇所だけ。71 は `processDiscoveredFile_` の `phase('processFile')` と遷移の間だけ。80 は `webAppListFolder` と新しい補助だけ。81 は新しい純関数・`renderFiles` の「状態」のセル・`startImport` の 1 行・CSS だけ。検査：終わったとき `git diff --name-only -- src/` がこの 5 つ以下であること。
+4. テストの変更は `cf N: …`（仕様書 §4 の 1〜18）を**足すこと**（補助を足してよい）。置き場所は仕様書 §4 のとおり。**既存のテストの期待（assert）は 1 つも変えないこと。**既存のテストが赤になったら、変えずに止めて理由を報告すること ── 特に、読取の回数を数えるテスト（`budget 1`・`multi 14`・`bulk 1`・`kw9` の読取の数・`scope 1〜3`）と、戻り値の形をまるごと比べるテスト（`resolvePurposes`・`webAppListFolder`・`processFile`・`runPreValidationBlock`）。`test/fixtures/` は変えない。`test/gas-stubs.js`・`test/gas-harness.js` は、足りない API を足すだけなら変えてよい（足したものは報告する）。
+5. **テストを先に赤にしてから直すこと。**cf 1〜18 を書き、いまの実装で赤になることを確かめてから直す。いまでも緑になるものはどれかを報告する。
+6. 既存のテストを 1 つも壊さないこと。特に phase3 の INV-14（区分1は転記先に 1 セルも書かず、取引ログ行も作らない）、phase6-orchestrator の区分1・区分2の取込、`webapp`・`bulk`・`multi`・`kw9`・`subtotal`・`deposit`・`imp`。
+7. **処理ログへの記録に明細の中身（店名・金額・日付・用途の値）を入れないこと。**入れてよいキーは仕様書 §2.3 のものだけ。ログ（`Logger.log`）にも中身やエラーの message を出さないこと。
+8. **画面へ文字を入れるときは `textContent` だけを使うこと**（`innerHTML` 等を使わない。メモやシート名は人が書いた文字）。
+9. Sheets API の読取は既存の口だけを通すこと（`findRowsByColumnValues_`・`recordError` など）。`Sheets.Spreadsheets.Values.batchGet` を直に呼ばない。
+10. **日本語のコメントは UTF-8 で書くこと。**以前、あなたの書いたコメントが `?` の羅列に化けた。終わったら `grep -n '???' src/*.gs src/*.html` が空であること（始める前も空）を確かめて報告すること。コメントは周りのコードと同じ密度・語り口（「なぜ」を書く）で。
+11. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断で安全側を外さないこと。迷ったら止めて報告すること。
+
+## 進め方
+
+1. 仕様書を読む。次を読む：`src/30_TransactionValidator.gs` の `classifyValidationResult` の周り、`src/31_PurposeResolver.gs` の `resolvePurposes`、`src/35_TransactionChecks.gs` の `validateTransactions`、`src/70_ImportFlow.gs` の `runPreValidationBlock`・`preValidationResult_`・`processFile`、`src/71_RunOrchestrator.gs` の `processDiscoveredFile_`、`src/60_ProcessLog.gs` の `recordError`・`PROCESS_FIELD_COLUMNS_`、`src/01_DataAccessCore.gs` の `findRowsByColumnValues_`・`jsonCell_`（読めない JSON で投げる）、`src/80_WebApp.gs` の `webAppListFolder`・`webAppFolderFile_`・`webAppReturnFileToCustomer`、`src/81_WebAppUi.html` の `renderFiles`・`startImport`・`showNotice`・`formatElapsed`・CSS、`test/phase8-webapp.test.js` の補助（`clientEval`・`requireWebFunction`・読取を数える `gas.stubs.getApiCallCounts()`）、`test/phase6-orchestrator.test.js` の 176 行付近（区分1の取込）、`test/phase3-importflow.test.js` の INV-14
+2. cf 1〜18 を書く → 赤を確かめる
+3. 直す
+4. `node test/run-tests.js` を全部緑にする
+5. 仕様書 §5 の P1〜P20 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら `git diff` が変異を入れる前と同じか確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する
+6. `git diff --stat -- src/ test/` を確かめる
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 直す前に cf 1〜18 のどれが赤だったか（緑だったものも）
+- 実測した読取の数：区分1のファイル 1 本の取込（直す前と後）、ファイル一覧（要修正なし・あり。直す前と後）
+- P1〜P20 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て（足したテストがあればその名前）
+- 仕様書が間違っていた・足りなかった箇所（黙って直さないこと）、自分で決めた箇所（全部）
+- `???` の grep の結果（前と後）
+- `git diff --stat -- src/ test/` の出力（始める前と後）
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。

@@ -70,8 +70,10 @@ function runPreValidationBlock(input) {
   // 区分1・区分2は無書込で差し戻す。取引ログへも登録しない。
   // ここで登録すると、転記行を持たない孤児の取引ログ行が残る。
   if (category === 1 || category === 2) {
+    var detail = {classification: classification};
+    if (category === 1) detail.customerFix = customerFixReasons(input.transactions || [], validation);
     return preValidationResult_(category, classification.code, [],
-      classification.reviewEntries || [], {classification: classification});
+      classification.reviewEntries || [], detail);
   }
 
   // 区分3以降。要確認の宛先を取引IDで引ける形へ正規化する。

@@ -187,6 +187,133 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(gas.stubs.getFile('fileD').getName(), '【要修正】明細202601.csv');
   });
 
+  test('cf 7: category-1 import returns and records redacted customer-fix reasons', () => {
+    setup();
+    const fileId = 'cf7_file';
+    putCsv(fileId, '明細202601.csv',
+      '利用日,利用店名,金額,使用用途\n' +
+      '2025/12/16,明細店名_秘密,7845123,\n' +
+      '2025/12/17,ローソン,7845124,用途文字列_秘密\n' +
+      '2025/12/18,ローソン,7845125,\n' +
+      '2025/12/19,,7845126,交通費\n');
+    gas.stubs.createFolder('folder1', {fileIds: [fileId]});
+
+    const report = plain(gas.call('runImport', [{}]));
+    const fileReport = report.customers[0].files.find((file) => file.fileId === fileId);
+    // 上限は実測値そのもの（2026-10-08：直す前14回→16回）。理由の記録の＋2は
+    // recordError が行を読み、書く前にもう一度読むため。1回増えたら記録して上げる。
+    assert.ok(Number(fileReport.reads) <= 16,
+      `区分1のファイル1本の取込が${fileReport.reads}回読んでいる（上限16）`);
+    assert.equal(fileReport.category, 1);
+    assert.equal(fileReport.nextState, 'CUSTOMER_FIX_REQUIRED');
+    assert.deepEqual(fileReport.customerFix, {
+      sheetName: null, transactionCount: 4,
+      reasons: [
+        {kind: 'PURPOSE_EMPTY', count: 2, rows: [2, 4]},
+        {kind: 'MERCHANT_REQUIRED', count: 1, rows: [5]}
+      ]
+    });
+
+    const process = plain(gas.call('getProcessLogRecord_', [fileId]));
+    const errors = JSON.parse(process.values[22]);
+    const reasonRecord = errors[errors.length - 1];
+    assert.equal(reasonRecord.code, 'SOURCE_REQUIRES_CUSTOMER_FIX');
+    assert.equal(reasonRecord.source, 'IMPORT');
+    assert.equal(reasonRecord.runId, report.runId);
+    assert.equal(typeof reasonRecord.occurredAt, 'string');
+    assert.deepEqual(reasonRecord.reasons, fileReport.customerFix.reasons);
+    assert.equal(reasonRecord.detail,
+      'PURPOSE_EMPTY=2 rows 2,4; MERCHANT_REQUIRED=1 rows 5');
+    assert.equal(Number(process.values[21]), 1);
+    const serialized = JSON.stringify(reasonRecord);
+    ['明細店名_秘密', '用途文字列_秘密', '交通費', '7845123', '7845124', '7845125', '7845126']
+      .forEach((value) => assert.equal(serialized.includes(value), false, `reason log leaked ${value}`));
+  });
+
+  test('cf 8: customer-fix reason is recorded before the state transition', () => {
+    setup();
+    const fileId = 'cf8_file';
+    putCsv(fileId, '明細202601.csv',
+      '利用日,利用店名,金額,使用用途\n2025/12/16,ローソン,1000,\n');
+    gas.stubs.createFolder('folder1', {fileIds: [fileId]});
+    const calls = [];
+    const priorRecordError = gas.context.recordError;
+    const priorTransition = gas.context.transitionFileState;
+    gas.context.recordError = function(targetId, record) {
+      if (record && record.code === 'SOURCE_REQUIRES_CUSTOMER_FIX') calls.push('recordError');
+      return priorRecordError.apply(this, arguments);
+    };
+    gas.context.transitionFileState = function() {
+      if (Array.prototype.indexOf.call(arguments, 'CUSTOMER_FIX_REQUIRED') >= 0)
+        calls.push('transition');
+      return priorTransition.apply(this, arguments);
+    };
+    try {
+      gas.call('runImport', [{}]);
+    } finally {
+      gas.context.recordError = priorRecordError;
+      gas.context.transitionFileState = priorTransition;
+    }
+    assert.deepEqual(calls, ['recordError', 'transition']);
+  });
+
+  test('cf 9: a reason-log failure keeps the customer-fix outcome and releases its lease', () => {
+    setup();
+    const fileId = 'cf9_file';
+    putCsv(fileId, '明細202601.csv',
+      '利用日,利用店名,金額,使用用途\n2025/12/16,店名シークレット,7845123,\n');
+    gas.stubs.createFolder('folder1', {fileIds: [fileId]});
+    const priorRecordError = gas.context.recordError;
+    gas.context.recordError = function(targetId, record) {
+      if (record && record.code === 'SOURCE_REQUIRES_CUSTOMER_FIX') {
+        const error = new Error('店名シークレットを含むエラー本文');
+        error.code = 'TEST_LOG_FAILURE';
+        throw error;
+      }
+      return priorRecordError.apply(this, arguments);
+    };
+    let report;
+    try {
+      report = plain(gas.call('runImport', [{}]));
+    } finally {
+      gas.context.recordError = priorRecordError;
+    }
+
+    const fileReport = report.customers[0].files.find((file) => file.fileId === fileId);
+    assert.equal(fileReport.outcome, 'NO_WRITE');
+    assert.equal(fileReport.nextState, 'CUSTOMER_FIX_REQUIRED');
+    assert.ok(fileReport.customerFix);
+    assert.equal(gas.stubs.getFile(fileId).getName(), '【要修正】明細202601.csv');
+    assert.equal(gas.call('activeLeases_', []).some((lease) => lease.fileId === fileId), false);
+    const logLine = gas.stubs.getLogs().find((line) =>
+      line.startsWith('CUSTOMER_FIX_REASON_NOT_RECORDED '));
+    assert.ok(logLine);
+    assert.equal(logLine.includes('TEST_LOG_FAILURE'), true);
+    assert.equal(logLine.includes('店名シークレット'), false);
+    assert.equal(fileReport.outcome, 'NO_WRITE');
+  });
+
+  test('cf 10: category 2 and completed imports add no customer-fix record or result key', () => {
+    setup();
+    putCsv('cf10_unknown', '未知.csv', 'x,y\n1,2\n');
+    putCsv('cf10_done', '三井住友カード202601.csv',
+      '利用日,利用店名,金額,使用用途\n2025/12/16,ローソン,10800,仕入れ\n');
+    gas.stubs.createFolder('folder1', {fileIds: ['cf10_unknown', 'cf10_done']});
+
+    const report = plain(gas.call('runImport', [{}]));
+    const files = report.customers[0].files;
+    const unknown = files.find((file) => file.fileId === 'cf10_unknown');
+    const completed = files.find((file) => file.fileId === 'cf10_done');
+    assert.equal(unknown.category, 2);
+    assert.equal(completed.nextState, 'COMPLETED');
+    [unknown, completed].forEach((file) => {
+      assert.equal(Object.prototype.hasOwnProperty.call(file, 'customerFix'), false);
+      const process = plain(gas.call('getProcessLogRecord_', [file.fileId]));
+      const errors = JSON.parse(process.values[22] || '[]');
+      assert.equal(errors.some((entry) => entry.code === 'SOURCE_REQUIRES_CUSTOMER_FIX'), false);
+    });
+  });
+
   test('5.4: a purpose-keyword file name complements the blank instead of bouncing', () => {
     setup();
     putCsv('fileE', '仕入_明細202601.csv',
