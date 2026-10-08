@@ -336,4 +336,74 @@ module.exports = function registerPhase1bValidationTests({test, assert, gas}) {
     input.foreignCurrency = {currencyCode: null, localAmount: null, exchangeRate: null, diagnostics: []};
     assert.equal(gas.call('classifyValidationResult', [input]).category, null);
   });
+
+  test('cf 1: customer-fix reasons list unresolved purpose rows in sorted order', () => {
+    const transactions = [
+      {purpose: '', sourceRow: 9}, {purpose: '仕入れ', sourceRow: 6},
+      {purpose: null, sourceRow: 5}, {purpose: undefined, sourceRow: 7}
+    ];
+    assert.deepEqual(plain(gas.call('customerFixReasons', [transactions,
+      {purposeResolution: {unresolvedCount: 3}, transactionValidation: {issues: []}}])), {
+      transactionCount: 4,
+      reasons: [{kind: 'PURPOSE_EMPTY', count: 3, rows: [5, 7, 9]}]
+    });
+  });
+
+  test('cf 2: only category-1 transaction issues are grouped after purpose', () => {
+    const validation = {
+      purposeResolution: {unresolvedCount: 1},
+      transactionValidation: {issues: [
+        {kind: 'MERCHANT_REQUIRED', code: 'MERCHANT_REQUIRED', customerFix: true, sourceRow: 10},
+        {kind: 'DATE_UNREADABLE', code: 'DATE_UNREADABLE', sourceRow: 11},
+        {kind: 'ZERO_AMOUNT', code: 'ZERO_AMOUNT', sourceRow: 12},
+        {kind: 'MERCHANT_BLANK_ALLOWED', code: 'MERCHANT_BLANK_ALLOWED', sourceRow: 13}
+      ]}
+    };
+    const result = plain(gas.call('customerFixReasons', [[
+      {purpose: '', sourceRow: 2}, {purpose: '用途', sourceRow: 3}, {purpose: '', sourceRow: 4}
+    ], validation]));
+    assert.deepEqual(result.reasons, [
+      {kind: 'PURPOSE_EMPTY', count: 1, rows: [2, 4]},
+      {kind: 'MERCHANT_REQUIRED', count: 1, rows: [10]}
+    ]);
+    assert.equal(gas.call('classifyValidationResult', [validation]).category, 1);
+  });
+
+  test('cf 3: customer-fix rows are unique, sorted, and capped at twenty', () => {
+    const transactions = Array.from({length: 25}, (_, index) => ({
+      purpose: '', sourceRow: 25 - index
+    }));
+    transactions[24].sourceRow = 1;
+    const result = plain(gas.call('customerFixReasons', [transactions,
+      {purposeResolution: {unresolvedCount: 25}, transactionValidation: {issues: []}}]));
+    assert.equal(result.transactionCount, 25);
+    assert.deepEqual(result.reasons, [{kind: 'PURPOSE_EMPTY', count: 25,
+      rows: Array.from({length: 20}, (_, index) => index + 1)}]);
+  });
+
+  test('cf 4: unresolved count gates purpose reasons and missing source rows are omitted', () => {
+    const noUnresolvedPurpose = plain(gas.call('customerFixReasons', [[
+      {purpose: '', sourceRow: 2}, {purpose: null}, {purpose: '仕入れ', sourceRow: 3}
+    ], {purposeResolution: {unresolvedCount: 0}, transactionValidation: {issues: []}}]));
+    assert.deepEqual(noUnresolvedPurpose, {transactionCount: 3, reasons: []});
+
+    const unresolved = plain(gas.call('customerFixReasons', [[
+      {purpose: '', sourceRow: 4}, {purpose: ''}
+    ], {purposeResolution: {unresolvedCount: 2}, transactionValidation: {issues: []}}]));
+    assert.deepEqual(unresolved.reasons, [{kind: 'PURPOSE_EMPTY', count: 2, rows: [4]}]);
+  });
+
+  test('cf 5: customer-fix summary keeps exact ASCII format', () => {
+    const reasons = [
+      {kind: 'PURPOSE_EMPTY', count: 25,
+        rows: Array.from({length: 20}, (_, index) => index + 6)},
+      {kind: 'MERCHANT_REQUIRED', count: 1, rows: [30]}
+    ];
+    assert.equal(gas.call('summarizeCustomerFixReasons', [reasons]),
+      'PURPOSE_EMPTY=25 rows 6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25 +5; MERCHANT_REQUIRED=1 rows 30');
+    assert.equal(gas.call('summarizeCustomerFixReasons', [[
+      {kind: 'PURPOSE_EMPTY', count: 2, rows: []}
+    ]]), 'PURPOSE_EMPTY=2');
+    assert.equal(gas.call('summarizeCustomerFixReasons', [[]]), '');
+  });
 };

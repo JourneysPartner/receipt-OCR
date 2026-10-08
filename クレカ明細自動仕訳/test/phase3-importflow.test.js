@@ -125,6 +125,31 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(plain(result).nextState, 'CUSTOMER_FIX_REQUIRED');
   });
 
+  test('cf 6: pre-validation returns reasons from its locally built transaction validation', () => {
+    const customer = setup();
+    const input = {
+      customer, file: {id: 'file1'},
+      transactions: [{purpose: '', merchantOriginal: '', sourceRow: 2}],
+      validation: {purposeResolution: {unresolvedCount: 1}}
+    };
+    const category1 = plain(gas.call('runPreValidationBlock', [input]));
+    assert.equal(category1.category, 1);
+    assert.deepEqual(category1.detail.customerFix, {
+      transactionCount: 1,
+      reasons: [
+        {kind: 'PURPOSE_EMPTY', count: 1, rows: [2]},
+        {kind: 'MERCHANT_REQUIRED', count: 1, rows: [2]}
+      ]
+    });
+
+    const category2 = plain(gas.call('runPreValidationBlock', [{
+      customer, file: {id: 'file1'}, transactions: [],
+      validation: {format: {ok: false, code: 'UNKNOWN_CARD_FORMAT'}}
+    }]));
+    assert.equal(category2.category, 2);
+    assert.equal(Object.prototype.hasOwnProperty.call(category2.detail, 'customerFix'), false);
+  });
+
   // ---- 区分2：管理者確認。同じく1セルも書かない ----
   test('INV-14: category 2 writes nothing to the destination', () => {
     const customer = setup();

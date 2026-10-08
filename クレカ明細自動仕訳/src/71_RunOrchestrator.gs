@@ -812,6 +812,23 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
     });
 
     phase('processFile');
+    if (result.preValidation.category === 1) {
+      var fix = (result.preValidation.detail && result.preValidation.detail.customerFix) ||
+        {transactionCount: 0, reasons: []};
+      var sheetName = resolvedSheet && resolvedSheet.name !== null && resolvedSheet.name !== undefined ?
+        String(resolvedSheet.name) : null;
+      outcome.customerFix = {sheetName: sheetName, transactionCount: fix.transactionCount,
+        reasons: fix.reasons};
+      try {
+        recordError(fileId, {code: 'SOURCE_REQUIRES_CUSTOMER_FIX', source: 'IMPORT',
+          occurredAt: nowIso_(), runId: String(runId), sheetName: sheetName,
+          transactionCount: fix.transactionCount, reasons: fix.reasons,
+          detail: summarizeCustomerFixReasons(fix.reasons)});
+      } catch (error) {
+        Logger.log('CUSTOMER_FIX_REASON_NOT_RECORDED ' + JSON.stringify({fileId: String(fileId),
+          code: String((error && error.code) || (error && error.name) || 'Error')}));
+      }
+    }
     // 9-12・9-13：`nextState`へ遷移（遷移がリース解放と名称変更を行う）。
     var transitioned = null;
     if (result.nextState && result.nextState !== stateNow) {

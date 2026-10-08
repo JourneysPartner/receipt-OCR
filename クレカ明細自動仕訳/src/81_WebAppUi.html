@@ -151,6 +151,7 @@
     .file-name, .review-file { overflow-wrap: anywhere; }
     .file-name a, .review-file a { color: var(--brand); }
     .file-name a:hover, .review-file a:hover { text-decoration: none; }
+    .fix-reason { color: var(--warn); font-size: 11px; overflow-wrap: anywhere; }
     .status-line { min-height: 21px; margin: 8px 0; color: var(--muted); }
     .progress-arrows { display: inline-flex; margin-right: .35em; }
     .progress-arrows span { opacity: .25; animation: progress-arrow-pulse 1.2s ease-in-out infinite; }
@@ -560,6 +561,68 @@
       return Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
     }
 
+    function customerFixReasonLines(fixReason) {
+      if (!fixReason || fixReason.source === 'NONE' ||
+          (fixReason.source !== 'IMPORT' && fixReason.source !== 'FORMAT_REVIEW' &&
+           fixReason.source !== 'UNAVAILABLE')) {
+        return ['理由の記録はありません'];
+      }
+      if (fixReason.source === 'UNAVAILABLE') return ['理由を読み込めませんでした'];
+
+      if (fixReason.source === 'FORMAT_REVIEW') {
+        var labels = {
+          PURPOSE_COLUMN_MISSING: '「使用用途」の列がありません',
+          PURPOSE_HEADER_VALUE: '「使用用途」の列の見出しに用途が書かれています',
+          PURPOSE_IN_ISSUER_COLUMN: 'カード会社の列に用途が書かれています',
+          OTHER: '形式の確認で顧客に修正を依頼しました'
+        };
+        var returnReason = fixReason.returnReason === null || fixReason.returnReason === undefined ?
+          '' : String(fixReason.returnReason);
+        var label = labels[returnReason] || returnReason;
+        return [label + (fixReason.note ? '（' + String(fixReason.note) + '）' : '')];
+      }
+
+      var reasons = Array.isArray(fixReason.reasons) ? fixReason.reasons : [];
+      if (!reasons.length) return ['理由の記録はありません'];
+      var transactionCount = Number(fixReason.transactionCount);
+      var sheetName = typeof fixReason.sheetName === 'string' && fixReason.sheetName !== '' ?
+        fixReason.sheetName : null;
+      return reasons.map(function(reason) {
+        reason = reason || {};
+        var kind = String(reason.kind);
+        var name = kind === 'PURPOSE_EMPTY' ? '使用用途が空' :
+          (kind === 'MERCHANT_REQUIRED' ? '利用店名が空' : kind);
+        var count = Number(reason.count);
+        if (!Number.isFinite(count)) count = 0;
+        var rows = Array.isArray(reason.rows) ? reason.rows.filter(function(row) {
+          return Number.isInteger(row) && row >= 1;
+        }) : [];
+        var line = name + '：';
+        if (transactionCount > 1 && count === transactionCount) {
+          return line + 'すべての行（' + count + ' 行）';
+        }
+        if (rows.length) {
+          line += (sheetName ? 'シート「' + sheetName + '」の ' : '') +
+            rows.join('・') + ' 行目';
+          if (count > rows.length) line += ' ほか ' + (count - rows.length) + ' 行';
+          return line;
+        }
+        return line + count + ' 行';
+      });
+    }
+
+    function customerFixNoticeLines(fileResults) {
+      if (!Array.isArray(fileResults)) return [];
+      return fileResults.filter(function(file) {
+        return file && file.nextState === 'CUSTOMER_FIX_REQUIRED';
+      }).map(function(file) {
+        var fixReason = file.customerFix ?
+          Object.assign({source: 'IMPORT'}, file.customerFix) : null;
+        return '【要修正】' + (file.fileName || file.fileId || '') + '：' +
+          customerFixReasonLines(fixReason).join('／');
+      });
+    }
+
     function progressText(done, total, elapsedMs) {
       return '処理中 ' + done + ' / ' + total + '（経過 ' + formatElapsed(elapsedMs) + '）';
     }
@@ -804,6 +867,14 @@
               appendDriveFileName(td, file.fileId, value);
             } else {
               td.textContent = value;
+            }
+            if (index === 3 && file.fixReason) {
+              customerFixReasonLines(file.fixReason).forEach(function(line) {
+                var reason = document.createElement('div');
+                reason.className = 'fix-reason';
+                reason.textContent = line;
+                td.appendChild(reason);
+              });
             }
             row.appendChild(td);
           });
@@ -1344,6 +1415,7 @@
             state.lastCompletedDestinationSpreadsheetId = state.activeImportDestinationSpreadsheetId;
           }
           collectSessionFiles(result.fileResults);
+          warnings = warnings.concat(customerFixNoticeLines(result.fileResults));
           var done = Number(result.done || 0);
           var remaining = Number(result.remaining || 0);
           cumulativeDone += done;

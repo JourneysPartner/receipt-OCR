@@ -5912,6 +5912,216 @@ module.exports = ({test, assert, gas}) => {
     });
   });
 
+  test('cf 11: only customer-fix files in the listing receive the parsed reason', () => {
+    const {customer} = setupWorld({knownMerchant: true});
+    const fixId = putCsv(customer, {fileId: 'cf11_fix', name: '要修正.csv',
+      rows: ['2025/12/10,既知店,1000,']});
+    const fixId2 = putCsv(customer, {fileId: 'cf11_fix2', name: '要修正2.csv',
+      rows: ['2025/12/13,既知店,4000,仕入れ', '2025/12/14,既知店,5000,']});
+    const doneId = putCsv(customer, {fileId: 'cf11_done', name: '完了.csv',
+      rows: ['2025/12/11,既知店,2000,仕入れ']});
+    webImport(customer, {});
+    putCsv(customer, {fileId: 'cf11_unregistered', name: '未登録.csv',
+      rows: ['2025/12/12,既知店,3000,仕入れ']});
+
+    // 要修正のファイルが何本あっても、処理ログは1回だけ引く（増分2読取以下）。
+    // ファイルごとに引くと、要修正の多いフォルダほど一覧が枠を食う。
+    let processLookups = 0;
+    let processReads = 0;
+    const priorFindRows = gas.context.findRowsByColumnValues_;
+    gas.context.findRowsByColumnValues_ = function(sheet) {
+      if (!(sheet && sheet.getName() === 'クレカ処理ログ')) return priorFindRows.apply(this, arguments);
+      processLookups += 1;
+      const readsBefore = gas.stubs.getApiCallCounts().batchGet;
+      try {
+        return priorFindRows.apply(this, arguments);
+      } finally {
+        processReads += gas.stubs.getApiCallCounts().batchGet - readsBefore;
+      }
+    };
+    let listed;
+    try {
+      listed = call('webAppListFolder', [customer.customerId, customer.cardId]);
+    } finally {
+      gas.context.findRowsByColumnValues_ = priorFindRows;
+    }
+    assert.equal(processLookups, 1);
+    assert.ok(processReads <= 2, `要修正の理由のために${processReads}回読んでいる（上限2）`);
+    const files = listed.files;
+    const fix = files.find((file) => file.fileId === fixId);
+    const fix2 = files.find((file) => file.fileId === fixId2);
+    const done = files.find((file) => file.fileId === doneId);
+    const unregistered = files.find((file) => file.fileId === 'cf11_unregistered');
+    assert.equal(fix.state, 'CUSTOMER_FIX_REQUIRED');
+    assert.equal(fix.fixReason.source, 'IMPORT');
+    assert.equal(fix.fixReason.transactionCount, 1);
+    assert.deepEqual(fix.fixReason.reasons, [{kind: 'PURPOSE_EMPTY', count: 1, rows: [2]}]);
+    assert.equal(fix2.state, 'CUSTOMER_FIX_REQUIRED');
+    assert.deepEqual(fix2.fixReason.reasons, [{kind: 'PURPOSE_EMPTY', count: 1, rows: [3]}]);
+    [done, unregistered].forEach((file) => {
+      assert.equal(Object.prototype.hasOwnProperty.call(file, 'fixReason'), false);
+    });
+  });
+
+  test('cf 12: a listing without customer-fix files does not read the process log', () => {
+    const {customer} = setupWorld({knownMerchant: true});
+    putCsv(customer, {fileId: 'cf12_done', name: '完了.csv',
+      rows: ['2025/12/10,既知店,1000,仕入れ']});
+    webImport(customer, {});
+
+    let processLookups = 0;
+    const priorFindRows = gas.context.findRowsByColumnValues_;
+    gas.context.findRowsByColumnValues_ = function(sheet) {
+      if (sheet && sheet.getName() === 'クレカ処理ログ') processLookups += 1;
+      return priorFindRows.apply(this, arguments);
+    };
+    try {
+      const listed = call('webAppListFolder', [customer.customerId, customer.cardId]);
+      assert.equal(listed.files[0].state, 'COMPLETED');
+    } finally {
+      gas.context.findRowsByColumnValues_ = priorFindRows;
+    }
+    assert.equal(processLookups, 0);
+  });
+
+  test('cf 13: customer-fix reason parser selects the newest safe record', () => {
+    const oldRecord = {code: 'SOURCE_REQUIRES_CUSTOMER_FIX', source: 'IMPORT',
+      occurredAt: '2026-01-01T00:00:00Z', sheetName: 'old', transactionCount: 1,
+      reasons: [{kind: 'OLD', count: 1, rows: [1]}]};
+    const newRecord = {code: 'SOURCE_REQUIRES_CUSTOMER_FIX', source: 'IMPORT',
+      occurredAt: '2026-02-01T00:00:00Z', sheetName: '202506', transactionCount: 2,
+      reasons: [{kind: 'NEW', count: 3,
+        rows: [1, '2', 2.5, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]}]};
+    const readReason = (cell) => call('webAppCustomerFixReason_', [cell]);
+
+    assert.deepEqual(readReason(JSON.stringify([oldRecord, newRecord])), {
+      source: 'IMPORT', occurredAt: '2026-02-01T00:00:00Z', sheetName: '202506',
+      transactionCount: 2, reasons: [{kind: 'NEW', count: 3,
+        rows: [1].concat(Array.from({length: 19}, (_, index) => index + 3))}]
+    });
+    assert.equal(readReason(JSON.stringify([oldRecord, {code: 'UNEXPECTED_ERROR'}])).reasons[0].kind,
+      'OLD');
+    assert.equal(readReason(JSON.stringify([{truncated: true}, oldRecord])).reasons[0].kind,
+      'OLD');
+    const markedRecord = Object.assign({}, oldRecord, {truncated: true,
+      reasons: [{kind: 'MARKER', count: 1, rows: [8]}]});
+    assert.deepEqual(readReason(JSON.stringify([oldRecord, markedRecord])), {
+      source: 'IMPORT', occurredAt: '2026-01-01T00:00:00Z', sheetName: 'old',
+      transactionCount: 1, reasons: [{kind: 'OLD', count: 1, rows: [1]}]
+    });
+    assert.deepEqual(readReason(JSON.stringify([{code: 'SOURCE_REQUIRES_CUSTOMER_FIX',
+      detail: 'PURPOSE_HEADER_VALUE: メモ'}])), {
+      source: 'FORMAT_REVIEW', returnReason: 'PURPOSE_HEADER_VALUE', note: 'メモ'
+    });
+    assert.deepEqual(readReason(JSON.stringify([{code: 'SOURCE_REQUIRES_CUSTOMER_FIX',
+      detail: 'PURPOSE_COLUMN_MISSING'}])), {
+      source: 'FORMAT_REVIEW', returnReason: 'PURPOSE_COLUMN_MISSING', note: ''
+    });
+    ['', 'not json', '{}'].forEach((cell) => {
+      assert.deepEqual(readReason(cell), {source: 'NONE'});
+    });
+  });
+
+  test('cf 14: a process-log read failure preserves the listing with unavailable reasons', () => {
+    const {customer} = setupWorld({knownMerchant: true});
+    putCsv(customer, {fileId: 'cf14_fix', name: '要修正.csv',
+      rows: ['2025/12/10,既知店,1000,']});
+    webImport(customer, {});
+
+    const listed = withMocks({processLogSheet_: () => { throw new Error('read failed'); }},
+      () => call('webAppListFolder', [customer.customerId, customer.cardId]));
+    const fix = listed.files.find((file) => file.fileId === 'cf14_fix');
+    assert.equal(fix.state, 'CUSTOMER_FIX_REQUIRED');
+    assert.deepEqual(fix.fixReason, {source: 'UNAVAILABLE'});
+  });
+
+  test('cf 15: return-to-customer format reasons appear in the file listing', () => {
+    const {customer} = setupWorld();
+    const fileId = putUnknownFile(customer, 'cf15_unknown');
+    webImport(customer, {});
+    gas.stubs.setActiveUser('owner@example.com');
+    const returned = call('webAppReturnFileToCustomer', [customer.customerId, customer.cardId,
+      fileId, 'PURPOSE_HEADER_VALUE', 'メモ']);
+    assert.equal(returned.returned, true);
+    gas.stubs.setActiveUser('reviewer@example.com');
+
+    const listed = call('webAppListFolder', [customer.customerId, customer.cardId]);
+    const fix = listed.files.find((file) => file.fileId === fileId);
+    assert.deepEqual(fix.fixReason, {
+      source: 'FORMAT_REVIEW', returnReason: 'PURPOSE_HEADER_VALUE', note: 'メモ'
+    });
+  });
+
+  test('cf 16: customer-fix UI lines cover import and format-review messages', () => {
+    const lines = (value) => plain(clientEval(
+      `customerFixReasonLines(${JSON.stringify(value)})`));
+    assert.deepEqual(lines({source: 'IMPORT', transactionCount: 4,
+      reasons: [{kind: 'PURPOSE_EMPTY', count: 3, rows: [5, 7, 9]}]}),
+    ['使用用途が空：5・7・9 行目']);
+    assert.deepEqual(lines({source: 'IMPORT', sheetName: '202506', transactionCount: 9,
+      reasons: [{kind: 'PURPOSE_EMPTY', count: 5, rows: [5, 7]}]}),
+    ['使用用途が空：シート「202506」の 5・7 行目 ほか 3 行']);
+    assert.deepEqual(lines({source: 'IMPORT', transactionCount: 12,
+      reasons: [{kind: 'PURPOSE_EMPTY', count: 12, rows: []}]}),
+    ['使用用途が空：すべての行（12 行）']);
+    assert.deepEqual(lines({source: 'IMPORT', transactionCount: 3,
+      reasons: [{kind: 'MERCHANT_REQUIRED', count: 2, rows: []}]}),
+    ['利用店名が空：2 行']);
+    assert.deepEqual(lines({source: 'IMPORT', sheetName: 's', transactionCount: 1,
+      reasons: [{kind: 'MERCHANT_REQUIRED', count: 1, rows: [2]}]}),
+    ['利用店名が空：シート「s」の 2 行目']);
+    assert.deepEqual(lines({source: 'IMPORT', transactionCount: 1,
+      reasons: [{kind: 'UNKNOWN_KIND', count: 1, rows: []}]}), ['UNKNOWN_KIND：1 行']);
+    assert.deepEqual([
+      lines({source: 'FORMAT_REVIEW', returnReason: 'PURPOSE_COLUMN_MISSING', note: 'メモ'}),
+      lines({source: 'FORMAT_REVIEW', returnReason: 'PURPOSE_HEADER_VALUE', note: ''}),
+      lines({source: 'FORMAT_REVIEW', returnReason: 'PURPOSE_IN_ISSUER_COLUMN', note: ''}),
+      lines({source: 'FORMAT_REVIEW', returnReason: 'OTHER', note: '補足'})
+    ], [
+      ['「使用用途」の列がありません（メモ）'],
+      ['「使用用途」の列の見出しに用途が書かれています'],
+      ['カード会社の列に用途が書かれています'],
+      ['形式の確認で顧客に修正を依頼しました（補足）']
+    ]);
+    [null, {source: 'NONE'}, {source: 'UNAVAILABLE'},
+      {source: 'IMPORT', reasons: []}, {source: 'UNKNOWN'}].forEach((value) => {
+      assert.deepEqual(lines(value), value && value.source === 'UNAVAILABLE' ?
+        ['理由を読み込めませんでした'] : ['理由の記録はありません']);
+    });
+  });
+
+  test('cf 17: import notices include only customer-fix files and tolerate missing details', () => {
+    const result = plain(clientEval(`customerFixNoticeLines(${JSON.stringify([
+      {fileName: '要修正.csv', fileId: 'fix1', nextState: 'CUSTOMER_FIX_REQUIRED',
+        customerFix: {sheetName: null, transactionCount: 1,
+          reasons: [{kind: 'MERCHANT_REQUIRED', count: 1, rows: [2]}]}},
+      {fileId: 'fix2', nextState: 'CUSTOMER_FIX_REQUIRED'},
+      {fileName: '完了.csv', nextState: 'COMPLETED', customerFix: {reasons: []}}
+    ])})`));
+    assert.deepEqual(result, [
+      '【要修正】要修正.csv：利用店名が空：2 行目',
+      '【要修正】fix2：理由の記録はありません'
+    ]);
+    assert.deepEqual(plain(clientEval('customerFixNoticeLines(null)')), []);
+  });
+
+  test('cf 18: list and import UI paths use safe customer-fix helpers', () => {
+    const renderStart = WEBAPP_UI_SOURCE.indexOf('function renderFiles()');
+    const importStart = WEBAPP_UI_SOURCE.indexOf('async function startImport()');
+    const renderSource = WEBAPP_UI_SOURCE.slice(renderStart, importStart);
+    const importEnd = WEBAPP_UI_SOURCE.indexOf('\n    async function ', importStart + 1);
+    const importSource = WEBAPP_UI_SOURCE.slice(importStart,
+      importEnd < 0 ? undefined : importEnd);
+    assert.ok(renderSource.includes('customerFixReasonLines(file.fixReason)'));
+    assert.ok(renderSource.includes("className = 'fix-reason'"));
+    assert.ok(renderSource.includes('textContent'));
+    assert.ok(importSource.includes(
+      'warnings = warnings.concat(customerFixNoticeLines(result.fileResults))'));
+    ['innerHTML', 'outerHTML', 'insertAdjacentHTML'].forEach((name) => {
+      assert.equal(WEBAPP_UI_SOURCE.includes(name), false, `${name} must not be used`);
+    });
+  });
+
   test('pf 13: a failed combined batchUpdate leaves both submitted hashes untouched', () => {
     const {customer} = setupWorld();
     const seeded = seedPrefetchFile(customer, 'pf_hash_atomic');

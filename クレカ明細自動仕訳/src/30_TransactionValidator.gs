@@ -721,3 +721,77 @@ function classifyValidationResult(input) {
   }
   return {category: null, code: null, reviewEntries: [], blankDateTxIds: blankDateTxIds.slice()};
 }
+
+var CUSTOMER_FIX_ROWS_LIMIT_ = 20;
+
+/**
+ * 区分1の理由（K-W22）。明細の値を残さず、顧客が元ファイルで確認できる行だけを返す。
+ * @param {!Array<!Object>} transactions 用途補完の後の取引
+ * @param {!Object} validation classifyValidationResult に渡した判定材料
+ * @return {{transactionCount: number, reasons: !Array<{kind: string, count: number, rows: !Array<number>}>}}
+ */
+function customerFixReasons(transactions, validation) {
+  var txs = Array.isArray(transactions) ? transactions : [];
+  var reasons = [];
+
+  function sourceRows(items) {
+    var seen = Object.create(null);
+    var rows = [];
+    items.forEach(function(item) {
+      var row = item && item.sourceRow;
+      var key = String(row);
+      if (Number.isInteger(row) && row >= 1 && !seen[key]) {
+        seen[key] = true;
+        rows.push(row);
+      }
+    });
+    return rows.sort(function(a, b) { return a - b; }).slice(0, CUSTOMER_FIX_ROWS_LIMIT_);
+  }
+
+  var unresolvedCount = Number(validation && validation.purposeResolution &&
+    validation.purposeResolution.unresolvedCount);
+  if (Number.isFinite(unresolvedCount) && unresolvedCount > 0) {
+    reasons.push({
+      kind: 'PURPOSE_EMPTY', count: unresolvedCount,
+      rows: sourceRows(txs.filter(function(tx) {
+        return tx && (tx.purpose === null || tx.purpose === undefined || tx.purpose === '');
+      }))
+    });
+  }
+
+  var issues = validation && validation.transactionValidation &&
+    validation.transactionValidation.issues;
+  var grouped = [];
+  (Array.isArray(issues) ? issues : []).forEach(function(issue) {
+    if (!issue || !(issue.customerFix === true || issue.kind === 'MERCHANT_REQUIRED')) return;
+    var kind = String(issue.code || issue.kind || 'UNKNOWN');
+    var group = grouped.filter(function(item) { return item.kind === kind; })[0];
+    if (!group) {
+      group = {kind: kind, count: 0, items: []};
+      grouped.push(group);
+    }
+    group.count += 1;
+    group.items.push(issue);
+  });
+  grouped.forEach(function(group) {
+    reasons.push({kind: group.kind, count: group.count, rows: sourceRows(group.items)});
+  });
+
+  return {transactionCount: txs.length, reasons: reasons};
+}
+
+/** 処理ログ用に理由を短いASCII文字列へまとめる。明細の値は含めない。 */
+function summarizeCustomerFixReasons(reasons) {
+  return (Array.isArray(reasons) ? reasons : []).map(function(reason) {
+    var rows = Array.isArray(reason.rows) ? reason.rows : [];
+    var count = Number(reason.count);
+    var summary = String(reason.kind) + '=' + String(reason.count);
+    if (rows.length) {
+      summary += ' rows ' + rows.join(',');
+      if (Number.isFinite(count) && count > rows.length) {
+        summary += ' +' + String(count - rows.length);
+      }
+    }
+    return summary;
+  }).join('; ');
+}

@@ -229,12 +229,79 @@ function webAppListFolder(customerId, folderId) {
     files.forEach(function(file) {
       file.formatReviewId = reviewsByFile[file.fileId] || null;
     });
+    var customerFixFiles = files.filter(function(file) {
+      return file.state === FILE_STATE.CUSTOMER_FIX_REQUIRED;
+    });
+    if (customerFixFiles.length) {
+      try {
+        var errorRowsByFile = findRowsByColumnValues_(processLogSheet_(),
+          PROCESS_FIELD_COLUMNS_.fileId,
+          customerFixFiles.map(function(file) { return file.fileId; }), PROCESS_LOG_WIDTH_);
+        customerFixFiles.forEach(function(file) {
+          var rows = errorRowsByFile[file.fileId] || [];
+          file.fixReason = rows.length === 1 ?
+            webAppCustomerFixReason_(rows[0].values[PROCESS_FIELD_COLUMNS_.errors - 1]) :
+            {source: 'NONE'};
+        });
+      } catch (error) {
+        customerFixFiles.forEach(function(file) { file.fixReason = {source: 'UNAVAILABLE'}; });
+      }
+    }
     files.sort(function(a, b) {
       if (a.fileName !== b.fileName) return a.fileName < b.fileName ? -1 : 1;
       return a.fileId < b.fileId ? -1 : (a.fileId > b.fileId ? 1 : 0);
     });
     return {kind: 'FILES', folders: [], files: files};
   });
+}
+
+/** 処理ログの診断情報だけを画面向けに整え、古い切詰め印は理由として扱わない。 */
+function webAppCustomerFixReason_(errorsCell) {
+  var errors;
+  try {
+    errors = jsonCell_(errorsCell, null);
+  } catch (error) {
+    return {source: 'NONE'};
+  }
+  if (!Array.isArray(errors)) return {source: 'NONE'};
+
+  var record = null;
+  for (var index = errors.length - 1; index >= 0; index -= 1) {
+    var entry = errors[index];
+    if (entry && entry.truncated) continue;
+    if (entry && entry.code === 'SOURCE_REQUIRES_CUSTOMER_FIX') {
+      record = entry;
+      break;
+    }
+  }
+  if (!record) return {source: 'NONE'};
+
+  if (Array.isArray(record.reasons)) {
+    return {
+      source: 'IMPORT',
+      occurredAt: typeof record.occurredAt === 'string' ? record.occurredAt : null,
+      sheetName: typeof record.sheetName === 'string' && record.sheetName !== '' ? record.sheetName : null,
+      transactionCount: Number.isFinite(record.transactionCount) ? record.transactionCount : 0,
+      reasons: record.reasons.map(function(reason) {
+        reason = reason || {};
+        var rows = Array.isArray(reason.rows) ? reason.rows.filter(function(row) {
+          return Number.isInteger(row) && row >= 1;
+        }).slice(0, CUSTOMER_FIX_ROWS_LIMIT_) : [];
+        return {
+          kind: String(reason.kind),
+          count: Number.isFinite(reason.count) ? reason.count : 0,
+          rows: rows
+        };
+      })
+    };
+  }
+
+  var formatDetail = typeof record.detail === 'string' ?
+    /^(PURPOSE_COLUMN_MISSING|PURPOSE_HEADER_VALUE|PURPOSE_IN_ISSUER_COLUMN|OTHER)(?:: ([\s\S]*))?$/.exec(record.detail) : null;
+  if (formatDetail) {
+    return {source: 'FORMAT_REVIEW', returnReason: formatDetail[1], note: formatDetail[2] || ''};
+  }
+  return {source: 'NONE'};
 }
 
 /** 選択顧客の未解決 PARTNER 要確認と、その他種別の件数を返す。 */
