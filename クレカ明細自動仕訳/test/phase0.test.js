@@ -67,7 +67,7 @@ module.exports = function registerPhase0Tests({test, assert, gas}) {
     }
   });
 
-  test('ERROR_CATALOG contains all 52 design codes with the required shape', () => {
+  test('ERROR_CATALOG contains all 54 design codes with the required shape', () => {
     const errorCodes = [
       'UNKNOWN_CARD_FORMAT', 'AMBIGUOUS_CARD_FORMAT', 'MULTI_SHEET_AMBIGUOUS',
       'CARD_FORMAT_DEFINITION_INVALID', 'FORMAT_SAMPLE_ROUNDTRIP_FAILED',
@@ -92,9 +92,9 @@ module.exports = function registerPhase0Tests({test, assert, gas}) {
       'LOG_CAPACITY_EXCEEDED', 'AUDIT_CHAIN_BROKEN',
       'SNAPSHOT_RESTORE_VERIFY_FAILED', 'FAULT_INJECTION_ENABLED_IN_PRODUCTION',
       'TRANSIENT_DRIVE_ERROR', 'TRANSIENT_SHEETS_ERROR',
-      'REQUIRED_LOG_WRITE_FAILED'
+      'REQUIRED_LOG_WRITE_FAILED', 'PARTNER_NAME_RETIRED', 'PARTNER_NAME_VARIANT'
     ];
-    assert.equal(errorCodes.length, 52);
+    assert.equal(errorCodes.length, 54);
     assert.deepEqual(gas.json('Object.keys(ERROR_CATALOG).sort()'), errorCodes.sort());
     assert.equal(
       gas.evaluate('Object.values(ERROR_CATALOG).every(function(e) { return typeof e.message === "string" && typeof e.retryable === "boolean" && Object.prototype.hasOwnProperty.call(e, "handler") && Object.prototype.hasOwnProperty.call(e, "reviewType") && typeof e.guidance === "string"; })'),

@@ -70,7 +70,11 @@ const ERROR_CATALOG = Object.freeze({
   FAULT_INJECTION_ENABLED_IN_PRODUCTION: errorCatalogEntry_('本番環境で障害注入設定が有効', false, 'システム管理者', null, 'Script Propertiesの設定を削除して再実行する'),
   TRANSIENT_DRIVE_ERROR: errorCatalogEntry_('一時的なDriveエラー（429・500・503を含む）', true, null, null, '4.38のバックオフ算式で自動再試行する'),
   TRANSIENT_SHEETS_ERROR: errorCatalogEntry_('一時的なSheetsエラー（429・500・503を含む）', true, null, null, '4.38のバックオフ算式で自動再試行する'),
-  REQUIRED_LOG_WRITE_FAILED: errorCatalogEntry_('必須ログを書けない', false, 'システム管理者', null, '以降の転記書込を開始しない')
+  REQUIRED_LOG_WRITE_FAILED: errorCatalogEntry_('必須ログを書けない', false, 'システム管理者', null, '以降の転記書込を開始しない'),
+  PARTNER_NAME_RETIRED: errorCatalogEntry_('使わない取引先名が指定された', false,
+    '確認担当者', null, '寄せ先の取引先名で確定する'),
+  PARTNER_NAME_VARIANT: errorCatalogEntry_('登録済みの取引先名と表記だけが違う名前が指定された', false,
+    '確認担当者', null, '登録済みの取引先名で確定する')
 });
 
 /** エラーカタログのコードを正本として保持する基底例外。 */

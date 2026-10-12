@@ -590,6 +590,50 @@ module.exports = ({test, assert, gas}) => {
       '（覚えた行を捨てる）:\n' + offenders.join('\n'));
   });
 
+  test('pm 24: 取込の8-10は4つの照合材料をbatchGet一回で先読みする', () => {
+    const values = gas.context.Sheets.Spreadsheets.Values;
+    const original = values.batchGet;
+    const requests = [];
+    values.batchGet = function(spreadsheetId, request) {
+      if (String(spreadsheetId) === 'master') requests.push(plain(request.ranges || []));
+      return original.apply(this, arguments);
+    };
+    try { measure(2, 1); }
+    finally { values.batchGet = original; }
+    const expected = ["'顧客別取引先辞書'!A2:R", "'共通取引先辞書'!A2:R",
+      "'共通取引先一覧'!A2:F", "'顧客別取引先一覧'!A2:J"];
+    const combined = requests.filter((ranges) => expected.every((range) =>
+      ranges.some((candidate) => String(candidate).indexOf(range) >= 0)));
+    assert.equal(combined.length, 1, JSON.stringify(requests));
+    expected.forEach((range) => {
+      const count = requests.reduce((sum, ranges) => sum + ranges.filter((candidate) =>
+        String(candidate).indexOf(range) >= 0).length, 0);
+      assert.equal(count, 1, `${range} を${count}回読んでいる`);
+    });
+  });
+
+  test('prefetchMatchingMasters_は区間外でもbuildDictionaryIndex用の材料を返しbatchGetしない', () => {
+    measure(2, 1);
+    const values = gas.context.Sheets.Spreadsheets.Values;
+    const original = values.batchGet;
+    let combinedBatchGets = 0;
+    values.batchGet = function(spreadsheetId, request) {
+      if ((request.ranges || []).length > 1) combinedBatchGets += 1;
+      return original.apply(this, arguments);
+    };
+    try {
+      const materials = plain(gas.call('prefetchMatchingMasters_', []));
+      assert.ok(Array.isArray(materials.customer));
+      assert.ok(Array.isArray(materials.common));
+      assert.ok(Array.isArray(materials.commonPartners));
+      assert.ok(Array.isArray(materials.partnerList));
+      assert.doesNotThrow(() => gas.call('buildDictionaryIndex', ['C001', materials]));
+      assert.equal(combinedBatchGets, 0);
+    } finally {
+      values.batchGet = original;
+    }
+  });
+
   test('tx 1: deciding whether a file is fully resolved reads its transactions once', () => {
     // `findRowsByColumnValue_` は鍵列の走査と一致行の取得で2往復かかる。
     // 状態違いで2度呼べば同じ行を2度読む ── 1ファイルで4往復だった。

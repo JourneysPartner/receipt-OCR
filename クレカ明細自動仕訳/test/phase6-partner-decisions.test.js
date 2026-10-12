@@ -424,4 +424,435 @@ module.exports = ({test, assert, gas}) => {
       .filter((rule) => rule.matchMethod === 'partial');
     assert.equal(rules.length, 1, 'パターン規則が重複登録されないこと');
   });
+
+  const customerPartnerSheet = () =>
+    gas.stubs.getSpreadsheet('master').getSheetByName('顧客別取引先一覧');
+
+  function addCustomerPartner(name, state = 'ACTIVE', canonical = '', customerId = 'C001', id = '') {
+    customerPartnerSheet().appendRow([id || `PTN_${customerPartnerSheet().getLastRow()}`,
+      customerId, name, state, canonical, 'INITIAL_DICTIONARY', '', '', '', '']);
+  }
+
+  function addCustomerDictionary(original, partner, options = {}) {
+    const values = blank(18);
+    Object.assign(values, {
+      0: options.id || `DICT_${original}`, 1: original,
+      2: gas.call('normalizeMerchant', [original]), 3: partner,
+      4: options.method || 'exact_original', 5: 1, 6: options.customerId || 'C001',
+      9: 'FALSE', 10: 'admin@example.com', 12: '2026-01-01T00:00:00+09:00',
+      13: 1, 14: options.active === false ? 'FALSE' : 'TRUE',
+      15: options.conflict ? 'TRUE' : 'FALSE', 16: options.conflict ? 'GROUP1' : ''
+    });
+    gas.stubs.getSpreadsheet('master').getSheetByName('顧客別取引先辞書').appendRow(values);
+  }
+
+  function currentPartnerReviews() {
+    return plain(gas.call('openReviews', [{}])).filter((review) =>
+      review.reviewType === 'PARTNER' && (review.status === 'OPEN' || review.status === 'IN_PROGRESS'));
+  }
+
+  function batchAdopt(reviews, partnerNames, options = {}) {
+    const decisions = reviews.map((review, index) => ({reviewId: review.reviewId,
+      operation: 'ADOPT_EXISTING_PARTNER', partnerName: partnerNames[index], learn: false}));
+    return plain(gas.call('resolvePartnerReviewsBatch', ['C001', 'fileA', decisions,
+      Object.assign({actor: 'admin@example.com', customer: gas.call('getCustomerById', ['C001'])}, options)]));
+  }
+
+  const activePartnerNames = () => customerPartnerSheet().getDataRange().getValues().slice(1)
+    .filter((row) => row[0] && row[1] === 'C001' && row[3] === 'ACTIVE')
+    .map((row) => String(row[2]).trim());
+
+  test('pm 12: 使わない名前はリース前に失敗し同じbatchの別件は確定する', () => {
+    setup();
+    const reviews = currentPartnerReviews();
+    addCustomerPartner('廃止取引先', 'RETIRED', '現在の取引先');
+    const firstTx = plain(gas.call('getTransaction', [reviews[0].fullTxId]));
+    const beforeF = destSheet().getRange(Number(firstTx.destinationRow), 3).getValue();
+    const beforeReview = plain(gas.call('getReviewById', [reviews[0].reviewId]));
+    const result = batchAdopt(reviews.slice(0, 2), ['廃止取引先', '新しい取引先']);
+    const error = result.errors.find((item) => item.reviewId === reviews[0].reviewId);
+    assert.equal(error.code, 'PARTNER_NAME_RETIRED');
+    assert.equal(error.message, '「廃止取引先」は使わない取引先名です。「現在の取引先」を使ってください。');
+    assert.deepEqual(result.resolvedReviewIds, [reviews[1].reviewId]);
+    assert.equal(destSheet().getRange(Number(firstTx.destinationRow), 3).getValue(), beforeF);
+    assert.equal(plain(gas.call('getReviewById', [reviews[0].reviewId])).status, beforeReview.status);
+    assert.equal(plain(gas.call('getReviewById', [reviews[1].reviewId])).status, 'RESOLVED');
+  });
+
+  test('pm 13: 登録名の表記違いは候補として確定せず書き込みもしない', () => {
+    setup();
+    const review = currentPartnerReviews()[0];
+    addCustomerPartner('Amazon');
+    const tx = plain(gas.call('getTransaction', [review.fullTxId]));
+    const beforeF = destSheet().getRange(Number(tx.destinationRow), 3).getValue();
+    const result = batchAdopt([review], ['AMAZON']);
+    assert.equal(result.errors[0].code, 'PARTNER_NAME_VARIANT');
+    assert.equal(result.errors[0].message,
+      '「AMAZON」は登録済みの「Amazon」と同じ名前です（全角・半角や大文字・小文字などの違いだけ）。「Amazon」を使ってください。');
+    assert.equal(destSheet().getRange(Number(tx.destinationRow), 3).getValue(), beforeF);
+    assert.equal(plain(gas.call('getReviewById', [review.reviewId])).status, 'OPEN');
+    assert.equal(gas.call('activeLeases_', []).filter((lease) => lease.fileId === 'fileA').length, 0);
+  });
+
+  test('pm 14: 同じ新規名をbatchで確定しても一覧と登録監査は一行だけ', () => {
+    setup();
+    const reviews = currentPartnerReviews();
+    const actor = 'admin@example.com';
+    const first = batchAdopt(reviews.slice(0, 2), ['新規取引先', ' 新規取引先 ']);
+    assert.equal(first.resolvedReviewIds.length, 2);
+    assert.equal(activePartnerNames().filter((name) => name === '新規取引先').length, 1);
+    const listed = customerPartnerSheet().getDataRange().getValues().slice(1)
+      .find((row) => row[1] === 'C001' && row[2] === '新規取引先');
+    assert.equal(listed[3], 'ACTIVE');
+    assert.equal(listed[5], 'RESOLUTION');
+    assert.equal(listed[6], actor);
+    const audit = gas.stubs.getSpreadsheet('master').getSheetByName('監査ログ')
+      .getDataRange().getValues().slice(1).filter((row) => row[2] === 'DICT_REGISTER' &&
+        row[6] === 'PARTNER' && row[10] && String(row[10]).includes('新規取引先'));
+    assert.equal(audit.length, 1);
+    const second = batchAdopt([reviews[2]], ['新規取引先']);
+    assert.equal(second.resolvedReviewIds.length, 1);
+    assert.equal(activePartnerNames().filter((name) => name === '新規取引先').length, 1);
+  });
+
+  test('pm 14b: 一覧登録関数を同じ名前で再実行しても行と監査を重ねない', () => {
+    setup();
+    const sheet = customerPartnerSheet();
+    const auditSheet = gas.stubs.getSpreadsheet('master').getSheetByName('監査ログ');
+    const register = () => gas.call('registerCustomerPartnerNames_', [
+      'C001', ['再登録取引先'], 'admin@example.com', 'RESOLUTION'
+    ]);
+    register();
+    const rowCount = sheet.getLastRow();
+    const auditCount = auditSheet.getLastRow();
+    register();
+    assert.equal(sheet.getLastRow(), rowCount);
+    assert.equal(auditSheet.getLastRow(), auditCount);
+    assert.equal(activePartnerNames().filter((name) => name === '再登録取引先').length, 1);
+  });
+
+  test('pm 14c: 一覧登録の重複確認読取はスクリプトロック内で行う', () => {
+    setup();
+    const originalLock = gas.context.withScriptLock_;
+    const originalRead = gas.context.readCustomerPartnerRows_;
+    let lockDepth = 0;
+    let duplicateCheckWasLocked = false;
+    gas.context.withScriptLock_ = function(callback) {
+      return originalLock(function() {
+        lockDepth += 1;
+        try { return callback(); }
+        finally { lockDepth -= 1; }
+      });
+    };
+    gas.context.readCustomerPartnerRows_ = function() {
+      if (lockDepth > 0) duplicateCheckWasLocked = true;
+      return originalRead.apply(this, arguments);
+    };
+    try {
+      gas.call('registerCustomerPartnerNames_', [
+        'C001', ['ロック確認取引先'], 'admin@example.com', 'RESOLUTION'
+      ]);
+    } finally {
+      gas.context.withScriptLock_ = originalLock;
+      gas.context.readCustomerPartnerRows_ = originalRead;
+    }
+    assert.equal(duplicateCheckWasLocked, true);
+  });
+
+  test('pm 15: 一覧登録が失敗した件はOPENに残し再実行で確定する', () => {
+    setup();
+    const review = currentPartnerReviews()[0];
+    const tx = plain(gas.call('getTransaction', [review.fullTxId]));
+    const register = gas.context.registerCustomerPartnerNames_;
+    gas.context.registerCustomerPartnerNames_ = () => { throw new Error('一覧停止'); };
+    let first;
+    try { first = batchAdopt([review], ['再試行取引先']); }
+    finally { gas.context.registerCustomerPartnerNames_ = register; }
+    assert.equal(first.errors[0].code, 'PARTNER_LIST_FAILED');
+    assert.equal(plain(gas.call('getReviewById', [review.reviewId])).status, 'OPEN');
+    assert.equal(destSheet().getRange(Number(tx.destinationRow), 3).getValue(), '再試行取引先');
+    const retried = batchAdopt([review], ['再試行取引先']);
+    assert.deepEqual(retried.resolvedReviewIds, [review.reviewId]);
+    assert.equal(activePartnerNames().filter((name) => name === '再試行取引先').length, 1);
+  });
+
+  test('pm 16: partnerListRowsを渡すと一覧の事前読取がなくNEWなしでは再読込もしない', () => {
+    const measure = (passRows) => {
+      setup();
+      const review = currentPartnerReviews()[0];
+      addCustomerPartner('一覧登録済み');
+      const rows = plain(gas.call('readCustomerPartnerRows_', []));
+      const result = batchAdopt([review], ['一覧登録済み'], passRows ? {partnerListRows: rows} : {});
+      return result.reads;
+    };
+    assert.equal(measure(true), measure(false) - 1);
+  });
+
+  test('pm 17: 単件確定もリース前に番人を通しNEWは確定後に登録する', () => {
+    setup();
+    const review = currentPartnerReviews()[0];
+    addCustomerPartner('廃止名', 'RETIRED', '採用名');
+    let error;
+    try { gas.call('resolveReview', [review.reviewId, 'ADOPT_EXISTING_PARTNER',
+      {partnerName: '廃止名', learn: false}]); } catch (caught) { error = caught; }
+    assert.equal(error && error.code, 'PARTNER_NAME_RETIRED');
+    assert.equal(plain(gas.call('getReviewById', [review.reviewId])).status, 'OPEN');
+    assert.equal(gas.call('activeLeases_', []).filter((lease) => lease.fileId === 'fileA').length, 0);
+
+    gas.call('resolveReview', [review.reviewId, 'ADOPT_EXISTING_PARTNER',
+      {partnerName: '新しい単件名', learn: false}]);
+    assert.equal(activePartnerNames().filter((name) => name === '新しい単件名').length, 1);
+  });
+
+  test('pm 20: 運用シートも辞書登録より前に番人を通し新規名を追加する', () => {
+    setup();
+    gas.call('opsListPartnerReviews', []);
+    const retiredRow = decisionRowFor('キュウテン');
+    addCustomerPartner('廃止先', 'RETIRED', '正規先');
+    decisionSheet().getRange(retiredRow, 4, 1, 3).setValues([['prefix', 'キュウ', '廃止先']]);
+    const beforeRules = plain(gas.call('readDictionary_', [false])).length;
+    const first = plain(gas.call('opsApplyPartnerDecisions', []));
+    assert.equal(first.results.find((item) => item.merchant === 'キュウテン').error,
+      '「廃止先」は使わない取引先名です。「正規先」を使ってください。');
+    assert.ok(String(decisionSheet().getRange(retiredRow, 7).getValue()).startsWith('エラー：'));
+    assert.equal(plain(gas.call('readDictionary_', [false])).length, beforeRules);
+    assert.equal(currentPartnerReviews().some((review) => review.merchantOriginal === 'キュウテン'), true);
+
+    const newRow = decisionRowFor('熊本県荒尾市 ﾗｸﾃﾝｲﾁﾊﾞ911963');
+    decisionSheet().getRange(newRow, 4, 1, 3).setValues([['prefix', 'ﾗｸﾃﾝｲﾁﾊﾞ', '新規運用名']]);
+    gas.call('opsApplyPartnerDecisions', []);
+    assert.equal(activePartnerNames().filter((name) => name === '新規運用名').length, 1);
+  });
+
+  test('pm 21: knownPartnerNames_はマスター一覧を読み帳簿のタブを開かない', () => {
+    setup();
+    addCustomerPartner('マスター登録先');
+    const customer = plain(gas.call('getCustomerById', ['C001']));
+    const spreadsheetApp = gas.context.SpreadsheetApp;
+    const openById = spreadsheetApp.openById;
+    let destinationOpens = 0;
+    spreadsheetApp.openById = function(id) {
+      if (String(id) === customer.destinationSpreadsheetId) destinationOpens += 1;
+      return openById.call(this, id);
+    };
+    let names;
+    try { names = plain(gas.call('knownPartnerNames_', [customer])); }
+    finally { spreadsheetApp.openById = openById; }
+    assert.deepEqual(names, {マスター登録先: true});
+    assert.equal(destinationOpens, 0);
+  });
+
+  test('pm 22: 自動採用はretiredの辞書名を残し他の一意候補を採用する', () => {
+    setup();
+    const reviews = currentPartnerReviews();
+    addCustomerPartner('docomo', 'RETIRED', 'ドコモ');
+    addCustomerDictionary(reviews[0].merchantOriginal, 'docomo', {id: 'DICT_RETIRED'});
+    addCustomerDictionary(reviews[1].merchantOriginal, '有効な採用先', {id: 'DICT_ACTIVE'});
+    const summary = plain(gas.call('opsAutoAdoptPartners', []));
+    assert.equal(summary.adopted, 1);
+    assert.equal(plain(gas.call('getReviewById', [reviews[0].reviewId])).status, 'OPEN');
+    assert.equal(plain(gas.call('getReviewById', [reviews[1].reviewId])).status, 'RESOLVED');
+  });
+
+  test('pm 26: opsBuildCustomerPartnerListは既定で読取のみで冪等に名前をそろえる', () => {
+    setup();
+    addCustomerDictionary('辞書店', '辞書取引先', {id: 'DICT_ACTIVE'});
+    addCustomerDictionary('無効店', '無効な辞書名', {id: 'DICT_INACTIVE', active: false});
+    const logSheet = gas.stubs.getSpreadsheet('master').getSheetByName('クレカ取引ログ');
+    logSheet.getRange(2, 12).setValue('RESOLVED_WITH_PARTNER');
+    logSheet.getRange(2, 20).setValue('  ログ由来取引先  ');
+    const beforeRows = customerPartnerSheet().getDataRange().getValues();
+    const auditSheet = gas.stubs.getSpreadsheet('master').getSheetByName('監査ログ');
+    const beforeAudit = auditSheet.getLastRow();
+    const preview = plain(gas.call('opsBuildCustomerPartnerList', []));
+    assert.equal(preview.apply, false);
+    assert.equal(preview.sheetExists, true);
+    assert.equal(customerPartnerSheet().getLastRow(), beforeRows.length);
+    assert.equal(auditSheet.getLastRow(), beforeAudit);
+    const built = plain(gas.call('opsBuildCustomerPartnerList', [true]));
+    assert.equal(built.customers[0].added, 2);
+    assert.deepEqual(activePartnerNames().sort((left, right) => left.localeCompare(right, 'ja')),
+      ['ログ由来取引先', '辞書取引先']);
+    assert.equal(activePartnerNames().includes('無効な辞書名'), false);
+    const second = plain(gas.call('opsBuildCustomerPartnerList', [true]));
+    assert.equal(second.customers[0].added, 0);
+    assert.deepEqual(customerPartnerSheet().getRange(1, 1, 1, 10).getValues()[0],
+      ['取引先ID', '顧客ID', '取引先名', '状態', '寄せ先', '登録元', '登録者', '登録日時', '更新者', '更新日時']);
+
+    const master = gas.stubs.getSpreadsheet('master');
+    master.deleteSheet(customerPartnerSheet());
+    const absent = plain(gas.call('opsBuildCustomerPartnerList', []));
+    assert.equal(absent.sheetExists, false);
+    assert.throws(() => gas.call('opsBuildCustomerPartnerList', [true]));
+  });
+
+  // 以下 pm 14d・15b・21b・26b・24b は監査（2026-10-12）で足した。どれも、実装は正しいのに
+  // 壊してもテストが黙っていた箇所（監査の変異 a・j・g・b・e）を見張る。
+
+  test('pm 14d: 一覧へは印（（不要）・取引先不明）と空の名前を足さない', () => {
+    setup();
+    const marker = gas.evaluate('NO_PARTNER_MARKER_');
+    const added = plain(gas.call('registerCustomerPartnerNames_', [
+      'C001', [marker, '取引先不明', '   ', '登録する名前'], 'admin@example.com', 'RESOLUTION'
+    ]));
+    assert.deepEqual(added.map((item) => item.partnerName), ['登録する名前']);
+    assert.deepEqual(activePartnerNames(), ['登録する名前']);
+  });
+
+  test('pm 15b: 一覧への登録が失敗しても、登録済みの名前の件は確定する', () => {
+    // 失敗にするのは新しい名前の件だけ。登録済みの名前の件は一覧に何も足さないので、
+    // 道連れにすると確定できたはずの要確認が開いたまま残る。
+    setup();
+    const reviews = currentPartnerReviews();
+    addCustomerPartner('登録済みの取引先');
+    const register = gas.context.registerCustomerPartnerNames_;
+    gas.context.registerCustomerPartnerNames_ = () => { throw new Error('一覧停止'); };
+    let result;
+    try { result = batchAdopt(reviews.slice(0, 2), ['登録済みの取引先', '新しい失敗先']); }
+    finally { gas.context.registerCustomerPartnerNames_ = register; }
+    assert.deepEqual(result.resolvedReviewIds, [reviews[0].reviewId]);
+    assert.deepEqual(result.errors.map((item) => [item.reviewId, item.code]),
+      [[reviews[1].reviewId, 'PARTNER_LIST_FAILED']]);
+    assert.equal(plain(gas.call('getReviewById', [reviews[0].reviewId])).status, 'RESOLVED');
+    assert.equal(plain(gas.call('getReviewById', [reviews[1].reviewId])).status, 'OPEN');
+  });
+
+  test('pm 21b: knownPartnerNames_は使わない名前（ACTIVEの行が並んでいても）を含めない', () => {
+    setup();
+    addCustomerPartner('有効名');
+    addCustomerPartner('廃止名', 'RETIRED', '有効名');
+    addCustomerPartner('両方名');
+    addCustomerPartner('両方名', 'RETIRED', '有効名');
+    const customer = plain(gas.call('getCustomerById', ['C001']));
+    assert.deepEqual(plain(gas.call('knownPartnerNames_', [customer])), {有効名: true});
+  });
+
+  test('pm 26b: opsBuildCustomerPartnerListは無効な取引ログ行の取引先名を入れない', () => {
+    setup();
+    const logSheet = gas.stubs.getSpreadsheet('master').getSheetByName('クレカ取引ログ');
+    logSheet.getRange(2, 12).setValue('RESOLVED_WITH_PARTNER');
+    logSheet.getRange(2, 20).setValue('取り消した取引の取引先');
+    logSheet.getRange(2, 42).setValue(false);
+    gas.call('opsBuildCustomerPartnerList', [true]);
+    assert.equal(activePartnerNames().includes('取り消した取引の取引先'), false);
+  });
+
+  test('pm 24b: 先読みの共通取引先一覧はA列が空の行を落とす（今の読み手と同じ形）', () => {
+    setup();
+    const common = gas.stubs.getSpreadsheet('master').getSheetByName('共通取引先一覧');
+    common.appendRow(['', 'IDの無い行', '', '', '', '']);
+    common.appendRow(['CP1', '共通の名前', '', '', '', '']);
+    const expected = plain(gas.call('readCommonPartners_', []));
+    gas.evaluate('beginRunScopedReads_()');
+    let prefetched;
+    try { prefetched = plain(gas.call('prefetchMatchingMasters_', [])); }
+    finally { gas.evaluate('endRunScopedReads_()'); }
+    assert.deepEqual(expected, [{partnerId: 'CP1', partnerName: '共通の名前'}]);
+    assert.deepEqual(prefetched.commonPartners, expected);
+  });
+
+  test('opsApplyPartnerDecisionsは取引先名以外のエラーでdetailではなくmessageを状態欄に出す', () => {
+    setup();
+    gas.call('opsListPartnerReviews', []);
+    const merchant = '熊本県荒尾市 ﾗｸﾃﾝｲﾁﾊﾞ911963';
+    const row = decisionRowFor(merchant);
+    decisionSheet().getRange(row, 6).setValue('株式会社テスト');
+    const original = gas.context.getCustomerById;
+    gas.context.getCustomerById = function() {
+      const error = new Error('元のエラーメッセージ');
+      error.code = 'OTHER_ERROR';
+      error.detail = 'detailには出さない補足';
+      throw error;
+    };
+    try { gas.call('opsApplyPartnerDecisions', []); }
+    finally { gas.context.getCustomerById = original; }
+    assert.equal(decisionSheet().getRange(row, 7).getValue(), 'エラー：元のエラーメッセージ');
+  });
+
+  test('pm 27: opsShowPartnerNameVariantsはsameKey・contains・closeを読み取り専用で返す', () => {
+    setup();
+    ['amazon', 'Amazon', 'ドコモ', 'NTTドコモ', 'セブンイレブン', 'セブンイレプン']
+      .forEach((name, index) => addCustomerPartner(name, 'ACTIVE', '', 'C001', `PTN_${index}`));
+    addCustomerDictionary('AMZ1', 'amazon', {id: 'DICT_AMZ1'});
+    addCustomerDictionary('AMZ2', 'amazon', {id: 'DICT_AMZ2'});
+    addCustomerDictionary('AMZ3', 'Amazon', {id: 'DICT_AMZ3'});
+    const listBefore = customerPartnerSheet().getDataRange().getValues();
+    const dictBefore = gas.stubs.getSpreadsheet('master').getSheetByName('顧客別取引先辞書')
+      .getDataRange().getValues();
+    const auditBefore = gas.stubs.getSpreadsheet('master').getSheetByName('監査ログ').getLastRow();
+    const report = plain(gas.call('opsShowPartnerNameVariants', ['C001']));
+    assert.ok(report.sameKey.some((group) => group.names.map((item) => item.name).sort()
+      .join('|') === 'Amazon|amazon'));
+    assert.ok(report.contains.some((group) => group.names.map((item) => item.name).sort()
+      .join('|') === 'NTTドコモ|ドコモ'));
+    assert.ok(report.close.some((group) => group.names.map((item) => item.name).sort()
+      .join('|') === 'セブンイレブン|セブンイレプン'));
+    assert.match(report.note, /ドコモ.*docomo|docomo.*ドコモ/);
+    assert.deepEqual(customerPartnerSheet().getDataRange().getValues(), listBefore);
+    assert.deepEqual(gas.stubs.getSpreadsheet('master').getSheetByName('顧客別取引先辞書')
+      .getDataRange().getValues(), dictBefore);
+    assert.equal(gas.stubs.getSpreadsheet('master').getSheetByName('監査ログ').getLastRow(), auditBefore);
+  });
+
+  test('pm 28: opsMergeCustomerPartnerNamesは計画後に辞書競合と一覧を安全に寄せる', () => {
+    setup();
+    addCustomerPartner('旧取引先');
+    addCustomerPartner('別名', 'RETIRED', '旧取引先');
+    addCustomerPartner('他顧客名', 'ACTIVE', '', 'OTHER');
+    addCustomerDictionary('STORE1', '旧取引先', {id: 'D1', conflict: true});
+    addCustomerDictionary('STORE1 ', '統合先', {id: 'D2', conflict: true});
+    addCustomerDictionary('STORE2', '旧取引先', {id: 'D3', conflict: true});
+    addCustomerDictionary('STORE2 ', '別取引先', {id: 'D4', conflict: true});
+    addCustomerDictionary('STORE1', '旧取引先', {id: 'D_OTHER', customerId: 'OTHER', conflict: true});
+    const dictSheet = gas.stubs.getSpreadsheet('master').getSheetByName('顧客別取引先辞書');
+    const listBefore = customerPartnerSheet().getDataRange().getValues();
+    const dictBefore = dictSheet.getDataRange().getValues();
+    const auditSheet = gas.stubs.getSpreadsheet('master').getSheetByName('監査ログ');
+    const auditBefore = auditSheet.getLastRow();
+    const plan = plain(gas.call('opsMergeCustomerPartnerNames', ['C001', '旧取引先', '統合先']));
+    assert.equal(plan.apply, false);
+    assert.equal(plan.dictionaryRows, 2);
+    assert.equal(plan.conflictRowsCleared, 2);
+    assert.equal(plan.listRowsRetired, 1);
+    assert.equal(plan.listRowsRepointed, 1);
+    assert.equal(plan.toAdded, true);
+    assert.deepEqual(customerPartnerSheet().getDataRange().getValues(), listBefore);
+    assert.deepEqual(dictSheet.getDataRange().getValues(), dictBefore);
+    assert.equal(auditSheet.getLastRow(), auditBefore);
+
+    const applied = plain(gas.call('opsMergeCustomerPartnerNames', ['C001', '旧取引先', '統合先', true]));
+    assert.equal(applied.dictionaryRows, 2);
+    const rules = plain(gas.call('readDictionary_', [false]));
+    const store1 = rules.filter((row) => row.customerId === 'C001' && row.normalized === 'STORE1');
+    const store2 = rules.filter((row) => row.customerId === 'C001' && row.normalized === 'STORE2');
+    assert.deepEqual(store1.map((row) => row.partnerName), ['統合先', '統合先']);
+    assert.equal(store1.every((row) => row.conflict === false && row.conflictGroupId === null), true);
+    assert.equal(store2.every((row) => row.conflict === true), true);
+    assert.equal(rules.find((row) => row.dictId === 'D_OTHER').partnerName, '旧取引先');
+    const listed = customerPartnerSheet().getDataRange().getValues().slice(1);
+    assert.ok(listed.some((row) => row[1] === 'C001' && row[2] === '旧取引先' &&
+      row[3] === 'RETIRED' && row[4] === '統合先'));
+    assert.ok(listed.some((row) => row[1] === 'C001' && row[2] === '別名' && row[4] === '統合先'));
+    assert.ok(listed.some((row) => row[1] === 'C001' && row[2] === '統合先' &&
+      row[3] === 'ACTIVE' && row[5] === 'MERGE'));
+    assert.ok(listed.some((row) => row[1] === 'OTHER' && row[2] === '他顧客名'));
+    assert.equal(auditSheet.getLastRow(), auditBefore + 2);
+
+    const afterList = customerPartnerSheet().getDataRange().getValues();
+    const afterDict = dictSheet.getDataRange().getValues();
+    assert.throws(() => gas.call('opsMergeCustomerPartnerNames', ['C001', '統合先', '統合先']),
+      (error) => error && error.name === 'TypeError');
+    assert.throws(() => gas.call('opsMergeCustomerPartnerNames', ['C001', '旧取引先', '別名', true]),
+      (error) => error && error.code === 'CUSTOMER_MASTER_INVALID');
+    assert.throws(() => gas.call('opsMergeCustomerPartnerNames', ['C001', '', '名前']),
+      (error) => error && error.name === 'TypeError');
+    assert.throws(() => gas.call('opsMergeCustomerPartnerNames', ['C001', '取引先不明', '名前']),
+      (error) => error && error.name === 'TypeError');
+    assert.throws(() => gas.call('opsMergeCustomerPartnerNames', ['C001', '（不要）', '名前']),
+      (error) => error && error.name === 'TypeError');
+    assert.throws(() => gas.call('opsMergeCustomerPartnerNames', ['C001', 'どこにもない', '名前']),
+      (error) => error && error.code === 'CUSTOMER_MASTER_INVALID');
+    assert.deepEqual(customerPartnerSheet().getDataRange().getValues(), afterList);
+    assert.deepEqual(dictSheet.getDataRange().getValues(), afterDict);
+  });
 };

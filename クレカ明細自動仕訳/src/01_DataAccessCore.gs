@@ -51,6 +51,7 @@ function forgetRunScopedReads_() {
   runScopedMasters_ = {purposeRules: null, commonPartners: null};
   forgetFormatDefinitions_();
   forgetDictionaryCache_();
+  forgetCustomerPartnerListCache_();
   forgetAppendedTxRows_();
   forgetDestinationSchema_();
 }
@@ -442,6 +443,12 @@ function rowHasAnyValue_(row) {
 function readSheetRows_(sheet, columns) {
   var range = quoteSheetName_(sheet.getName()) + '!A2:' + columnLetter_(columns);
   var rows = sheetsReadRanges_(sheet, [range])[0];
+  return sheetRowsFromValues_(rows, columns);
+}
+
+/** batchGet と通常の表読取で同じ末尾処理・幅補完を使う。 */
+function sheetRowsFromValues_(values, columns) {
+  var rows = Array.isArray(values) ? values : [];
   // 実APIは末尾の空行を返さないが、スタブはグリッド全体を返し得る。
   // 末尾の全空行を落として両者の挙動を揃える。
   var last = rows.length;

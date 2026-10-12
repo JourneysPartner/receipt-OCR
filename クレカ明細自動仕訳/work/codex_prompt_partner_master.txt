@@ -1,0 +1,53 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）に、**取引先名の一覧（マスターの新しいシート「顧客別取引先一覧」）と、それを使う照合・確定の番人・画面・運用関数**を実装します。
+
+作業ツリーは main の最新（コミット d740f61）で、`src/`・`test/` に未コミットの変更はありません。あなたの変更は、ステージされていない差分（`git diff`）として残してください ── **`git add` しないこと。**新しいファイル（`src/37_CustomerPartnerList.gs`）は未追跡のままでかまいません。開始時の `node test/run-tests.js` の本数は、始める前に自分で数えて報告に書いてください（1432/1432 のはずです）。
+
+## 仕様書
+
+`work/spec_partner_master.md`（1.0）。**全部読んでから始めてください。**§1.2 は利用者が決めたことなので変えないこと。
+
+## 要点（詳細は仕様書）
+
+1. マスターに `顧客別取引先一覧`（10 列）を足し、必須シートにする（00・04）。読み書きの部品は新しいファイル `src/37_CustomerPartnerList.gs`。
+2. 照合（33）：辞書（STEP1〜5）に当たらなかった店名が、一覧の有効な名前と `normalizeMerchant` で一致し、名前が 1 つなら自動確定（`matchedBy: 'PARTNER_NAME'`）。辞書の候補が「使わない名前」なら自動確定しない。
+3. 確定の番人（55・51・80・97）：使わない名前・全角半角/大小だけ違う名前を拒み、新しい名前は確定の後で一覧へ足す。
+4. 取込（71）：8-10 の材料 4 つを 1 回の batchGet で読む（固定費を増やさない）。
+5. 画面（80・81）：`webAppPartnerNames`、共有の datalist、確認ダイアログの「新しい取引先名」の段。
+6. 運用関数（97）：`opsBuildCustomerPartnerList`・`opsShowPartnerNameVariants`・`opsMergeCustomerPartnerNames`。`knownPartnerNames_` は帳簿のタブを読まない。
+
+---
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。**
+2. **git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。
+3. **`src/` で変えてよいファイル**：`00_Config.gs`・`01_DataAccessCore.gs`（`sheetRowsFromValues_` の切り出しと `forgetRunScopedReads_` だけ）・`04_Provisioning.gs`・`06_ErrorCatalog.gs`・`33_MerchantMatcher.gs`・`37_CustomerPartnerList.gs`（新規）・`51_ReviewResolution.gs`・`55_PartnerBatchResolution.gs`・`71_RunOrchestrator.gs`・`80_WebApp.gs`・`81_WebAppUi.html`・`97_Ops.gs`。`96_Menu.gs` は仕様書 §2.4 の最後の条件（メニューが文言を出せない）のときだけ。他は 1 文字も変えない。検査：終わったとき `git diff --name-only -- src/` と `git status --short -- src/` がこの範囲に収まること。
+4. **`src/97_Ops.gs` には、文字列の中に生の NUL バイトが 2 個ある**（`importPartnerListForCustomer_` の鍵の連結など）。**消さない・増やさない・別の文字に置き換えない。**始める前と終わった後に数えて報告すること（例：`python -c "print(open('src/97_Ops.gs','rb').read().count(b'\x00'))"`）。grep は `-a` を付けないとこのファイルを黙って飛ばす。
+5. テストの変更は `pm N: …`（仕様書 §4 の 1〜34）を**足すこと**（置き場所は §4。補助を足してよい）。**既存のテストの期待（assert）は変えないこと。例外は §4 の末尾の 2 つだけ**（`phase5-provisioning` のシートの枚数 20→21、`multi 14` の固定費の上限を実測値へ下げる）。それ以外の既存のテストが赤になったら、変えずに止めて理由を報告すること。`test/gas-stubs.js`・`test/gas-harness.js`・`test/fixtures/` は変えない（足りないスタブがあれば止めて報告）。
+6. **テストを先に赤にしてから直すこと。**pm 1〜34 を書き、いまの実装で赤になることを確かめてから実装する。今でも緑になるもの（あれば）を報告する。
+7. 画面へ文字を入れるときは `textContent` だけを使うこと（`innerHTML` を使わない）。
+8. **日本語は UTF-8 で書くこと。**以前、あなたの書いた日本語が `?` の羅列に化けた。終わったら `grep -n '???' src/*.gs src/*.html test/*.js` が空であること（始める前も空）を確かめて報告すること。U+FFFD（置換文字）も入れないこと。コメントは周りと同じ密度・語り口（「なぜ」を書く）で。
+9. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断をしたら全部報告すること。迷ったら止めて報告すること。
+10. 読取の上限（`budget 1`・`multi 14` の 1 本ごと 20・`batch 3`・`batch 19`・`reads 1`）を**上げないこと。**超えたら止めて、どこで何回増えたかを報告すること。
+
+## 進め方
+
+1. 仕様書を読む。次を読む：`src/33_MerchantMatcher.gs` 全部・`src/34_MerchantDictionary.gs`（`readDictionary_`・`dictionaryWriteSheet_`・`learnFromResolutionBatch` の作法）・`src/01_DataAccessCore.gs` の `readSheetRows_`・`sheetsReadRanges_`・`forgetRunScopedReads_`・`src/55_PartnerBatchResolution.gs` 全部・`src/51_ReviewResolution.gs` の `adoptExistingPartner_`・`src/71_RunOrchestrator.gs` の 8-10（`buildDictionaryIndex` の周り）と `commonPartnersForRun_`・`src/80_WebApp.gs` の `webAppListReviews`・`webAppResolveReviews`・`webAppResolveErrorMessage_`・`src/81_WebAppUi.html` の `partnerChoices`・`renderBulkPartnerOptions`・行の入力欄を作る所・`openConfirmation`・`loadReviews`・`gasCall`・`formatNormalizeHeader`・`el` の表・`src/97_Ops.gs` の `opsAutoAdoptPartners`・`knownPartnerNames_`・`opsApplyPartnerDecisions`・`opsExplainPartnerMatch`・`opsMergePartnerNameVariants`・`opsDedupeDictionaryRows`、テストの `dict 1`・`budget 1`・`multi 14`・`batch 3`・`batch 19`・`phase5-provisioning`
+2. 始める前の数を取る：`node test/run-tests.js` の最後の行、`???` の grep、97 の NUL の数、`git diff --stat -- src/ test/`
+3. pm 1〜34 を書く → 赤を確かめる
+4. 実装する
+5. `node test/run-tests.js` を全部緑にする
+6. 仕様書 §5 の M1〜M26 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら `git diff` が変異を入れる前と同じか確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する
+7. `git diff --stat -- src/ test/` と `git status --short` を確かめる
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 直す前に pm 1〜34 のどれが赤だったか（緑だったものも）
+- 読取の実測：取込の固定費（`multi 14`、前と後）・1 本ごと・`batch 3`・`batch 19`・`webAppResolveReviews` の増分
+- M1〜M26 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て（足したテストがあればその名前）
+- 仕様書が間違っていた・足りなかった箇所（黙って直さないこと）、自分で決めた箇所（全部）
+- `???` の grep・97 の NUL の数（前と後）
+- `git diff --stat -- src/ test/` と `git status --short` の出力（始める前と後）
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。

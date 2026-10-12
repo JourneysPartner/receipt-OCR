@@ -371,6 +371,35 @@ function webAppListReviews(customerId, limit, offset) {
   });
 }
 
+/** Webの候補表示に使う顧客別の正式名と廃止名を返す。 */
+function webAppPartnerNames(customerId) {
+  return webAppInvoke_(function() {
+    webAppAuthorizeCustomer_(customerId, 'WEBAPP:取引先名');
+    var wantedCustomerId = String(customerId);
+    var records = customerPartnerRecords_(readCustomerPartnerRows_()).filter(function(record) {
+      return record.customerId === wantedCustomerId;
+    });
+    var activeByName = Object.create(null);
+    var retiredByName = Object.create(null);
+    records.forEach(function(record) {
+      if (record.active) {
+        if (!activeByName[record.partnerName]) activeByName[record.partnerName] = record;
+      } else if (!retiredByName[record.partnerName]) {
+        retiredByName[record.partnerName] = record;
+      }
+    });
+    Object.keys(retiredByName).forEach(function(name) { delete activeByName[name]; });
+    var active = Object.keys(activeByName).sort(function(left, right) {
+      return left.localeCompare(right, 'ja');
+    }).map(function(name) { return {name: name, key: normalizeMerchant(name)}; });
+    var retired = Object.keys(retiredByName).sort(function(left, right) {
+      return left.localeCompare(right, 'ja');
+    }).map(function(name) { return {name: name, key: normalizeMerchant(name),
+      canonical: retiredByName[name].canonicalName || ''}; });
+    return {active: active, retired: retired};
+  });
+}
+
 /** 一覧に必要な取引行をまとめて読み、一意に有効な行だけを表示に使う。 */
 function webAppTransactionsById_(ids) {
   var wanted = [];
@@ -638,6 +667,7 @@ function webAppResolveReviews(customerId, decisions, options) {
     authorize(ROLE.REVIEWER, String(customerId), {operation: operation});
     var wantedCustomerId = String(customerId);
     var customer = getCustomerById(wantedCustomerId);
+    var partnerListRows = readCustomerPartnerRows_();
     var reviewsById = Object.create(null);
     allReviewRecords_().forEach(function(review) {
       if (!Object.prototype.hasOwnProperty.call(reviewsById, String(review.reviewId))) {
@@ -804,7 +834,8 @@ function webAppResolveReviews(customerId, decisions, options) {
         var componentResult;
         try {
           componentResult = resolvePartnerReviewsBatch(wantedCustomerId, fileId, batchDecisions,
-            {actor: sentItems[0].auth.userEmail, customer: customer});
+            {actor: sentItems[0].auth.userEmail, customer: customer,
+              partnerListRows: partnerListRows});
         } catch (componentError) {
           var componentCode = componentError && componentError.code || 'RESOLVE_FAILED';
           sentItems.forEach(function(item) {

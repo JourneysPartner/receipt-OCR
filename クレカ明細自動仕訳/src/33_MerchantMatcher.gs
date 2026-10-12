@@ -100,12 +100,13 @@ function sortMerchantRules_(rules) {
 /** @param {!Array<!Object>} rules @return {!Array<!Object>} */
 function merchantCandidates_(rules) {
   return sortMerchantRules_(rules).map(function(rule) {
+    var matchMethod = merchantMethod_(rule) || null;
     return {
       ruleId: merchantRuleId_(rule),
       partnerName: merchantPartner_(rule),
-      priority: merchantPriority_(rule.priority),
+      priority: matchMethod === 'partner_name' ? null : merchantPriority_(rule.priority),
       conflict: toBool(rule.conflict !== undefined ? rule.conflict : rule.conflictFlag),
-      matchMethod: merchantMethod_(rule) || null
+      matchMethod: matchMethod
     };
   });
 }
@@ -120,13 +121,18 @@ function buildDictionaryIndex(customerId, source) {
   if (!source || !Array.isArray(source.customer) || !Array.isArray(source.common)) {
     throw new TypeError('buildDictionaryIndex requires injected customer and common rows in phase 1b');
   }
+  var partnerNameIndex = null;
+  if (Array.isArray(source.partnerList)) {
+    partnerNameIndex = buildPartnerNameIndex_(customerPartnerRecords_(source.partnerList), customerId);
+  }
   return {
     customer: source.customer.filter(function(rule) {
       var id = rule.customerId === undefined ? customerId : String(rule.customerId);
       return id === customerId;
     }).slice(),
     common: source.common.slice(),
-    commonPartners: Array.isArray(source.commonPartners) ? source.commonPartners.slice() : []
+    commonPartners: Array.isArray(source.commonPartners) ? source.commonPartners.slice() : [],
+    partnerNameIndex: partnerNameIndex
   };
 }
 
@@ -213,6 +219,23 @@ function matchPartner(tx, customerId, dictIndex) {
     }
   }
 
+  if (!selected.length && dictIndex.partnerNameIndex) {
+    var partnerMatches = dictIndex.partnerNameIndex.activeByKey[normalized] || [];
+    var distinctPartnerNames = [];
+    partnerMatches.forEach(function(record) {
+      if (distinctPartnerNames.indexOf(record.partnerName) < 0) {
+        distinctPartnerNames.push(record.partnerName);
+      }
+    });
+    if (distinctPartnerNames.length) {
+      selected = partnerMatches.map(function(record) {
+        return {ruleId: record.partnerId, partnerName: record.partnerName,
+          priority: null, conflict: false, matchMethod: 'partner_name'};
+      });
+      matchedBy = 'PARTNER_NAME';
+    }
+  }
+
   var suggestionOnly = false;
   if (!selected.length) {
     selected = approvedPatternMatches(customer, false);
@@ -223,6 +246,15 @@ function matchPartner(tx, customerId, dictIndex) {
   }
 
   var candidates = merchantCandidates_(selected);
+  var retiredPartnerNames = [];
+  if (dictIndex.partnerNameIndex && candidates.length) {
+    candidates.forEach(function(candidate) {
+      var classification = classifyPartnerName_(dictIndex.partnerNameIndex, candidate.partnerName);
+      if (classification.kind === 'RETIRED' && retiredPartnerNames.indexOf(candidate.partnerName) < 0) {
+        retiredPartnerNames.push(candidate.partnerName);
+      }
+    });
+  }
   var conflict = candidates.some(function(candidate) { return candidate.conflict; });
   var partnerNames = [];
   candidates.forEach(function(candidate) {
@@ -230,7 +262,8 @@ function matchPartner(tx, customerId, dictIndex) {
       partnerNames.push(candidate.partnerName);
     }
   });
-  var autoConfirm = !suggestionOnly && candidates.length > 0 && partnerNames.length === 1 && !conflict;
+  var autoConfirm = !suggestionOnly && candidates.length > 0 && partnerNames.length === 1 &&
+    !conflict && retiredPartnerNames.length === 0;
   return {
     partnerName: autoConfirm ? partnerNames[0] : null,
     matchedBy: matchedBy,
@@ -238,6 +271,7 @@ function matchPartner(tx, customerId, dictIndex) {
     candidates: candidates,
     autoConfirm: autoConfirm,
     conflict: conflict,
+    retiredPartnerNames: retiredPartnerNames,
     excludedByPeriod: excludedByPeriod,
     partnerResolutionStatus: autoConfirm ? PARTNER_STATUS.RESOLVED_WITH_PARTNER : PARTNER_STATUS.UNRESOLVED
   };

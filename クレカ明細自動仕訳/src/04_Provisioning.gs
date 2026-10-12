@@ -23,6 +23,7 @@ var MASTER_SHEET_SPECS_ = Object.freeze([
   {key: 'COMMON_PARTNER_LIST', width: 6, label: '取引先ID'},
   {key: 'COMMON_PARTNER_DICT', width: 18, label: '辞書ID'},
   {key: 'CUSTOMER_PARTNER_DICT', width: 18, label: '辞書ID'},
+  {key: 'CUSTOMER_PARTNER_LIST', width: 10, label: '取引先ID'},
   {key: 'PURPOSE_COMPLEMENT', width: 10, label: 'ルールID'},        // ※
   {key: 'CARD_FORMAT_MASTER', width: 37, label: '形式ID'},          // ※
   {key: 'PROCESS_LOG', width: 40, label: '実行ID'},
