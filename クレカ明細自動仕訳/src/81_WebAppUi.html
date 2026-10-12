@@ -154,6 +154,7 @@
     .fix-reason { color: var(--warn); font-size: 11px; overflow-wrap: anywhere; }
     .status-line { min-height: 21px; margin: 8px 0; color: var(--muted); }
     .progress-arrows { display: inline-flex; margin-right: .35em; }
+    .progress-arrows[hidden] { display: none; }
     .progress-arrows span { opacity: .25; animation: progress-arrow-pulse 1.2s ease-in-out infinite; }
     .progress-arrows span:nth-child(2) { animation-delay: .2s; }
     .progress-arrows span:nth-child(3) { animation-delay: .4s; }
@@ -535,6 +536,7 @@
         });
         el.notice.appendChild(list);
       }
+      if (typeof el.notice.scrollIntoView === 'function') el.notice.scrollIntoView({block: 'nearest'});
     }
 
     function clearNotice() {
@@ -659,6 +661,9 @@
         if (activeProgressTimers[progressId] === handle) delete activeProgressTimers[progressId];
         el[progressId + '-arrows'].hidden = true;
         el[progressId + '-hint'].hidden = true;
+        if (el[progressId + '-label'].textContent === '処理中 ') {
+          el[progressId + '-label'].textContent = '終了 ';
+        }
       }
 
       function refresh() {

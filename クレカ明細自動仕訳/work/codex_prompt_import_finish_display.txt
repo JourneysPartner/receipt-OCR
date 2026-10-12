@@ -1,0 +1,46 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の Web アプリの画面（`src/81_WebAppUi.html`）で、**取込・確定が終わったことを分かるようにする小さな直し 3 つ**を受け取ります。
+
+作業ツリーは main の最新（コミット e9a4acb）で、`src/`・`test/` に未コミットの変更はありません。あなたの変更は、ステージされていない差分（`git diff`）として残してください ── **`git add` しないこと。**開始時の `node test/run-tests.js` の本数は、始める前に自分で数えて報告に書いてください（1427/1427 のはずです）。
+
+## 仕様書
+
+`work/spec_import_finish_display.md`（1.0）。**全部読んでから始めてください。**短い仕様です。
+
+## 直すこと（要点。詳細は仕様書）
+
+1. CSS：`.progress-arrows[hidden] { display: none; }` を `.progress-arrows` の規則の直後に足す（作者の `display: inline-flex` が `hidden` 属性を打ち消しているため）。
+2. `startProgressTimer` の `stop()`：見出しが `'処理中 '` のときだけ `'終了 '` にする。値（`n / m（経過 …）`）は残す。
+3. `showNotice`：中身を作った後、`el.notice.scrollIntoView` があれば `{block: 'nearest'}` で 1 回呼ぶ。
+
+---
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。**
+2. **git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。
+3. **`src/` で変えてよいのは `81_WebAppUi.html` だけ。**その中でも、CSS の 1 行の追加・`startProgressTimer` の `stop()`・`showNotice` の末尾だけ。`.gs` は 1 文字も変えない。検査：終わったとき `git diff --name-only -- src/` が `src/81_WebAppUi.html` だけであること。
+4. テストの変更は `ui N: …`（仕様書 §4 の 1〜5）を `test/phase8-webapp.test.js` の `imp 11` の後に**足すこと**（そのファイルの中に補助を足してよい）。**既存のテストの期待（assert）は 1 つも変えないこと。**既存のテストが赤になったら、変えずに止めて理由を報告すること ── 特に `imp 9`（`progressText` の文言）・`imp 10`（止めた後に経過表示を更新しない）・`imp 11`・`cf 16〜18`。`test/fixtures/`・`test/gas-stubs.js`・`test/gas-harness.js` は変えない。
+5. **テストを先に赤にしてから直すこと。**ui 1〜5 を書き、いまの実装で赤になることを確かめてから直す。いまでも緑になるもの（ui 5 は今でも緑のはず）はどれかを報告する。
+6. 画面へ文字を入れるときは今と同じく `textContent` だけを使うこと（`innerHTML` を使わない）。
+7. **日本語は UTF-8 で書くこと。**以前、あなたの書いた日本語が `?` の羅列に化けた。終わったら `grep -n '???' src/*.gs src/*.html test/phase8-webapp.test.js` が空であること（始める前も空）を確かめて報告すること。コメントを足すなら、周りと同じ密度・語り口（「なぜ」を書く）で。
+8. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断をしたら全部報告すること。迷ったら止めて報告すること。
+
+## 進め方
+
+1. 仕様書を読む。次を読む：`src/81_WebAppUi.html` の CSS（`.progress-arrows` の周り、150〜170 行あたり）・`showNotice`・`clearNotice`・`clearProgressDisplay`・`startProgressTimer`・`renderProgress`・`progressText`、HTML の `import-progress`・`resolve-progress` の要素、`test/phase8-webapp.test.js` の `clientEval`（412 行付近）・`imp 9`〜`imp 11`（5589 行付近）・`cf 16〜18`
+2. ui 1〜5 を書く → 赤を確かめる
+3. 直す
+4. `node test/run-tests.js` を全部緑にする
+5. 仕様書 §5 の Q1〜Q8 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら `git diff` が変異を入れる前と同じか確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する
+6. `git diff --stat -- src/ test/` を確かめる
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 直す前に ui 1〜5 のどれが赤だったか（緑だったものも）
+- Q1〜Q8 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て（足したテストがあればその名前）
+- 仕様書が間違っていた・足りなかった箇所（黙って直さないこと）、自分で決めた箇所（全部）
+- `???` の grep の結果（前と後）
+- `git diff --stat -- src/ test/` の出力（始める前と後）
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。
