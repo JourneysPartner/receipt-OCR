@@ -5657,6 +5657,146 @@ module.exports = ({test, assert, gas}) => {
     assert.ok(hints.res.includes('確定している'), hints.res);
   });
 
+  test('ui 1: 進捗矢印はhiddenで隠れ、初期状態で非表示になっている', () => {
+    assert.match(WEBAPP_UI_SOURCE,
+      /\.progress-arrows\[hidden\]\s*\{\s*display:\s*none;\s*\}/);
+    ['import-progress-arrows', 'resolve-progress-arrows'].forEach((id) => {
+      const element = WEBAPP_UI_SOURCE.match(new RegExp(`<span id="${id}"[^>]*>`));
+      assert.ok(element, `${id} must exist`);
+      assert.match(element[0], /\shidden(?:\s|>)/, `${id} must start hidden`);
+    });
+  });
+
+  test('ui 2: 取込と確定の進捗を止めると終了表示になり値を残す', () => {
+    const elements = {};
+    ['import-progress', 'resolve-progress'].forEach((id) => {
+      ['-label', '-arrows', '-value', '-hint'].forEach((suffix) => {
+        elements[id + suffix] = {textContent: '', hidden: true};
+      });
+    });
+    let now = 0;
+    let tick = null;
+    let intervalId = 0;
+    const stoppedIntervals = [];
+    const result = plain(clientEval(`(() => {
+      const stopped = {};
+      ['import-progress', 'resolve-progress'].forEach((id) => {
+        const timer = startProgressTimer(id, () => true, {now: () => __clock.now()});
+        timer.update(1, 1);
+        __clock.advance(51000);
+        __tick();
+        const valueBeforeStop = el[id + '-value'].textContent;
+        timer.stop();
+        stopped[id] = {
+          label: el[id + '-label'].textContent,
+          value: el[id + '-value'].textContent,
+          valueBeforeStop,
+          arrowsHidden: el[id + '-arrows'].hidden,
+          hintHidden: el[id + '-hint'].hidden
+        };
+      });
+      return stopped;
+    })()`, {
+      document: {getElementById(id) { return elements[id] || {}; }},
+      setInterval(callback) { tick = callback; intervalId += 1; return intervalId; },
+      clearInterval(id) { stoppedIntervals.push(id); },
+      __clock: {now: () => now, advance: (ms) => { now += ms; }},
+      __tick() { if (tick) tick(); }
+    }));
+    ['import-progress', 'resolve-progress'].forEach((id) => {
+      assert.equal(result[id].label, '終了 ');
+      assert.equal(result[id].value, '1 / 1（経過 0:51）');
+      assert.equal(result[id].value, result[id].valueBeforeStop);
+      assert.equal(result[id].arrowsHidden, true);
+      assert.equal(result[id].hintHidden, true);
+    });
+    assert.deepEqual(stoppedIntervals, [1, 2]);
+  });
+
+  test('ui 3: 処理中以外の見出しはstopで変えない', () => {
+    const elements = {
+      'import-progress-label': {textContent: ''},
+      'import-progress-arrows': {hidden: false},
+      'import-progress-value': {textContent: ''},
+      'import-progress-hint': {hidden: false}
+    };
+    const label = clientEval(`(() => {
+      const timer = startProgressTimer('import-progress', () => true);
+      el['import-progress-label'].textContent = '';
+      timer.stop();
+      return el['import-progress-label'].textContent;
+    })()`, {
+      document: {getElementById(id) { return elements[id] || {}; }},
+      setInterval() { return 1; },
+      clearInterval() {}
+    });
+    assert.equal(label, '');
+  });
+
+  function noticeDom(includeScrollIntoView) {
+    const scrollCalls = [];
+    const notice = {
+      textContent: '',
+      className: '',
+      children: [],
+      appendChild(child) { this.children.push(child); }
+    };
+    if (includeScrollIntoView) {
+      // 呼ばれた時点の見た目も残す。ブラウザは display: none の要素へは
+      // スクロールしないので、表示の印（visible）を付ける前に呼ぶと黙って効かない。
+      notice.scrollIntoView = (options) => {
+        scrollCalls.push({options, className: notice.className, children: notice.children.length});
+      };
+    }
+    const document = {
+      getElementById(id) { return id === 'notice' ? notice : {}; },
+      createElement(tagName) {
+        return {
+          tagName,
+          textContent: '',
+          children: [],
+          appendChild(child) { this.children.push(child); }
+        };
+      }
+    };
+    return {document, notice, scrollCalls};
+  }
+
+  test('ui 4: お知らせの内容を作った後にnearestへ一度だけスクロールする', () => {
+    const dom = noticeDom(true);
+    const result = plain(clientEval(`(() => {
+      showNotice('1 件を取り込みました。', 'success',
+        ['【要修正】a.xlsx：使用用途が空：5 行目']);
+      return {
+        className: el.notice.className,
+        message: el.notice.children[0].textContent,
+        details: el.notice.children[1].children.map((item) => item.textContent),
+        scrollCalls: __scrollCalls
+      };
+    })()`, {document: dom.document, __scrollCalls: dom.scrollCalls}));
+    assert.equal(result.className, 'notice visible success');
+    assert.equal(result.message, '1 件を取り込みました。');
+    assert.deepEqual(result.details, ['【要修正】a.xlsx：使用用途が空：5 行目']);
+    assert.deepEqual(result.scrollCalls,
+      [{options: {block: 'nearest'}, className: 'notice visible success', children: 2}]);
+  });
+
+  test('ui 5: scrollIntoViewがない環境でもお知らせを作れる', () => {
+    const dom = noticeDom(false);
+    const result = plain(clientEval(`(() => {
+      showNotice('1 件を取り込みました。', 'success',
+        ['【要修正】a.xlsx：使用用途が空：5 行目']);
+      return {
+        className: el.notice.className,
+        message: el.notice.children[0].textContent,
+        details: el.notice.children[1].children.map((item) => item.textContent)
+      };
+    })()`, {document: dom.document}));
+    assert.equal(result.className, 'notice visible success');
+    assert.equal(result.message, '1 件を取り込みました。');
+    assert.deepEqual(result.details, ['【要修正】a.xlsx：使用用途が空：5 行目']);
+  });
+
   function seedPrefetchFile(customer, fileId, options = {}) {
     const name = options.name || `${fileId}.csv`;
     gas.stubs.createFile(fileId, {name, data: 'a,b\n1,2\n'});
