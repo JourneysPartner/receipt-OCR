@@ -51,6 +51,9 @@ function partnerBatchMessage_(code) {
     ALREADY_SETTLED: 'この要確認はすでに処理されています。',
     OPERATION_NOT_OFFERED: 'この要確認では指定の操作を選べません。',
     INVALID_PARTNER_NAME: '取引先名を確認してください。',
+    PARTNER_NAME_RETIRED: '使わない取引先名です。',
+    PARTNER_NAME_VARIANT: '登録済みの取引先名と表記だけが違います。',
+    PARTNER_LIST_FAILED: '取引先名の一覧への登録に失敗しました。もう一度確定してください。',
     LEARN_PRECONDITION: '取引先を学習できないため、確定できません。',
     TX_NOT_FOUND: '取引情報が見つかりません。',
     TRANSACTION_LOG_AMBIGUOUS: '取引情報が重複しています。',
@@ -74,11 +77,11 @@ function partnerBatchMessage_(code) {
  * 報告もされないまま消える ── 勘定の恒等式が 1 件ぶん合わなくなる
  * （2026-10-03 の監査で見つけた）。同じ件に 2 つ目の理由は積まない。
  */
-function partnerBatchFail_(result, item, code) {
+function partnerBatchFail_(result, item, code, message) {
   if (item.failed) return;
   item.failed = String(code || 'WRITE_FAILED');
   result.errors.push({reviewId: item.reviewId, code: item.failed,
-    message: partnerBatchMessage_(item.failed)});
+    message: message === undefined ? partnerBatchMessage_(item.failed) : String(message)});
 }
 
 function partnerBatchRecord_(record) {
@@ -127,8 +130,11 @@ function partnerBatchCommitBlocking_(tx, openReviewsForTx) {
  * 見送り・上限で未着手のどれか 1 つだけに入る（呼出し側の画面と自動採用が
  * 「どの件が片付いたか」をこれで判定する）。
  *
+ * `options.partnerListRows` を渡すと、新しく足した名前の行をその配列へその場で書き足す
+ * （同じ呼出しの次のまとまりで読み直さないため。`opsAutoAdoptPartners` がこれを見て索引を作り直す）。
+ *
  * **段の順序を変えてはならない**（仕様書 §2.3）。転記先へ書いて読み返す →
- * 取引ログ → 辞書 → 要確認・監査・確定の順にしてあるので、どこで殺されても
+ * 取引ログ → 辞書 → 取引先名一覧 → 要確認・監査・確定の順にしてあるので、どこで殺されても
  * 同じまとまりをもう一度呼べば同じ値を書き直して先へ進む。確定（J 列）を
  * 要確認より先に書くと「`COMMITTED` なのに要確認が `OPEN`」が残る。
  */
@@ -220,6 +226,15 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
       reviewsById[review.reviewId] = review;
     }
   });
+  var hasAdoption = selected.some(function(item) {
+    return item.decision.operation === 'ADOPT_EXISTING_PARTNER';
+  });
+  var partnerListRows = options.partnerListRows;
+  if (partnerListRows === undefined && hasAdoption) {
+    partnerListRows = readCustomerPartnerRows_();
+  }
+  var partnerNameIndex = hasAdoption ? buildPartnerNameIndex_(
+    customerPartnerRecords_(partnerListRows || []), customerId) : null;
   var eligible = [];
   selected.forEach(function(item) {
     var review = reviewsById[item.reviewId];
@@ -234,13 +249,19 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
     } else if (decision.operation === 'ADOPT_EXISTING_PARTNER' &&
         (!decision.partnerName.trim() || isPartnerUnknownLabel(decision.partnerName))) {
       code = 'INVALID_PARTNER_NAME';
-    } else if (decision.operation === 'ADOPT_EXISTING_PARTNER' && decision.learn === true &&
-        (!review.merchantNormalized ||
-         normalizeMerchant(review.merchantOriginal) !== String(review.merchantNormalized))) {
-      code = 'LEARN_PRECONDITION';
+    } else if (decision.operation === 'ADOPT_EXISTING_PARTNER') {
+      item.partnerNameClassification = classifyPartnerName_(partnerNameIndex, decision.partnerName);
+      if (item.partnerNameClassification.kind === 'RETIRED') code = 'PARTNER_NAME_RETIRED';
+      else if (item.partnerNameClassification.kind === 'VARIANT') code = 'PARTNER_NAME_VARIANT';
+      else if (decision.learn === true && (!review.merchantNormalized ||
+          normalizeMerchant(review.merchantOriginal) !== String(review.merchantNormalized))) {
+        code = 'LEARN_PRECONDITION';
+      }
     }
     if (code) {
-      partnerBatchFail_(result, item, code);
+      var issueMessage = code === 'PARTNER_NAME_RETIRED' || code === 'PARTNER_NAME_VARIANT' ?
+        partnerNameIssueMessage_(decision.partnerName, item.partnerNameClassification) : undefined;
+      partnerBatchFail_(result, item, code, issueMessage);
       return;
     }
     item.review = review;
@@ -440,9 +461,45 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
       }
     }
 
-    ready = ready.filter(function(item) {
-      return !item.failed;
+    ready = ready.filter(function(item) { return !item.failed; });
+    var newPartnerItems = ready.filter(function(item) {
+      return item.decision.operation === 'ADOPT_EXISTING_PARTNER' &&
+        item.partnerNameClassification && item.partnerNameClassification.kind === 'NEW';
     });
+    if (newPartnerItems.length) {
+      var namesToRegister = [];
+      newPartnerItems.forEach(function(item) {
+        var name = String(item.decision.partnerName).trim();
+        if (namesToRegister.indexOf(name) < 0) namesToRegister.push(name);
+      });
+      try {
+        var registeredNames = registerCustomerPartnerNames_(customerId, namesToRegister,
+          options.actor, 'RESOLUTION');
+        if (Array.isArray(partnerListRows)) {
+          // 後続のまとまりでも同じ一覧スナップショットを使えるよう、その場で反映する。
+          var knownNames = Object.create(null);
+          customerPartnerRecords_(partnerListRows).forEach(function(record) {
+            if (record.customerId === customerId) knownNames[record.partnerName] = true;
+          });
+          namesToRegister.forEach(function(name) {
+            if (knownNames[name]) return;
+            var registered = (registeredNames || []).filter(function(item) {
+              return item.partnerName === name;
+            })[0];
+            partnerListRows.push({rowNumber: partnerListRows.length + 2, values: [
+              registered ? registered.partnerId : customerPartnerId_(customerId, name),
+              customerId, name, 'ACTIVE', '', 'RESOLUTION', options.actor, '', '', ''
+            ]});
+            knownNames[name] = true;
+          });
+        }
+      } catch (error) {
+        newPartnerItems.forEach(function(item) {
+          partnerBatchFail_(result, item, 'PARTNER_LIST_FAILED');
+        });
+      }
+    }
+    ready = ready.filter(function(item) { return !item.failed; });
     // 要確認・監査・確定は 1 つのロックの中で、この順に書く。確定の判定は
     // ロックの中で読んだ要確認を材料にする ── 同じ取引に `DATE` などの別の
     // 要確認が開いていれば確定しない（`commitBlockingReasons_` が唯一の判定器）。

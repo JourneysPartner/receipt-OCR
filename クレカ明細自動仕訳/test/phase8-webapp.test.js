@@ -2850,8 +2850,10 @@ module.exports = ({test, assert, gas}) => {
     // 変更前（2026-10-02）：1ファイル43回・4ファイル118回、固定費18回。
     // 変更後（2026-10-03）：1ファイル38回・4ファイル98回、固定費18回、
     // 1本増えるごと20回。上限はこの実測値に合わせる。
-    assert.ok(fixedReads <= 18,
-      `呼出しの固定費が${fixedReads}回（上限18）。1=${one.reads}, 4=${four.reads}`);
+    // 変更後（2026-10-12）：4材料を1回のbatchGetにまとめ、固定費16回・1本20回。
+    // 固定費を増やさないため、この実測値へ上限を下げる。
+    assert.ok(fixedReads <= 16,
+      `呼出しの固定費が${fixedReads}回（上限16）。1=${one.reads}, 4=${four.reads}`);
   });
 
   test('multi 15: the call overhead before the first file counts toward the gate', () => {
@@ -4373,6 +4375,10 @@ module.exports = ({test, assert, gas}) => {
     const normalized = call('normalizeMerchant', ['自動採用店']);
     call('learnFromResolution', [customer.customerId, '自動採用店', normalized,
       '株式会社自動採用', 'owner@example.com']);
+    // 本番では学習は確定の経路からしか呼ばれず、そこで一覧にも名前を足す。
+    // 準備も本番の形にそろえる。
+    call('registerCustomerPartnerNames_', [customer.customerId, ['株式会社自動採用'],
+      'owner@example.com', 'RESOLUTION']);
     return {customer, files};
   }
 
@@ -6285,6 +6291,259 @@ module.exports = ({test, assert, gas}) => {
       .getRange(seeded.process.rowNumber, 14).getValue(), '');
     assert.equal(master.getSheetByName('恒久ファイルインデックス')
       .getRange(seeded.permanent.rowNumber, 6).getValue(), '');
+  });
+
+  function customerPartnerListSheet() {
+    return gas.stubs.getSpreadsheet('master').getSheetByName('顧客別取引先一覧');
+  }
+
+  function addPartnerListEntry(customerId, name, state = 'ACTIVE', canonical = '', id = '') {
+    customerPartnerListSheet().appendRow([id || `PTN_${customerId}_${customerPartnerListSheet().getLastRow()}`,
+      customerId, name, state, canonical, 'INITIAL_DICTIONARY', '', '', '', '']);
+  }
+
+  function clientPartnerState(active, retired = []) {
+    const activeRows = active.map((name) => ({name, key: gas.call('normalizeMerchant', [name])}));
+    const retiredRows = retired.map((entry) => ({name: entry.name,
+      key: gas.call('normalizeMerchant', [entry.name]), canonical: entry.canonical || ''}));
+    const activeByKey = Object.create(null);
+    activeRows.forEach((entry) => {
+      if (!activeByKey[entry.key]) activeByKey[entry.key] = [];
+      activeByKey[entry.key].push(entry.name);
+    });
+    const retiredByKey = Object.create(null);
+    retiredRows.forEach((entry) => {
+      if (!retiredByKey[entry.key]) retiredByKey[entry.key] = [];
+      retiredByKey[entry.key].push({name: entry.name, canonical: entry.canonical});
+    });
+    return `{customerId:'C001', active:${JSON.stringify(activeRows)}, retired:${JSON.stringify(retiredRows)},` +
+      `activeExact:new Set(${JSON.stringify(activeRows.map((entry) => entry.name))}),` +
+      `activeByKey:new Map(${JSON.stringify(Object.keys(activeByKey).map((key) => [key, activeByKey[key]]))}),` +
+      `retiredByKey:new Map(${JSON.stringify(Object.keys(retiredByKey).map((key) => [key, retiredByKey[key]]))})}`;
+  }
+
+  test('pm 18: Web確定は一覧を一度だけ読みretiredの文言をそのまま返す', () => {
+    const first = seedPartnerViaWeb({fileId: 'pm18_one', merchant: '一つ目の店'});
+    const secondFileId = putCsv(first.customer, {fileId: 'pm18_two',
+      rows: ['2025/12/11,二つ目の店,2200,仕入れ']});
+    webImport(first.customer, {});
+    const second = openReviewsFor(first.customer.customerId, {fileId: secondFileId})
+      .find((item) => item.reviewType === 'PARTNER');
+    assert.ok(second);
+    addPartnerListEntry(first.customer.customerId, '廃止名', 'RETIRED', '正規名');
+    addPartnerListEntry(first.customer.customerId, '一覧登録名');
+    const values = gas.context.Sheets.Spreadsheets.Values;
+    const original = values.batchGet;
+    let partnerListReads = 0;
+    values.batchGet = function(spreadsheetId, request) {
+      if (String(spreadsheetId) === 'master' && (request.ranges || []).some((range) =>
+          String(range).indexOf('顧客別取引先一覧') >= 0)) partnerListReads += 1;
+      return original.apply(this, arguments);
+    };
+    let result;
+    try {
+      result = webResolve(first.customer.customerId, [
+        decision(first.reviews[0], '廃止名'), decision(second, '一覧登録名')
+      ], 'pm18');
+    } finally { values.batchGet = original; }
+    const retiredError = result.errors.find((item) => item.reviewId === first.reviews[0].reviewId);
+    assert.equal(retiredError.code, 'PARTNER_NAME_RETIRED');
+    assert.equal(retiredError.message, '「廃止名」は使わない取引先名です。「正規名」を使ってください。');
+    assert.equal(partnerListReads, 1);
+    assert.equal(reviewById(first.reviews[0].reviewId).status, 'OPEN');
+    assert.equal(reviewById(second.reviewId).status, 'RESOLVED');
+    assert.equal(result.resolved, 1);
+    assert.equal(result.resolved + result.remaining + result.errors.length + result.skippedByLease, 2);
+  });
+
+  test('pm 19: webAppPartnerNamesは認可した顧客だけの有効名と廃止名を返す', () => {
+    requireWebFunction('webAppPartnerNames');
+    const {world, customer} = setupWorld();
+    const other = addCustomer(world, {suffix: '2', customerId: 'C002', reviewers: 'other@example.com'});
+    addPartnerListEntry(customer.customerId, 'Amazon');
+    addPartnerListEntry(customer.customerId, 'docomo', 'RETIRED', 'ドコモ');
+    addPartnerListEntry(other.customerId, '他顧客名');
+    const result = plain(call('webAppPartnerNames', [customer.customerId]));
+    assert.deepEqual(result, {
+      active: [{name: 'Amazon', key: 'AMAZON'}],
+      retired: [{name: 'docomo', key: 'DOCOMO', canonical: 'ドコモ'}]
+    });
+    assert.throws(() => call('webAppPartnerNames', [other.customerId]));
+  });
+
+  // pm 19b・32b・33b は監査（2026-10-12）で足した（監査の変異 d・f・i）。
+
+  test('pm 19b: 同じ名前にACTIVEとRETIREDの行があれば、webAppPartnerNamesは廃止名としてだけ返す', () => {
+    // 有効名にも出すと、画面がその名前を候補に出し、確認も「登録済み」として素通りさせる
+    // （サーバーの番人は止めるが、利用者は確定を押すまで分からない）。
+    const {customer} = setupWorld();
+    addPartnerListEntry(customer.customerId, '両方名');
+    addPartnerListEntry(customer.customerId, '両方名', 'RETIRED', '正規名');
+    addPartnerListEntry(customer.customerId, '正規名');
+    const result = plain(call('webAppPartnerNames', [customer.customerId]));
+    assert.deepEqual(result.active.map((entry) => entry.name), ['正規名']);
+    assert.deepEqual(result.retired, [{name: '両方名', key: '両方名', canonical: '正規名'}]);
+  });
+
+  test('pm 32b: 2文字の名前は距離1でも似た名前に出さない', () => {
+    const state = clientPartnerState(['AC']);
+    assert.deepEqual(plain(clientEval(`(() => { state.partnerNames = ${state};
+      return similarPartnerNames('AB', 3); })()`)), []);
+  });
+
+  test('pm 33b: 取引先不明は新しい取引先名として確認に出さない', () => {
+    const doc = fakeClientDocument();
+    const state = clientPartnerState(['Amazon']);
+    const result = clientEval(`(() => {
+      state.selectedCustomerId = 'C001';
+      state.partnerNames = ${state};
+      state.reviews = [{reviewId: 'R1', fileId: 'F1', merchantOriginal: '店1',
+        merchantNormalized: '店1', sourceRow: 2, fileName: '明細.csv'}];
+      state.selectedReviewIds.add('R1');
+      state.partnerInputs.set('R1', '取引先不明');
+      openConfirmation();
+      return {opened: el['confirm-dialog'].opened === true,
+        newHidden: el['confirm-new-partners'].hidden,
+        lines: el['confirm-new-partners-list'].children.map((item) => item.textContent)};
+    })()`, {document: doc.document});
+    assert.equal(result.opened, true);
+    assert.equal(result.newHidden, true);
+    assert.deepEqual(plain(result.lines), []);
+  });
+
+  test('pm 30: 入力候補は推測・取引先不明・一覧の順で共有する', () => {
+    const state = clientPartnerState(['Amazon', 'ENEOS'], [{name: 'docomo', canonical: 'ドコモ'}]);
+    const result = clientEval(`(() => {
+      state.partnerNames = ${state};
+      const review = {candidates: [{partnerName: '推測候補'}, {partnerName: 'docomo'},
+        {partnerName: '推測候補'}]};
+      const choices = partnerOptionNames(review);
+      state.partnerNames = null;
+      return {choices: choices, fallback: partnerOptionNames(review), direct: partnerChoices(review)};
+    })()`);
+    assert.deepEqual(plain(result.choices), ['推測候補', '取引先不明', 'Amazon', 'ENEOS']);
+    assert.deepEqual(plain(result.fallback), plain(result.direct));
+  });
+
+  test('pm 31: partnerNameKeyはnormalizeMerchantと同じ正規化をする', () => {
+    const values = ['Ａｍａｚｏｎ', 'ﾄﾞｺﾓ ｹｰﾀｲ', 'ｾﾌﾞﾝ‐ｲﾚﾌﾞﾝ', 'A\u3000  B',
+      'A\t\tB', 'x\u0001Y', 'abc\u2011def', 'カタカナｰ長音', 'x\u00ady', 'ＰＱＲ−ＳＴ'];
+    const actual = plain(clientEval(`(${JSON.stringify(values)}).map(partnerNameKey)`));
+    const expected = values.map((value) => gas.call('normalizeMerchant', [value]));
+    assert.deepEqual(actual, expected);
+  });
+
+  test('pm 32: 似た名前は含む組を先にし距離条件・順序・上限を守る', () => {
+    const similarState = clientPartnerState(
+      ['ドコモン', 'NTTドコモ', 'トコモ', 'ドコモ', 'ABCDEFGH', 'ABXDEFGY', 'ABCDEF']);
+    const similar = plain(clientEval(`(() => { state.partnerNames = ${similarState};
+      return similarPartnerNames('ドコモ', 3); })()`));
+    assert.deepEqual(similar, ['ドコモン', 'NTTドコモ', 'トコモ']);
+    const distanceState = clientPartnerState(['ABXDEFGY', 'ABQXYZ']);
+    const distance = plain(clientEval(`(() => { state.partnerNames = ${distanceState};
+      return similarPartnerNames('ABCDEFGH', 5); })()`));
+    assert.deepEqual(distance, ['ABXDEFGY']);
+    const noneState = clientPartnerState(['AAAA', 'BBBB']);
+    assert.deepEqual(plain(clientEval(`(() => { state.partnerNames = ${noneState};
+      return similarPartnerNames('CCCC', 3); })()`)), []);
+  });
+
+  function fakeClientDocument() {
+    const elements = Object.create(null);
+    function element() {
+      return {textContent: '', hidden: true, className: '', children: [], attributes: {},
+        appendChild(child) { this.children.push(child); },
+        setAttribute(name, value) { this.attributes[name] = value; },
+        removeAttribute(name) { delete this.attributes[name]; },
+        showModal() { this.opened = true; }, close() { this.opened = false; }};
+    }
+    return {elements, document: {
+      getElementById(id) { return elements[id] || (elements[id] = element()); },
+      createElement() { return element(); }
+    }};
+  }
+
+  test('pm 33: 確認前にretiredとvariantを止め新規名だけ確認段を出す', () => {
+    const runConfirmation = (name, partnerState, document) => clientEval(`(() => {
+      const names = ${JSON.stringify(Array.isArray(name) ? name : [name])};
+      state.selectedCustomerId = 'C001';
+      state.partnerNames = ${partnerState};
+      state.reviews = names.map((partner, index) => ({reviewId: 'R' + (index + 1),
+        fileId: 'F1', merchantOriginal: '店' + (index + 1),
+        merchantNormalized: '店' + (index + 1), sourceRow: index + 2, fileName: '明細.csv'}));
+      names.forEach((partner, index) => {
+        const reviewId = 'R' + (index + 1);
+        state.selectedReviewIds.add(reviewId);
+        state.partnerInputs.set(reviewId, partner);
+      });
+      openConfirmation();
+      return {opened: el['confirm-dialog'].opened === true,
+        notice: el.notice.children.map((item) => item.textContent).join(''),
+        noticeMessage: el.notice.children[0] && el.notice.children[0].textContent,
+        noticeItems: el.notice.children[1] ?
+          el.notice.children[1].children.map((item) => item.textContent) : [],
+        noticeClass: el.notice.className, newHidden: el['confirm-new-partners'].hidden,
+        intro: el['confirm-new-partners-intro'].textContent,
+        lines: el['confirm-new-partners-list'].children.map((item) => item.textContent)};
+    })()`, {document});
+    const retiredDoc = fakeClientDocument();
+    const retired = runConfirmation('docomo', clientPartnerState(['ドコモ'],
+      [{name: 'docomo', canonical: 'ドコモ'}]), retiredDoc.document);
+    assert.equal(retired.opened, false);
+    assert.equal(retired.noticeMessage, '次の取引先名では確定できません。');
+    assert.deepEqual(plain(retired.noticeItems), ['「docomo」は使わない取引先名です。「ドコモ」を使ってください。']);
+    assert.match(retired.noticeClass, /warning/);
+
+    const variantDoc = fakeClientDocument();
+    const variant = runConfirmation('amazon', clientPartnerState(['Amazon']), variantDoc.document);
+    assert.equal(variant.opened, false);
+    assert.equal(variant.noticeMessage, '次の取引先名では確定できません。');
+    assert.deepEqual(plain(variant.noticeItems), [
+      '「amazon」は登録済みの「Amazon」と同じ名前です（全角・半角や大文字・小文字などの違いだけ）。「Amazon」を使ってください。'
+    ]);
+
+    const bothDoc = fakeClientDocument();
+    const both = runConfirmation(['docomo', 'amazon'], clientPartnerState(['Amazon'],
+      [{name: 'docomo', canonical: 'ドコモ'}]), bothDoc.document);
+    assert.equal(both.opened, false);
+    assert.equal(both.noticeMessage, '次の取引先名では確定できません。');
+    assert.equal(both.noticeItems.length, 2);
+    assert.match(both.noticeItems[0], /「docomo」/);
+    assert.match(both.noticeItems[1], /「amazon」/);
+
+    const newDoc = fakeClientDocument();
+    const fresh = runConfirmation('Amazom', clientPartnerState(['Amazon', 'ENEOS']), newDoc.document);
+    assert.equal(fresh.opened, true);
+    assert.equal(fresh.newHidden, false);
+    assert.equal(fresh.intro,
+      '新しい取引先名が 1 件あります。打ち間違いでないか確かめてください（確定すると取引先名の一覧に足します）。');
+    assert.deepEqual(plain(fresh.lines), ['Amazom（似た名前：Amazon）']);
+
+    const knownDoc = fakeClientDocument();
+    const known = runConfirmation('Amazon', clientPartnerState(['Amazon']), knownDoc.document);
+    assert.equal(known.opened, true);
+    assert.equal(known.newHidden, true);
+  });
+
+  test('pm 34: loadReviews・許可表・共有datalistが一覧APIへ結線される', () => {
+    requireWebFunction('webAppPartnerNames');
+    assert.ok(WEBAPP_UI_SOURCE.includes("else if (name === 'webAppPartnerNames')"));
+    assert.equal((WEBAPP_UI_SOURCE.match(/<datalist id="partner-name-options">/g) || []).length, 1);
+    const loadStart = WEBAPP_UI_SOURCE.indexOf('async function loadReviews(');
+    const loadEnd = WEBAPP_UI_SOURCE.indexOf('\n    function stoppedByMessage', loadStart);
+    const loadSource = WEBAPP_UI_SOURCE.slice(loadStart, loadEnd);
+    assert.ok(loadSource.includes("gasCall('webAppPartnerNames'"));
+    assert.ok(loadSource.includes('state.partnerNames = null'));
+    assert.ok(loadSource.includes('state.reviews ='));
+    const rowStart = WEBAPP_UI_SOURCE.indexOf('function renderReviews()');
+    const rowEnd = WEBAPP_UI_SOURCE.indexOf('\n    function ', rowStart + 1);
+    const rowSource = WEBAPP_UI_SOURCE.slice(rowStart, rowEnd);
+    assert.ok(rowSource.includes("setAttribute('list', 'partner-name-options')"));
+    assert.equal(rowSource.includes("createElement('datalist')"), false);
+    assert.ok(rowSource.includes('fillPartnerOptions(partnerOptionNames(review))'));
+    assert.ok(WEBAPP_UI_SOURCE.includes("'partner-name-options'"), 'elの取得表に共有候補がない');
+    ['innerHTML', 'outerHTML', 'insertAdjacentHTML'].forEach((name) =>
+      assert.equal(WEBAPP_UI_SOURCE.includes(name), false, `${name} must not be used`));
   });
 
 };

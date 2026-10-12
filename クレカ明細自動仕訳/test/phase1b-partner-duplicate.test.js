@@ -342,4 +342,170 @@ module.exports = function registerPhase1bPartnerDuplicateTests({test, assert, ga
     assert.equal(result.reason, 'FILE_CHANGED');
     assert.equal(result.releaseReservedRows, true);
   });
+
+  function partnerRows(entries) {
+    return entries.map((entry, index) => ({rowNumber: index + 2, values: [
+      entry.id || `PTN${index + 1}`, entry.customerId || 'CFIX', entry.name,
+      entry.state === undefined ? 'ACTIVE' : entry.state,
+      entry.canonical || '', entry.source || 'INITIAL_DICTIONARY', '', '', '', ''
+    ]}));
+  }
+
+  function matchWithPartnerRows(original, entries, customerRules = []) {
+    const index = gas.call('buildDictionaryIndex', ['CFIX', {
+      customer: customerRules, common: [], commonPartners: [],
+      partnerList: partnerRows(entries)
+    }]);
+    return plain(gas.call('matchPartner', [{merchantOriginal: original, date: null}, 'CFIX', index]));
+  }
+
+  test('pm 1: 顧客別一覧の名前一致で正規化した店名を自動確定する', () => {
+    const result = matchWithPartnerRows('ＥＮＥＯＳ', [{id: 'PTN_ENEOS', name: 'ENEOS'}]);
+    assert.equal(result.autoConfirm, true);
+    assert.equal(result.partnerName, 'ENEOS');
+    assert.equal(result.matchedBy, 'PARTNER_NAME');
+    assert.equal(result.matchedRuleId, 'PTN_ENEOS');
+    assert.equal(result.partnerResolutionStatus, 'RESOLVED_WITH_PARTNER');
+  });
+
+  test('pm 2: 一覧の同じ鍵に有効名が複数あると自動確定しない', () => {
+    const result = matchWithPartnerRows('AMAZON', [
+      {id: 'PTN_LOWER', name: 'amazon'}, {id: 'PTN_UPPER', name: 'Amazon'}
+    ]);
+    assert.equal(result.autoConfirm, false);
+    assert.equal(result.matchedBy, 'PARTNER_NAME');
+    assert.deepEqual(result.candidates.map((candidate) => candidate.partnerName), ['amazon', 'Amazon']);
+  });
+
+  test('pm 3: STEP1とSTEP5の辞書候補が一覧の名前一致より優先される', () => {
+    const exact = row('DICT_EXACT', 'customer', 'ENEOS', 'ENEOS', 'エネオス株式会社', 'exact_original', 1);
+    const step1 = matchWithPartnerRows('ENEOS', [{id: 'PTN_ENEOS', name: 'ENEOS'}], [exact]);
+    assert.equal(step1.matchedBy, 'STEP1');
+    assert.equal(step1.partnerName, 'エネオス株式会社');
+    const prefix = row('DICT_PREFIX', 'customer', 'ENEOS', 'ENEOS', 'エネオス株式会社', 'prefix', 1,
+      {approved: true});
+    const step5 = matchWithPartnerRows('ENEOS 東京', [{id: 'PTN_ENEOS', name: 'ENEOS'}], [prefix]);
+    assert.equal(step5.matchedBy, 'STEP5');
+    assert.equal(step5.partnerName, 'エネオス株式会社');
+  });
+
+  test('pm 4: 一覧一致は未承認パターンの候補提示より先に使われる', () => {
+    const suggestion = row('DICT_SUGGEST', 'customer', 'ENEOS', 'ENEOS', '候補取引先', 'prefix', 1,
+      {approved: false});
+    const matched = matchWithPartnerRows('ENEOS 東京', [{name: 'ENEOS 東京'}], [suggestion]);
+    assert.equal(matched.matchedBy, 'PARTNER_NAME');
+    assert.equal(matched.autoConfirm, true);
+    const unmatched = matchWithPartnerRows('ENEOS 東京 支店', [], [suggestion]);
+    assert.equal(unmatched.autoConfirm, false);
+    assert.equal(unmatched.candidates[0].partnerName, '候補取引先');
+  });
+
+  test('pm 5: retired名と他顧客のactive名は名前一致に使わない', () => {
+    const rows = partnerRows([
+      {name: 'docomo', state: 'RETIRED', canonical: 'ドコモ'},
+      {name: 'docomo', customerId: 'OTHER', state: 'ACTIVE'}
+    ]);
+    const index = gas.call('buildDictionaryIndex', ['CFIX', {
+      customer: [], common: [], commonPartners: [], partnerList: rows
+    }]);
+    const result = plain(gas.call('matchPartner', [{merchantOriginal: 'docomo', date: null}, 'CFIX', index]));
+    assert.equal(result.autoConfirm, false);
+    assert.deepEqual(result.candidates, []);
+    assert.equal(result.matchedBy, null);
+  });
+
+  test('pm 5b: 他顧客だけにある有効名は一覧一致に使わない', () => {
+    const rows = partnerRows([{name: 'Other Store', customerId: 'OTHER', state: 'ACTIVE'}]);
+    const index = gas.call('buildDictionaryIndex', ['CFIX', {
+      customer: [], common: [], commonPartners: [], partnerList: rows
+    }]);
+    const result = plain(gas.call('matchPartner', [
+      {merchantOriginal: 'Other Store', date: null}, 'CFIX', index
+    ]));
+    assert.equal(result.autoConfirm, false);
+    assert.deepEqual(result.candidates, []);
+    assert.equal(result.matchedBy, null);
+  });
+
+  test('pm 6: 辞書候補がretiredなら候補を保ち自動確定を止める', () => {
+    const dictionary = row('DICT_DOCOMO', 'customer', 'docomo', 'DOCOMO', 'docomo', 'exact_original', 1);
+    const result = matchWithPartnerRows('docomo', [{name: 'docomo', state: 'RETIRED', canonical: 'ドコモ'}],
+      [dictionary]);
+    assert.equal(result.autoConfirm, false);
+    assert.deepEqual(result.retiredPartnerNames, ['docomo']);
+    assert.deepEqual(result.candidates.map((candidate) => candidate.partnerName), ['docomo']);
+    const mixed = matchWithPartnerRows('docomo', [
+      {name: 'docomo', state: 'ACTIVE'}, {name: 'docomo', state: 'RETIRED', canonical: 'ドコモ'}
+    ], [dictionary]);
+    assert.equal(mixed.autoConfirm, false);
+    assert.deepEqual(mixed.retiredPartnerNames, ['docomo']);
+  });
+
+  test('pm 7: 名前一致は normalizeMerchant の長音・半角カナ・空白規則を使う', () => {
+    const result = matchWithPartnerRows('ﾄﾞｺﾓ ｹｰﾀｲ', [{name: 'ドコモ　ケータイ'}]);
+    assert.equal(result.autoConfirm, true);
+    assert.equal(result.partnerName, 'ドコモ　ケータイ');
+    assert.equal(matchWithPartnerRows('   ', [{name: ' '}]).matchedBy, null);
+  });
+
+  test('pm 8: 一覧の状態・空ID・空名を安全側で読む', () => {
+    const raw = [
+      {rowNumber: 2, values: ['PTN1', 'CFIX', 'Amazon', ' active ', '', '', '', '', '', '']},
+      {rowNumber: 3, values: ['PTN2', 'CFIX', 'amazon', '', '廃止寄せ先', '', '', '', '', '']},
+      {rowNumber: 4, values: ['PTN3', 'CFIX', '未使用', 'x', '', '', '', '', '', '']},
+      {rowNumber: 5, values: ['PTN4', 'CFIX', '削除', 'RETIRED', '', '', '', '', '', '']},
+      {rowNumber: 6, values: ['', 'CFIX', 'IDなし', 'ACTIVE', '', '', '', '', '', '']},
+      {rowNumber: 7, values: ['PTN7', 'CFIX', '   ', 'ACTIVE', '', '', '', '', '', '']}
+    ];
+    const records = plain(gas.call('customerPartnerRecords_', [raw]));
+    assert.deepEqual(records.map((record) => [record.partnerId, record.partnerName, record.active, record.canonicalName]), [
+      ['PTN1', 'Amazon', true, ''], ['PTN2', 'amazon', false, '廃止寄せ先'],
+      ['PTN3', '未使用', false, ''], ['PTN4', '削除', false, '']
+    ]);
+  });
+
+  test('pm 9: 一覧を渡さない照合は既存結果を保ち空のretiredPartnerNamesを返す', () => {
+    const index = {customer: [row('DICT_KEEP', 'customer', 'ENEOS', 'ENEOS', 'ENEOS', 'exact_original', 1)],
+      common: []};
+    const result = plain(gas.call('matchPartner', [{merchantOriginal: 'ENEOS', date: null}, 'CFIX', index]));
+    assert.equal(result.autoConfirm, true);
+    assert.equal(result.matchedBy, 'STEP1');
+    assert.equal(result.partnerName, 'ENEOS');
+    assert.deepEqual(result.retiredPartnerNames, []);
+  });
+
+  test('pm 10: 分類順はKNOWN、VARIANT、RETIRED、NEWである', () => {
+    const records = gas.call('customerPartnerRecords_', [partnerRows([
+      {name: 'Amazon'}, {name: 'Legacy', state: 'RETIRED', canonical: 'Amazon'},
+      {name: 'Legacy2', state: 'RETIRED', canonical: ''}, {name: 'AMAZON'}
+    ])]);
+    const index = gas.call('buildPartnerNameIndex_', [records, 'CFIX']);
+    assert.deepEqual(plain(gas.call('classifyPartnerName_', [index, ' Amazon '])), {kind: 'KNOWN'});
+    assert.deepEqual(plain(gas.call('classifyPartnerName_', [index, 'amazon'])),
+      {kind: 'VARIANT', existing: ['Amazon', 'AMAZON']});
+    assert.deepEqual(plain(gas.call('classifyPartnerName_', [index, 'legacy'])),
+      {kind: 'RETIRED', name: 'legacy', canonical: 'Amazon'});
+    assert.deepEqual(plain(gas.call('classifyPartnerName_', [index, '新規'])), {kind: 'NEW', name: '新規'});
+  });
+
+  test('pm 10b: 有効名と廃止名の鍵が重なる場合はVARIANTを先に返す', () => {
+    const records = gas.call('customerPartnerRecords_', [partnerRows([
+      {name: 'Amazon'}, {name: 'AMAZON', state: 'RETIRED', canonical: 'Amazon'}
+    ])]);
+    const index = gas.call('buildPartnerNameIndex_', [records, 'CFIX']);
+    assert.deepEqual(plain(gas.call('classifyPartnerName_', [index, 'amazon'])),
+      {kind: 'VARIANT', existing: ['Amazon']});
+  });
+
+  test('pm 11: retiredとvariantの案内文言を共通部品で作る', () => {
+    const issue = (name, classification) => gas.call('partnerNameIssueMessage_', [name, classification]);
+    assert.equal(issue('docomo', {kind: 'RETIRED', canonical: 'ドコモ'}),
+      '「docomo」は使わない取引先名です。「ドコモ」を使ってください。');
+    assert.equal(issue('docomo', {kind: 'RETIRED', canonical: ''}),
+      '「docomo」は使わない取引先名です。顧客別取引先一覧を確認してください。');
+    assert.equal(issue('amazon', {kind: 'VARIANT', existing: ['Amazon']}),
+      '「amazon」は登録済みの「Amazon」と同じ名前です（全角・半角や大文字・小文字などの違いだけ）。「Amazon」を使ってください。');
+    assert.equal(issue('amazon', {kind: 'VARIANT', existing: ['Amazon', 'AMAZON']}),
+      '「amazon」は登録済みの「Amazon」「AMAZON」と同じ名前です（全角・半角や大文字・小文字などの違いだけ）。どちらかを使ってください。');
+  });
 };

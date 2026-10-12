@@ -1,0 +1,47 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の**取引先名の一覧（`work/spec_partner_master.md`）の実装の続き**を受け取ります。
+
+前の回（同じ指示の 1 回目）で、別の実行が仕様書 1.0 どおりに実装とテスト pm 1〜34 を書き、既存テスト `batch 19` が赤になったところで正しく止まりました（1465/1466）。その差分は作業ツリーに**ステージされずに**残っています（`src/37_CustomerPartnerList.gs` は未追跡）。監査（Claude）が差分を読み、仕様書を **1.1** に直しました。あなたの仕事は、(A) 1.1 の 6 つの直しを入れて全部緑にし、(B) 変異 M1〜M26 を回すことです。
+
+## 読むもの
+
+1. `work/spec_partner_master.md`（**1.1**）。改訂履歴の 1.1 の 6 項目と、§2.1・§2.4・§2.5・§2.6 の 7・§4 の末尾の「1.1」と書いた箇所。仕様書の他の部分は 1 回目の実装が済んでいる前提で、必要なところだけ読み直してよい。
+2. 今の差分：`src/` の `00・01・04・06・33・37（新規）・51・55・71・80・81・97`、`test/` の `phase0`（まだ無変更）・`phase1b-partner-duplicate`・`phase3-importflow`・`phase4-resolution`・`phase5-provisioning`・`phase6-orchestrator`・`phase6-partner-decisions`・`phase6-round-trips`・`phase8-webapp`。
+
+## (A) 入れる直し（1.1）
+
+1. **`batch 19`**：`test/phase8-webapp.test.js` の `seedAutoAdoptionFiles` で、`learnFromResolution` の直後に `registerCustomerPartnerNames_(customer.customerId, ['株式会社自動採用'], 'owner@example.com', 'RESOLUTION')` を呼ぶ。理由をコメントで書く（本番では学習は確定の経路からしか呼ばれず、そこで一覧にも名前を足す。準備を本番の形にそろえる）。`batch 19` の期待は変えない。
+2. **エラーカタログ**：`src/06_ErrorCatalog.gs` の `Object.defineProperties` の形をやめ、`PARTNER_NAME_RETIRED`・`PARTNER_NAME_VARIANT` を `REQUIRED_LOG_WRITE_FAILED` の後に**普通の項目**として足す（今のコメントは消す）。`test/phase0.test.js` の設計コードの一覧に 2 つ足し、テスト名の「52」を「54」にする（**この変更は許可する**）。
+3. **`prefetchMatchingMasters_`（71）**：`runScopedReads_` が偽のとき `null` を返さず、束ねずに今の読み手で `{customer, common, commonPartners, partnerList}` を返す。テストを 1 本足す（区間の外で呼んで `buildDictionaryIndex` に渡せる・束ねた batchGet をしない）。
+4. **運用シートのエラー表示（97 `opsApplyPartnerDecisions`）**：`outcome.error` に `error.detail` を使うのは `error.code` が `PARTNER_NAME_RETIRED`／`PARTNER_NAME_VARIANT` のときだけ。他は元どおり `error.message`。テストを 1 本足す（取引先名の 2 コード以外のエラーで、状態欄が元の `message` のまま）。
+5. **画面のお知らせ（81 `openConfirmation`）**：止める名前があるときは `showNotice('次の取引先名では確定できません。', 'warning', 文言の配列)`。pm 33 をこの形に合わせる（文言が箇条書きの項目として出ること・2 つの名前で 2 項目）。
+6. **55 の約束を書く**：`resolvePartnerReviewsBatch` の関数の説明に「`options.partnerListRows` を渡すと、新しく足した名前の行をその配列へその場で書き足す（同じ呼出しの次のまとまりで読み直さないため。`opsAutoAdoptPartners` がこれを見て索引を作り直す）」と書き、書き足す箇所にも短いコメント。
+7. （小）`opsBuildCustomerPartnerList(true)` は 1 行目が `CUSTOMER_PARTNER_LIST_HEADER_` と違うときだけ書く（仕様書 §2.1）。
+
+## (B) 変異
+
+仕様書 §5 の M1〜M26 を 1 つずつ入れて `node test/run-tests.js` を回し、赤になるテストを記録して戻す。M21 の「帳簿のタブを読む」は、`knownPartnerNames_` を元の実装（`SpreadsheetApp.openById(customer.destinationSpreadsheetId)` の `取引先一覧` タブの B 列）に戻す変異とする。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する。
+
+**git はこの環境では使えない**（前の回で `fatal: cannot change to …` になった）。変異を戻したことは、変異を入れる前にそのファイルを `tools/codex-logs/mut-bak/` へ写しておき、戻した後に**バイト単位で同じ**か（md5 などで）確かめること。終わったら `mut-bak/` を消す。
+
+---
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。git を操作しないこと。**
+2. **`src/` で変えてよいファイル**は 1 回目と同じ範囲（`00・01・04・06・33・37・51・55・71・80・81・97`）。
+3. **`src/97_Ops.gs` の生の NUL バイト 2 個を消さない・増やさない。**始めと終わりに数えて報告する。
+4. 既存のテストの期待（assert）を変えてよいのは、仕様書 §4 の末尾の 3 つ（枚数 20→21・`multi 14` の固定費を実測値へ下げる・`phase0` の設計コードに 2 つ足す）**だけ**。他が赤になったら、変えずに止めて理由を報告する。`test/gas-stubs.js`・`test/gas-harness.js`・`test/fixtures/` は変えない。
+5. 読取の上限（`budget 1`・`multi 14` の 1 本ごと 20・`batch 3`・`batch 19`・`reads 1`）を上げないこと。
+6. 画面へ文字を入れるときは `textContent` だけ。日本語は UTF-8。終わったら `grep -n '???' src/*.gs src/*.html test/*.js` が空であること、U+FFFD を足していないことを確かめる。
+7. 仕様書を変えないこと。仕様書に無い判断をしたら全部報告すること。迷ったら止めて報告すること。
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- (A) の 1〜7 をどう入れたか（足したテストの名前）
+- 読取の実測：`multi 14` の固定費・1 本ごと・`batch 3`・`batch 19`
+- M1〜M26 それぞれで赤になったテストの名前。赤にならなかった変異と理由の見立て（足したテストがあればその名前）
+- 仕様書が間違っていた・足りなかった箇所、自分で決めた箇所（全部）
+- `???` の grep・97 の NUL の数（前と後）・`mut-bak/` を消したこと
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。

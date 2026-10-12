@@ -36,6 +36,7 @@ module.exports = ({test, assert, gas}) => {
       {name: names.commonList, values: [sheetHeader(6, '取引先ID')]},
       {name: names.commonDict, values: [sheetHeader(18, '辞書ID')]},
       {name: names.customerDict, values: [sheetHeader(18, '辞書ID')]},
+      {name: '顧客別取引先一覧', values: [sheetHeader(10, '取引先ID')]},
       {name: names.process, values: [sheetHeader(40, '実行ID')]},
       {name: names.transaction, values: [sheetHeader(45, '取引ID完全値')]},
       {name: names.audit, values: [sheetHeader(15, '監査ID')]},

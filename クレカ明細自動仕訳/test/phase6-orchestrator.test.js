@@ -134,6 +134,63 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(leaseRows, 1, 'the lease must be released on completion');
   });
 
+  test('pm 23: 一覧の単一名一致は取込で確定し複数名一致は要確認に残す', () => {
+    setup();
+    const list = gas.stubs.getSpreadsheet('master').getSheetByName('顧客別取引先一覧');
+    list.appendRow(['PTN_ENEOS', 'C001', 'ENEOS', 'ACTIVE', '', 'INITIAL_DICTIONARY', '', '', '', '']);
+    putCsv('file_pm23a', '三井住友カード202601.csv',
+      '利用日,利用店名,金額,使用用途\n2025/12/16,ＥＮＥＯＳ,2900,仕入れ\n');
+    gas.stubs.createFolder('folder1', {fileIds: ['file_pm23a']});
+    gas.call('runImport', [{}]);
+    assert.equal(destSheet().getRange(2, 3).getValue(), 'ENEOS');
+    const txId = String(destSheet().getRange(2, 7).getValue());
+    assert.equal(gas.call('getTransaction', [txId]).partnerResolutionStatus, 'RESOLVED_WITH_PARTNER');
+    assert.equal(plain(gas.call('openReviews', [{}])).filter((review) => review.reviewType === 'PARTNER').length, 0);
+
+    setup();
+    const ambiguous = gas.stubs.getSpreadsheet('master').getSheetByName('顧客別取引先一覧');
+    ambiguous.appendRow(['PTN_AMAZON_1', 'C001', 'amazon', 'ACTIVE', '', 'INITIAL_DICTIONARY', '', '', '', '']);
+    ambiguous.appendRow(['PTN_AMAZON_2', 'C001', 'Amazon', 'ACTIVE', '', 'INITIAL_DICTIONARY', '', '', '', '']);
+    putCsv('file_pm23b', '三井住友カード202601.csv',
+      '利用日,利用店名,金額,使用用途\n2025/12/16,AMAZON,2900,仕入れ\n');
+    gas.stubs.createFolder('folder1', {fileIds: ['file_pm23b']});
+    gas.call('runImport', [{}]);
+    assert.equal(destSheet().getRange(2, 3).getValue(), '');
+    const review = plain(gas.call('openReviews', [{}])).find((item) => item.reviewType === 'PARTNER');
+    assert.ok(review);
+    assert.equal(JSON.parse(review.candidates).length, 2);
+  });
+
+  test('pm 25: runScopedReads外では一覧を再読込し一覧の読取口から書かない', () => {
+    setup();
+    putCsv('file_pm25', '三井住友カード202601.csv',
+      '利用日,利用店名,金額,使用用途\n2025/12/16,ENEOS,2900,仕入れ\n');
+    gas.stubs.createFolder('folder1', {fileIds: ['file_pm25']});
+    gas.call('runImport', [{}]);
+    const review = plain(gas.call('openReviews', [{}])).find((item) => item.reviewType === 'PARTNER');
+    assert.ok(review);
+    gas.stubs.getSpreadsheet('master').getSheetByName('顧客別取引先一覧')
+      .appendRow(['PTN_AFTER_IMPORT', 'C001', 'ＥＮＥＯＳ', 'ACTIVE', '', 'RESOLUTION', '', '', '', '']);
+    const explanation = plain(gas.call('opsExplainPartnerMatch', [review.reviewId]));
+    assert.equal(explanation.matchedBy, 'PARTNER_NAME');
+    assert.equal(explanation.autoConfirm, true);
+
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const offenders = [];
+    fs.readdirSync(path.join(process.cwd(), 'src')).filter((name) => name.endsWith('.gs'))
+      .forEach((name) => fs.readFileSync(path.join(process.cwd(), 'src', name), 'utf8')
+        .split('\n').forEach((line, index) => {
+          if (line.indexOf('customerPartnerListSheet_(') < 0) return;
+          if (/function customerPartnerList(Write)?Sheet_/.test(line)) return;
+          if (line.indexOf('customerPartnerListWriteSheet_(') >= 0) return;
+          if (!/\.(setValue|setValues|appendRow|insertRow|deleteRow|clear)\s*\(/.test(line) &&
+              !/var sheet = customerPartnerListSheet_/.test(line)) return;
+          offenders.push(`${name}:${index + 1} ${line.trim()}`);
+        }));
+    assert.deepEqual(offenders, [], '一覧を書込取得口から変更している: ' + offenders.join('\n'));
+  });
+
   test('6.1: an unresolved partner leaves F blank, registers PARTNER, and holds the file', () => {
     setup();
     putCsv('fileB', '三井住友カード202601.csv',

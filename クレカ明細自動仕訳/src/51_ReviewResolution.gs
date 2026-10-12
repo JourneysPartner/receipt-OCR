@@ -127,6 +127,16 @@ function adoptExistingPartner_(review, input, actor) {
     throw new TypeError('ADOPT_EXISTING_PARTNER requires a partner name');
   }
   assertNotPartnerUnknownLabel_(input.partnerName);
+  var partnerNameIndex = buildPartnerNameIndex_(
+    customerPartnerRecords_(readCustomerPartnerRows_()), review.customerId);
+  var partnerNameClassification = classifyPartnerName_(partnerNameIndex, input.partnerName);
+  if (partnerNameClassification.kind === 'RETIRED' ||
+      partnerNameClassification.kind === 'VARIANT') {
+    var partnerNameErrorCode = partnerNameClassification.kind === 'RETIRED' ?
+      'PARTNER_NAME_RETIRED' : 'PARTNER_NAME_VARIANT';
+    throw new CatalogError(partnerNameErrorCode,
+      partnerNameIssueMessage_(input.partnerName, partnerNameClassification));
+  }
   var customer = reviewWriteCustomer_(review);
   var leaseId = acquireLease(review.customerId, review.fileId, input.runId || null,
     actor, LEASE_PURPOSE.WRITE_ONLY);
@@ -152,6 +162,9 @@ function adoptExistingPartner_(review, input, actor) {
     if (input.learn !== false) {
       learnFromResolution(review.customerId, review.merchantOriginal,
         review.merchantNormalized, String(input.partnerName), actor);
+    }
+    if (partnerNameClassification.kind === 'NEW') {
+      registerCustomerPartnerNames_(review.customerId, [input.partnerName], actor, 'RESOLUTION');
     }
     return settle_(review, 'ADOPT_EXISTING_PARTNER', actor,
       {adoptedPartner: String(input.partnerName)});

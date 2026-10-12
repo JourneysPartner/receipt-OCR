@@ -123,12 +123,49 @@ function commonPartnersForRun_() {
 }
 
 function readCommonPartners_() {
-  return readSheetRows_(
-    requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.COMMON_PARTNER_LIST), 6)
-    .filter(function(row) { return String(row.values[0] || '') !== ''; })
+  return commonPartnerRowsFromRecords_(readSheetRows_(
+    requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.COMMON_PARTNER_LIST), 6));
+}
+
+function commonPartnerRowsFromRecords_(rows) {
+  return rows.filter(function(row) { return String(row.values[0] || '') !== ''; })
     .map(function(row) {
       return {partnerId: String(row.values[0]), partnerName: String(row.values[1] || '')};
     });
+}
+
+/** 8-10の読取区間だけ、欠けている材料を一度のbatchGetで補う。 */
+function prefetchMatchingMasters_() {
+  if (!runScopedReads_) {
+    return {customer: readDictionary_(false), common: readDictionary_(true),
+      commonPartners: commonPartnersForRun_(), partnerList: readCustomerPartnerRows_()};
+  }
+  var customerSheet = dictionarySheet_(false);
+  var commonSheet = dictionarySheet_(true);
+  var commonPartnerSheet = requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.COMMON_PARTNER_LIST);
+  var partnerListSheet = customerPartnerListSheet_();
+  var missing = [];
+  if (dictionaryRowsCache_.customer === null) missing.push({key: 'customer',
+    range: quoteSheetName_(customerSheet.getName()) + '!A2:R', width: DICTIONARY_WIDTH_});
+  if (dictionaryRowsCache_.common === null) missing.push({key: 'common',
+    range: quoteSheetName_(commonSheet.getName()) + '!A2:R', width: DICTIONARY_WIDTH_});
+  if (runScopedMasters_.commonPartners === null) missing.push({key: 'commonPartners',
+    range: quoteSheetName_(commonPartnerSheet.getName()) + '!A2:F', width: 6});
+  if (customerPartnerListCache_.rows === null) missing.push({key: 'partnerList',
+    range: quoteSheetName_(partnerListSheet.getName()) + '!A2:J', width: CUSTOMER_PARTNER_LIST_WIDTH_});
+  if (missing.length) {
+    var values = sheetsReadRanges_(customerSheet, missing.map(function(item) { return item.range; }));
+    missing.forEach(function(item, index) {
+      var rows = sheetRowsFromValues_(values[index], item.width);
+      if (item.key === 'customer') dictionaryRowsCache_.customer = rows;
+      else if (item.key === 'common') dictionaryRowsCache_.common = rows;
+      else if (item.key === 'commonPartners') {
+        runScopedMasters_.commonPartners = commonPartnerRowsFromRecords_(rows);
+      } else customerPartnerListCache_.rows = rows;
+    });
+  }
+  return {customer: readDictionary_(false), common: readDictionary_(true),
+    commonPartners: commonPartnersForRun_(), partnerList: readCustomerPartnerRows_()};
 }
 
 /** 有効な形式定義のF列キーワードの和集合（5.2 判定3の材料）。 */
@@ -717,11 +754,8 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
         phase('destinationIndex');
 
         // 8-10：店名正規化・取引先判定（メモリ上のみ。登録は9-8）。
-        var dictionary = buildDictionaryIndex(customer.customerId, {
-          customer: readDictionary_(false),
-          common: readDictionary_(true),
-          commonPartners: commonPartnersForRun_()
-        });
+        var matchingMasters = prefetchMatchingMasters_();
+        var dictionary = buildDictionaryIndex(customer.customerId, matchingMasters);
         phase('dictionary');
         // 年会費のように、明細の店名にカード会社が現れない取引がある
         // （実装差戻し#31）。そのファイルがどのカードのものかは形式が知って

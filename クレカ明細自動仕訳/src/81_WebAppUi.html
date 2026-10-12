@@ -221,6 +221,9 @@
     .confirmation-list li { margin-bottom: 9px; }
     .confirmation-summary { margin: 12px 0 0; padding-left: 22px; }
     .confirmation-summary li { margin-bottom: 7px; }
+    .new-partners-warning { margin-top: 12px; padding: 9px 12px; border-left: 4px solid var(--warn); background: #fff4df; }
+    .new-partners-warning p { margin: 0 0 6px; color: var(--warn); font-weight: 600; }
+    .new-partners-warning ul { margin: 0; padding-left: 22px; }
     .confirmation-details { margin-top: 14px; }
     .confirmation-details > summary { cursor: pointer; color: var(--brand); }
     .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px 16px; border-top: 1px solid var(--line); }
@@ -307,6 +310,7 @@
             <label for="bulk-partner">選択中に一括入力
               <input id="bulk-partner" type="text" list="bulk-partner-options" placeholder="取引先を入力">
               <datalist id="bulk-partner-options"></datalist>
+              <datalist id="partner-name-options"></datalist>
             </label>
             <button id="bulk-apply" type="button" class="button" disabled>選択した行に入れる</button>
             <button id="select-clear" type="button" class="button" disabled>選択を解除</button>
@@ -363,6 +367,10 @@
     <div class="dialog-header"><h2 id="confirm-title">要確認の確定</h2></div>
     <div class="dialog-body">
       <div id="confirm-intro"></div>
+      <div id="confirm-new-partners" class="new-partners-warning" hidden>
+        <p id="confirm-new-partners-intro"></p>
+        <ul id="confirm-new-partners-list"></ul>
+      </div>
       <ul id="confirm-summary" class="confirmation-summary" hidden></ul>
       <details id="confirm-details" class="confirmation-details" hidden>
         <summary id="confirm-details-summary">1 件ずつ見る</summary>
@@ -420,7 +428,21 @@
       learnYes: '辞書に登録します',
       // サーバーの `MEMO_TAG_PARTNER_UNKNOWN_`（36）と同じ語。取引先欄にこの語が
       // 入った件を、サーバーは名前ではなく「取引先不明で確定」として扱う。
-      partnerUnknown: '取引先不明'
+      partnerUnknown: '取引先不明',
+      partnerRetired: function(name, canonical) {
+        return canonical ? '「' + name + '」は使わない取引先名です。「' + canonical + '」を使ってください。' :
+          '「' + name + '」は使わない取引先名です。顧客別取引先一覧を確認してください。';
+      },
+      partnerVariant: function(name, existing) {
+        var names = Array.from(new Set(existing || []));
+        var quoted = names.map(function(value) { return '「' + value + '」'; }).join('');
+        return '「' + name + '」は登録済みの' + quoted +
+          'と同じ名前です（全角・半角や大文字・小文字などの違いだけ）。' +
+          (names.length > 1 ? 'どちらかを使ってください。' : quoted + 'を使ってください。');
+      },
+      newPartnerIntro: function(count) {
+        return '新しい取引先名が ' + count + ' 件あります。打ち間違いでないか確かめてください（確定すると取引先名の一覧に足します）。';
+      }
     });
 
     var state = {
@@ -432,6 +454,7 @@
       folders: [],
       files: [],
       reviews: [],
+      partnerNames: null,
       // 表を描き直しても入力と選択を保つため、表示位置でなく要確認 ID を鍵にする。
       partnerInputs: new Map(),
       selectedReviewIds: new Set(),
@@ -484,13 +507,14 @@
       'import-progress', 'import-progress-label', 'import-progress-arrows',
       'import-progress-value', 'import-progress-hint', 'import-disabled-reason', 'import-button', 'review-total',
       'review-window', 'review-empty', 'review-content', 'other-reviews', 'review-table',
-      'review-filter', 'review-count', 'bulk-partner', 'bulk-partner-options', 'bulk-apply',
+      'review-filter', 'review-count', 'bulk-partner', 'bulk-partner-options', 'partner-name-options', 'bulk-apply',
       'select-clear', 'review-pager',
       'review-more', 'review-prev', 'review-next', 'resolve-progress', 'resolve-progress-label',
       'resolve-progress-arrows', 'resolve-progress-value', 'resolve-progress-hint', 'resolve-button',
       'excel-button', 'excel-status', 'final-button', 'final-panel', 'final-sheet',
       'final-verdict', 'final-summary', 'final-files', 'final-problems', 'final-row-count', 'final-rows',
-      'confirm-dialog', 'confirm-title', 'confirm-intro', 'confirm-summary',
+      'confirm-dialog', 'confirm-title', 'confirm-intro', 'confirm-new-partners',
+      'confirm-new-partners-intro', 'confirm-new-partners-list', 'confirm-summary',
       'confirm-details', 'confirm-details-summary', 'confirm-list',
       'confirm-cancel', 'confirm-submit'
       , 'format-panel', 'format-body', 'format-close'
@@ -503,6 +527,7 @@
         if (name === 'webAppBootstrap') runner.webAppBootstrap();
         else if (name === 'webAppListFolder') runner.webAppListFolder(args[0], args[1]);
         else if (name === 'webAppListReviews') runner.webAppListReviews(args[0], args[1], args[2]);
+        else if (name === 'webAppPartnerNames') runner.webAppPartnerNames(args[0]);
         else if (name === 'webAppRunImport') runner.webAppRunImport(args[0], args[1], args[2]);
         else if (name === 'webAppResolveReviews') runner.webAppResolveReviews(args[0], args[1], args[2]);
         else if (name === 'webAppFinalReview') runner.webAppFinalReview(args[0], args[1], args[2]);
@@ -971,6 +996,124 @@
       return names;
     }
 
+    // サーバーの `normalizeMerchant` と同じでなければならない（テスト pm 28 が見る）。
+    function partnerNameKey(value) {
+      return formatNormalizeHeader(value);
+    }
+
+    function classifyPartnerNameClient(name) {
+      if (!state.partnerNames) return {kind: 'UNKNOWN'};
+      var partnerName = String(name === null || name === undefined ? '' : name).trim();
+      if (state.partnerNames.activeExact.has(partnerName)) return {kind: 'KNOWN'};
+      var key = partnerNameKey(partnerName);
+      var active = key && state.partnerNames.activeByKey.get(key) || [];
+      if (active.length) return {kind: 'VARIANT', existing: active.slice()};
+      var retired = key && state.partnerNames.retiredByKey.get(key) || [];
+      if (retired.length) return {kind: 'RETIRED', name: partnerName,
+        canonical: String(retired[0].canonical || '')};
+      return {kind: 'NEW', name: partnerName};
+    }
+
+    function partnerNameIssueMessageClient(name, classification) {
+      if (classification.kind === 'RETIRED') {
+        return TEXT.partnerRetired(name, classification.canonical);
+      }
+      if (classification.kind === 'VARIANT') {
+        return TEXT.partnerVariant(name, classification.existing);
+      }
+      return '';
+    }
+
+    function buildPartnerNamesClient(customerId, result) {
+      var active = Array.isArray(result && result.active) ? result.active.slice() : [];
+      var retired = Array.isArray(result && result.retired) ? result.retired.slice() : [];
+      var activeExact = new Set();
+      var activeByKey = new Map();
+      var retiredByKey = new Map();
+      active.forEach(function(entry) {
+        var name = String(entry && entry.name || '').trim();
+        var key = partnerNameKey(name);
+        if (!name) return;
+        activeExact.add(name);
+        if (!activeByKey.has(key)) activeByKey.set(key, []);
+        if (activeByKey.get(key).indexOf(name) < 0) activeByKey.get(key).push(name);
+      });
+      retired.forEach(function(entry) {
+        var name = String(entry && entry.name || '').trim();
+        var key = partnerNameKey(name);
+        if (!name) return;
+        if (!retiredByKey.has(key)) retiredByKey.set(key, []);
+        retiredByKey.get(key).push({name: name, canonical: String(entry.canonical || '')});
+      });
+      return {customerId: String(customerId), active: active, activeExact: activeExact,
+        activeByKey: activeByKey, retiredByKey: retiredByKey};
+    }
+
+    function partnerOptionNames(review) {
+      var choices = partnerChoices(review);
+      if (!state.partnerNames) return choices;
+      var names = [];
+      choices.forEach(function(name) {
+        if (classifyPartnerNameClient(name).kind === 'RETIRED') return;
+        if (names.indexOf(name) < 0) names.push(name);
+      });
+      state.partnerNames.active.forEach(function(entry) {
+        var name = String(entry.name || '');
+        if (name && names.indexOf(name) < 0) names.push(name);
+      });
+      return names;
+    }
+
+    function fillPartnerOptions(names) {
+      var dataList = el['partner-name-options'];
+      dataList.textContent = '';
+      (names || []).forEach(function(name) {
+        var option = document.createElement('option');
+        option.value = String(name);
+        dataList.appendChild(option);
+      });
+    }
+
+    function partnerNameEditDistance(left, right) {
+      var previous = Array(right.length + 1).fill(0).map(function(_, index) { return index; });
+      for (var i = 1; i <= left.length; i += 1) {
+        var current = [i];
+        for (var j = 1; j <= right.length; j += 1) {
+          current[j] = Math.min(current[j - 1] + 1, previous[j] + 1,
+            previous[j - 1] + (left[i - 1] === right[j - 1] ? 0 : 1));
+        }
+        previous = current;
+      }
+      return previous[right.length];
+    }
+
+    function similarPartnerNames(name, limit) {
+      if (!state.partnerNames) return [];
+      var wanted = partnerNameKey(name).replace(/\s/g, '');
+      if (!wanted) return [];
+      var matches = [];
+      state.partnerNames.active.forEach(function(entry) {
+        var otherName = String(entry.name || '');
+        var other = partnerNameKey(otherName).replace(/\s/g, '');
+        if (!other || other === wanted) return;
+        var shorter = Math.min(wanted.length, other.length);
+        var contains = shorter >= 2 && (wanted.indexOf(other) >= 0 || other.indexOf(wanted) >= 0);
+        var distance = contains ? 0 : Math.abs(wanted.length - other.length) > 2 ? 3 :
+          partnerNameEditDistance(wanted, other);
+        if (contains || (shorter >= 3 && distance <= 1) ||
+            (shorter >= 8 && distance <= 2)) {
+          matches.push({name: otherName, contains: contains,
+            lengthDifference: Math.abs(wanted.length - other.length)});
+        }
+      });
+      matches.sort(function(left, right) {
+        return Number(right.contains) - Number(left.contains) ||
+          left.lengthDifference - right.lengthDifference || left.name.localeCompare(right.name, 'ja');
+      });
+      var maximum = limit === undefined ? 3 : Math.max(0, Math.min(3, Math.floor(Number(limit) || 0)));
+      return matches.slice(0, maximum).map(function(entry) { return entry.name; });
+    }
+
     /**
      * 空のセルへ、Drive で元ファイルを開くリンクとしてファイル名を置く。ID が無ければ文字だけ置く。
      * Web アプリは iframe の中で動くので、同じ枠で開くと画面ごと置き換わる。必ず別タブで開く。
@@ -995,10 +1138,14 @@
       state.reviews.forEach(function(review) {
         if (!state.selectedReviewIds.has(String(review.reviewId))) return;
         candidateNames(review).forEach(function(name) {
-          if (!isPartnerUnknownChoice(name)) names.add(name);
+          if (!isPartnerUnknownChoice(name) &&
+              classifyPartnerNameClient(name).kind !== 'RETIRED') names.add(name);
         });
       });
       names.add(TEXT.partnerUnknown);
+      if (state.partnerNames) state.partnerNames.active.forEach(function(entry) {
+        if (entry.name && !names.has(entry.name)) names.add(entry.name);
+      });
       names.forEach(function(name) {
         var option = document.createElement('option');
         option.value = name;
@@ -1090,20 +1237,14 @@
           input.placeholder = '空欄＝取引先なし';
           input.value = state.partnerInputs.has(reviewId) ? state.partnerInputs.get(reviewId) : '';
           input.disabled = isMutationBusy();
-          var listId = 'candidate-' + index + '-' + state.reviewRequest;
-          input.setAttribute('list', listId);
-          var dataList = document.createElement('datalist');
-          dataList.id = listId;
-          partnerChoices(review).forEach(function(name) {
-            var option = document.createElement('option');
-            option.value = name;
-            dataList.appendChild(option);
+          input.setAttribute('list', 'partner-name-options');
+          input.addEventListener('focus', function() {
+            fillPartnerOptions(partnerOptionNames(review));
           });
           input.addEventListener('input', function() {
             state.partnerInputs.set(reviewId, input.value);
             updateActionButtons();
           });
-          inputCell.appendChild(dataList);
           inputCell.appendChild(input);
           row.appendChild(inputCell);
           var fileCell = document.createElement('td');
@@ -1209,6 +1350,7 @@
       state.viewGeneration += 1;
       invalidateOperations();
       state.selectedCustomerId = String(customerId);
+      state.partnerNames = null;
       state.selectedFolderId = null;
       state.folders = [];
       state.files = [];
@@ -1317,9 +1459,23 @@
       state.loadingReviews = true;
       renderReviews();
       try {
-        var result = await gasCall('webAppListReviews', [customerId, null, offset]);
+        var loaded = await Promise.all([
+          gasCall('webAppListReviews', [customerId, null, offset]).then(function(value) {
+            return {value: value};
+          }, function(error) { return {error: error}; }),
+          gasCall('webAppPartnerNames', [customerId]).then(function(value) {
+            return {value: value};
+          }, function(error) { return {error: error}; })
+        ]);
         if (generation !== state.viewGeneration || request !== state.reviewRequest ||
             String(customerId) !== String(state.selectedCustomerId)) return;
+        var result = loaded[0].value;
+        state.partnerNames = loaded[1].error ? null :
+          buildPartnerNamesClient(customerId, loaded[1].value);
+        if (loaded[0].error) {
+          showNotice(failureMessage(loaded[0].error), 'error');
+          return;
+        }
         state.reviews = Array.isArray(result.reviews) ? result.reviews : [];
         state.partnerTotal = Number(result.partnerTotal || 0);
         state.otherCounts = result.otherCounts || {};
@@ -1327,6 +1483,7 @@
         state.reviewLimit = Number(result.limit || 0);
       } catch (error) {
         if (generation !== state.viewGeneration || request !== state.reviewRequest) return;
+        state.partnerNames = null;
         showNotice(failureMessage(error), 'error');
       } finally {
         if (generation === state.viewGeneration && request === state.reviewRequest) {
@@ -1666,6 +1823,24 @@
         showNotice(TEXT.tooMany(state.reviewLimit), 'warning');
         return;
       }
+      var checkedNames = [];
+      var blockedNames = [];
+      var newNames = [];
+      items.forEach(function(item) {
+        var name = String(item.partnerName || '').trim();
+        if (!name || isPartnerUnknownChoice(name) || checkedNames.indexOf(name) >= 0) return;
+        checkedNames.push(name);
+        var classification = classifyPartnerNameClient(name);
+        if (classification.kind === 'RETIRED' || classification.kind === 'VARIANT') {
+          blockedNames.push(partnerNameIssueMessageClient(name, classification));
+        } else if (classification.kind === 'NEW') {
+          newNames.push(name);
+        }
+      });
+      if (blockedNames.length) {
+        showNotice('次の取引先名では確定できません。', 'warning', blockedNames);
+        return;
+      }
       formatCancelPendingConfirmation();
       freezeSameMerchantConflict(items);
       var payload = {
@@ -1684,6 +1859,17 @@
       el['confirm-title'].textContent = '要確認の確定';
       el['confirm-submit'].textContent = '確定する';
       el['confirm-intro'].textContent = '次の ' + items.length + ' 件を確定します。取り消せません。';
+      el['confirm-new-partners'].hidden = newNames.length === 0;
+      el['confirm-new-partners-intro'].textContent = newNames.length ?
+        TEXT.newPartnerIntro(newNames.length) : '';
+      el['confirm-new-partners-list'].textContent = '';
+      newNames.forEach(function(name) {
+        var similar = similarPartnerNames(name, 3);
+        var li = document.createElement('li');
+        li.textContent = name + (similar.length ? '（似た名前：' + similar.join('、') + '）' :
+          '（似た名前はありません）');
+        el['confirm-new-partners-list'].appendChild(li);
+      });
       el['confirm-summary'].textContent = '';
       confirmationGroups(items).forEach(function(group) {
         var li = document.createElement('li');
@@ -2951,6 +3137,9 @@
         state.formatConfirmResolve = resolve;
         el['confirm-title'].textContent = title;
         el['confirm-intro'].textContent = message;
+        el['confirm-new-partners'].hidden = true;
+        el['confirm-new-partners-intro'].textContent = '';
+        el['confirm-new-partners-list'].textContent = '';
         el['confirm-summary'].textContent = '';
         el['confirm-summary'].hidden = true;
         el['confirm-details'].hidden = true;
