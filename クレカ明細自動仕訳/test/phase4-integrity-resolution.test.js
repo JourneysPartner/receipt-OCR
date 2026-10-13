@@ -321,4 +321,33 @@ module.exports = ({test, assert, gas}) => {
     assert.throws(() => gas.call('resolveIntegrityReview', [id, 'ACCEPT_MANUAL_CHANGE', {}]),
       (error) => error && /INTEGRITY/.test(String(error.message)));
   });
+
+  test('kw21 8c: reverting a manual change preserves a successor lease', () => {
+    const customer = setup();
+    const sheet = committed('TX_KW21');
+    sheet.getRange(2, 6).setValue('担当者の修正');
+    const leaseSheet = gas.stubs.getSpreadsheet('master').getSheetByName(names.lease);
+    const savedVerify = gas.context.verifyWrittenValues;
+    let displacedLeaseId = null;
+    gas.context.verifyWrittenValues = (target, rowWrites, index) => {
+      const verified = savedVerify(target, rowWrites, index);
+      const current = leaseSheet.getDataRange().getValues().slice(1)
+        .filter((row) => row[0] !== '' && row[2] === 'file1');
+      assert.equal(current.length, 1, 'the revert owns one lease before verification');
+      displacedLeaseId = current[0][0];
+      leaseSheet.deleteRow(2);
+      const now = new Date().toISOString();
+      leaseSheet.appendRow(['LEASE_SUCCESSOR', 'C001', 'file1', 'RUN_SUCCESSOR',
+        'successor@example.com', '', now, now, 'ACTIVE', 'WRITE_ONLY']);
+      return verified;
+    };
+    try {
+      gas.call('revertManualChange', ['TX_KW21', 'reviewer@example.com', {customer}]);
+    } finally {
+      gas.context.verifyWrittenValues = savedVerify;
+    }
+    assert.ok(displacedLeaseId);
+    assert.deepEqual(leaseSheet.getDataRange().getValues().slice(1)
+      .filter((row) => row[0] !== '').map((row) => row[0]), ['LEASE_SUCCESSOR']);
+  });
 };

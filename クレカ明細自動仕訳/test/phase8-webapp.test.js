@@ -4741,10 +4741,12 @@ module.exports = ({test, assert, gas}) => {
     const review = seeded.reviews[0];
     const realLock = gas.context.withScriptLock_;
     let lockCount = 0;
+    // ロックの順：1＝リースの取得、2＝転記先への書込（K-W21 から確かめと同じロックの中）、
+    // 3＝取引ログの書込（手順6）。3 回目の後で止める。
     const error = caught(() => withMocks({withScriptLock_(callback) {
       lockCount += 1;
       const value = realLock(callback);
-      if (lockCount === 2) throw new Error('stopped after transaction log write');
+      if (lockCount === 3) throw new Error('stopped after transaction log write');
       return value;
     }}, () => batchResolve(seeded.customer, seeded.fileId, [{reviewId: review.reviewId,
       operation: 'ADOPT_EXISTING_PARTNER', partnerName: '株式会社再実行先', learn: true}])));

@@ -1,5 +1,22 @@
 'use strict';
 
+var GAS_MAX_EXECUTION_SECONDS_ = 360;
+// 強制解放を許す最小の待ち時間（K-W21）。Apps Scriptの実行は360秒で止まるので、
+// 最後の心拍から420秒を超えた持ち主は必ず止められている。60秒の余裕は、
+// 止められる直前に送ったSheetsへの要求が届き切るぶん。心拍の時刻はその実行が
+// 書いたものなので、心拍の更新（`renewHeartbeat`。いまは誰も呼ばない）を
+// 後で結線しても成り立つ。設定値がこれを割ると、生きた実行のリースを奪える。
+var LEASE_FORCE_RELEASE_FLOOR_SECONDS_ = GAS_MAX_EXECUTION_SECONDS_ + 60;
+
+function leaseForceReleaseMinSeconds_() {
+  var value = Number(SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS);
+  if (!isFinite(value) || value < LEASE_FORCE_RELEASE_FLOOR_SECONDS_) {
+    throw new StateTransitionError(
+      'LEASE_FORCE_RELEASE_MIN_SECONDS must be at least 420');
+  }
+  return value;
+}
+
 const ALLOWED_FILE_TRANSITIONS_ = Object.freeze({
   null: Object.freeze([FILE_STATE.DISCOVERED]),
   DISCOVERED: Object.freeze([FILE_STATE.VALIDATING]),
@@ -38,7 +55,10 @@ function transitionFileState(fileId, fromState, toState, runId) {
   var written = updateProcessLog(fileId,
     {internalState: toState, expectedPrefix: STATE_TO_PREFIX[toState]}, record, records.permanent);
   updateFilePrefix(fileId, written);
-  if (toState !== FILE_STATE.VALIDATING && toState !== FILE_STATE.WRITING) releaseLease(fileId, runId, 'STATE_TRANSITION:' + toState);
+  if (toState !== FILE_STATE.VALIDATING && toState !== FILE_STATE.WRITING &&
+      runId !== undefined && runId !== null && String(runId) !== '') {
+    releaseLease(fileId, runId, 'STATE_TRANSITION:' + toState);
+  }
   // 書いた行を返す。直後に同じ行を書く呼出しが読み直さずに済む。
   // **接頭辞の列は `updateFilePrefix` が書き換えることがある**ので、
   // 返した行を使ってよいのは行の位置を知るためだけである（`updateProcessLog`
@@ -138,9 +158,13 @@ function renewHeartbeat(leaseId) {
 }
 
 function releaseLease(fileId, runId, reason) {
+  if (runId === undefined || runId === null || String(runId) === '') {
+    // runIdが無い解放は別の実行のリースまで消すため、必須にする。
+    throw new TypeError('releaseLease requires a runId');
+  }
   return withScriptLock_(function() {
     var targets = activeLeases_().filter(function(lease) {
-      return lease.fileId === String(fileId) && (runId === undefined || runId === null || lease.runId === String(runId));
+      return lease.fileId === String(fileId) && lease.runId === String(runId);
     });
     if (!targets.length) return;
     targets.forEach(function(lease) {
@@ -148,6 +172,23 @@ function releaseLease(fileId, runId, reason) {
         customerId: lease.customerId, before: {state: LEASE_STATE.ACTIVE}, after: {state: null}, reason: reason || ''}, false);
     });
     targets.sort(function(a, b) { return b._rowNumber - a._rowNumber; }).forEach(function(lease) { leaseSheet_().deleteRow(lease._rowNumber); });
+  });
+}
+
+function releaseLeaseById(leaseId, reason) {
+  if (leaseId === undefined || leaseId === null || String(leaseId) === '') {
+    throw new TypeError('releaseLeaseById requires a leaseId');
+  }
+  return withScriptLock_(function() {
+    var lease = activeLeases_().filter(function(item) {
+      return item.leaseId === String(leaseId);
+    })[0];
+    if (!lease) return false;
+    appendAuditUnlocked_({type: 'LEASE_RELEASE', actor: lease.owner,
+      targetType: 'LEASE', targetId: lease.leaseId, customerId: lease.customerId,
+      before: {state: LEASE_STATE.ACTIVE}, after: {state: null}, reason: reason || ''}, false);
+    leaseSheet_().deleteRow(lease._rowNumber);
+    return true;
   });
 }
 
@@ -162,6 +203,9 @@ function assertLeaseHeldForWrite(fileId, leaseId) {
 
 function forceReleaseLease(leaseId, reason, actor) {
   return withScriptLock_(function() {
+    // 閾値が実行上限より短いと、生きた書込を止める前にリースを奪える。
+    // 無効な設定はリース表を読む前に拒む。
+    var minimumSeconds = leaseForceReleaseMinSeconds_();
     var lease = activeLeases_().filter(function(item) { return item.leaseId === String(leaseId); })[0];
     if (!lease) return;
     // `PROCESS`リースは取込の途中でだけ持たれるので、ファイルが
@@ -182,7 +226,7 @@ function forceReleaseLease(leaseId, reason, actor) {
     var customer = getCustomerById(lease.customerId);
     if (customer.admins.indexOf(String(actor).toLowerCase()) < 0) throw new AuthorizationError('System administrator role is required');
     var elapsed = (Date.now() - new Date(lease.lastHeartbeat).getTime()) / 1000;
-    if (!isFinite(elapsed) || elapsed <= SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS) throw new StateTransitionError('Heartbeat has not exceeded the force-release threshold');
+    if (!isFinite(elapsed) || elapsed <= minimumSeconds) throw new StateTransitionError('Heartbeat has not exceeded the force-release threshold');
     appendAuditUnlocked_({type: 'LEASE_FORCE_RELEASE', actor: actor, targetType: 'LEASE', targetId: lease.leaseId,
       customerId: lease.customerId, before: {state: LEASE_STATE.ACTIVE}, after: {state: null}, reason: reason || ''}, false);
     leaseSheet_().deleteRow(lease._rowNumber);
@@ -260,6 +304,8 @@ function releaseInvestigatedLease(leaseId, reason, actor) {
   if (!leaseId) throw new TypeError('releaseInvestigatedLease requires a leaseId');
   if (!reason) throw new TypeError('releaseInvestigatedLease requires a reason');
   return withScriptLock_(function() {
+    // 強制解放の下限を割る設定では、調査経路からもリースを奪わせない。
+    var minimumSeconds = leaseForceReleaseMinSeconds_();
     var lease = activeLeases_().filter(function(item) {
       return item.leaseId === String(leaseId);
     })[0];
@@ -280,7 +326,7 @@ function releaseInvestigatedLease(leaseId, reason, actor) {
       throw new AuthorizationError('System administrator role is required');
     }
     var elapsed = (Date.now() - new Date(lease.lastHeartbeat).getTime()) / 1000;
-    if (!isFinite(elapsed) || elapsed <= SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS) {
+    if (!isFinite(elapsed) || elapsed <= minimumSeconds) {
       throw new StateTransitionError('Heartbeat has not exceeded the force-release threshold');
     }
     appendAuditUnlocked_({type: 'LEASE_RELEASE_INVESTIGATED', actor: actor, targetType: 'LEASE',

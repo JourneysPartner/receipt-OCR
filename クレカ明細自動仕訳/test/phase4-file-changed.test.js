@@ -276,6 +276,35 @@ module.exports = ({test, assert, gas}) => {
       'freee already holds this booking - a silent edit would desynchronise them');
   });
 
+  test('kw21 8b: UPDATE_PURPOSE keeps a successor lease from another run', () => {
+    const {reviewId} = setupDuplicatePair();
+    const sheet = gas.stubs.getSpreadsheet('master').getSheetByName(names.lease);
+    const savedVerify = gas.context.verifyWrittenValues;
+    let displacedLeaseId = null;
+    gas.context.verifyWrittenValues = (customer, rowWrites, index) => {
+      const verified = savedVerify(customer, rowWrites, index);
+      const current = sheet.getDataRange().getValues().slice(1)
+        .filter((row) => row[0] !== '' && row[2] === 'file1');
+      assert.equal(current.length, 1, 'the update owns one lease before verification');
+      displacedLeaseId = current[0][0];
+      sheet.deleteRow(2);
+      const now = new Date().toISOString();
+      sheet.appendRow(['LEASE_SUCCESSOR', 'C001', 'file1', 'RUN_SUCCESSOR',
+        'successor@example.com', '', now, now, 'ACTIVE', 'WRITE_ONLY']);
+      return verified;
+    };
+    try {
+      gas.call('resolveFileReview', [reviewId, 'UPDATE_PURPOSE', {
+        fullTxId: 'TX_ORIG', newPurpose: '消耗品'
+      }]);
+    } finally {
+      gas.context.verifyWrittenValues = savedVerify;
+    }
+    assert.ok(displacedLeaseId);
+    assert.deepEqual(sheet.getDataRange().getValues().slice(1)
+      .filter((row) => row[0] !== '').map((row) => row[0]), ['LEASE_SUCCESSOR']);
+  });
+
   // ================= #7：役割の検査 =================
 
   test('4.26: system-administrator operations refuse other roles', () => {

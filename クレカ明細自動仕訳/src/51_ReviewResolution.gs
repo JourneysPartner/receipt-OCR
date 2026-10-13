@@ -169,7 +169,7 @@ function adoptExistingPartner_(review, input, actor) {
     return settle_(review, 'ADOPT_EXISTING_PARTNER', actor,
       {adoptedPartner: String(input.partnerName)});
   } finally {
-    releaseLease(review.fileId, input.runId || null, 'RESOLVE_DONE');
+    releaseLeaseById(leaseId, 'RESOLVE_DONE');
   }
 }
 
@@ -228,7 +228,7 @@ function resolvePartnerUnknown_(review, input, actor) {
     updatePartnerResolution(tx.fullTxId, PARTNER_STATUS.RESOLVED_WITHOUT_PARTNER);
     return settle_(review, 'RESOLVE_PARTNER_UNKNOWN', actor);
   } finally {
-    releaseLease(review.fileId, input.runId || null, 'RESOLVE_DONE');
+    releaseLeaseById(leaseId, 'RESOLVE_DONE');
   }
 }
 
@@ -277,7 +277,7 @@ function fixDateAmount_(review, input, actor) {
       correctedDate: input.correctedDate, correctedAmount: input.correctedAmount
     });
   } finally {
-    releaseLease(review.fileId, input.runId || null, 'RESOLVE_DONE');
+    releaseLeaseById(leaseId, 'RESOLVE_DONE');
   }
 }
 
@@ -351,7 +351,7 @@ function excludeTransaction_(review, operation, actor, input) {
     }
     updateTransactionStatus(review.fullTxId, from, TX_STATUS.CANCELED);
   } finally {
-    releaseLease(review.fileId, input.runId || null, 'RESOLVE_DONE');
+    releaseLeaseById(leaseId, 'RESOLVE_DONE');
   }
 
   var reason = REVIEW_EXCLUDE_REASON.REVIEWER_JUDGEMENT;

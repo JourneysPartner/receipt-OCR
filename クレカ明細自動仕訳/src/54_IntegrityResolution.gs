@@ -106,7 +106,7 @@ function revertManualChange(fullTxId, actor, options) {
     });
     return {fullTxId: fullTxId, restored: verified[0].values};
   } finally {
-    releaseLease(tx.fileId, options.runId || null, 'REVERT_DONE');
+    releaseLeaseById(leaseId, 'REVERT_DONE');
   }
 }
 
@@ -182,7 +182,7 @@ function restoreRow(fullTxId, actor, options) {
     });
     return {fullTxId: fullTxId, rowNumber: entry.rowNumber};
   } finally {
-    releaseLease(tx.fileId, options.runId || null, 'RESTORE_DONE');
+    releaseLeaseById(leaseId, 'RESTORE_DONE');
   }
 }
 

@@ -595,4 +595,33 @@ module.exports = ({test, assert, gas}) => {
     gas.call('resolveReview', [id, 'POST_ZERO_AMOUNT', {}]);
     assert.equal(plain(gas.call('getReviewById', [id])).excludeReason, null);
   });
+
+  test('kw21 8a: review resolution leaves a successor lease after its own lease disappears', () => {
+    setup();
+    committedTx('TX_KW21');
+    const id = review('PARTNER', 'TX_KW21');
+    const sheet = gas.stubs.getSpreadsheet('master').getSheetByName('処理リース');
+    const savedVerify = gas.context.verifyWrittenValues;
+    let displacedLeaseId = null;
+    gas.context.verifyWrittenValues = (customer, rowWrites, index) => {
+      const verified = savedVerify(customer, rowWrites, index);
+      const current = sheet.getDataRange().getValues().slice(1)
+        .filter((row) => row[0] !== '');
+      assert.equal(current.length, 1, 'the resolution owns one lease before verification');
+      displacedLeaseId = current[0][0];
+      sheet.deleteRow(2);
+      const now = new Date().toISOString();
+      sheet.appendRow(['LEASE_SUCCESSOR', 'C001', 'file1', 'RUN_SUCCESSOR',
+        'successor@example.com', '', now, now, 'ACTIVE', 'WRITE_ONLY']);
+      return verified;
+    };
+    try {
+      gas.call('resolveReview', [id, 'RESOLVE_PARTNER_UNKNOWN', {}]);
+    } finally {
+      gas.context.verifyWrittenValues = savedVerify;
+    }
+    assert.ok(displacedLeaseId);
+    assert.deepEqual(leaseRows().map((row) => row[0]), ['LEASE_SUCCESSOR'],
+      'finally releases only the displaced lease ID');
+  });
 };

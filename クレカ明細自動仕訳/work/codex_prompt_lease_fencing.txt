@@ -1,0 +1,60 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の、**K-W21：リースの確かめと書込を同じロックの中で行い、解放を自分のリースIDに限る**直しを受け取ります。
+
+作業ツリーは main の最新（コミット 81932c9）で、`src/`・`test/` に未コミットの変更はありません。あなたの変更は、ステージされていない差分（`git diff`）として残してください ── **`git add` しないこと。**開始時の `node test/run-tests.js` の本数は、始める前に自分で数えて報告に書いてください（1480/1480 のはずです）。
+
+## 仕様書
+
+`work/spec_lease_fencing.md`（1.0）。**全部読んでから始めてください。**§1 は「なぜ」、§2 が直すこと、§4 がテスト、§5 が変異です。
+
+## 直すこと（要点。詳細は仕様書 §2）
+
+1. `src/43_SheetWriter.gs`：`writeTransactionRows`・`clearTransactionRows`・`releaseReservedRows` の 3 つで、`assertLeaseHeldForWrite` と転記先への `batchUpdate`（全部）を 1 つの `withScriptLock_` の中で行う（§2.1）。
+2. `src/11_FileStateManager.gs`：`releaseLeaseById(leaseId, reason)` を足す。`releaseLease` は `runId` を必須にする。`transitionFileState` は `runId` が空でないときだけ解放する。定数 `GAS_MAX_EXECUTION_SECONDS_`・`LEASE_FORCE_RELEASE_FLOOR_SECONDS_` と補助 `leaseForceReleaseMinSeconds_()` を足し、`forceReleaseLease`・`releaseInvestigatedLease` で使う（§2.2・§2.4）。
+3. 呼出し元の 14 か所の解放を `releaseLeaseById(leaseId, '<今と同じ理由>')` にする：`51` 4・`52` 4・`54` 2・`55` 1・`71` 1・`97` 2（§2.2-4）。
+4. `src/97_Ops.gs` の `completeFullyResolvedFiles_`：リース中のファイルを飛ばす。リース表は候補が初めて見つかったときに 1 回だけ読む（§2.3）。
+5. `src/05_SettingsValidator.gs` の `lockSettings`（検査 8）：`LEASE_FORCE_RELEASE_MIN_SECONDS` が 420 未満なら問題として返す（§2.4-4）。
+
+---
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。**
+2. **git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。
+3. **`src/` で変えてよいのは次の 9 つだけ、しかも次の箇所だけ。**
+   - `05_SettingsValidator.gs`：`runSettingsCheck_` の `case 'lockSettings':` だけ。
+   - `11_FileStateManager.gs`：`transitionFileState` の解放の 1 行の条件、`releaseLease`、`forceReleaseLease`・`releaseInvestigatedLease` の閾値を読む箇所、新しい定数・関数の追加。
+   - `43_SheetWriter.gs`：`writeTransactionRows`・`clearTransactionRows`・`releaseReservedRows` の 3 つだけ。
+   - `51_ReviewResolution.gs`・`52_FileResolution.gs`・`54_IntegrityResolution.gs`・`55_PartnerBatchResolution.gs`・`71_RunOrchestrator.gs`：`releaseLease(...)` の呼出しの行（仕様書 §2.2-4 の箇所）だけ。
+   - `97_Ops.gs`：`releaseLease(...)` の呼出しの 2 行と `completeFullyResolvedFiles_` だけ。
+   検査：終わったとき `git diff --name-only -- src/` がこの 9 つ以下であること。
+4. **`src/97_Ops.gs` には、文字列の中に生の NUL バイトが 2 個ある。**消さない・増やさない・別の文字に置き換えないこと。始める前と終わった後に数えて報告すること（`node -e "console.log([...require('fs').readFileSync('src/97_Ops.gs')].filter(b=>b===0).length)"` が前後とも 2）。grep は `-a` を付けないとこのファイルを黙って飛ばす。
+5. テストの変更は `kw21 N: …`（仕様書 §4 の 1〜13）を**足すこと**（補助を足してよい）。**既存のテストの期待（assert）は 1 つも変えないこと。**既存のテストが赤になったら、変えずに止めて理由を報告すること ── 特に、読取の回数を数えるテスト（`budget 1`・`multi 14`・`bulk 1`・`kw9` の読取の数・`scope 1〜3`・`phase6-round-trips`）、リースの数を確かめるテスト（`phase4-resolution` の `leaseRows()`、`phase4-lease-recovery`、`phase2-data-access` の INV-19/20/30）、`phase7-menu-operations` の `35d`〜`35f`。`test/fixtures/` は変えない。`test/gas-stubs.js`・`test/gas-harness.js` は、足りない API を足すだけなら変えてよい（足したものは報告する）。**模擬ロック `MemoryScriptLock` の「入れ子を拒む」振る舞いは変えないこと**（入れ子のロックを見つける唯一の番人）。
+6. **テストを先に赤にしてから直すこと。**kw21 1〜13 を書き、いまの実装で赤になることを確かめてから直す。いまでも緑になるものはどれかを報告する。
+7. **入れ子のロックを作らないこと**（仕様書 §2.1-5）。`43` の 3 つの関数を呼ぶ箇所が、どれもスクリプトロックの外であることを `src/` を読んで確かめ、呼出し元の一覧を報告すること。
+8. **読取の回数を増やさないこと**（`completeFullyResolvedFiles_` の 1 回を除く）。kw21 13 で `writeTransactionRows` の読取の数を直す前と後で実測し、報告すること。
+9. Sheets API の読取は既存の口だけを通すこと（`activeLeases_` など）。`Sheets.Spreadsheets.Values.batchGet` を直に呼ばない。
+10. **日本語のコメントは UTF-8 で書くこと。**以前、あなたの書いたコメントが `?` の羅列に化けた。終わったら `grep -a -n '???' src/*.gs src/*.html` が空であること（始める前も空）を確かめて報告すること。コメントは周りのコードと同じ密度・語り口（「なぜ」を書く）で。
+11. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断で安全側を外さないこと。迷ったら止めて報告すること。
+
+## 進め方
+
+1. 仕様書を読む。次を読む：`src/11_FileStateManager.gs` の全部、`src/01_DataAccessCore.gs` の `withScriptLock_`・`leaseConflict_`、`src/43_SheetWriter.gs` の `writeTransactionRows`〜`releaseReservedRows` と `recoverPartialFailure`、`src/45_DestinationIndex.gs` の `reserveDestinationRows`（ロックの中で確かめる見本）、`src/70_ImportFlow.gs` の `runWriteBlock`（`writeStarted`／`valuesWritten` の 3 段階）、`src/55_PartnerBatchResolution.gs` の 270〜410 行と 600 行付近、`src/71_RunOrchestrator.gs` の `processDiscoveredFile_` の 529〜537 行と 900〜921 行、`src/97_Ops.gs` の `opsReleaseStalledLeases`・`completeFullyResolvedFiles_`・`completeFileIfFullyResolved_`・`opsRecoverStuckFiles`・`opsReprocessFile` の周り、`src/05_SettingsValidator.gs` の `runSettingsCheck_`・`loadSettingsFromProperties`、`src/62_AuditLog.gs` の `appendAuditUnlocked_`、`test/gas-stubs.js` の `MemoryScriptLock`、`test/phase4-lease-recovery.test.js`・`test/phase4-resolution.test.js`（`leaseRows()`・`gas.context.verifyWrittenValues` の差し替え）・`test/phase7-menu-operations.test.js` の `withMocks`
+2. 始める前の数を取る：`node test/run-tests.js` の最後の行、`???` の grep、97 の NUL の数、`git diff --stat -- src/ test/`
+3. kw21 1〜13 を書く → 赤を確かめる
+4. 直す
+5. `node test/run-tests.js` を全部緑にする
+6. 仕様書 §5 の M1〜M18 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら `git diff` が変異を入れる前と同じか確かめる。97 に入れる変異では NUL の数も確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する
+7. `git diff --stat -- src/ test/` を確かめる
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 直す前に kw21 1〜13 のどれが赤だったか（緑だったものも）
+- `43` の 3 つの関数の呼出し元の一覧と、どれもロックの外であることの確認
+- 実測した読取の数：`writeTransactionRows` 1 回（直す前と後）、`completeFullyResolvedFiles_`（候補 0・1・2 のとき）
+- M1〜M18 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て（足したテストがあればその名前）
+- 仕様書が間違っていた・足りなかった箇所（黙って直さないこと）、自分で決めた箇所（全部）
+- `???` の grep・97 の NUL の数（前と後）
+- `git diff --stat -- src/ test/` の出力（始める前と後）
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。

@@ -123,7 +123,11 @@ function runSettingsCheck_(check, context) {
         'MAX_DRIVE_CALLS_PER_MINUTE', 'MAX_SHEETS_CALLS_PER_MINUTE']);
 
     case 'lockSettings':
-      return missingNumbers_(['LOCK_TIMEOUT_MS', 'LEASE_FORCE_RELEASE_MIN_SECONDS']);
+      var missingLocks = missingNumbers_(['LOCK_TIMEOUT_MS', 'LEASE_FORCE_RELEASE_MIN_SECONDS']);
+      if (missingLocks) return missingLocks;
+      return Number(SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS) >= LEASE_FORCE_RELEASE_FLOOR_SECONDS_
+        ? null
+        : 'LEASE_FORCE_RELEASE_MIN_SECONDS must be at least 420 (Apps Script runs stop at 360 s)';
 
     case 'capacityThresholds':
       return capacityThresholdProblem_();
