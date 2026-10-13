@@ -1,5 +1,8 @@
 'use strict';
 
+const fs = require('node:fs');
+const path = require('node:path');
+
 /**
  * INV-20：残留リースの検出と強制解放 ── `WRITE_ONLY` 用途を含めて。
  *
@@ -56,6 +59,22 @@ module.exports = ({test, assert, gas}) => {
     const stale = new Date(Date.now() - 3 * 3600 * 1000).toISOString();
     sheet.getRange(2, 8).setValue(stale);   // lastHeartbeat
     return leaseId;
+  }
+
+  function leaseSheet() {
+    return gas.stubs.getSpreadsheet('master').getSheetByName('処理リース');
+  }
+
+  function auditSheet() {
+    return gas.stubs.getSpreadsheet('master').getSheetByName('監査ログ');
+  }
+
+  function appendLeaseRow(leaseId, runId, owner, fileId, purpose, heartbeat) {
+    const now = heartbeat || new Date().toISOString();
+    leaseSheet().appendRow([
+      leaseId, 'C001', fileId || 'file1', runId, owner, '', now, now, 'ACTIVE',
+      purpose || 'WRITE_ONLY'
+    ]);
   }
 
   test('INV-20: a stranded WRITE_ONLY lease on a REVIEW_WAIT file is detected', () => {
@@ -309,6 +328,393 @@ module.exports = ({test, assert, gas}) => {
     gas.call('forceReleaseLease', [leaseId, 'stalled', 'admin@example.com']);
     assert.equal(plain(gas.call('detectStalledLeases', [])).length, 0,
       'forceReleaseLease 側が受け持てていない');
+  });
+
+  test('kw21 1: value writes check the lease and write under one lock', () => {
+    const customer = setup('REVIEW_WAIT');
+    gas.stubs.createSpreadsheet('dest1', {sheets: [{
+      name: '入力用シート', values: [blank(30), blank(30), blank(30)]
+    }]});
+    const leaseId = gas.call('acquireLease',
+      ['C001', 'file1', 'RUN_1', 'reviewer@example.com', 'WRITE_ONLY']);
+    const lock = gas.stubs.getScriptLock();
+    const savedActiveLeases = gas.context.activeLeases_;
+    const values = gas.context.Sheets.Spreadsheets.Values;
+    const savedBatchUpdate = values.batchUpdate;
+
+    function runAndCheck(label, invoke, expectedWrites) {
+      const observed = [];
+      lock.reset();
+      gas.context.activeLeases_ = function() {
+        observed.push({kind: 'lease-read', locked: lock.locked,
+          tryCount: lock.tryCount, releaseCount: lock.releaseCount});
+        return savedActiveLeases();
+      };
+      values.batchUpdate = function(request, spreadsheetId) {
+        observed.push({kind: 'batch-update', locked: lock.locked,
+          tryCount: lock.tryCount, releaseCount: lock.releaseCount,
+          option: request.valueInputOption});
+        return savedBatchUpdate.call(this, request, spreadsheetId);
+      };
+      try {
+        invoke(customer, leaseId);
+      } finally {
+        gas.context.activeLeases_ = savedActiveLeases;
+        values.batchUpdate = savedBatchUpdate;
+      }
+      const reads = observed.filter((item) => item.kind === 'lease-read');
+      const writes = observed.filter((item) => item.kind === 'batch-update');
+      assert.equal(reads.length, 1, label + ': one lease read');
+      assert.equal(writes.length, expectedWrites, label + ': all expected writes');
+      assert.ok(observed.every((item) => item.locked),
+        label + ': every lease read and batchUpdate runs while locked');
+      assert.ok(observed.every((item) => item.tryCount === 1 && item.releaseCount === 0),
+        label + ': all observed calls belong to the same lock acquisition');
+      assert.equal(lock.tryCount, 1, label + ': one tryLock');
+      assert.equal(lock.releaseCount, 1, label + ': one releaseLock');
+      assert.equal(lock.locked, false, label + ': the lock is released');
+      if (label === 'writeTransactionRows') {
+        assert.deepEqual(writes.map((item) => item.option), ['RAW', 'USER_ENTERED']);
+      }
+    }
+
+    try {
+      runAndCheck('writeTransactionRows', (target, id) =>
+        gas.call('writeTransactionRows', [target, [{
+          rowNumber: 2, fullTxId: 'TX_KW21',
+          values: {b: '2026-10-13', f: 'F', i: 'I', k: 'K', m: 1200}
+        }], id, 'file1']), 2);
+      runAndCheck('clearTransactionRows', (target, id) =>
+        gas.call('clearTransactionRows', [target, [2], id, 'file1']), 1);
+      runAndCheck('releaseReservedRows', (target, id) =>
+        gas.call('releaseReservedRows', [target, [2], id, 'file1']), 1);
+    } finally {
+      gas.context.activeLeases_ = savedActiveLeases;
+      values.batchUpdate = savedBatchUpdate;
+    }
+  });
+
+  test('kw21 2: lock contention prevents all three writes before reading leases', () => {
+    const customer = setup('REVIEW_WAIT');
+    const leaseId = gas.call('acquireLease',
+      ['C001', 'file1', 'RUN_1', 'reviewer@example.com', 'WRITE_ONLY']);
+    const lock = gas.stubs.getScriptLock();
+    const savedActiveLeases = gas.context.activeLeases_;
+    const values = gas.context.Sheets.Spreadsheets.Values;
+    const savedBatchUpdate = values.batchUpdate;
+    let reads = 0;
+    let writes = 0;
+    gas.context.activeLeases_ = function() { reads += 1; return savedActiveLeases(); };
+    values.batchUpdate = function() { writes += 1; return null; };
+    const calls = [
+      () => gas.call('writeTransactionRows', [customer, [{
+        rowNumber: 2, fullTxId: 'TX_KW21',
+        values: {b: '2026-10-13', f: 'F', i: 'I', k: 'K', m: 1200}
+      }], leaseId, 'file1']),
+      () => gas.call('clearTransactionRows', [customer, [2], leaseId, 'file1']),
+      () => gas.call('releaseReservedRows', [customer, [2], leaseId, 'file1'])
+    ];
+    try {
+      calls.forEach((invoke) => {
+        lock.setTryLockResults([false]);
+        assert.throws(invoke, (error) => error && error.code === 'LEASE_CONFLICT');
+      });
+    } finally {
+      gas.context.activeLeases_ = savedActiveLeases;
+      values.batchUpdate = savedBatchUpdate;
+    }
+    assert.equal(reads, 0, 'a failed tryLock does not read the lease table');
+    assert.equal(writes, 0, 'a failed tryLock writes no destination cells');
+  });
+
+  test('kw21 3: a missing lease stops all three writes', () => {
+    const customer = setup('REVIEW_WAIT');
+    const leaseId = gas.call('acquireLease',
+      ['C001', 'file1', 'RUN_1', 'reviewer@example.com', 'WRITE_ONLY']);
+    leaseSheet().deleteRow(2);
+    const values = gas.context.Sheets.Spreadsheets.Values;
+    const savedBatchUpdate = values.batchUpdate;
+    let writes = 0;
+    values.batchUpdate = function() { writes += 1; return null; };
+    const calls = [
+      () => gas.call('writeTransactionRows', [customer, [{
+        rowNumber: 2, fullTxId: 'TX_KW21',
+        values: {b: '2026-10-13', f: 'F', i: 'I', k: 'K', m: 1200}
+      }], leaseId, 'file1']),
+      () => gas.call('clearTransactionRows', [customer, [2], leaseId, 'file1']),
+      () => gas.call('releaseReservedRows', [customer, [2], leaseId, 'file1'])
+    ];
+    try {
+      calls.forEach((invoke) => {
+        assert.throws(invoke, (error) => error && error.code === 'LEASE_CONFLICT');
+      });
+    } finally {
+      values.batchUpdate = savedBatchUpdate;
+    }
+    assert.equal(writes, 0, 'a lost lease writes no destination cells');
+  });
+
+  test('kw21 4: releaseLeaseById removes and audits only its lease row', () => {
+    setup('REVIEW_WAIT');
+    appendLeaseRow('LEASE_A', 'RUN_A', 'owner-a@example.com');
+    appendLeaseRow('LEASE_B', 'RUN_B', 'owner-b@example.com');
+    const result = gas.call('releaseLeaseById', ['LEASE_A', 'TEST_RELEASE']);
+    assert.equal(result, true);
+    assert.deepEqual(leaseSheet().getDataRange().getValues().slice(1)
+      .filter((row) => row[0]).map((row) => row[0]), ['LEASE_B']);
+
+    const auditRowsForA = () => auditSheet().getDataRange().getValues().slice(1)
+      .filter((row) => JSON.stringify(row).includes('LEASE_RELEASE') &&
+        JSON.stringify(row).includes('LEASE_A'));
+    assert.equal(auditRowsForA().length, 1, 'one audit row names the released lease ID');
+    const auditCount = auditSheet().getLastRow();
+    assert.equal(gas.call('releaseLeaseById', ['LEASE_MISSING', 'TEST_RELEASE']), false);
+    assert.equal(leaseSheet().getLastRow(), 2, 'the other lease remains');
+    assert.equal(auditSheet().getLastRow(), auditCount, 'a missing lease adds no audit row');
+    [null, undefined, ''].forEach((id) => {
+      assert.throws(() => gas.call('releaseLeaseById', [id, 'TEST_RELEASE']),
+        (error) => error && error.name === 'TypeError');
+    });
+  });
+
+  test('kw21 5: releaseLease requires a runId and removes only its matching row', () => {
+    setup('REVIEW_WAIT');
+    appendLeaseRow('LEASE_A', 'RUN_A', 'owner-a@example.com');
+    appendLeaseRow('LEASE_B', 'RUN_B', 'owner-b@example.com');
+    [null, undefined, ''].forEach((runId) => {
+      assert.throws(() => gas.call('releaseLease', ['file1', runId, 'TEST_RELEASE']),
+        (error) => error && error.name === 'TypeError');
+      assert.equal(leaseSheet().getLastRow(), 3, 'invalid runId removes no lease');
+    });
+    gas.call('releaseLease', ['file1', 'RUN_A', 'TEST_RELEASE']);
+    assert.deepEqual(leaseSheet().getDataRange().getValues().slice(1)
+      .filter((row) => row[0]).map((row) => row[0]), ['LEASE_B']);
+  });
+
+  test('kw21 6: terminal transitions without a runId keep their lease', () => {
+    setup('REVIEW_WAIT');
+    appendLeaseRow('LEASE_COMPLETION', 'RUN_1', 'worker@example.com');
+    gas.call('transitionFileState',
+      ['file1', 'REVIEW_WAIT', 'COMPLETED', null]);
+    assert.equal(gas.call('getFileState', ['file1']), 'COMPLETED');
+    assert.deepEqual(leaseSheet().getDataRange().getValues().slice(1)
+      .filter((row) => row[0]).map((row) => row[0]), ['LEASE_COMPLETION']);
+
+    setup('REVIEW_WAIT');
+    appendLeaseRow('LEASE_CANCEL', 'RUN_1', 'worker@example.com');
+    gas.call('applyCancelFileState', ['file1', 'REVIEW_WAIT', 'REPROCESS']);
+    assert.equal(gas.call('getFileState', ['file1']), 'DISCOVERED');
+    assert.deepEqual(leaseSheet().getDataRange().getValues().slice(1)
+      .filter((row) => row[0]).map((row) => row[0]), ['LEASE_CANCEL']);
+  });
+
+  test('kw21 7: terminal transition with a runId releases only that run', () => {
+    setup('REVIEW_WAIT');
+    appendLeaseRow('LEASE_RUN_A', 'RUN_1', 'owner-a@example.com');
+    appendLeaseRow('LEASE_RUN_B', 'RUN_B', 'owner-b@example.com');
+    gas.call('transitionFileState',
+      ['file1', 'REVIEW_WAIT', 'FAILED', 'RUN_1']);
+    assert.deepEqual(leaseSheet().getDataRange().getValues().slice(1)
+      .filter((row) => row[0]).map((row) => row[0]), ['LEASE_RUN_B']);
+  });
+
+  test('kw21 9: source releases use lease IDs at the specified call sites', () => {
+    const srcDir = path.resolve(__dirname, '..', 'src');
+    const sourceFiles = fs.readdirSync(srcDir).filter((name) => name.endsWith('.gs'));
+    const releaseLines = [];
+    const releaseByIdCounts = Object.create(null);
+    sourceFiles.forEach((name) => {
+      const source = fs.readFileSync(path.join(srcDir, name)).toString('utf8');
+      source.split(/\r?\n/).forEach((line) => {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('*')) return;
+        if (line.includes('releaseLease(')) releaseLines.push(name + ':' + line.trim());
+        if (line.includes('releaseLeaseById(') &&
+            !line.includes('function releaseLeaseById(')) {
+          releaseByIdCounts[name] = (releaseByIdCounts[name] || 0) + 1;
+        }
+      });
+    });
+    assert.equal(releaseLines.length, 2, releaseLines.join('\n'));
+    assert.ok(releaseLines.some((line) => line.startsWith('11_FileStateManager.gs:function releaseLease(')));
+    assert.ok(releaseLines.some((line) =>
+      line.startsWith('11_FileStateManager.gs:') &&
+      line.includes("releaseLease(fileId, runId, 'STATE_TRANSITION:")));
+    const expected = {
+      '51_ReviewResolution.gs': 4, '52_FileResolution.gs': 4,
+      '54_IntegrityResolution.gs': 2, '55_PartnerBatchResolution.gs': 1,
+      '71_RunOrchestrator.gs': 1, '97_Ops.gs': 2
+    };
+    Object.keys(expected).forEach((name) => {
+      assert.equal(releaseByIdCounts[name] || 0, expected[name], name);
+    });
+  });
+
+  test('kw21 10: the completion sweep skips leases and reads them once on demand', () => {
+    let customer = setup('REVIEW_WAIT');
+    const savedScan = gas.context.permanentIndexRowsForScan_;
+    const savedResolved = gas.context.isFileFullyResolved;
+    const savedActiveLeases = gas.context.activeLeases_;
+    let reads = 0;
+    gas.context.permanentIndexRowsForScan_ = () =>
+      [{fileId: 'file1', state: 'REVIEW_WAIT'}];
+    gas.context.isFileFullyResolved = () => false;
+    gas.context.activeLeases_ = function() { reads += 1; return savedActiveLeases(); };
+    try {
+      assert.deepEqual(plain(gas.call('completeFullyResolvedFiles_', [])), []);
+      assert.equal(reads, 0, 'no resolved candidate means no lease-table read');
+
+      gas.stubs.createFile('file2', {name: '明細2.csv', data: 'a'});
+      gas.call('createOrUpdateProcessLog', ['RUN_2', customer, {
+        id: 'file2', name: '明細2.csv', binaryHash: 'd'.repeat(64),
+        contentHash: 'e'.repeat(64), hashVersion: '3', state: 'REVIEW_WAIT'
+      }]);
+      appendLeaseRow('LEASE_FILE2', 'RUN_2', 'worker@example.com', 'file2');
+      gas.context.permanentIndexRowsForScan_ = () => [
+        {fileId: 'file1', state: 'REVIEW_WAIT'},
+        {fileId: 'file2', state: 'REVIEW_WAIT'}
+      ];
+      gas.context.isFileFullyResolved = () => true;
+      reads = 0;
+      assert.deepEqual(plain(gas.call('completeFullyResolvedFiles_', [])), ['file1']);
+      assert.equal(reads, 1, 'multiple resolved candidates share one lease read');
+      assert.equal(gas.call('getFileState', ['file1']), 'COMPLETED');
+      assert.equal(gas.call('getFileState', ['file2']), 'REVIEW_WAIT');
+      assert.deepEqual(leaseSheet().getDataRange().getValues().slice(1)
+        .filter((row) => row[0]).map((row) => row[0]), ['LEASE_FILE2']);
+    } finally {
+      gas.context.permanentIndexRowsForScan_ = savedScan;
+      gas.context.isFileFullyResolved = savedResolved;
+      gas.context.activeLeases_ = savedActiveLeases;
+    }
+  });
+
+  test('kw21 11: lock settings reject values below 420, but accept 420 and 600', () => {
+    setup('REVIEW_WAIT');
+    const original = gas.evaluate('SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS');
+    const lockProblem = () => plain(gas.call('validateSettings', ['IMPORT']))
+      .problems.filter((problem) => problem.check === 8)[0] || null;
+    try {
+      gas.evaluate('SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS = 419;');
+      const tooLow = lockProblem();
+      assert.ok(tooLow);
+      assert.match(tooLow.detail, /420/);
+      [420, 600].forEach((value) => {
+        gas.evaluate('SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS = ' + value + ';');
+        assert.equal(lockProblem(), null, value + ' remains valid');
+      });
+      gas.evaluate('SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS = null;');
+      const missing = lockProblem();
+      assert.ok(missing);
+      assert.match(missing.detail, /must be configured/);
+    } finally {
+      gas.evaluate('SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS = ' +
+        (original === null ? 'null' : String(original)) + ';');
+    }
+  });
+
+  test('kw21 12: force release paths refuse a threshold below the floor', () => {
+    setup('REVIEW_WAIT');
+    gas.stubs.setActiveUser('admin@example.com');
+    const forceLeaseId = gas.call('acquireLease',
+      ['C001', 'file1', 'RUN_FORCE', 'admin@example.com', 'WRITE_ONLY']);
+    const stale = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+    leaseSheet().getRange(2, 8).setValue(stale);
+    appendLeaseRow('LEASE_INVESTIGATED', 'RUN_INVESTIGATED',
+      'admin@example.com', 'file1', 'PROCESS', stale);
+    const originalSetting = gas.evaluate('SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS');
+    const auditCount = auditSheet().getLastRow();
+    const savedActiveLeases = gas.context.activeLeases_;
+    let leaseReads = 0;
+    gas.context.activeLeases_ = function() {
+      leaseReads += 1;
+      return savedActiveLeases();
+    };
+    try {
+      gas.evaluate('SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS = 300;');
+      assert.throws(() => gas.call('forceReleaseLease',
+        [forceLeaseId, 'TEST_FORCE', 'admin@example.com']),
+        (error) => error && /LEASE_FORCE_RELEASE_MIN_SECONDS/.test(String(error.message)) &&
+          /420/.test(String(error.message)));
+      assert.equal(leaseReads, 0, 'invalid threshold is rejected before reading leases');
+      assert.throws(() => gas.call('releaseInvestigatedLease',
+        ['LEASE_INVESTIGATED', 'TEST_INVESTIGATED', 'admin@example.com']),
+        (error) => error && /LEASE_FORCE_RELEASE_MIN_SECONDS/.test(String(error.message)) &&
+          /420/.test(String(error.message)));
+      assert.equal(leaseReads, 0, 'both release paths reject before reading leases');
+      assert.equal(leaseSheet().getLastRow(), 3, 'both leases remain');
+      assert.equal(auditSheet().getLastRow(), auditCount, 'no failed release is audited');
+
+      const stalled = plain(gas.call('opsReleaseStalledLeases', []));
+      assert.equal(stalled.length, 1);
+      assert.equal(stalled[0].released, false);
+
+      gas.evaluate('SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS = 600;');
+      gas.call('forceReleaseLease', [forceLeaseId, 'TEST_FORCE', 'admin@example.com']);
+      const investigated = plain(gas.call('releaseInvestigatedLease',
+        ['LEASE_INVESTIGATED', 'TEST_INVESTIGATED', 'admin@example.com']));
+      assert.equal(investigated.released, true);
+    } finally {
+      gas.context.activeLeases_ = savedActiveLeases;
+      gas.evaluate('SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS = ' +
+        (originalSetting === null ? 'null' : String(originalSetting)) + ';');
+    }
+  });
+
+  test('kw21 13: writeTransactionRows reads the lease table once', () => {
+    const customer = setup('REVIEW_WAIT');
+    gas.stubs.createSpreadsheet('dest1', {sheets: [{
+      name: '入力用シート', values: [blank(30), blank(30), blank(30)]
+    }]});
+    const leaseId = gas.call('acquireLease',
+      ['C001', 'file1', 'RUN_1', 'reviewer@example.com', 'WRITE_ONLY']);
+    gas.stubs.resetApiCallCounts();
+    gas.call('writeTransactionRows', [customer, [{
+      rowNumber: 2, fullTxId: 'TX_KW21_READS',
+      values: {b: '2026-10-13', f: 'F', i: 'I', k: 'K', m: 1200}
+    }], leaseId, 'file1']);
+    const reads = gas.stubs.getApiCallCounts().batchGet;
+    console.log('kw21 13: writeTransactionRows lease-table batchGet=' + reads);
+    assert.equal(reads, 1, 'the lock moves the existing read but does not add one');
+  });
+
+  // 監査で足した（変異 X8 がすり抜けた）。書くものが無い呼出しは、ロックも
+  // リース表の読取も払わない（仕様 §2.1-3）。確定の経路は空の配列で呼ぶことがある。
+  test('kw21 13b: empty writes take no lock and read no lease', () => {
+    const customer = setup('REVIEW_WAIT');
+    const lock = gas.stubs.getScriptLock();
+    const savedActiveLeases = gas.context.activeLeases_;
+    let reads = 0;
+    gas.context.activeLeases_ = function() { reads += 1; return savedActiveLeases(); };
+    lock.reset();
+    try {
+      assert.deepEqual(plain(gas.call('writeTransactionRows', [customer, [], 'LEASE_X', 'file1'])), []);
+      assert.deepEqual(plain(gas.call('clearTransactionRows', [customer, [], 'LEASE_X', 'file1'])), []);
+      gas.call('releaseReservedRows', [customer, [], 'LEASE_X', 'file1']);
+    } finally {
+      gas.context.activeLeases_ = savedActiveLeases;
+    }
+    assert.equal(lock.tryCount, 0, 'no lock for an empty write');
+    assert.equal(reads, 0, 'no lease-table read for an empty write');
+  });
+
+  // 監査で足した（変異 X2 がすり抜けた）。下限は 420 ちょうどを許す
+  // ── 設定の検査（kw21 11）と強制解放の補助が同じ境界でなければならない。
+  test('kw21 12b: a threshold of exactly 420 still allows force release', () => {
+    setup('REVIEW_WAIT');
+    gas.stubs.setActiveUser('admin@example.com');
+    const leaseId = gas.call('acquireLease',
+      ['C001', 'file1', 'RUN_FORCE', 'admin@example.com', 'WRITE_ONLY']);
+    leaseSheet().getRange(2, 8).setValue(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+    const original = gas.evaluate('SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS');
+    try {
+      gas.evaluate('SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS = 420;');
+      gas.call('forceReleaseLease', [leaseId, 'TEST_FORCE', 'admin@example.com']);
+      assert.equal(leaseSheet().getLastRow(), 1, 'the stale lease is released at the floor');
+    } finally {
+      gas.evaluate('SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS = ' +
+        (original === null ? 'null' : String(original)) + ';');
+    }
   });
 
 };

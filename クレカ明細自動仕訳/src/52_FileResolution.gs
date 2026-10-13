@@ -227,7 +227,7 @@ function adoptAsNewTransaction_(review, actor, input) {
     written = writeAdoptedTransaction_(customer, original.fileId, adopted, leaseId,
       input.runId || null);
   } finally {
-    releaseLease(original.fileId, input.runId || null, 'ADOPT_DONE');
+    releaseLeaseById(leaseId, 'ADOPT_DONE');
   }
   applyNewFileMeta_(review.fileId, input.newFileMeta);
 
@@ -307,7 +307,7 @@ function applyFileDiff_(review, actor, input) {
       addedIds.push(id.full);
     });
   } finally {
-    releaseLease(review.fileId, input.runId || null, 'DIFF_DONE');
+    releaseLeaseById(leaseId, 'DIFF_DONE');
   }
   applyNewFileMeta_(review.fileId, input.newFileMeta);
 
@@ -369,7 +369,7 @@ function updatePurpose_(review, actor, input) {
     }
     updateWrittenValues(tx.fullTxId, planned, verified[0].values);
   } finally {
-    releaseLease(tx.fileId, input.runId || null, 'PURPOSE_DONE');
+    releaseLeaseById(leaseId, 'PURPOSE_DONE');
   }
   return moveFile_(review, 'UPDATE_PURPOSE', actor, input, FILE_STATE.EXCLUDED);
 }
@@ -439,7 +439,7 @@ function cancelFileFromReview_(review, actor, input) {
       index: index
     });
   } finally {
-    releaseLease(review.fileId, input.runId || null, 'CANCEL_DONE');
+    releaseLeaseById(leaseId, 'CANCEL_DONE');
   }
 
   // 取消しで根拠が消えた要確認をまとめて閉じる。開いたまま残すと、

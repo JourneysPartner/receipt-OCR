@@ -209,76 +209,83 @@ function writeColumnNumber_(customer, key) {
  */
 function writeTransactionRows(customer, rowWrites, leaseId, fileId) {
   if (!Array.isArray(rowWrites) || !rowWrites.length) return [];
-  // 書込の直前に、自らが当該ファイルの有効なリース所有者であることを確認する（INV-30）。
-  assertLeaseHeldForWrite(fileId, leaseId);
+  return withScriptLock_(function() {
+    // 書込の直前に、自らが当該ファイルの有効なリース所有者であることを確認する（INV-30）。
+    // **確認と書込を同じロックの中で行う**（K-W21）。間に強制解放と新しい持ち主の
+    // 取得が割り込むと、古い実行が新しい持ち主の帳簿を書き換える。RAW と
+    // USER_ENTERED の間でもロックを外さない。
+    assertLeaseHeldForWrite(fileId, leaseId);
 
-  var groups = [
-    {option: 'RAW', keys: ['txId', 'f', 'i', 'k', 'g']},
-    {option: 'USER_ENTERED', keys: ['b', 'm']}
-  ];
-  var sheetName = customer.destinationSheetName;
+    var groups = [
+      {option: 'RAW', keys: ['txId', 'f', 'i', 'k', 'g']},
+      {option: 'USER_ENTERED', keys: ['b', 'm']}
+    ];
+    var sheetName = customer.destinationSheetName;
 
-  // 行番号順に並べてから、列ごとに連続行をまとめる。1セル1レンジだと
-  // 200件で1,200レンジになり、リクエストサイズ上限と実行時間の双方に近づく。
-  var sorted = rowWrites.slice().sort(function(a, b) { return a.rowNumber - b.rowNumber; });
+    // 行番号順に並べてから、列ごとに連続行をまとめる。1セル1レンジだと
+    // 200件で1,200レンジになり、リクエストサイズ上限と実行時間の双方に近づく。
+    var sorted = rowWrites.slice().sort(function(a, b) { return a.rowNumber - b.rowNumber; });
 
-  groups.forEach(function(group) {
-    var data = [];
-    group.keys.forEach(function(key) {
-      // 当該列に書く対象だけを集める。`values`に含まれないキーの列には触れない
-      // ── 要確認の解決はF列だけを更新するので、他列を巻き込むと担当者が
-      // 手で直した値が消える。
-      var targets = sorted.filter(function(write) {
-        var value = key === 'txId' ? write.fullTxId : (write.values || {})[key];
-        return value !== undefined;
-      });
-      if (!targets.length) return;
+    groups.forEach(function(group) {
+      var data = [];
+      group.keys.forEach(function(key) {
+        // 当該列に書く対象だけを集める。`values`に含まれないキーの列には触れない
+        // ── 要確認の解決はF列だけを更新するので、他列を巻き込むと担当者が
+        // 手で直した値が消える。
+        var targets = sorted.filter(function(write) {
+          var value = key === 'txId' ? write.fullTxId : (write.values || {})[key];
+          return value !== undefined;
+        });
+        if (!targets.length) return;
 
-      var column = writeColumnNumber_(customer, key);
-      groupConsecutiveRows(targets).forEach(function(chunk) {
-        data.push({
-          range: a1ColumnRange_(sheetName, column, chunk.startRow, chunk.endRow),
-          values: chunk.rowWrites.map(function(write) {
-            var value = key === 'txId' ? write.fullTxId : (write.values || {})[key];
-            return [value === null ? '' : value];
-          })
+        var column = writeColumnNumber_(customer, key);
+        groupConsecutiveRows(targets).forEach(function(chunk) {
+          data.push({
+            range: a1ColumnRange_(sheetName, column, chunk.startRow, chunk.endRow),
+            values: chunk.rowWrites.map(function(write) {
+              var value = key === 'txId' ? write.fullTxId : (write.values || {})[key];
+              return [value === null ? '' : value];
+            })
+          });
         });
       });
+      if (!data.length) return;
+      // 障害注入の停止点（4.39）。RAWとUSER_ENTEREDの分割点で止められる
+      // ことが、仕様11.3 Step4（RAWだけ成功した部分失敗）を実機で再現する
+      // 唯一の手段である。本番では素通りする。
+      faultInjectionPoint(group.option === 'RAW'
+        ? 'SHEET_WRITE_RAW_BEFORE' : 'SHEET_WRITE_USER_ENTERED_BEFORE',
+        {fileId: fileId});
+      Sheets.Spreadsheets.Values.batchUpdate(
+        {valueInputOption: group.option, data: data},
+        customer.destinationSpreadsheetId
+      );
     });
-    if (!data.length) return;
-    // 障害注入の停止点（4.39）。RAWとUSER_ENTEREDの分割点で止められる
-    // ことが、仕様11.3 Step4（RAWだけ成功した部分失敗）を実機で再現する
-    // 唯一の手段である。本番では素通りする。
-    faultInjectionPoint(group.option === 'RAW'
-      ? 'SHEET_WRITE_RAW_BEFORE' : 'SHEET_WRITE_USER_ENTERED_BEFORE',
-      {fileId: fileId});
-    Sheets.Spreadsheets.Values.batchUpdate(
-      {valueInputOption: group.option, data: data},
-      customer.destinationSpreadsheetId
-    );
-  });
 
-  return rowWrites.map(function(write) {
-    return {rowNumber: write.rowNumber, fullTxId: write.fullTxId, ok: true};
+    return rowWrites.map(function(write) {
+      return {rowNumber: write.rowNumber, fullTxId: write.fullTxId, ok: true};
+    });
   });
 }
 
 /** B/F/I/K/M列と内部取引ID列だけを空にする。他列に触れない。 */
 function clearTransactionRows(customer, rowNumbers, leaseId, fileId) {
   if (!Array.isArray(rowNumbers) || !rowNumbers.length) return [];
-  assertLeaseHeldForWrite(fileId || null, leaseId);
-  var data = [];
-  rowNumbers.forEach(function(rowNumber) {
-    ['txId', 'b', 'f', 'i', 'k', 'm'].forEach(function(key) {
-      data.push({
-        range: a1Range_(customer.destinationSheetName, rowNumber, writeColumnNumber_(customer, key), writeColumnNumber_(customer, key)),
-        values: [['']]
+  return withScriptLock_(function() {
+    assertLeaseHeldForWrite(fileId || null, leaseId);
+    var data = [];
+    rowNumbers.forEach(function(rowNumber) {
+      ['txId', 'b', 'f', 'i', 'k', 'm'].forEach(function(key) {
+        data.push({
+          range: a1Range_(customer.destinationSheetName, rowNumber, writeColumnNumber_(customer, key), writeColumnNumber_(customer, key)),
+          values: [['']]
+        });
       });
     });
+    Sheets.Spreadsheets.Values.batchUpdate(
+      {valueInputOption: 'RAW', data: data}, customer.destinationSpreadsheetId);
+    return rowNumbers.map(function(rowNumber) { return {rowNumber: rowNumber, ok: true}; });
   });
-  Sheets.Spreadsheets.Values.batchUpdate(
-    {valueInputOption: 'RAW', data: data}, customer.destinationSpreadsheetId);
-  return rowNumbers.map(function(rowNumber) { return {rowNumber: rowNumber, ok: true}; });
 }
 
 /**
@@ -361,15 +368,17 @@ function verifyWrittenValues(customer, rowWrites, index) {
 /** 予約後・値書込前に中止する場合に、予約した取引ID列だけを空へ戻す（M17）。 */
 function releaseReservedRows(customer, rowNumbers, leaseId, fileId) {
   if (!Array.isArray(rowNumbers) || !rowNumbers.length) return;
-  assertLeaseHeldForWrite(fileId || null, leaseId);
-  var data = rowNumbers.map(function(rowNumber) {
-    return {
-      range: a1Range_(customer.destinationSheetName, rowNumber, writeColumnNumber_(customer, 'txId'), writeColumnNumber_(customer, 'txId')),
-      values: [['']]
-    };
+  return withScriptLock_(function() {
+    assertLeaseHeldForWrite(fileId || null, leaseId);
+    var data = rowNumbers.map(function(rowNumber) {
+      return {
+        range: a1Range_(customer.destinationSheetName, rowNumber, writeColumnNumber_(customer, 'txId'), writeColumnNumber_(customer, 'txId')),
+        values: [['']]
+      };
+    });
+    Sheets.Spreadsheets.Values.batchUpdate(
+      {valueInputOption: 'RAW', data: data}, customer.destinationSpreadsheetId);
   });
-  Sheets.Spreadsheets.Values.batchUpdate(
-    {valueInputOption: 'RAW', data: data}, customer.destinationSpreadsheetId);
 }
 
 /**

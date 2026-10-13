@@ -915,7 +915,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
         outcome.nextState = FILE_STATE.FAILED;
       }
     } catch (ignored2) { /* 遷移できない場合もリースだけは返す */ }
-    try { releaseLease(fileId, runId, 'RUN_FAILURE'); } catch (ignored3) { }
+    try { if (leaseId) releaseLeaseById(leaseId, 'RUN_FAILURE'); } catch (ignored3) { }
     return outcome;
   }
 }

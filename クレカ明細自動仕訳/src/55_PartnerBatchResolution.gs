@@ -599,7 +599,7 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
       });
     });
   } finally {
-    releaseLease(fileId, result.runId, 'RESOLVE_DONE');
+    releaseLeaseById(leaseId, 'RESOLVE_DONE');
   }
 
   return finish();
