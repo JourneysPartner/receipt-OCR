@@ -3427,6 +3427,7 @@ Ver.2.0はこれらを「期待どおりである」とだけ記していた。�
 1. **SpreadsheetApp による変更（複製・書式・入力規則）を行った直後、Sheets API を呼ぶ前に必ず`SpreadsheetApp.flush()`を実行する。** SpreadsheetAppの操作はバッチ化されて遅延適用されるため、flushしないとSheets API側から見えない。
 2. **Sheets API で書いた値を SpreadsheetApp で読み返さない。** 読取確認は必ずSheets APIで行う。SpreadsheetApp側には独自のキャッシュがあり、Sheets APIの書込を即座に反映しない場合がある。
 3. 1回の転記の中でSpreadsheetAppとSheets APIを交互に使わない。順序は「（ロック区間）複製→flush→予約書込→（ロック解放）**書式適用→flush→値書込**→読取確認」に固定する。**書式は値を書く前に適用する**（Ver.3.0）。値を書いてから書式を変えても、`0570-…`が既に電話番号として解釈された後では元に戻らず、`applyPlainTextFormat`の契約（「値を書く前に呼ぶ」）とも矛盾していた。
+4. **（K-W24、2026-10-14）ロックを外す前に必ず`flush()`する。**Google の公式の注意（Lock.releaseLock、2026-04-13 更新）どおり、`withScriptLock_` がロックの口で行う（呼出側の責任にしない）。あわせて、**行の位置・末尾・行数は、ロックの中で Sheets API で読んで決める**（別の実行が書いた内容を SpreadsheetApp の読取が必ず返す保証は公式に無い）。行を消さないシートでは SpreadsheetApp の `getMaxRows()`・`getLastRow()` は本当以下にしかずれないので、「足りている」は信じ、「足りない」ときだけ API で本当の行数を読んで本当の末尾へ足す（`ensureRowExists_`。余白 500 行）。監査の末尾・要確認の追記位置・転記先の行予約と拡張も同じ（詳細は `work/spec_concurrent_sheet_writes.md`）。行予約の取引ID列は Sheets API（`RAW`）で書く（上の 3 の「予約書込」はこれを指す）。
 
 ### インターフェース
 

@@ -1,0 +1,72 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の、**K-W24：共有シートの書き方を、2 つの実行が同時に動いても安全な形にする**直しを受け取ります（取込の並列化 §15-10 の 1 段目。利用者に見える変化は作りません）。
+
+作業ツリーは main の最新（コミット 351b4dd）で、`src/`・`test/` に未コミットの変更はありません。あなたの変更は、ステージされていない差分として残してください ── **`git add` しないこと。**開始時の `node test/run-tests.js` の本数は、始める前に自分で数えて報告に書いてください（1510/1510 のはずです）。
+
+開始時の `src/`・`test/` の写しを `work/.kw24-check/baseline/` に置いてあります（私が md5 で一致を確かめました）。サンドボックスで親フォルダの `.git` が読めず `git diff` が使えない場合は、この写しとの比較で「変えたファイルの一覧」を報告してください。写しは消さないこと（私が後で消します）。
+
+## 前回の停止への回答（2026-10-14）
+
+前回のあなたの起動は、既存のテスト 2 本（`INV-21/29: a nested concurrent audit append cannot branch the chain`・`rc 8`）が赤になったところで正しく止まりました。**どちらも仕様書の私の見落としです。**回答（仕様書を 1.1 で直しました。§3 の末尾）：
+
+1. `rc 8`：読取の上限を 6 から **7** にしてください（あなたの見立てどおり、`rewindFileForReimportAudited_` の `appendAudit` が監査の末尾を読む 1 回。§2.3-4 で増えると決めたもの）。テストのコメントに理由を 1 行。
+2. `INV-21/29`：**テストは変えず**、模擬の `setBeforeAppendHook` を、末尾より下から始まる `setValues` の書込の直前にも働くようにしてください。
+3. U+FFFD：`test/phase1a-pure-logic.test.js:47` の 1 個は元からある検証用の文字なので、そのままでよい（`src/` は 0、`test/` は開始時の 1 のまま、を確かめて報告）。
+4. **私の判断の取り下げ：§2.5（リース表を `deleteDimension` で消す）をやめます。**あなたの `deleteLeaseRowsUnlocked_` を、今までどおり `leaseSheet_().deleteRow(行)` を行番号の大きい順に呼ぶ形に戻してください（行番号は相乗りの読取で得たもの。この補助の名前と、大きい順にする理由のコメントは残してよい）。理由は仕様書 1.1 の §2.5（同じ実行の中で、API で行を消した後に `acquireLease` の `appendRow` が SpreadsheetApp で行を足す組合せは、今は無く、保証が無い）。kw24 9・17 と M12・M13 も仕様書 1.1 に合わせて直してください（`11` に `Sheets.Spreadsheets.batchUpdate` が無いことを kw24 17 で確かめる）。模擬に足した `deleteDimension` まわりのものは、使わなくなったなら戻してください。
+
+あなたの差分のそれ以外の部分（`withScriptLock_`・`ensureRowExists_`・`apiSheetRowCount_`・監査の窓・要確認の位置・予約と拡張）は、私が読んで仕様どおりと確かめました。そのまま使ってください。
+
+**作業ツリーには前回のあなたの変更が残っています**（`git add` はされていません）。それを土台に続けてください ── 上の 2 つを直して全部緑にし、そのあと前回できなかった §5 の **M1〜M18**（と赤にならなかったときのテストの追加）を行い、下の「報告してほしいこと」を全部書いてください。開始時の写し `work/.kw24-check/baseline/` は前回のまま使ってください（コミット 351b4dd の状態）。前回のあなたの証跡（`work/.kw24-check/` の中のログ・`run-selected.js` など）は残してかまいません。
+
+## 仕様書
+
+`work/spec_concurrent_sheet_writes.md`（1.1）。**全部読んでから始めてください。**§1 は「なぜ」、§2 が直すこと、§3 が変えないこと、§4 がテスト、§5 が変異です。
+
+## 直すこと（要点。詳細は仕様書 §2）
+
+1. `src/01_DataAccessCore.gs`：`withScriptLock_` はロックを外す前に `SpreadsheetApp.flush()` する（成功・中身が投げた・flush が投げた、の扱いは §2.1）。`ensureRowExists_` は「足りない」と見えたときだけ Sheets API で本当の行数を読み、本当の末尾へ余白 500 行つきで足す（§2.2）。補助 `apiSheetRowCount_`（読取の口を通す）と定数 `ROW_GROWTH_SLACK_` を足す。
+2. `src/62_AuditLog.gs`：監査の末尾（直前の行とハッシュ）を Sheets API の窓の読取で決め、末尾の次の行へ書く（§2.3）。`appendRow` と `getLastRow() + 1` をやめる。
+3. `src/11_FileStateManager.gs`：リースを消す 4 つは、リース表と監査の窓を 1 回の読取で読む（§2.3-3）。行の消し方（`deleteRow`）は変えない（§2.5、1.1 で取り下げ）。
+4. `src/55_PartnerBatchResolution.gs`：確定のロックの中の要確認の読取に監査の窓を相乗りさせる（§2.3-3）。
+5. `src/50_ReviewStore.gs`：要確認の追記位置を、同じロックの中の `allReviewRecords_()` の結果で決める（§2.4）。
+6. `src/45_DestinationIndex.gs`・`src/43_SheetWriter.gs`：行予約の確かめは索引で、予約の書込は Sheets API で。拡張は本当の行数を読んで本当の末尾へ。見え方が古ければ索引を作り直して求め直す（§2.6）。
+
+---
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。**
+2. **git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。
+3. **`src/` で変えてよいのは `01_DataAccessCore.gs`・`11_FileStateManager.gs`・`43_SheetWriter.gs`・`45_DestinationIndex.gs`・`50_ReviewStore.gs`・`55_PartnerBatchResolution.gs`・`62_AuditLog.gs` の 7 つだけ。**`97_Ops.gs` は変えない（中に生の NUL バイトが 2 個ある。終わったら数えて報告：前後とも 2）。
+4. **改行の形を保つこと。**上の 7 つはいま LF だけ（CR 0）。ファイル全体を書き直す道具を使っても、LF のまま・文字コード UTF-8（BOM なし）のままにすること。終わったら 7 つの CR の数を数えて報告すること（0 のはず）。
+5. テストの変更は `kw24 N: …`（仕様書 §4 の 1〜17 と 14b）を**足すこと**（補助を足してよい）。**既存のテストの期待（assert）は変えないこと。**例外は仕様書 §3 の `flush 2`・`ops menu 48`・`rc 8`（と、テストを変えずに模擬を直す `INV-21/29`）だけで、元の意味を保つ形に直し、どう直したかを報告すること。ほかの既存のテストが赤になったら、変えずに止めて理由を報告すること ── 特に、読取の回数を数えるテスト（`budget 1`・`multi 14`・`bulk 1`・`kw9` の読取の数・`scope 1〜3`・`phase6-round-trips`・`kw21 13`・`rc 8`）、監査の連鎖のテスト、`M30`（`phase3-importflow`）、リースの数を確かめるテスト。`test/fixtures/` は変えない。`test/gas-stubs.js`・`test/gas-harness.js` は、足りない API（`Sheets.Spreadsheets.get`、`batchUpdate` の `deleteDimension` の読み方、SpreadsheetApp の見え方を古くする操作など）を足すだけなら変えてよい（足したものを全部報告する）。**模擬ロック `MemoryScriptLock` の「入れ子を拒む」振る舞いは変えないこと。**`Sheets.Spreadsheets.get` は、模擬でも読取 1 回として数えること（`budget` 系のテストがそれを見る）。
+6. **テストを先に赤にしてから直すこと。**kw24 を書き、いまの実装で赤になることを確かめてから直す。いまでも緑になるものはどれかを報告する。
+7. **読取の回数を増やさないこと**（仕様書 §3 の例外：行を足すとき・転記先を拡張するときの 1 回、相乗りの窓が埋まっていたときの続き）。kw24 9・12・15 の数は直す前に実測し、その値そのものを上限にすること（余裕を足さない）。測った値を報告すること。
+8. Sheets API の読取は既存の口（`sheetsReadRanges_`・`sheetsBatchGetPaced_`）か、新しい `apiSheetRowCount_` だけを通すこと。`Sheets.Spreadsheets.Values.batchGet`・`Sheets.Spreadsheets.get` を直に呼ばない。
+9. **入れ子のロックを作らないこと。**変えた関数がロックの中で呼ばれるか外で呼ばれるかを変えない。
+10. **日本語のコメントは UTF-8 で書くこと。**以前、あなたの書いた日本語が `?` の羅列に化けた。終わったら `grep -a -n '???' src/*.gs src/*.html test/*.js` が空であること（始める前も空）、U+FFFD が `src/` で 0・`test/` で開始時の 1 のままであることを確かめて報告すること。コメントは周りのコードと同じ密度・語り口（「なぜ」を書く）で。§1.1 の公式の注意は、`withScriptLock_` のコメントに日付つきで書くこと。
+11. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断で安全側を外さないこと。迷ったら止めて報告すること。
+
+## 進め方
+
+1. 仕様書を読む。次を読む：`src/01_DataAccessCore.gs` の `withScriptLock_`・`paceSheetsRead_`・`sheetsBatchGetPaced_`・`sheetsReadRanges_`・`readSheetRows_`・`sheetRowsFromValues_`・`apiLastDataRows_`・`ensureRowExists_`、`src/62_AuditLog.gs` の全部、`src/11_FileStateManager.gs` の `activeLeases_`〜`releaseInvestigatedLease`、`src/50_ReviewStore.gs` の `allReviewRecords_`・`registerReview`・`registerPendingReviews`、`src/55_PartnerBatchResolution.gs` の 500〜545 行、`src/45_DestinationIndex.gs` の `buildIndex`・`reserveDestinationRows`、`src/43_SheetWriter.gs` の `findEmptyRows`・`planTemplateExpansion`・`expandTemplateRows`・`validateExpandedRows`・`systemOwnedColumnsAreEmpty_`、`src/60_ProcessLog.gs` の `createOrUpdateProcessLog`、`src/61_TransactionLog.gs` の `appendRowsBatched_`、`test/gas-stubs.js` の `MemoryScriptLock`・`SpreadsheetApp`・`Sheets`・`roundTrips`・`apiCallCounts`、`test/phase6-round-trips.test.js` の `flush 1`・`flush 2`、`test/phase7-menu-operations.test.js` の `ops menu 48`、`test/phase3-importflow.test.js` の `M30` の 2 本、`test/phase4-lease-recovery.test.js` の `kw21` の準備
+2. 始める前の数を取る：`node test/run-tests.js` の最後の行、`???` と U+FFFD の grep、97 の NUL の数、7 つのファイルの CR の数
+3. kw24 を書く → 赤を確かめる
+4. 直す
+5. `node test/run-tests.js` を全部緑にする
+6. 仕様書 §5 の M1〜M18 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら、変異を入れる前の内容と同じか確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する
+7. 変えたファイルの一覧を確かめる（`git diff --stat -- src/ test/`、使えなければ写しとの比較）
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 直す前に kw24 のどれが赤だったか（緑だったものも）
+- `flush 2`・`ops menu 48` をどう直したか（直す前と後の数）
+- 実測した読取の数：kw24 9（リースを消す 4 つ）・12（要確認の登録）・15（予約：拡張なし／拡張あり、直す前と後）
+- 模擬に足したもの（全部）
+- M1〜M18 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て（足したテストがあればその名前）
+- `expandTemplateRows` の呼出し元の一覧
+- 仕様書が間違っていた・足りなかった箇所（黙って直さないこと）、自分で決めた箇所（全部）
+- `???`・U+FFFD・97 の NUL・7 つのファイルの CR の数（前と後）
+- 変えたファイルの一覧（始める前と後）
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。

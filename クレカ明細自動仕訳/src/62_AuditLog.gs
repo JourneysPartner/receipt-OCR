@@ -1,6 +1,7 @@
 'use strict';
 
 const AUDIT_WIDTH_ = 15;
+const AUDIT_TAIL_WINDOW_ = 200;
 
 function auditSheet_() { return requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.AUDIT_LOG); }
 
@@ -30,19 +31,49 @@ function makeAuditRow_(entry, previousHash, forceGenesis) {
   return row;
 }
 
-function appendAuditUnlocked_(entry, forceGenesis) {
-  var sheet = auditSheet_();
-  if (sheet.getLastRow() < 2 && !forceGenesis) {
-    var createdAt = nowIso_();
-    var genesis = makeAuditRow_({type: 'CHAIN_ANCHOR', actor: entry.actor || activeUserEmail_(), targetType: 'AUDIT',
-      targetId: 'GENESIS', after: {kind: 'GENESIS', createdAt: createdAt}}, CONFIG.AUDIT_CHAIN_GENESIS, true);
-    sheet.appendRow(genesis);
+/** 監査行は消さないため、古い末尾を窓の下限として使える。 */
+function auditTailRange_(sheet, start) {
+  start = start === undefined ? Math.max(2, sheet.getLastRow()) : start;
+  return {start: start, range: quoteSheetName_(sheet.getName()) + '!A' + start + ':O' +
+    (start + AUDIT_TAIL_WINDOW_ - 1)};
+}
+
+function auditTailFromValues_(start, values) {
+  var tail = {lastRow: 1, lastHash: null};
+  (values || []).forEach(function(row, offset) {
+    if (row[0] !== '' && row[0] !== null && row[0] !== undefined) {
+      tail = {lastRow: start + offset, lastHash: String(row[14] || '')};
+    }
+  });
+  return tail;
+}
+
+/** 相乗りした最初の窓を使い、最後まで埋まっていた場合だけ続きを読む。 */
+function readAuditTail_(sheet, window, values) {
+  window = window || auditTailRange_(sheet);
+  if (values === undefined) values = sheetsReadRanges_(sheet, [window.range])[0];
+  var tail = auditTailFromValues_(window.start, values);
+  if (tail.lastRow === 1 && window.start > 2) {
+    // 本当より大きい末尾は前提外。黙って起点を書かず、A列とO列で確かめ直す。
+    var full = sheetsReadRanges_(sheet, [quoteSheetName_(sheet.getName()) + '!A2:A',
+      quoteSheetName_(sheet.getName()) + '!O2:O']);
+    return auditTailFromValues_(2, (full[0] || []).map(function(row, offset) {
+      var value = Array(AUDIT_WIDTH_).fill('');
+      value[0] = row[0]; value[14] = (full[1][offset] || [])[0];
+      return value;
+    }));
   }
-  var lastRow = sheet.getLastRow();
-  var previousHash = lastRow >= 2 ? String(sheet.getRange(lastRow, 15).getValue() || '') : CONFIG.AUDIT_CHAIN_GENESIS;
-  var row = makeAuditRow_(entry, previousHash, Boolean(forceGenesis));
-  sheet.appendRow(row);
-  return row[0];
+  while (tail.lastRow === window.start + AUDIT_TAIL_WINDOW_ - 1) {
+    window = auditTailRange_(sheet, window.start + AUDIT_TAIL_WINDOW_);
+    var next = auditTailFromValues_(window.start, sheetsReadRanges_(sheet, [window.range])[0]);
+    if (next.lastRow === 1) break;
+    tail = next;
+  }
+  return tail;
+}
+
+function appendAuditUnlocked_(entry, forceGenesis, knownTail) {
+  return writeAuditEntriesUnlocked_([entry], Boolean(forceGenesis), knownTail)[0];
 }
 
 /**
@@ -50,32 +81,38 @@ function appendAuditUnlocked_(entry, forceGenesis) {
  * 行ごとにappendAuditUnlocked_を呼ぶと、末尾ハッシュの読取と書込が行数分
  * 繰り返され、同じまとまりの監査記録が途中で割れるため、先に全行を作る。
  */
-function appendAuditRowsUnlocked_(entries) {
+function appendAuditRowsUnlocked_(entries, knownTail) {
   if (!Array.isArray(entries)) throw new TypeError('entries must be an array');
   if (!entries.length) return [];
+  return writeAuditEntriesUnlocked_(entries, false, knownTail);
+}
 
+/** 単件とまとめ書きで、起点・連鎖・追記位置の決め方をそろえる。 */
+function writeAuditEntriesUnlocked_(entries, forceGenesis, knownTail) {
   var sheet = auditSheet_();
-  if (sheet.getLastRow() < 2) {
+  var tail = knownTail || readAuditTail_(sheet);
+  var rows = [];
+  var previousHash = tail.lastRow >= 2 ? tail.lastHash : CONFIG.AUDIT_CHAIN_GENESIS;
+  if (tail.lastRow < 2 && !forceGenesis) {
     var createdAt = nowIso_();
     var firstActor = entries[0] && entries[0].actor || activeUserEmail_();
     var genesis = makeAuditRow_({type: 'CHAIN_ANCHOR', actor: firstActor,
       targetType: 'AUDIT', targetId: 'GENESIS',
       after: {kind: 'GENESIS', createdAt: createdAt}}, CONFIG.AUDIT_CHAIN_GENESIS, true);
-    sheet.appendRow(genesis);
+    rows.push(genesis);
+    previousHash = genesis[14];
   }
 
-  var lastRow = sheet.getLastRow();
-  var previousHash = lastRow >= 2 ? String(sheet.getRange(lastRow, 15).getValue() || '') :
-    CONFIG.AUDIT_CHAIN_GENESIS;
-  var rows = entries.map(function(entry) {
-    var row = makeAuditRow_(entry, previousHash, false);
+  var ids = entries.map(function(entry) {
+    var row = makeAuditRow_(entry, previousHash, forceGenesis);
     previousHash = row[14];
-    return row;
+    rows.push(row);
+    return row[0];
   });
-  var firstRow = lastRow + 1;
+  var firstRow = tail.lastRow + 1;
   ensureRowExists_(sheet, firstRow + rows.length - 1);
   sheet.getRange(firstRow, 1, rows.length, AUDIT_WIDTH_).setValues(rows);
-  return rows.map(function(row) { return row[0]; });
+  return ids;
 }
 
 function appendAudit(entry) {

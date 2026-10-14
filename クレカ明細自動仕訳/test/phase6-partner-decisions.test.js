@@ -494,6 +494,27 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(gas.call('activeLeases_', []).filter((lease) => lease.fileId === 'fileA').length, 0);
   });
 
+  // K-W24 §2.3-3：まとめ確定のロックの中では、要確認の読取に監査の末尾の窓を
+  // 相乗りさせる。末尾を別に読むと、確定 1 回ごとに読取が 1 回増える。
+  test('kw24 12b: batch confirmation reads the audit tail together with the reviews', () => {
+    setup();
+    const review = currentPartnerReviews()[0];
+    addCustomerPartner('既存取引先');
+    const calls = [];
+    const original = gas.context.readAuditTail_;
+    gas.context.readAuditTail_ = function(...args) {
+      calls.push({withValues: args[2] !== undefined});
+      return original.apply(this, args);
+    };
+    let result;
+    try { result = batchAdopt([review], ['既存取引先']); }
+    finally { gas.context.readAuditTail_ = original; }
+    assert.deepEqual(result.resolvedReviewIds, [review.reviewId]);
+    assert.ok(calls.length >= 2, JSON.stringify(calls));
+    assert.deepEqual(calls.filter((call) => !call.withValues), [], JSON.stringify(calls));
+    assert.equal(gas.call('verifyChain', ['FULL']).ok, true);
+  });
+
   test('pm 14: 同じ新規名をbatchで確定しても一覧と登録監査は一行だけ', () => {
     setup();
     const reviews = currentPartnerReviews();

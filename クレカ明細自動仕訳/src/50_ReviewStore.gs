@@ -79,6 +79,22 @@ function allReviewRecords_() {
   return readSheetRows_(reviewSheet_(), REVIEW_SHEET_WIDTH_).map(reviewFromRecord_);
 }
 
+/** 確定で使う要確認と監査末尾を相乗りさせ、読取の回数を増やさない。 */
+function allReviewRecordsAndAuditTail_() {
+  var sheet = reviewSheet_();
+  var audit = auditSheet_();
+  var window = auditTailRange_(audit);
+  var values = sheetsReadRanges_(sheet, [quoteSheetName_(sheet.getName()) + '!A2:' +
+    columnLetter_(REVIEW_SHEET_WIDTH_), window.range]);
+  return {reviews: sheetRowsFromValues_(values[0], REVIEW_SHEET_WIDTH_).map(reviewFromRecord_),
+    auditTail: readAuditTail_(audit, window, values[1])};
+}
+
+/** A〜AFの読取で得た物理行番号を使う。右側だけに値がある行は含めない。 */
+function lastReviewRow_(reviews) {
+  return reviews.reduce(function(last, review) { return Math.max(last, review._rowNumber); }, 1);
+}
+
 /** 未解決（OPEN／IN_PROGRESS）の要確認だけを返す。 */
 function openReviews(filter) {
   filter = filter || {};
@@ -175,14 +191,18 @@ function registerReview(entry) {
     fileId: entry.fileId, fullTxId: entry.fullTxId, scope: entry.suppressionScope
   });
   return withScriptLock_(function() {
-    var duplicate = allReviewRecords_().filter(function(review) {
+    var current = allReviewRecords_();
+    var duplicate = current.filter(function(review) {
       return review.suppressionKey === key &&
         (review.status === 'OPEN' || review.status === 'IN_PROGRESS');
     })[0];
     if (duplicate) return {registered: false, reviewId: duplicate.reviewId, suppressionKey: key};
 
     var built = makeReviewRow_(entry, key);
-    reviewSheet_().appendRow(built.row);
+    var sheet = reviewSheet_();
+    var rowNumber = lastReviewRow_(current) + 1;
+    ensureRowExists_(sheet, rowNumber);
+    sheet.getRange(rowNumber, 1, 1, REVIEW_SHEET_WIDTH_).setValues([built.row]);
     return {registered: true, reviewId: built.reviewId, suppressionKey: key};
   });
 }
@@ -289,7 +309,8 @@ function registerPendingReviews(entries) {
 
   withScriptLock_(function() {
     var openByKey = Object.create(null);
-    allReviewRecords_().forEach(function(review) {
+    var current = allReviewRecords_();
+    current.forEach(function(review) {
       if ((review.status === 'OPEN' || review.status === 'IN_PROGRESS') &&
           !Object.prototype.hasOwnProperty.call(openByKey, review.suppressionKey)) {
         openByKey[review.suppressionKey] = review.reviewId;
@@ -316,7 +337,7 @@ function registerPendingReviews(entries) {
     });
     if (rows.length) {
       var sheet = reviewSheet_();
-      var firstRow = sheet.getLastRow() + 1;
+      var firstRow = lastReviewRow_(current) + 1;
       ensureRowExists_(sheet, firstRow + rows.length - 1);
       sheet.getRange(firstRow, 1, rows.length, REVIEW_SHEET_WIDTH_).setValues(rows);
     }

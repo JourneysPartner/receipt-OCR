@@ -6484,7 +6484,8 @@ module.exports = ({test, assert, gas}) => {
       api.batchUpdate = batchUpdate;
       originals.forEach(({sheet, write}) => { sheet._write = write; });
     }
-    assert.ok(reads <= 6, `recheck batchGet count: ${reads} (measured budget: 6)`);
+    // K-W24 §2.3-4: rewindFileForReimportAudited_のappendAuditが監査末尾を1回読む。
+    assert.ok(reads <= 7, `recheck batchGet count: ${reads} (measured budget: 7)`);
     assert.equal(destinationWrites, 0);
   });
 

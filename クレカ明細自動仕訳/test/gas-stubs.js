@@ -164,6 +164,10 @@ class MemoryRange {
       throw new RangeError('setValues dimensions do not match range');
     }
     countRoundTrip('rangeWrites');
+    // setValuesでの追記も、appendRowと同じ入れ子実行の仕掛けを通す。
+    if (this.sheet.beforeAppendHook && this.row > this.sheet._lastContentRow()) {
+      const hook = this.sheet.beforeAppendHook; this.sheet.beforeAppendHook = null; hook();
+    }
     this.sheet._write(this.row, this.column, values, false); return this;
   }
   setFormulas(values) {
@@ -243,7 +247,8 @@ class MemorySheet {
   getProtections() { return (this.protections || []).slice(); }
   getParent() { return this.parent; }
   getSheetId() { return this.parent.sheets.indexOf(this) + 1; }
-  getMaxRows() { return this.maxRows; }
+  getMaxRows() { return this.staleSpreadsheetAppView && this.staleSpreadsheetAppView.maxRows !== undefined
+    ? this.staleSpreadsheetAppView.maxRows : this.maxRows; }
   getMaxColumns() { return this.maxColumns; }
   insertColumnsAfter(afterPosition, howMany) {
     const count = Number(howMany);
@@ -254,6 +259,12 @@ class MemorySheet {
     return this;
   }
   getLastRow() {
+    if (this.staleSpreadsheetAppView && this.staleSpreadsheetAppView.lastRow !== undefined) {
+      return this.staleSpreadsheetAppView.lastRow;
+    }
+    return this._lastContentRow();
+  }
+  _lastContentRow() {
     for (let row = this.maxRows - 1; row >= 0; row -= 1) {
       if (this.values[row].some((v) => v !== '' && v !== null) || this.formulas[row].some((v) => v !== '')) return row + 1;
     }
@@ -432,10 +443,11 @@ function createGasStubs() {
   const scriptCacheValues = new Map();
   let spreadsheetCopyCounter = 0;
   let sheetsBatchGetFailures = [];
+  let sheetsGetFailures = [];
   let getScriptPropertiesFailures = [];
   const scriptCacheFailures = {getScriptCache: [], get: [], put: [], remove: []};
   const triggers = [];
-  const apiCallCounts = {batchGet: 0, cellsRead: 0, batchUpdate: 0, rangesWritten: 0, cellsWritten: 0};
+  const apiCallCounts = {batchGet: 0, get: 0, cellsRead: 0, batchUpdate: 0, rangesWritten: 0, cellsWritten: 0};
   const scriptLock = new MemoryScriptLock(); let activeSpreadsheetId = null;
   let activeUserEmail = 'tester@example.com'; let effectiveUserEmail = 'tester@example.com';
   let mailQuota = 100; let mailFailures = []; const sentMails = [];
@@ -556,7 +568,7 @@ function createGasStubs() {
     const spreadsheet = openSpreadsheet(spreadsheetId); const parsed = parseA1(a1);
     const sheet = parsed.sheetName ? spreadsheet.getSheetByName(parsed.sheetName) : spreadsheet.getSheets()[0];
     if (!sheet) throw new Error(`Sheet not found for range: ${a1}`);
-    const resolved = parseA1(a1, {sheetName: sheet.getName(), maxRows: sheet.getMaxRows(), maxColumns: sheet.getMaxColumns()});
+    const resolved = parseA1(a1, {sheetName: sheet.getName(), maxRows: sheet.maxRows, maxColumns: sheet.getMaxColumns()});
     return {sheet, range: sheet.getRange(resolved.row, resolved.column, resolved.numRows, resolved.numColumns)};
   };
   const ButtonSet = Object.freeze({OK: 'OK', OK_CANCEL: 'OK_CANCEL', YES_NO: 'YES_NO', YES_NO_CANCEL: 'YES_NO_CANCEL'});
@@ -634,6 +646,20 @@ function createGasStubs() {
   };
   const SpreadsheetApp = {openById: openSpreadsheet, getActiveSpreadsheet: () => activeSpreadsheetId ? openSpreadsheet(activeSpreadsheetId) : null, getUi: () => { if (!uiAvailable) throw new Error('Cannot call SpreadsheetApp.getUi() from this context.'); return Ui; }, flush: () => { roundTrips.flushes += 1; if (roundTripListener) roundTripListener('flushes'); }, ProtectionType: Object.freeze({RANGE: 'RANGE', SHEET: 'SHEET'})};
   const Sheets = {Spreadsheets: {
+    get(spreadsheetId, request = {}) {
+      return asOneRoundTrip('rangeReads', () => {
+        apiCallCounts.get += 1;
+        if (sheetsGetFailures.length) {
+          const failure = sheetsGetFailures.shift();
+          const error = new Error(failure.message || `Sheets failure ${failure.code || failure}`);
+          error.code = Number(failure.code || failure); throw error;
+        }
+        const names = (request.ranges || []).map(name => String(name).replace(/^'|'$/g, '').replace(/''/g, "'"));
+        return {sheets: openSpreadsheet(spreadsheetId).getSheets()
+          .filter(sheet => !names.length || names.includes(sheet.getName()))
+          .map(sheet => ({properties: {title: sheet.getName(), gridProperties: {rowCount: sheet.maxRows}}}))};
+      });
+    },
     Values: {
       batchGet(spreadsheetId, request) {
         return asOneRoundTrip('rangeReads', () => this._batchGet(spreadsheetId, request));
@@ -997,6 +1023,15 @@ function createGasStubs() {
     resetUiEvents() { uiEvents.length = 0; },
     getMenus: () => menus.slice(),
     setSheetsBatchGetFailures(failures) { sheetsBatchGetFailures = failures.slice(); },
+    setSheetsGetFailures(failures) { sheetsGetFailures = failures.slice(); },
+    setStaleSpreadsheetAppView(spreadsheetId, sheetName, view) {
+      openSpreadsheet(spreadsheetId).getSheetByName(sheetName).staleSpreadsheetAppView = Object.assign({}, view);
+    },
+    clearStaleSpreadsheetAppView() {
+      spreadsheets.forEach(spreadsheet => spreadsheet.getSheets().forEach(sheet => {
+        delete sheet.staleSpreadsheetAppView;
+      }));
+    },
     setGetScriptPropertiesFailures(failures) { getScriptPropertiesFailures = (failures || []).slice(); },
     setScriptCacheFailures(failures = {}) {
       Object.keys(scriptCacheFailures).forEach((key) => {
@@ -1028,8 +1063,8 @@ function createGasStubs() {
     onValuesBatchUpdate(fn) { valuesBatchUpdateListener = fn; },
     roundTrips() { return {rangeReads: roundTrips.rangeReads, rangeWrites: roundTrips.rangeWrites, flushes: roundTrips.flushes}; },
     resetRoundTrips() { roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; },
-    resetApiCallCounts() { apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; },
-    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptCacheValues.clear(); Object.keys(scriptCacheFailures).forEach((key) => { scriptCacheFailures[key] = []; }); scriptLock.reset(); sheetsBatchGetFailures = []; getScriptPropertiesFailures = []; spreadsheetCopyCounter = 0; htmlTemplates.clear(); activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; effectiveUserEmail = 'tester@example.com'; mailQuota = 100; mailFailures = []; sentMails.length = 0; propertyWrites.length = 0; Object.keys(propertyCallCounts).forEach((key) => { propertyCallCounts[key] = 0; }); uiAvailable = true; uiEvents.length = 0; menus.length = 0; promptResponses = []; alertResponses = []; apiCallCounts.batchGet = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; sleepCalls.length = 0; sleepHook = null; driveListFailures = []; triggers.length = 0; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; }
+    resetApiCallCounts() { apiCallCounts.batchGet = 0; apiCallCounts.get = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; },
+    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptCacheValues.clear(); Object.keys(scriptCacheFailures).forEach((key) => { scriptCacheFailures[key] = []; }); scriptLock.reset(); sheetsBatchGetFailures = []; sheetsGetFailures = []; getScriptPropertiesFailures = []; spreadsheetCopyCounter = 0; htmlTemplates.clear(); activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; effectiveUserEmail = 'tester@example.com'; mailQuota = 100; mailFailures = []; sentMails.length = 0; propertyWrites.length = 0; Object.keys(propertyCallCounts).forEach((key) => { propertyCallCounts[key] = 0; }); uiAvailable = true; uiEvents.length = 0; menus.length = 0; promptResponses = []; alertResponses = []; apiCallCounts.batchGet = 0; apiCallCounts.get = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; sleepCalls.length = 0; sleepHook = null; driveListFailures = []; triggers.length = 0; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; }
   };
   return {Utilities, SpreadsheetApp, Sheets, DriveApp, Drive, Logger, LockService, Session,
     PropertiesService, CacheService, ScriptApp, MailApp, HtmlService, control};

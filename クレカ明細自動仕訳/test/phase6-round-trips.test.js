@@ -109,8 +109,10 @@ module.exports = ({test, assert, gas}) => {
     gas.stubs.createFolder('folder1', {fileIds: fileIds});
 
     gas.stubs.resetRoundTrips();
+    const releaseBefore = gas.stubs.getScriptLock().releaseCount;
     const report = plain(gas.call('runImport', [{}]));
     const trips = gas.stubs.roundTrips();
+    measure.lockReleases = gas.stubs.getScriptLock().releaseCount - releaseBefore;
     const file = report.customers[0].files[0];
     assert.equal(file.outcome, 'WRITTEN', JSON.stringify(file));
     if (!fileCount || fileCount === 1) assert.equal(file.written, txCount);
@@ -300,6 +302,7 @@ module.exports = ({test, assert, gas}) => {
     // 読まれ、以前はそのたびに flush していた（往復の4割）。
     measure(3);
     const after = gas.stubs.roundTrips();
+    const afterFlushes = after.flushes - measure.lockReleases;
 
     const saved = gas.context.SHEETS_API_ONLY_SHEETS_;
     gas.context.SHEETS_API_ONLY_SHEETS_ = [];
@@ -309,13 +312,15 @@ module.exports = ({test, assert, gas}) => {
       gas.context.SHEETS_API_ONLY_SHEETS_ = saved;
     }
     const before = gas.stubs.roundTrips();
+    const beforeFlushes = before.flushes - measure.lockReleases;
 
     assert.equal(after.rangeReads, before.rangeReads, '読取の回数は変えていない');
     // **割合で見る。**読取そのものを減らせば省ける回数も減るので、
     // 「差が何回あるか」で固定すると、速くしたときに落ちる。
-    assert.ok(after.flushes < before.flushes * 0.7,
-      `flushが${before.flushes}回から${after.flushes}回にしかならない` +
-      `（${Math.round(after.flushes / before.flushes * 100)}%）。` +
+    // ロックの口のflushは全操作に必要なので、読取前の省略効果から除く。
+    assert.ok(afterFlushes < beforeFlushes * 0.7,
+      `flushが${beforeFlushes}回から${afterFlushes}回にしかならない` +
+      `（${Math.round(afterFlushes / beforeFlushes * 100)}%）。` +
       '省けているか（SHEETS_API_ONLY_SHEETS_ が効いているか）を見よ');
   });
 
