@@ -1,0 +1,56 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の Web アプリに、**【要修正】のファイルを 1 本ずつ取込待ちへ戻すボタン（K-W23）**を足す作業を受け取ります。
+
+作業ツリーは main の最新（コミット d094673）で、`src/`・`test/` に未コミットの変更はありません。あなたの変更は、ステージされていない差分（`git diff`）として残してください ── **`git add` しないこと。**開始時の `node test/run-tests.js` の本数は、始める前に自分で数えて報告に書いてください（1497/1497 のはずです）。
+
+## 前回の停止への回答（2026-10-14）
+
+前回のあなたの起動は、rc 6 の矛盾を見つけて実装前で正しく止まりました。回答：**あなたの案どおり。**認可の拒否で `denyAuthorization_` が書く `PERMISSION`（`DENIED`）の監査は保ち、rc 6 は「戻す操作の監査（`REVIEW_RESOLVE`）が増えない」・状態と処理ログ・恒久索引が変わらないことを確かめる形にしてください。仕様書は 1.1 で直しました（§6 の 6）。
+
+前回作った `work/.kw23-check/`（`baseline/` に開始時の src・test の写し）は残してあります。私が開始時の md5 と照らして一致を確かめました。**開始時の状態との比較にそのまま使ってください**（作り直さなくてよい）。消さなくてよい ── 私が後で消します。サンドボックスで親フォルダの `.git` が読めず `git diff` が使えない場合は、この写しとの比較で「変えたファイルの一覧」と「97 の変更が 1 行だけ」を報告してください（`git diff --stat` の代わり）。
+
+## 仕様書
+
+`work/spec_customer_fix_recheck.md`（1.1）。**全部読んでから始めてください。**
+
+## 作ること（要点。詳細は仕様書）
+
+1. `80_WebApp.gs`：公開関数 `webAppRecheckCustomerFixFile(customerId, folderId, fileId)`（認可 → フォルダにあるか → リース → 状態 → `rewindFileForReimportAudited_` で戻す、の順）。純関数 `webAppStableWaitMinutes_(updatedMs, nowMs)` を出し、`webAppFolderFile_` で登録済みの `DISCOVERED` にも「取込待ち（あと n 分）」を出す。
+2. `97_Ops.gs`：`rewindFileForReimportAudited_` の `reason: 'MENU'` を `reason: context.reason || 'MENU'` にする 1 行だけ。
+3. `81_WebAppUi.html`：`gasCall` の枝、`renderFiles` の【要修正】の行にボタン、`recheckCustomerFix(file)`（確認 → 呼ぶ → お知らせ → 一覧の読み直し）。
+
+---
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。**
+2. **git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。
+3. **`src/` で変えてよいのは `80_WebApp.gs`・`81_WebAppUi.html`・`97_Ops.gs` だけ。**97 は仕様書 §3.3 の 1 行だけ。検査：終わったとき `git diff --name-only -- src/` がこの 3 つだけ、`git diff --text --stat -- src/97_Ops.gs` が 1 行の変更だけであること。
+4. **97 の改行の形を変えないこと。**97 は文字列の中に生の NUL バイトが 2 つあり、git はバイナリとして扱う（改行を変換しない）。いまの 97 の改行が CRLF か LF かを始める前に確かめ、同じ形のまま 1 行だけ書き換えること（ファイル全体を書き直す道具を使うと全行が差分になる）。NUL バイトは 2 つのまま残すこと（終わったら数えて報告）。他のファイルも、いまの改行の形を保つこと。
+5. テストの変更は `rc N: …`（仕様書 §6 の 1〜12）を足すこと。サーバーは `test/phase8-webapp.test.js` の `cf 18` の後へ。画面のボタンを押すテストは、`phase8` の `clientEval` で書けなければ `test/phase9-format-registration.test.js` の world（DOM と `gasCall` の記録がある）へ足してよい（どちらに置いたか報告）。そのファイルの中に補助を足してよい。**既存のテストの期待（assert）は 1 つも変えないこと。**既存のテストが赤になったら、変えずに止めて理由を報告すること ── 特に `cf 11〜18`・phase7 のメニューの再検査（`applyRecheck_`、監査の `reason: 'MENU'` を見るもの）・phase9 の `取込待ちに戻す`（形式の画面）・一覧の状態の名前を見るもの。`test/fixtures/`・`test/gas-stubs.js`・`test/gas-harness.js` は変えない。
+6. **テストを先に赤にしてから直すこと。**rc 1〜12 を書き、いまの実装で赤になることを確かめてから作る。いまでも緑になるもの（rc 12 の一部など）はどれかを報告する。
+7. 読取の上限（rc 8）は、**測った値そのもの**を上限にすること（余裕を足さない）。測った値を報告すること。既存の読取回数のテスト（`budget`・`multi`・`cf 7`・`cf 11` など）の上限は変えないこと。
+8. 画面へ文字を入れるときは今と同じく `textContent` だけを使うこと（`innerHTML` 等を使わない）。
+9. **日本語は UTF-8 で書くこと。**以前、あなたの書いた日本語が `?` の羅列に化けた。終わったら `grep -n '???' src/*.gs src/*.html test/phase8-webapp.test.js test/phase9-format-registration.test.js` が空であること（始める前も空）を確かめて報告すること。U+FFFD も 0 であること。コメントを足すなら、周りと同じ密度・語り口（「なぜ」を書く）で。
+10. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断をしたら全部報告すること。迷ったら止めて報告すること。
+
+## 進め方
+
+1. 仕様書を読む。次を読む：`src/80_WebApp.gs` の `webAppFormatContext_`・`webAppReturnFileToCustomer`・`webAppListFolder`・`webAppInvoke_`・`webAppAuthorizeCustomer_`・`webAppDirectChildFolder_`・`webAppFolderFile_`、`src/96_Menu.gs` の `menuRecheck`・`applyRecheck_`・`menuAssertNoLease_`・`menuFileStateLabel_`、`src/97_Ops.gs` の `rewindFileForReimport_`・`rewindFileForReimportAudited_`（`grep -a` で探す。97 はバイナリ扱い）、`src/11_FileStateManager.gs` の `getFileState`・`activeLeases_`、`src/60_ProcessLog.gs` の `clearSubmittedContentHash`、`src/81_WebAppUi.html` の `gasCall`・`renderFiles`・`formatConfirm`・`formatSetBusy`・`isMutationBusy`・`loadFiles`・`showNotice`・`returnFormatToCustomer`、`test/phase8-webapp.test.js` の `setupWorld`・`putCsv`・`webImport`・`call`・`clientEval`・`cf 11〜18`、`test/phase7-menu-operations.test.js` の再検査のテスト（940 行付近）
+2. rc 1〜12 を書く → 赤を確かめる
+3. 作る
+4. `node test/run-tests.js` を全部緑にする
+5. 仕様書 §7 の R1〜R14 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら `git diff` が変異を入れる前と同じか確かめる。97 は改行の形も）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する
+6. `git diff --stat -- src/ test/` を確かめる
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 直す前に rc 1〜12 のどれが赤だったか（緑だったものも）
+- rc 8 で測った読取の回数
+- R1〜R14 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て（足したテストがあればその名前）
+- 仕様書が間違っていた・足りなかった箇所（黙って直さないこと）、自分で決めた箇所（全部）
+- 97 の改行の形（前と後）と NUL バイトの数（前と後）
+- `???` の grep と U+FFFD の結果（前と後）
+- `git diff --stat -- src/ test/` の出力（始める前と後）
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。
