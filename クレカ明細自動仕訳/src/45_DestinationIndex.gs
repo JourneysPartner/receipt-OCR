@@ -167,6 +167,18 @@ function reserveDestinationRows(customer, fullTxIds, fileId, leaseId) {
       throw new StateTransitionError(plan.code + ': template expansion cannot proceed');
     }
     if (plan.action === 'EXPAND') {
+      var actual = apiSheetRowCount_(sheet);
+      if (actual > index.rangeEnd) {
+        // 見えなかった末尾に空き行があれば、拡張せずそちらを使える。
+        index = buildIndex(customer, {endRow: actual});
+        candidates = findEmptyRows(customer, fullTxIds.length, index);
+        plan = planTemplateExpansion({requiredCount: fullTxIds.length, emptyRowCount: candidates.length});
+        if (plan.action === 'STOP') {
+          throw new StateTransitionError(plan.code + ': template expansion cannot proceed');
+        }
+      }
+    }
+    if (plan.action === 'EXPAND') {
       // 複製元は**数式を持つ空き行**（＝本物のテンプレート行）のうち最後の
       // もの。数式の無い空き行を複製しても勘定科目や消費税式は増えない。
       // 該当が無ければ従来どおり最終行に任せ、手順6の停止条件が守る。
@@ -175,9 +187,19 @@ function reserveDestinationRows(customer, fullTxIds, fileId, leaseId) {
         var formulas = getFormulasByRow(index, rowNumber) || [];
         if (formulas.some(function(f) { return f; })) templateHint = rowNumber;
       });
-      expandedRows = expandTemplateRows(customer, sheet, plan.rowsToAdd, templateHint);
+      expandedRows = expandTemplateRows(customer, sheet, plan.rowsToAdd, templateHint,
+        {actual: actual, index: index});
       expandedRows.forEach(function(rowNumber) { candidates.push(rowNumber); });
-      index = buildIndex(customer);   // 拡張後の範囲で読み直す
+      index = buildIndex(customer, {endRow: actual + plan.rowsToAdd});
+      // 手順5・6：新しい索引で拡張行を確かめる。停止条件の文言も変えない。
+      var check = validateExpandedRows(
+        expandedRows.map(function(rowNumber) { return getAllValuesByRow(index, rowNumber); }),
+        expandedRows.map(function(rowNumber) { return getFormulasByRow(index, rowNumber); }),
+        customer.rowScanLastColumn, customer.rowScanExcludedColumns);
+      if (!check.ok) {
+        throw new StateTransitionError(
+          'DESTINATION_TEMPLATE_ROW_NOT_EMPTY: expanding did not produce usable empty rows');
+      }
     }
     // 取引IDと行番号の対応を明示して返す。呼出側が「i番目の取引はi番目の
     // 行」という添字一致に頼ると、空き行が非連続に見つかる場合や順序が
@@ -185,30 +207,25 @@ function reserveDestinationRows(customer, fullTxIds, fileId, leaseId) {
     //
     // 空き確認と予約は**行ごとに往復しない**。1行につき読取2回・書込1回を
     // 素直に回すと、200件のファイルで600往復になり6分の実行上限に当たる
-    // （実機で1件あたり約20秒だった。2026-09-03）。候補行を覆う範囲を
-    // 一度だけ読み、取引IDは連続行ごとにまとめて書く。
+    // （実機で1件あたり約20秒だった。2026-09-03）。ロック内で作った索引を
+    // そのまま使い、取引IDは連続行ごとにまとめて書く。
     var reserved = [];
-    var firstRow = Math.min.apply(null, candidates);
-    var lastRow = Math.max.apply(null, candidates);
-    var block = sheet.getRange(firstRow, 1, lastRow - firstRow + 1, customer.rowScanLastColumn);
-    var blockValues = block.getValues();
-    var blockFormulas = block.getFormulas();
     candidates.forEach(function(rowNumber, offset) {
-      var values = blockValues[rowNumber - firstRow];
-      var formulas = blockFormulas[rowNumber - firstRow];
+      var values = getAllValuesByRow(index, rowNumber);
+      var formulas = getFormulasByRow(index, rowNumber);
       if (!isDestinationRowEmpty(values, formulas, customer.rowScanLastColumn, customer.rowScanExcludedColumns)) throw leaseConflict_('Reserved row is no longer empty');
       reserved.push({txId: String(fullTxIds[offset]), rowNumber: rowNumber});
     });
-    groupConsecutiveRows(reserved.slice().sort(function(a, b) {
+    var reservationWrites = groupConsecutiveRows(reserved.slice().sort(function(a, b) {
       return a.rowNumber - b.rowNumber;
-    })).forEach(function(group) {
-      sheet.getRange(group.startRow, customer.columnMapping.txId, group.rowWrites.length, 1)
-        .setValues(group.rowWrites.map(function(item) { return [item.txId]; }));
+    })).map(function(group) {
+      var column = columnLetter_(customer.columnMapping.txId);
+      return {range: quoteSheetName_(sheet.getName()) + '!' + column + group.startRow + ':' +
+        column + (group.startRow + group.rowWrites.length - 1),
+        values: group.rowWrites.map(function(item) { return [item.txId]; })};
     });
-    // 予約は SpreadsheetApp で書いた。ロックを解放すると、続く書込ブロックが
-    // Sheets API で同じ行へ書く。ここで flush しないと予約が相手から見えず、
-    // 別の実行が同じ行を空きと判定して二重に予約する（4.23 flush規則1）。
-    SpreadsheetApp.flush();
+    // 予約はRAWの1要求で確定する。別の実行がロックを取る前にIDが見える。
+    Sheets.Spreadsheets.Values.batchUpdate({valueInputOption: 'RAW', data: reservationWrites}, spreadsheet.getId());
     // 停止点：予約済み・値書込前の状態を作る（11.3 Step4/5 の再現用）。
     faultInjectionPoint('ROW_RESERVE_AFTER', {fileId: fileId});
     invalidate(index);

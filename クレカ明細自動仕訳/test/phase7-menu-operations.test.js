@@ -1434,12 +1434,15 @@ module.exports = ({test, assert, gas}) => {
       const seeded = setupPartnerImport(1, count);
       const first = seeded.reviews[0];
       gas.stubs.resetRoundTrips();
+      const releaseBefore = gas.stubs.getScriptLock().releaseCount;
       const outcome = call('applyResolveDecision_', [applyItem([first]), 'ADOPT_EXISTING_PARTNER',
         {reviewId: first.reviewId, partnerName: '株式会社テスト'},
         {maxPerAction: 1, deadlineMs: 999999, tripWorstMs: 0}]);
       assert.equal(outcome.resolved, 1);
       const value = gas.stubs.roundTrips();
-      return value.rangeReads + value.rangeWrites + value.flushes;
+      // 必須のロック解放前flushを除き、要確認の件数による費用を比べる。
+      const lockReleases = gas.stubs.getScriptLock().releaseCount - releaseBefore;
+      return value.rangeReads + value.rangeWrites + value.flushes - lockReleases;
     });
     assert.equal(trips[0], trips[1]);
     assert.ok(trips[0] <= 100, JSON.stringify(trips));

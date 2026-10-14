@@ -98,10 +98,24 @@ function makeCatalogError_(code, detail) {
 
 function leaseConflict_(detail) { return makeCatalogError_('LEASE_CONFLICT', detail); }
 
+/**
+ * Lock.releaseLock の公式注意（2026-04-13 更新）は、ロックを外す前に
+ * SpreadsheetApp.flush() して保留中の書込を確定するよう求めている。
+ * flush を呼出側の責任にすると必ずどこかで漏れるので、ロックの口で必ず行う。
+ */
 function withScriptLock_(callback) {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(SETTINGS.LOCK_TIMEOUT_MS)) throw leaseConflict_('Script lock was not acquired');
-  try { return callback(); } finally { lock.releaseLock(); }
+  try {
+    var result;
+    try { result = callback(); } catch (error) {
+      // 途中までの書込も排他中に確定する。ただし元の失敗を隠してはならない。
+      try { SpreadsheetApp.flush(); } catch (ignored) { /* preserve the callback error */ }
+      throw error;
+    }
+    SpreadsheetApp.flush();
+    return result;
+  } finally { lock.releaseLock(); }
 }
 
 /**
@@ -386,16 +400,23 @@ function isSheetsQuotaError_(error) {
 
 function sheetsReadRanges_(sheet, ranges) {
   if (SHEETS_API_ONLY_SHEETS_.indexOf(String(sheet.getName())) < 0) SpreadsheetApp.flush();
+  return sheetsReadWithRetry_(function() {
+    var response = sheetsBatchGetPaced_(sheet.getParent().getId(), {
+      ranges: ranges,
+      valueRenderOption: 'UNFORMATTED_VALUE',
+      dateTimeRenderOption: 'SERIAL_NUMBER',
+      majorDimension: 'ROWS'
+    });
+    return (response.valueRanges || []).map(function(range) { return range.values || []; });
+  });
+}
+
+/** 値と行数の読取は、同じ再試行・待ち時間の計上を使う。 */
+function sheetsReadWithRetry_(read) {
   var lastError = null;
   for (var attempt = 0; attempt <= 4; attempt += 1) {
     try {
-      var response = sheetsBatchGetPaced_(sheet.getParent().getId(), {
-        ranges: ranges,
-        valueRenderOption: 'UNFORMATTED_VALUE',
-        dateTimeRenderOption: 'SERIAL_NUMBER',
-        majorDimension: 'ROWS'
-      });
-      return (response.valueRanges || []).map(function(range) { return range.values || []; });
+      return read();
     } catch (error) {
       lastError = error;
       var status = Number(error && (error.code || error.status));
@@ -640,8 +661,32 @@ function findRowsByColumnValues_(sheet, column, values, width) {
   return result;
 }
 
+var ROW_GROWTH_SLACK_ = 500;
+
+/** 本当の行数も読取の枠を消費するため、値の読取と同じ口で数えて待つ。 */
+function apiSheetRowCount_(sheet) {
+  return sheetsReadWithRetry_(function() {
+    paceSheetsRead_();
+    apiReadCount_ += 1;
+    var response = Sheets.Spreadsheets.get(sheet.getParent().getId(), {
+      ranges: [quoteSheetName_(sheet.getName())],
+      fields: 'sheets(properties(title,gridProperties(rowCount)))'
+    });
+    var found = (response.sheets || []).filter(function(item) {
+      return item.properties && item.properties.title === sheet.getName();
+    })[0];
+    var rowCount = found && found.properties.gridProperties && found.properties.gridProperties.rowCount;
+    if (!Number.isInteger(rowCount) || rowCount < 1) throw new Error('Sheet row count not found: ' + sheet.getName());
+    return rowCount;
+  });
+}
+
 /**
- * 指定行まで行数を広げる。
+ * 指定行まで行数を広げる。行を消さないシートだけに使う（リース表は対象外）。
+ * 処理ログ・恒久ファイルインデックス・取引ログ・取引インデックス・要確認・
+ * 監査・初期設定のマスターが対象で、雛形を複製する転記先には使わない。
+ * 見える行数は本当以下なので「足りている」は信じ、足りないときだけ読み直す。
+ * 本当の末尾へ余白も足せば、相手の行を動かさず、毎回の行数読取も避けられる。
  *
  * 行挿入は SpreadsheetApp であり、その変更は遅延適用される。**直後に
  * `flush()` しないと、続けて呼ぶ Sheets API から挿入後の行が見えない**
@@ -652,7 +697,9 @@ function findRowsByColumnValues_(sheet, column, values, width) {
  */
 function ensureRowExists_(sheet, rowNumber) {
   if (rowNumber <= sheet.getMaxRows()) return;
-  sheet.insertRowsAfter(sheet.getMaxRows(), rowNumber - sheet.getMaxRows());
+  var actual = apiSheetRowCount_(sheet);
+  if (rowNumber <= actual) return;
+  sheet.insertRowsAfter(actual, rowNumber - actual + ROW_GROWTH_SLACK_);
   SpreadsheetApp.flush();
 }
 

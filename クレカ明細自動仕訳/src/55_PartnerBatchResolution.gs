@@ -504,7 +504,8 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
     // ロックの中で読んだ要確認を材料にする ── 同じ取引に `DATE` などの別の
     // 要確認が開いていれば確定しない（`commitBlockingReasons_` が唯一の判定器）。
     if (ready.length) withScriptLock_(function() {
-      var currentReviews = allReviewRecords_();
+      var current = allReviewRecordsAndAuditTail_();
+      var currentReviews = current.reviews;
       var reviewById = Object.create(null);
       currentReviews.forEach(function(review) { reviewById[review.reviewId] = review; });
       var openNow = [];
@@ -540,7 +541,7 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
       appendAuditRowsUnlocked_(openNow.map(function(item) {
         return {type: 'REVIEW_RESOLVE', actor: options.actor, targetType: 'TRANSACTION',
           targetId: item.review.fullTxId, after: {operation: item.decision.operation}};
-      }));
+      }), current.auditTail);
 
       var txById = partnerBatchReadTransactions_(openNow);
       var commitUpdates = [];

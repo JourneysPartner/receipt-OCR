@@ -102,9 +102,10 @@ function clearTemplateValueCells(row) {
  *
  * @return {!Array<number>} 追加された行番号。
  */
-function expandTemplateRows(customer, sheet, shortage, templateSourceRow) {
+function expandTemplateRows(customer, sheet, shortage, templateSourceRow, context) {
   if (!Number.isInteger(shortage) || shortage <= 0) return [];
   var lastColumn = customer.rowScanLastColumn;
+  var actual = context.actual;
 
   // 手順1：複製元は「検証済みの直前行」＝**最初の空きテンプレート行**である。
   // `getMaxRows()`を複製元にすると、実際の顧客シートではグリッドが既定
@@ -113,18 +114,18 @@ function expandTemplateRows(customer, sheet, shortage, templateSourceRow) {
   // この関数が存在する理由そのものが満たされない。テストのシートは
   // maxRowsをデータ行ぴったりに作りがちで、その差はスタブでは出ない。
   var templateRow = Number.isInteger(templateSourceRow) && templateSourceRow >= 1
-    ? templateSourceRow : sheet.getMaxRows();
+    ? templateSourceRow : actual;
   // 勘定科目の既定値や消費税の計算式が入っているのが**正しい**テンプレートで
   // ある。複製元として不適なのは、取引が転記済みの行を複製してしまう場合。
-  var sourceValues = sheet.getRange(templateRow, 1, 1, lastColumn).getValues();
-  if (!systemOwnedColumnsAreEmpty_(customer, sourceValues[0])) {
+  var sourceValues = getAllValuesByRow(context.index, templateRow);
+  if (!sourceValues || !systemOwnedColumnsAreEmpty_(customer, sourceValues)) {
     throw new StateTransitionError(
       'INVALID_TEMPLATE_SOURCE: the template row still carries a transaction');
   }
 
   // 手順2：行ごと複製する。数式は相対参照が移動する。
   // 追加は常にシート末尾へ行う（途中挿入は既存の行番号参照を全部ずらす）。
-  var insertAfter = sheet.getMaxRows();
+  var insertAfter = actual;
   sheet.insertRowsAfter(insertAfter, shortage);
   var added = [];
   var source = sheet.getRange(templateRow, 1, 1, lastColumn);
@@ -147,16 +148,8 @@ function expandTemplateRows(customer, sheet, shortage, templateSourceRow) {
   // 手順4：Sheets API から見えるようにする。
   SpreadsheetApp.flush();
 
-  // 手順5・6：拡張した行が本当に空き行になったかを確認し、
-  // なっていなければ停止する。ここが無限ループの遮断点である。
-  var check = validateExpandedRows(
-    added.map(function(r) { return sheet.getRange(r, 1, 1, lastColumn).getValues()[0]; }),
-    added.map(function(r) { return sheet.getRange(r, 1, 1, lastColumn).getFormulas()[0]; }),
-    lastColumn, customer.rowScanExcludedColumns);
-  if (!check.ok) {
-    throw new StateTransitionError(
-      'DESTINATION_TEMPLATE_ROW_NOT_EMPTY: expanding did not produce usable empty rows');
-  }
+  // 手順5・6は呼出側が作り直す索引で確かめる。SpreadsheetApp の読取は
+  // 相手の変更を数え落とし得るため、拡張後の予約と同じ読取を材料にする。
   return added;
 }
 

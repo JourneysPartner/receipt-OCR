@@ -129,6 +129,29 @@ function activeLeases_() {
   });
 }
 
+/** リースと監査末尾は同じロックの材料なので、読取の枠も1回でそろえる。 */
+function activeLeasesAndAuditTail_() {
+  var sheet = leaseSheet_();
+  var audit = auditSheet_();
+  var window = auditTailRange_(audit);
+  var values = sheetsReadRanges_(sheet, [quoteSheetName_(sheet.getName()) + '!A2:J', window.range]);
+  var leases = sheetRowsFromValues_(values[0], 10).map(function(row) {
+    return leaseFromRow_(row.values, row.rowNumber);
+  }).filter(function(lease) {
+    if (lease.state !== LEASE_STATE.ACTIVE) throw new IntegrityError(null, 'Lease sheet contains a non-ACTIVE row');
+    return true;
+  });
+  return {leases: leases, auditTail: readAuditTail_(audit, window, values[1])};
+}
+
+/** 削除で後続の位置が動くため、大きい行番号から消す。 */
+function deleteLeaseRowsUnlocked_(leases) {
+  var sheet = leaseSheet_();
+  leases.slice().sort(function(a, b) { return b._rowNumber - a._rowNumber; }).forEach(function(lease) {
+    sheet.deleteRow(lease._rowNumber);
+  });
+}
+
 function acquireLease(customerId, fileId, runId, owner, purpose) {
   if (purpose !== LEASE_PURPOSE.PROCESS && purpose !== LEASE_PURPOSE.WRITE_ONLY) throw new TypeError('Invalid lease purpose');
   return withScriptLock_(function() {
@@ -163,15 +186,16 @@ function releaseLease(fileId, runId, reason) {
     throw new TypeError('releaseLease requires a runId');
   }
   return withScriptLock_(function() {
-    var targets = activeLeases_().filter(function(lease) {
+    var current = activeLeasesAndAuditTail_();
+    var targets = current.leases.filter(function(lease) {
       return lease.fileId === String(fileId) && lease.runId === String(runId);
     });
     if (!targets.length) return;
-    targets.forEach(function(lease) {
-      appendAuditUnlocked_({type: 'LEASE_RELEASE', actor: lease.owner, targetType: 'LEASE', targetId: lease.leaseId,
-        customerId: lease.customerId, before: {state: LEASE_STATE.ACTIVE}, after: {state: null}, reason: reason || ''}, false);
-    });
-    targets.sort(function(a, b) { return b._rowNumber - a._rowNumber; }).forEach(function(lease) { leaseSheet_().deleteRow(lease._rowNumber); });
+    appendAuditRowsUnlocked_(targets.map(function(lease) {
+      return {type: 'LEASE_RELEASE', actor: lease.owner, targetType: 'LEASE', targetId: lease.leaseId,
+        customerId: lease.customerId, before: {state: LEASE_STATE.ACTIVE}, after: {state: null}, reason: reason || ''};
+    }), current.auditTail);
+    deleteLeaseRowsUnlocked_(targets);
   });
 }
 
@@ -180,14 +204,15 @@ function releaseLeaseById(leaseId, reason) {
     throw new TypeError('releaseLeaseById requires a leaseId');
   }
   return withScriptLock_(function() {
-    var lease = activeLeases_().filter(function(item) {
+    var current = activeLeasesAndAuditTail_();
+    var lease = current.leases.filter(function(item) {
       return item.leaseId === String(leaseId);
     })[0];
     if (!lease) return false;
     appendAuditUnlocked_({type: 'LEASE_RELEASE', actor: lease.owner,
       targetType: 'LEASE', targetId: lease.leaseId, customerId: lease.customerId,
-      before: {state: LEASE_STATE.ACTIVE}, after: {state: null}, reason: reason || ''}, false);
-    leaseSheet_().deleteRow(lease._rowNumber);
+      before: {state: LEASE_STATE.ACTIVE}, after: {state: null}, reason: reason || ''}, false, current.auditTail);
+    deleteLeaseRowsUnlocked_([lease]);
     return true;
   });
 }
@@ -206,7 +231,8 @@ function forceReleaseLease(leaseId, reason, actor) {
     // 閾値が実行上限より短いと、生きた書込を止める前にリースを奪える。
     // 無効な設定はリース表を読む前に拒む。
     var minimumSeconds = leaseForceReleaseMinSeconds_();
-    var lease = activeLeases_().filter(function(item) { return item.leaseId === String(leaseId); })[0];
+    var current = activeLeasesAndAuditTail_();
+    var lease = current.leases.filter(function(item) { return item.leaseId === String(leaseId); })[0];
     if (!lease) return;
     // `PROCESS`リースは取込の途中でだけ持たれるので、ファイルが
     // VALIDATING/WRITINGでないのに残っていたら状態の食い違いであり、
@@ -228,8 +254,8 @@ function forceReleaseLease(leaseId, reason, actor) {
     var elapsed = (Date.now() - new Date(lease.lastHeartbeat).getTime()) / 1000;
     if (!isFinite(elapsed) || elapsed <= minimumSeconds) throw new StateTransitionError('Heartbeat has not exceeded the force-release threshold');
     appendAuditUnlocked_({type: 'LEASE_FORCE_RELEASE', actor: actor, targetType: 'LEASE', targetId: lease.leaseId,
-      customerId: lease.customerId, before: {state: LEASE_STATE.ACTIVE}, after: {state: null}, reason: reason || ''}, false);
-    leaseSheet_().deleteRow(lease._rowNumber);
+      customerId: lease.customerId, before: {state: LEASE_STATE.ACTIVE}, after: {state: null}, reason: reason || ''}, false, current.auditTail);
+    deleteLeaseRowsUnlocked_([lease]);
   });
 }
 
@@ -306,7 +332,8 @@ function releaseInvestigatedLease(leaseId, reason, actor) {
   return withScriptLock_(function() {
     // 強制解放の下限を割る設定では、調査経路からもリースを奪わせない。
     var minimumSeconds = leaseForceReleaseMinSeconds_();
-    var lease = activeLeases_().filter(function(item) {
+    var current = activeLeasesAndAuditTail_();
+    var lease = current.leases.filter(function(item) {
       return item.leaseId === String(leaseId);
     })[0];
     if (!lease) throw new StateTransitionError('Lease not found: ' + leaseId);
@@ -332,8 +359,8 @@ function releaseInvestigatedLease(leaseId, reason, actor) {
     appendAuditUnlocked_({type: 'LEASE_RELEASE_INVESTIGATED', actor: actor, targetType: 'LEASE',
       targetId: lease.leaseId, customerId: lease.customerId,
       before: {state: LEASE_STATE.ACTIVE, fileState: state}, after: {state: null},
-      reason: String(reason)}, false);
-    leaseSheet_().deleteRow(lease._rowNumber);
+      reason: String(reason)}, false, current.auditTail);
+    deleteLeaseRowsUnlocked_([lease]);
     return {leaseId: lease.leaseId, fileId: lease.fileId, fileState: state, released: true};
   });
 }
