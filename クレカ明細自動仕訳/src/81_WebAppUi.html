@@ -536,6 +536,7 @@
         else if (name === 'webAppSaveFormat') runner.webAppSaveFormat(args[0], args[1], args[2], args[3], args[4]);
         else if (name === 'webAppRequeueFormatFiles') runner.webAppRequeueFormatFiles(args[0], args[1], args[2]);
         else if (name === 'webAppReturnFileToCustomer') runner.webAppReturnFileToCustomer(args[0], args[1], args[2], args[3], args[4]);
+        else if (name === 'webAppRecheckCustomerFixFile') runner.webAppRecheckCustomerFixFile(args[0], args[1], args[2]);
         else if (name === 'webAppWithdrawFormat') runner.webAppWithdrawFormat(args[0], args[1]);
         else reject(new Error('Unknown server function'));
       });
@@ -908,6 +909,16 @@
             }
             row.appendChild(td);
           });
+        if (file.state === 'CUSTOMER_FIX_REQUIRED' && !file.formatReviewId) {
+          var recheckButton = document.createElement('button');
+          recheckButton.type = 'button';
+          recheckButton.className = 'button';
+          recheckButton.textContent = '修正済み → 取込待ちに戻す';
+          recheckButton.disabled = isMutationBusy();
+          recheckButton.addEventListener('click', function() { return recheckCustomerFix(file); });
+          row.lastChild.appendChild(document.createElement('br'));
+          row.lastChild.appendChild(recheckButton);
+        }
         if (file.formatReviewId) {
           var actionCell = row.lastChild;
           var formatButton = document.createElement('button');
@@ -3191,6 +3202,31 @@
         await refreshFormatLists();
       }
       finally { formatSetBusy(false); }
+    }
+
+    async function recheckCustomerFix(file) {
+      if (isMutationBusy()) return;
+      if (!await formatConfirm('取込待ちに戻す', '「' + file.fileName +
+          '」を取込待ちに戻します。顧客が元ファイルを直し終えたときだけ戻してください。' +
+          '［記帳を実行］で取り込み直し、まだ直っていなければ、もう一度【要修正】になります。' +
+          '戻すだけでは転記先に何も書きません。')) return;
+      formatSetBusy(true);
+      try {
+        var result = await gasCall('webAppRecheckCustomerFixFile',
+          [state.selectedCustomerId, state.selectedFolderId, file.fileId]);
+        if (result && result.ok === true) {
+          var message = '「' + result.fileName + '」を取込待ちに戻しました。［記帳を実行］で取り込みます。' +
+            'ファイル名の【要修正】は取り込むと外れます。';
+          if (result.waitMinutes > 0) message += 'Drive で最近更新されたため、取り込めるのはあと ' +
+            result.waitMinutes + ' 分たってからです。';
+          showNotice(message, 'success');
+        } else if (result && result.code === 'STATE_CHANGED') {
+          showNotice('「' + result.fileName + '」は状態が変わっています（現在: ' +
+            result.stateLabel + '）。一覧を読み直しました。', 'warning');
+        } else showNotice(TEXT.unknownFailure, 'error');
+      } catch (error) { showNotice(failureMessage(error), 'error'); }
+      finally { formatSetBusy(false); }
+      await loadFiles(state.selectedCustomerId, state.selectedFolderId, state.viewGeneration);
     }
 
     async function returnFormatToCustomer() {

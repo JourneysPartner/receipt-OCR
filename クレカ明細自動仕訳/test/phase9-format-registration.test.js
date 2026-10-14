@@ -159,7 +159,8 @@ module.exports = ({test, assert, gas}) => {
     for (const name of ['webAppBootstrap', 'webAppListFolder', 'webAppListReviews',
       'webAppFinalReview', 'webAppExplainUnknownFile', 'webAppPreviewFormat',
       'webAppSaveFormat', 'webAppRequeueFormatFiles', 'webAppReturnFileToCustomer',
-      'webAppWithdrawFormat', 'webAppRunImport', 'webAppResolveReviews']) {
+      'webAppWithdrawFormat', 'webAppRunImport', 'webAppResolveReviews',
+      'webAppRecheckCustomerFixFile']) {
       runner[name] = (...args) => {
         calls.push({name, args});
         const success = runner.success, failure = runner.failure;
@@ -176,12 +177,130 @@ module.exports = ({test, assert, gas}) => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'src', '81_WebAppUi.html'), 'utf8');
     const script = /<script>([\s\S]*?)<\/script>/.exec(source)[1].replace(
       '    bootstrap();',
-      '    globalThis.__ui = {state, el, renderSelection, renderFormatPanel, previewFormat, saveFormat, returnFormatToCustomer, openFormat, chooseFolder, chooseCustomer, loadFinalReview, formatSetBusy};');
+      '    globalThis.__ui = {state, el, renderSelection, renderFiles, renderFormatPanel, previewFormat, saveFormat, returnFormatToCustomer, openFormat, chooseFolder, chooseCustomer, loadFinalReview, formatSetBusy, recheckCustomerFix: typeof recheckCustomerFix === "function" ? recheckCustomerFix : null};');
     const sandbox = {document, google: {script: {run: runner}}, window: {open() { return {}; }},
       setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {}, console};
     vm.runInNewContext(script, sandbox);
     return {ui: sandbox.__ui, document, calls, pending, ids, root, Node};
   }
+  function recheckBrowserWorld(responses = {}) {
+    const world = browserWorld(Object.assign({webAppListFolder: {kind: 'FILES', files: []}}, responses));
+    const {state} = world.ui;
+    state.customers = [{customerId: 'C001', customerName: '顧客一', canImport: true}];
+    state.selectedCustomerId = 'C001'; state.selectedFolderId = 'card';
+    state.files = [{fileId: 'target', fileName: '【要修正】<img src=x>.csv',
+      state: 'CUSTOMER_FIX_REQUIRED', stateLabel: '要修正', importable: false,
+      fixReason: {source: 'IMPORT', reasons: [{kind: 'PURPOSE_EMPTY', count: 1, rows: [2]}]}}];
+    world.ui.renderSelection();
+    return world;
+  }
+  function recheckButtons(world) {
+    return world.ids['file-list'].querySelectorAll('button')
+      .filter((node) => node.textContent === '修正済み → 取込待ちに戻す');
+  }
+
+  test('rc 9: only customer-fix rows without format reviews expose one safe recheck button', () => {
+    const world = recheckBrowserWorld();
+    const {state} = world.ui;
+    const fix = state.files[0];
+    state.files.push(...['DISCOVERED', 'COMPLETED', null, 'REVIEW_WAIT'].map((value, index) =>
+      ({fileId: 'other' + index, fileName: 'other.csv', state: value, stateLabel: value || '取込可能',
+        formatReviewId: value === 'REVIEW_WAIT' ? 'format-review' : null})),
+    {...fix, fileId: 'format-fix', formatReviewId: 'another-format-review'});
+    world.ui.renderFiles();
+    const buttons = recheckButtons(world);
+    assert.equal(buttons.length, 1);
+    assert.equal(buttons[0].type, 'button');
+    assert.equal(buttons[0].className, 'button');
+    assert.equal(buttons[0].disabled, false);
+    const cell = buttons[0].parentNode, row = cell.parentNode;
+    assert.equal(row.children[3], cell);
+    assert.equal(cell.children.at(-2).tagName, 'BR');
+    assert.equal(cell.children.at(-3).className, 'fix-reason');
+    assert.equal(row.children[0].textContent, fix.fileName);
+    assert.equal(world.ids['file-list'].querySelectorAll('img').length, 0);
+    for (const busy of ['importBusy', 'resolveBusy', 'formatBusy']) {
+      state[busy] = true; world.ui.renderFiles();
+      assert.equal(recheckButtons(world)[0].disabled, true, busy);
+      recheckButtons(world)[0].fire('click');
+      assert.equal(world.calls.length, 0);
+      state[busy] = false;
+    }
+  });
+
+  browserAsyncTest('rc 10: confirmation cancellation is inert and successful recheck refreshes once after its notice', async () => {
+    const cancelled = recheckBrowserWorld();
+    const cancelPending = recheckButtons(cancelled)[0].fire('click')[0];
+    assert.equal(cancelled.ids['confirm-title'].textContent, '取込待ちに戻す');
+    assert.equal(cancelled.ids['confirm-intro'].textContent,
+      '「【要修正】<img src=x>.csv」を取込待ちに戻します。顧客が元ファイルを直し終えたときだけ戻してください。' +
+      '［記帳を実行］で取り込み直し、まだ直っていなければ、もう一度【要修正】になります。戻すだけでは転記先に何も書きません。');
+    assert.equal(cancelled.calls.length, 0);
+    cancelled.ids['confirm-cancel'].fire('click'); await cancelPending;
+    assert.equal(cancelled.calls.length, 0);
+    assert.equal(cancelled.ui.state.formatBusy, false);
+    cancelled.ui.state.importBusy = true;
+    await cancelled.ui.recheckCustomerFix(cancelled.ui.state.files[0]);
+    assert.equal(cancelled.ui.state.formatConfirmResolve, null);
+    assert.equal(cancelled.calls.length, 0);
+    for (const waitMinutes of [0, 7]) {
+      let noticeAtRefresh;
+      const world = recheckBrowserWorld({webAppRecheckCustomerFixFile: {defer: true},
+        webAppListFolder: () => {
+          noticeAtRefresh = world.ids.notice.textContent;
+          assert.equal(world.ui.state.formatBusy, false);
+          return {kind: 'FILES', files: []};
+        }});
+      const pending = recheckButtons(world)[0].fire('click')[0];
+      assert.equal(world.calls.length, 0);
+      world.ids['confirm-submit'].fire('click');
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(world.ui.state.formatBusy, true);
+      assert.equal(recheckButtons(world)[0].disabled, true);
+      assert.deepEqual(JSON.parse(JSON.stringify(world.calls)),
+        [{name: 'webAppRecheckCustomerFixFile', args: ['C001', 'card', 'target']}]);
+      world.pending.shift().reply({ok: true, fileName: '【要修正】<img src=x>.csv', waitMinutes});
+      await pending;
+      const expected = '「【要修正】<img src=x>.csv」を取込待ちに戻しました。［記帳を実行］で取り込みます。' +
+        'ファイル名の【要修正】は取り込むと外れます。' + (waitMinutes > 0 ?
+          'Drive で最近更新されたため、取り込めるのはあと 7 分たってからです。' : '');
+      assert.equal(world.ids.notice.textContent, expected);
+      assert.equal(noticeAtRefresh, expected);
+      assert.equal(world.ids.notice.className, 'notice visible success');
+      assert.equal(world.ids.notice.querySelectorAll('img').length, 0);
+      assert.equal(world.ui.state.formatBusy, false);
+      assert.deepEqual(world.calls.map((item) => item.name),
+        ['webAppRecheckCustomerFixFile', 'webAppListFolder']);
+      assert.deepEqual(Array.from(world.calls[1].args), ['C001', 'card']);
+    }
+  });
+
+  browserAsyncTest('rc 11: changed state exceptions and unknown replies show failure notices and release busy before refresh', async () => {
+    const cases = [
+      {reply: {ok: false, code: 'STATE_CHANGED', fileName: '現在.csv',
+        stateLabel: '完了 (COMPLETED)'}, kind: 'warning',
+      text: '「現在.csv」は状態が変わっています（現在: 完了 (COMPLETED)）。一覧を読み直しました。'},
+      {reply: new Error('サーバーで停止しました'), kind: 'error', text: 'サーバーで停止しました'},
+      ...[null, {}, {ok: 'true'}].map((reply) => ({reply, kind: 'error',
+        text: '処理に失敗しました。管理者へ連絡してください。'}))
+    ];
+    for (const item of cases) {
+      const world = recheckBrowserWorld({webAppRecheckCustomerFixFile: {defer: true}});
+      const pending = recheckButtons(world)[0].fire('click')[0];
+      world.ids['confirm-submit'].fire('click');
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(world.ui.state.formatBusy, true);
+      const request = world.pending.shift();
+      if (item.reply instanceof Error) request.reject(item.reply); else request.reply(item.reply);
+      await pending;
+      assert.equal(world.ui.state.formatBusy, false);
+      assert.equal(world.ids.notice.textContent, item.text);
+      assert.equal(world.ids.notice.className, 'notice visible ' + item.kind);
+      assert.deepEqual(world.calls.map((call) => call.name),
+        ['webAppRecheckCustomerFixFile', 'webAppListFolder']);
+    }
+  });
+
   function formatBrowserDiagnosis() {
     const columns = Object.fromEntries(['date', 'merchant', 'amount', 'purpose', 'amountFallback']
       .map((role, index) => [role, {column: ['A', 'B', 'C', 'D', null][index], source: 'HEADER'}]));

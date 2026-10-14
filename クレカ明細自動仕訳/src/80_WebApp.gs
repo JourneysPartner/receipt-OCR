@@ -140,6 +140,30 @@ function webAppReturnFileToCustomer(customerId, folderId, fileId, reason, note) 
   });
 }
 
+function webAppRecheckCustomerFixFile(customerId, folderId, fileId) {
+  return webAppInvoke_(function() {
+    var selected = webAppAuthorizeCustomer_(customerId, 'WEBAPP:要修正を取込待ちへ戻す');
+    var folder = webAppDirectChildFolder_(selected.customer, folderId);
+    fileId = String(fileId);
+    var file = webAppIteratorToArray_(folder.getFiles()).filter(function(item) {
+      return String(item.getId()) === fileId;
+    })[0];
+    if (!file) throw new AuthorizationError('選択されたファイルはこのフォルダにありません。');
+    menuAssertNoLease_(fileId, activeLeases_);
+    var state = getFileState(fileId);
+    var fileName = String(file.getName());
+    if (state !== FILE_STATE.CUSTOMER_FIX_REQUIRED) {
+      return {ok: false, code: 'STATE_CHANGED', fileId: fileId, fileName: fileName,
+        state: state, stateLabel: menuFileStateLabel_(state)};
+    }
+    rewindFileForReimportAudited_(fileId, selected.scope.userEmail,
+      {from: FILE_STATE.CUSTOMER_FIX_REQUIRED, operation: 'RECHECK',
+        customerId: String(customerId), reason: 'WEBAPP'});
+    return {ok: true, fileId: fileId, fileName: fileName, nextState: FILE_STATE.DISCOVERED,
+      waitMinutes: webAppStableWaitMinutes_(file.getLastUpdated().getTime(), Date.now())};
+  });
+}
+
 function webAppWithdrawFormat(customerId, formatId) {
   return webAppInvoke_(function() {
     var scope = authorize(ROLE.SYSTEM_ADMIN, customerId, {operation: 'WEBAPP:形式取消し'});
@@ -983,6 +1007,13 @@ function webAppDirectChildFolder_(customer, folderId) {
   throw new AuthorizationError('選択されたフォルダはこの顧客の直下にありません。');
 }
 
+/** 戻したファイルも未登録と同じ待ち時間で案内し、取込候補とのずれを防ぐ。 */
+function webAppStableWaitMinutes_(updatedMs, nowMs) {
+  if (updatedMs <= nowMs - 10 * 60 * 1000) return 0;
+  return Math.max(1,
+    Math.ceil((10 * 60 * 1000 - (nowMs - updatedMs)) / (60 * 1000)));
+}
+
 /** ファイル一覧 1 行を作る。 */
 function webAppFolderFile_(file, stateByFileId, nowMs) {
   var fileId = String(file.getId());
@@ -990,19 +1021,19 @@ function webAppFolderFile_(file, stateByFileId, nowMs) {
   var updated = file.getLastUpdated();
   var updatedMs = updated instanceof Date ? updated.getTime() : new Date(updated).getTime();
   var supported = /\.(csv|xlsx)$/i.test(fileName);
-  var stable = updatedMs <= nowMs - 10 * 60 * 1000;
+  var minutes = webAppStableWaitMinutes_(updatedMs, nowMs);
+  var stable = minutes === 0;
   var registered = Object.prototype.hasOwnProperty.call(stateByFileId, fileId);
   var state = registered ? stateByFileId[fileId] : null;
   var stateLabel;
   if (registered) {
-    stateLabel = menuFileStateLabel_(state);
+    stateLabel = state === FILE_STATE.DISCOVERED && supported && !stable ?
+      '取込待ち（あと ' + minutes + ' 分）' : menuFileStateLabel_(state);
   } else if (!supported) {
     stateLabel = '対象外';
   } else if (stable) {
     stateLabel = '取込可能';
   } else {
-    var minutes = Math.max(1,
-      Math.ceil((10 * 60 * 1000 - (nowMs - updatedMs)) / (60 * 1000)));
     stateLabel = '取込待ち（あと ' + minutes + ' 分）';
   }
   return {

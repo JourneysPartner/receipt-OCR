@@ -6270,6 +6270,240 @@ module.exports = ({test, assert, gas}) => {
     });
   });
 
+  function recheckSnapshot() {
+    const master = gas.stubs.getSpreadsheet('master');
+    return Object.fromEntries(['クレカ処理ログ', '恒久ファイルインデックス', '監査ログ']
+      .map((name) => [name, plain(master.getSheetByName(name).getDataRange().getValues())]));
+  }
+
+  function recheckSeed(fileId = 'rc_fix') {
+    const {customer} = setupWorld({knownMerchant: true});
+    putCsv(customer, {fileId, rows: ['2025/12/10,既知店,1000,',
+      '2025/12/11,既知店,2000,仕入れ']});
+    const imported = webImport(customer);
+    assert.equal(call('getFileState', [fileId]), 'CUSTOMER_FIX_REQUIRED');
+    const destination = gas.stubs.getSpreadsheet(imported.destinationSpreadsheetId);
+    const destinationValues = () => plain(destination.getSheets().map((sheet) =>
+      ({name: sheet.getName(), values: sheet.getDataRange().getValues()})));
+    return {customer, fileId, destination, destinationValues};
+  }
+
+  function recheckFile(customer, fileId) {
+    return call('webAppRecheckCustomerFixFile', [customer.customerId, customer.cardId, fileId]);
+  }
+
+  test('rc 1: returning one customer-fix file clears both hashes and audits without destination writes', () => {
+    const seeded = recheckSeed('23');
+    const {customer, fileId, destinationValues} = seeded;
+    const driveFile = gas.context.DriveApp.getFileById(fileId);
+    const before = recheckSnapshot(), destinationBefore = destinationValues();
+    const processRow = before['クレカ処理ログ'].find((row) => row[7] === fileId);
+    const indexRow = before['恒久ファイルインデックス'].find((row) => row[0] === fileId);
+    const hashColumn = gas.evaluate('PROCESS_FIELD_COLUMNS_.submittedContentHash') - 1;
+    assert.ok(processRow[hashColumn]);
+    assert.ok(indexRow[5]);
+    const result = recheckFile(customer, Number(fileId));
+    assert.deepEqual(result, {ok: true, fileId, fileName: driveFile.getName(),
+      nextState: 'DISCOVERED', waitMinutes: 0});
+    assert.equal(call('getFileState', [fileId]), 'DISCOVERED');
+    const after = recheckSnapshot();
+    assert.equal(after['クレカ処理ログ'].find((row) => row[7] === fileId)[hashColumn], '');
+    assert.equal(after['恒久ファイルインデックス'].find((row) => row[0] === fileId)[5], '');
+    assert.equal(after['監査ログ'].length, before['監査ログ'].length + 1);
+    const audit = after['監査ログ'].at(-1);
+    assert.equal(audit[2], 'REVIEW_RESOLVE');
+    assert.equal(audit[3], 'reviewer@example.com');
+    assert.equal(audit[7], fileId);
+    assert.equal(audit[8], customer.customerId);
+    assert.equal(audit[11], 'WEBAPP');
+    assert.deepEqual(JSON.parse(audit[9]), {fileState: 'CUSTOMER_FIX_REQUIRED'});
+    assert.deepEqual(JSON.parse(audit[10]), {fileState: 'DISCOVERED', operation: 'RECHECK'});
+    assert.deepEqual(destinationValues(), destinationBefore);
+    const file = call('webAppListFolder', [customer.customerId, customer.cardId]).files[0];
+    assert.equal(file.importable, true);
+    assert.equal(Object.hasOwn(file, 'fixReason'), false);
+    assert.equal(driveFile.getName(), result.fileName);
+  });
+
+  test('rc 2: corrected content under the same file ID imports each transaction once', () => {
+    const {customer, fileId, destination} = recheckSeed();
+    recheckFile(customer, fileId);
+    // 同じ Drive ID の内容だけを直し、再提出のハッシュと重複防止を実際の取込で確かめる。
+    const file = gas.context.DriveApp.getFileById(fileId);
+    file.bytes = Buffer.from('利用日,利用店名,金額,使用用途\n' +
+      '2025/12/10,既知店,1000,仕入れ\n2025/12/11,既知店,2000,仕入れ\n', 'utf8');
+    file.lastUpdated = new Date(Date.now() - 11 * 60 * 1000);
+    const options = {destinationSpreadsheetId: destination.getId()};
+    webImport(customer, options);
+    assert.equal(call('getFileState', [fileId]), 'COMPLETED');
+    const rows = destination.getSheetByName('入力用シート').getDataRange().getValues()
+      .slice(1).filter((row) => row[6]);
+    assert.equal(rows.length, 2);
+    assert.deepEqual(rows.map((row) => row[5]).sort((a, b) => a - b), [1000, 2000]);
+    assert.equal(new Set(rows.map((row) => row[6])).size, 2);
+    const before = plain(rows);
+    webImport(customer, options);
+    assert.deepEqual(plain(destination.getSheetByName('入力用シート').getDataRange()
+      .getValues().slice(1).filter((row) => row[6])), before);
+  });
+
+  test('rc 3: unchanged content returns to customer-fix with a reason and no destination changes', () => {
+    const {customer, fileId, destination, destinationValues} = recheckSeed();
+    const before = destinationValues();
+    recheckFile(customer, fileId);
+    webImport(customer, {destinationSpreadsheetId: destination.getId()});
+    assert.equal(call('getFileState', [fileId]), 'CUSTOMER_FIX_REQUIRED');
+    const file = call('webAppListFolder', [customer.customerId, customer.cardId]).files[0];
+    assert.equal(file.fixReason.source, 'IMPORT');
+    assert.deepEqual(file.fixReason.reasons, [{kind: 'PURPOSE_EMPTY', count: 1, rows: [2]}]);
+    assert.deepEqual(destinationValues(), before);
+  });
+
+  test('rc 4: completed and already-rewound files return STATE_CHANGED without any writes', () => {
+    for (const state of ['COMPLETED', 'DISCOVERED']) {
+      const {customer, fileId} = recheckSeed();
+      if (state === 'DISCOVERED') recheckFile(customer, fileId);
+      else call('updateProcessLog', [fileId, {internalState: state}]);
+      const before = recheckSnapshot();
+      assert.deepEqual(recheckFile(customer, fileId), {ok: false, code: 'STATE_CHANGED',
+        fileId, fileName: gas.context.DriveApp.getFileById(fileId).getName(), state,
+        stateLabel: call('menuFileStateLabel_', [state])});
+      assert.deepEqual(recheckSnapshot(), before);
+    }
+  });
+
+  test('rc 5: an active lease stops recheck before the state read with the menu conflict message', () => {
+    const {customer, fileId} = recheckSeed();
+    call('acquireLease', [customer.customerId, fileId, 'rc-run', 'worker', 'PROCESS']);
+    const before = recheckSnapshot();
+    const expected = caught(() => call('webAppInvoke_', [() =>
+      gas.call('menuAssertNoLease_', [fileId, gas.context.activeLeases_])]));
+    let stateReads = 0;
+    const error = withMocks({getFileState: () => { stateReads += 1; return 'CUSTOMER_FIX_REQUIRED'; }},
+      () => caught(() => recheckFile(customer, fileId)));
+    assert.equal(error.code, 'LEASE_CONFLICT');
+    assert.equal(error.message, expected.message);
+    assert.equal(stateReads, 0);
+    assert.equal(call('getFileState', [fileId]), 'CUSTOMER_FIX_REQUIRED');
+    assert.deepEqual(recheckSnapshot(), before);
+  });
+
+  test('rc 6: folder and authorization rejection preserve state and REVIEW_RESOLVE while auditing DENIED', () => {
+    for (const variant of ['other-file', 'nested-folder', 'unauthorized']) {
+      const {customer, fileId} = recheckSeed();
+      let folderId = customer.cardId, customerId = customer.customerId;
+      if (variant === 'other-file') {
+        gas.stubs.createFolder('other-card', {fileIds: [], subFolderIds: []});
+        customer.rootFolder.subFolderIds.push('other-card'); folderId = 'other-card';
+      } else if (variant === 'nested-folder') {
+        gas.stubs.createFolder('nested', {fileIds: [fileId], subFolderIds: []});
+        customer.cardFolder.subFolderIds.push('nested'); folderId = 'nested';
+      } else {
+        const added = addCustomer({customers: {}}, {suffix: '2', customerId: 'C002',
+          reviewers: 'someone@example.com'});
+        customerId = added.customerId; folderId = added.cardId;
+      }
+      const before = recheckSnapshot();
+      let leaseReads = 0, stateReads = 0;
+      const error = withMocks({activeLeases_: () => { leaseReads += 1; return []; },
+        getFileState: () => { stateReads += 1; return 'CUSTOMER_FIX_REQUIRED'; }},
+      () => caught(() => call('webAppRecheckCustomerFixFile', [customerId, folderId, fileId])));
+      assert.equal(error.name, 'AuthorizationError', variant);
+      if (variant === 'other-file') assert.match(error.message, /選択されたファイルはこのフォルダにありません/);
+      if (variant === 'nested-folder') assert.match(error.message, /選択されたフォルダはこの顧客の直下にありません/);
+      assert.equal(leaseReads, 0, variant);
+      assert.equal(stateReads, 0, variant);
+      assert.equal(call('getFileState', [fileId]), 'CUSTOMER_FIX_REQUIRED');
+      const after = recheckSnapshot();
+      for (const name of ['クレカ処理ログ', '恒久ファイルインデックス'])
+        assert.deepEqual(after[name], before[name], variant);
+      assert.deepEqual(after['監査ログ'].filter((row) => row[2] === 'REVIEW_RESOLVE'),
+        before['監査ログ'].filter((row) => row[2] === 'REVIEW_RESOLVE'), variant);
+      const newAudits = after['監査ログ'].slice(before['監査ログ'].length);
+      assert.equal(newAudits.length, variant === 'unauthorized' ? 1 : 0, variant);
+      if (variant === 'unauthorized') {
+        assert.equal(newAudits[0][2], 'PERMISSION');
+        assert.equal(JSON.parse(newAudits[0][10]).decision, 'DENIED');
+        assert.equal(newAudits[0][11], 'NO_CUSTOMER_ACCESS');
+      }
+    }
+  });
+
+  test('rc 7: the ten-minute boundary and registered waiting labels match importability', () => {
+    const now = Date.now();
+    assert.equal(call('webAppStableWaitMinutes_', [now - 600000, now]), 0);
+    assert.equal(call('webAppStableWaitMinutes_', [now - 599000, now]), 1);
+    assert.equal(call('webAppStableWaitMinutes_', [now - 180000, now]), 7);
+    const {customer, fileId} = recheckSeed();
+    const file = gas.context.DriveApp.getFileById(fileId);
+    file.lastUpdated = new Date(now - 180000);
+    putCsv(customer, {fileId: 'rc_unregistered', lastUpdated: new Date(now - 180000)});
+    const realNow = Date.now;
+    Date.now = () => now;
+    try {
+      assert.equal(recheckFile(customer, fileId).waitMinutes, 7);
+      const files = call('webAppListFolder', [customer.customerId, customer.cardId]).files;
+      for (const id of [fileId, 'rc_unregistered']) {
+        const listed = files.find((item) => item.fileId === id);
+        assert.equal(listed.stateLabel, '取込待ち（あと 7 分）');
+        assert.equal(listed.importable, false);
+      }
+      const unsupported = call('webAppFolderFile_', [{...file,
+        getId: () => fileId, getName: () => 'file.txt', getLastUpdated: () => file.getLastUpdated(),
+        getSize: () => file.getSize()}, {[fileId]: 'DISCOVERED'}, now]);
+      assert.equal(unsupported.stateLabel, '未処理（取込待ち） (DISCOVERED)');
+      assert.equal(unsupported.importable, false);
+      Date.now = () => now + 420001;
+      const stableFiles = call('webAppListFolder', [customer.customerId, customer.cardId]).files;
+      assert.equal(stableFiles.find((item) => item.fileId === fileId).stateLabel,
+        '未処理（取込待ち） (DISCOVERED)');
+      assert.equal(stableFiles.find((item) => item.fileId === fileId).importable, true);
+      assert.equal(stableFiles.find((item) => item.fileId === 'rc_unregistered').stateLabel, '取込可能');
+    } finally { Date.now = realNow; }
+  });
+
+  test('rc 8: one recheck stays within its measured Sheets read budget and writes only to master', () => {
+    const {customer, fileId, destination} = recheckSeed();
+    let destinationWrites = 0;
+    const originals = destination.getSheets().map((sheet) => {
+      const write = sheet._write;
+      sheet._write = function() { destinationWrites += 1; return write.apply(this, arguments); };
+      return {sheet, write};
+    });
+    const api = gas.context.Sheets.Spreadsheets.Values, batchUpdate = api.batchUpdate;
+    api.batchUpdate = function(request, spreadsheetId) {
+      assert.equal(spreadsheetId, 'master');
+      return batchUpdate.apply(this, arguments);
+    };
+    gas.stubs.resetApiCallCounts();
+    let reads;
+    try {
+      assert.equal(recheckFile(customer, fileId).ok, true);
+      reads = gas.stubs.getApiCallCounts().batchGet;
+    } finally {
+      api.batchUpdate = batchUpdate;
+      originals.forEach(({sheet, write}) => { sheet._write = write; });
+    }
+    assert.ok(reads <= 6, `recheck batchGet count: ${reads} (measured budget: 6)`);
+    assert.equal(destinationWrites, 0);
+  });
+
+  test('rc 12: existing whole-UI safe rendering check also covers the new paths', () => {
+    ['innerHTML', 'outerHTML', 'insertAdjacentHTML'].forEach((name) => {
+      assert.equal(WEBAPP_UI_SOURCE.includes(name), false, `${name} must not be used`);
+    });
+  });
+
+  test('rc 12: recheck exists and renders file names through textContent notices', () => {
+    assert.equal(clientEval('typeof recheckCustomerFix'), 'function');
+    const start = WEBAPP_UI_SOURCE.indexOf('async function recheckCustomerFix(');
+    const end = WEBAPP_UI_SOURCE.indexOf('\n    async function ', start + 1);
+    const source = WEBAPP_UI_SOURCE.slice(start, end < 0 ? undefined : end);
+    assert.ok(source.includes('showNotice('));
+    assert.ok(WEBAPP_UI_SOURCE.includes("recheckButton.textContent = '修正済み → 取込待ちに戻す'"));
+    assert.ok(WEBAPP_UI_SOURCE.includes('text.textContent = String(message'));
+  });
+
   test('pf 13: a failed combined batchUpdate leaves both submitted hashes untouched', () => {
     const {customer} = setupWorld();
     const seeded = seedPrefetchFile(customer, 'pf_hash_atomic');
