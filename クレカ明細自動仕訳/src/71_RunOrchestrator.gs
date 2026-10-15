@@ -705,14 +705,6 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
         // （INV-07）で止める ── 判定まで届くのは一致する場合だけである。
         validation.contentHash = contentHash;
         validation.hashVersion = VERSIONS.HASH;
-        var indexRows = permanentIndexRowsForScan_()
-          .filter(function(row) { return row.fileId !== fileId; })
-          .map(function(row) {
-            return {customerId: row.customerId, fileId: row.fileId,
-              contentHash: row.contentHash, hashVersion: row.hashVersion, active: true};
-          });
-        validation.duplicate = checkDuplicateFile(
-          customer.customerId, contentHash, VERSIONS.HASH, indexRows);
         transactions = transactions.map(function(tx) {
           return Object.assign({}, tx, {
             identityHash: generateIdentityHash(tx),
@@ -736,7 +728,9 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
         // spec_import_prefetch §2.3）。F列が空のままだと同一内容の再提出を重複として
         // 検出できない（INV-05）。以前は別々のロックで書いていたので、間で殺されると
         // 処理ログにだけハッシュが入った。
-        updateProcessLogAndContentHash_(fileId, Object.assign({
+        // ロックの外で比べると、同時取込が互いのハッシュを読む前に通ってしまう。
+        // ハッシュを書くロックの中で判定し、先に書いたファイルを原本にする。
+        var hashed = updateProcessLogAndContentHash_(fileId, Object.assign({
           formatId: cardFormat.formatId,
           sourceSheetName: resolvedSheet.name === null ? '' : String(resolvedSheet.name),
           submittedContentHash: contentHash,
@@ -747,7 +741,9 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
           excludedCount: parsed.excludedRows.length,
           readCount: parsed.txs.length
         }, versionFields_({codeVersion: VERSIONS.CODE, formatVersion: cardFormat.version,
-          hashVersion: VERSIONS.HASH, sheetSchemaVersion: VERSIONS.SHEET_SCHEMA})));
+          hashVersion: VERSIONS.HASH, sheetSchemaVersion: VERSIONS.SHEET_SCHEMA})),
+          {customerId: customer.customerId, hashVersion: VERSIONS.HASH});
+        validation.duplicate = hashed.duplicate;
         phase('duplicate');
         // 8-7：転記先構成検証（`WRITING`遷移前）。
         validation.destinationSchema = destinationSchemaForRun_(customer);

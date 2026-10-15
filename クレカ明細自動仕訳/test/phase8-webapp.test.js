@@ -2837,14 +2837,14 @@ module.exports = ({test, assert, gas}) => {
     assert.ok(latestImportCall().sharedWindow.errors >= 1);
   });
 
-  test('multi 14: four files add at most 20 reads each and fixed reads stay at measured cost', () => {
+  test('multi 14: four files add at most 19 reads each and fixed reads stay at measured cost', () => {
     const one = readCountByImport(1);
     const four = readCountByImport(4);
     const perFile = (four.reads - one.reads) / 3;
     const fixedReads = one.reads - perFile;
     assert.ok(Number.isInteger(perFile) && perFile > 0,
       `1本増えるごとの読取を測定できる: 1=${one.reads}, 4=${four.reads}`);
-    assert.ok(perFile <= 20, `1本増えるごとの読取は${perFile}回（上限20）`);
+    assert.ok(perFile <= 19, `1本増えるごとの読取は${perFile}回（上限19）`);
     assert.equal(one.record.totalReads, one.reads);
     assert.equal(four.record.totalReads, four.reads);
     // 変更前（2026-10-02）：1ファイル43回・4ファイル118回、固定費18回。
@@ -2852,6 +2852,7 @@ module.exports = ({test, assert, gas}) => {
     // 1本増えるごと20回。上限はこの実測値に合わせる。
     // 変更後（2026-10-12）：4材料を1回のbatchGetにまとめ、固定費16回・1本20回。
     // 固定費を増やさないため、この実測値へ上限を下げる。
+    // K-W25：外の重複判定読取をなくし、1本19回（実測）へ下げる。
     assert.ok(fixedReads <= 16,
       `呼出しの固定費が${fixedReads}回（上限16）。1=${one.reads}, 4=${four.reads}`);
   });
@@ -5816,7 +5817,7 @@ module.exports = ({test, assert, gas}) => {
       }]);
   }
 
-  test('pf 1: importing two files reduces the second file to the measured 20 reads', () => {
+  test('pf 1: importing two files reduces the second file to the measured 19 reads', () => {
     const {customer} = setupWorld({knownMerchant: true});
     [0, 1].forEach((index) => putCsv(customer, {fileId: `pf_one_${index}`,
       rows: [`2025/12/${10 + index},既知店,${1000 + index},仕入れ`]}));
@@ -5824,8 +5825,8 @@ module.exports = ({test, assert, gas}) => {
     const files = importFileResults(result);
     assert.equal(result.done, 2);
     assert.equal(files.length, 2);
-    assert.equal(files[1].reads, 20,
-      `2本目の読取は${files[1].reads}回（5回減った実測20回のはず）: ${JSON.stringify(files[1])}`);
+    assert.equal(files[1].reads, 19,
+      `2本目の読取は${files[1].reads}回（K-W25で外の重複判定読取が1回減り、実測19回のはず）: ${JSON.stringify(files[1])}`);
   });
 
   test('pf 2: transition reads both remembered rows in one batchGet and updates both', () => {
@@ -6783,4 +6784,6 @@ module.exports = ({test, assert, gas}) => {
       assert.equal(WEBAPP_UI_SOURCE.includes(name), false, `${name} must not be used`));
   });
 
+  require('./kw25-import-helpers')({test, assert, gas, setupWorld, putCsv, createWebDestination,
+    webImport, importFileResults, openReviewsFor, withMocks, call, plain});
 };

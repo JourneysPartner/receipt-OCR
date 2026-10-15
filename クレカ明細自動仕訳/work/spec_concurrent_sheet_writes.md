@@ -190,6 +190,13 @@ function ensureRowExists_(sheet, rowNumber) {
 3. 監査の連鎖の検証（次の［記帳を実行］の最初の呼出しで走る `verifyChain('RECENT')`）が `BROKEN_NOTIFY_ONLY` を出さない（`IMPORT_CALL`・通知で確かめる）。
 4. `IMPORT_CALL` の 1 ファイルの読取が gas-push-114 と同じ（行を足した呼出しだけ +1 があり得る）。
 
+**受入の結果（2026-10-15、合格）**：push 後の実機の取込は 10-14 22:02（au 4 本、うち au202506 を転記）・10-15 16:24（アプラス 202510 を転記）、要確認の確定は 10-15 17:37（SAISON_2504 の 1 件、`PARTNER_BATCH` committed 1・errors 0）。
+
+1. 取込・確定とも `FAILED` なし、`quotaHits` 0。
+2. `opsShowLeases` ＝ `(リースなし)`（10-15）。
+3. `verifyChain('RECENT')` ＝ ok（500 行、`brokenAt` なし。10-15 に run-function で確かめた）。前検査の所見 0。
+4. 転記したファイルの読取は 28（au202506）・27（アプラス 202510）で、gas-push-114 の 29（SAISON_2504、10-14 19:03）以下。要修正のファイルは 8〜10。
+
 ## 7. 2 段目・3 段目への申し送り
 
 - 2 段目：重複の判定を `updateProcessLogAndContentHash_` のロックの中で（恒久ファイルインデックスを同じ `batchGet` で読み、先に書いたほうを原本にする）、用途修正版の判定を `registerPrepared` のロックの中で（取引インデックスを読み直し、見つかれば区分 2 へ組み直す）。

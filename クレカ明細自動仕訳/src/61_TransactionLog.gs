@@ -218,7 +218,7 @@ function getTxIndexSheet(customerId, year, createIfMissing) {
   return sheet;
 }
 
-function registerPrepared(txs, runId, existingByIdHint) {
+function registerPrepared(txs, runId, existingByIdHint, options) {
   if (!Array.isArray(txs)) throw new TypeError('txs must be an array');
   return withScriptLock_(function() {
     var logSheet = transactionLogSheet_();
@@ -234,6 +234,9 @@ function registerPrepared(txs, runId, existingByIdHint) {
     var existingById = existingByIdHint || activeTransactionRecordsByIds_(ids);
     step_('reg:existing');
     var appends = [];
+    var purposeRevision = options && options.purposeRevision;
+    var updates = [];
+    var knownLastRows = Object.create(null);
 
     // 取引インデックスのシートは**この呼出しの中で1回だけ引く。**
     //
@@ -305,16 +308,54 @@ function registerPrepared(txs, runId, existingByIdHint) {
         [23, 24, 25, 26, 27, 46].forEach(function(column) { // 読取確認値 b/f/i/k/m/g
           if (carried[column] !== undefined) updatedRow[column] = carried[column];
         });
-        logSheet.getRange(current._rowNumber, 1, 1, TRANSACTION_LOG_WIDTH_)
+        if (purposeRevision) updates.push({rowNumber: current._rowNumber, row: updatedRow});
+        else logSheet.getRange(current._rowNumber, 1, 1, TRANSACTION_LOG_WIDTH_)
           .setValues([updatedRow]);
         return;
       }
 
       var now = nowIso_(); var row = makeTransactionRow_(tx, runId, now);
-      var year = Number(now.slice(0, 4)); var indexSheet = indexSheetFor(row[3], year);
+      var year = Number(now.slice(0, 4));
+      var indexSheet = purposeRevision ? null : indexSheetFor(row[3], year);
       var indexRow = [row[0], row[3], row[4], Number(txInput_(tx, ['occurrenceIndex', 'appearanceOrder'], 0)), row[38],
         txInput_(tx, ['contentHash', 'submittedContentHash'], ''), row[40], row[12], true, now, now];
-      appends.push({row: row, indexSheet: indexSheet, indexRow: indexRow});
+      appends.push({row: row, indexSheet: indexSheet, indexRow: indexRow, year: year});
+    });
+
+    // 外の判定から待っている間に、別のファイルが登録を終えていることがある。
+    // 候補なら既存行も変えないよう、更新とシート作成は判定が済むまで保留する。
+    if (purposeRevision && appends.length) {
+      var currentYear = Number(nowIso_().slice(0, 4));
+      var targets = [];
+      [currentYear - 1, currentYear].forEach(function(year) {
+        var sheet = getTxIndexSheet(purposeRevision.customerId, year, false);
+        if (sheet) targets.push({sheet: sheet, year: year});
+      });
+      var fetched = targets.length ? sheetsReadRanges_(targets[0].sheet, targets.map(function(target) {
+        return quoteSheetName_(target.sheet.getName()) + '!A1:' + columnLetter_(TX_INDEX_WIDTH_);
+      })) : [];
+      var items = [];
+      targets.forEach(function(target, position) {
+        var rows = fetched[position] || [];
+        items = items.concat(txIndexItemsFromRows_(sheetRowsFromValues_(rows.slice(1), TX_INDEX_WIDTH_),
+          purposeRevision.customerId, {purpose: 'FREEE_PENDING'}, null));
+        var key = String(purposeRevision.customerId) + '_' + String(target.year);
+        indexSheetByKey[key] = target.sheet;
+        knownLastRows[key] = lastDataRowFromValues_(rows);
+      });
+      var candidate = checkPurposeRevisionCandidate(purposeRevision.customerId,
+        purposeRevision.identityHashes, purposeRevision.contentHash, purposeRevision.hashVersion, items, {});
+      if (candidate.candidate) {
+        Logger.log('PURPOSE_REVISION_IN_LOCK ' + JSON.stringify({fileId: String(txs[0].fileId),
+          matchedFileId: candidate.fileId}));
+        return {registered: false, purposeRevision: candidate};
+      }
+    }
+    updates.forEach(function(update) {
+      logSheet.getRange(update.rowNumber, 1, 1, TRANSACTION_LOG_WIDTH_).setValues([update.row]);
+    });
+    if (purposeRevision) appends.forEach(function(append) {
+      append.indexSheet = indexSheetFor(append.row[3], append.year);
     });
 
     step_('reg:build');
@@ -327,13 +368,18 @@ function registerPrepared(txs, runId, existingByIdHint) {
     var byIndexSheet = [];
     appends.forEach(function(append) {
       var bucket = byIndexSheet.filter(function(item) { return item.sheet === append.indexSheet; })[0];
-      if (!bucket) { bucket = {sheet: append.indexSheet, rows: []}; byIndexSheet.push(bucket); }
+      if (!bucket) {
+        bucket = {sheet: append.indexSheet, rows: [],
+          knownLastRow: knownLastRows[String(append.row[3]) + '_' + String(append.year)]};
+        byIndexSheet.push(bucket);
+      }
       bucket.rows.push(append.indexRow);
     });
     byIndexSheet.forEach(function(bucket) {
-      appendRowsBatched_(bucket.sheet, bucket.rows, TX_INDEX_WIDTH_, 'idx');
+      appendRowsBatched_(bucket.sheet, bucket.rows, TX_INDEX_WIDTH_, 'idx', bucket.knownLastRow);
     });
     step_('reg:appendIndex');
+    return {registered: true, purposeRevision: null};
   });
 }
 
@@ -371,10 +417,10 @@ function rememberedTxRecordsByIds_(fullTxIds) {
  * `apiLastDataRow_`で決める ── `getLastRow()`はSpreadsheetAppのキャッシュ
  * 越しで、Sheets APIで足したばかりの行を数え落とす。
  */
-function appendRowsBatched_(sheet, rows, width, label) {
+function appendRowsBatched_(sheet, rows, width, label, knownLastRow) {
   if (!rows || !rows.length) return null;
   var tag = label ? 'append:' + label + ':' : null;
-  var startRow = apiLastDataRow_(sheet, width) + 1;
+  var startRow = (knownLastRow === undefined ? apiLastDataRow_(sheet, width) : knownLastRow) + 1;
   if (tag) step_(tag + 'last');
   ensureRowExists_(sheet, startRow + rows.length - 1);
   if (tag) step_(tag + 'grow');
@@ -603,7 +649,16 @@ function queryTxIndex(customerId, filter) {
   var result = [];
   years.forEach(function(year) {
     var sheet = getTxIndexSheet(customerId, year, false); if (!sheet) return;
-    readSheetRows_(sheet, TX_INDEX_WIDTH_).forEach(function(record) {
+    result = result.concat(txIndexItemsFromRows_(readSheetRows_(sheet, TX_INDEX_WIDTH_),
+      customerId, filter, lookbackCutoff));
+  });
+  return result;
+}
+
+/** 外の照会と登録時の再判定で、freee未取込などの絞り込みを一致させる。 */
+function txIndexItemsFromRows_(records, customerId, filter, lookbackCutoff) {
+  var result = [];
+  records.forEach(function(record) {
       var v = record.values; if (String(v[1]) !== String(customerId)) return;
       var item = {fullTxId: String(v[0]), customerId: String(v[1]), fileId: String(v[2]), occurrenceIndex: Number(v[3]),
         identityHash: v[4], contentHash: v[5], hashVersion: String(v[6]), freeeStatus: String(v[7]), active: toBool(v[8]),
@@ -614,7 +669,6 @@ function queryTxIndex(customerId, filter) {
       if (filter.active !== undefined && item.active !== Boolean(filter.active)) return;
       if (filter.purpose === 'FREEE_PENDING' && (!item.active || item.freeeStatus === FREEE_IMPORT_STATUS.IMPORTED)) return;
       result.push(item);
-    });
   });
   return result;
 }

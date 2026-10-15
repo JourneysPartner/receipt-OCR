@@ -236,8 +236,27 @@ function runPreValidationBlock(input) {
   // 上限がいくらでも超えられる（4.31）。
   markPhase(input, 'pre:plannedStatus');
   if (transactions.length) {
-    registerPrepared(transactions, input.runId, existingById);
+    var registerOptions;
+    // 承認済みの要因を再び止めると、承認しても進めない（INV-28）。
+    if (validation.purposeRevision && validation.contentHash && validation.hashVersion &&
+        !validationCauseApproved_(validation, 'PURPOSE_REVISION_CANDIDATE')) {
+      registerOptions = {purposeRevision: {
+        customerId: input.customer.customerId,
+        identityHashes: (input.transactions || []).map(function(tx) { return tx.identityHash; }),
+        contentHash: validation.contentHash, hashVersion: validation.hashVersion
+      }};
+    }
+    var registered = registerPrepared(transactions, input.runId, existingById, registerOptions);
     markPhase(input, 'pre:register');
+    if (registered && registered.purposeRevision && registered.purposeRevision.candidate) {
+      validation.purposeRevision = registered.purposeRevision;
+      var reclassified = classifyValidationResult(validation);
+      if (reclassified.category !== 2) {
+        throw new IntegrityError(null, 'Purpose revision in lock must classify as category 2');
+      }
+      return preValidationResult_(2, reclassified.code, [], reclassified.reviewEntries,
+        {classification: reclassified, purposeRevisionInLock: true});
+    }
     if (input.runId) incrementRunTransactionCount(input.runId, transactions.length);
     markPhase(input, 'pre:runCount');
   }

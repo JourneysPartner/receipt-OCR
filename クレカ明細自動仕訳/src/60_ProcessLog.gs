@@ -413,18 +413,37 @@ function syncPermanentContentHash(fileId, contentHash) {
 }
 
 /**
- * 提出時点の内容ハッシュを、2行を読み直してから一括で書く。
+ * 提出時点の内容ハッシュを、処理ログの行と恒久索引の全行を読んでから一括で書く。
  * 片方だけにハッシュが残ると再提出の重複判定が崩れるため、両方のINV-07を
  * 先に確かめ、1つのSheets API書込にまとめる。
  */
-function updateProcessLogAndContentHash_(fileId, fields) {
+function updateProcessLogAndContentHash_(fileId, fields, duplicateCheck) {
   if (!fields || fields.submittedContentHash === undefined) {
     throw new TypeError('submittedContentHash is required');
   }
   return withScriptLock_(function() {
-    var pair = getFileRecordsPair_(fileId);
-    var record = pair.process;
-    var permanent = pair.permanent;
+    var key = String(fileId);
+    var processSheet = processLogSheet_();
+    var indexSheet = permanentFileIndexSheet_();
+    var processRowNumber = fileRowNumberCache_.process[key];
+    var ranges = processRowNumber ?
+      [a1Range_(processSheet.getName(), processRowNumber, 1, PROCESS_LOG_WIDTH_)] : [];
+    ranges.push(quoteSheetName_(indexSheet.getName()) + '!A2:' + columnLetter_(FILE_INDEX_WIDTH_));
+    var fetched = sheetsReadRanges_(processSheet, ranges);
+    var indexRows = sheetRowsFromValues_(fetched[fetched.length - 1], FILE_INDEX_WIDTH_);
+    var matches = indexRows.filter(function(row) { return String(row.values[0]) === key; });
+    if (matches.length > 1) {
+      throw new IntegrityError('TRANSACTION_LOG_AMBIGUOUS', 'Duplicate permanent file index fileId');
+    }
+    var permanent = matches[0] || null;
+    if (permanent) fileRowNumberCache_.index[key] = permanent.rowNumber;
+    var processValues = processRowNumber ? padRowValues_(fetched[0] && fetched[0][0], PROCESS_LOG_WIDTH_) : null;
+    var record = processValues && String(processValues[7]) === key ?
+      {rowNumber: processRowNumber, values: processValues} : null;
+    if (!record) {
+      delete fileRowNumberCache_.process[key];
+      record = getProcessLogRecord_(fileId);
+    }
     if (!record) throw makeCatalogError_('REQUIRED_LOG_WRITE_FAILED', 'Process log not found: ' + fileId);
     if (!permanent) throw makeCatalogError_('REQUIRED_LOG_WRITE_FAILED', 'Permanent file index not found: ' + fileId);
 
@@ -440,6 +459,19 @@ function updateProcessLogAndContentHash_(fileId, fields) {
     // 両方の判定を済ませてから、どちらかの不変条件違反を返す。
     if (processHashWrite.error) throw processHashWrite.error;
     if (indexHashWrite.error) throw indexHashWrite.error;
+
+    var duplicate = null;
+    if (duplicateCheck) {
+      var rows = indexRows.filter(function(row) {
+        return String(row.values[0] || '') !== '' && String(row.values[0]) !== key;
+      }).map(function(row) {
+        var item = permanentIndexRowFromValues_(row.values, row.rowNumber);
+        return {customerId: item.customerId, fileId: item.fileId,
+          contentHash: item.contentHash, hashVersion: item.hashVersion, active: true};
+      });
+      duplicate = checkDuplicateFile(duplicateCheck.customerId, fields.submittedContentHash,
+        duplicateCheck.hashVersion, rows);
+    }
 
     var data = [];
     Object.keys(fields).forEach(function(name) {
@@ -457,7 +489,9 @@ function updateProcessLogAndContentHash_(fileId, fields) {
     data.push({range: a1Range_(indexSheetName, permanent.rowNumber, 12, 12),
       values: [[nowIso_()]]});
     Sheets.Spreadsheets.Values.batchUpdate({valueInputOption: 'RAW', data: data}, masterSpreadsheet_().getId());
-    return writtenRecords_(record, permanent, fields);
+    var result = writtenRecords_(record, permanent, fields);
+    result.duplicate = duplicate;
+    return result;
   });
 }
 
