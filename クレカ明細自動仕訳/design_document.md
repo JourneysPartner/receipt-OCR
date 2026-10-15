@@ -3297,6 +3297,7 @@ Ver.2.2はこれらを「逃げ道として`custom`の行を手作業で作成�
 - 不変：取引同一性ハッシュの一致だけを根拠に取引を単独で自動除外しない。用途は修正版候補の照合と部分一致警告の2つに限る（仕様12.1）。
 - 不変：別顧客間では重複判定しない（仕様12.2）。
 - 事前：`checkDuplicateFile`と`checkPurposeRevisionCandidate`は`classifyValidationResult`の入力として呼ばれ、**その結果は必ず区分判定に使用される**（CR-D）。
+- 不変：**（K-W25、2026-10-15）二重取込の判定は、相手の記録を書くのと同じロックの中の読取で行う。**ロックの外で読んでから判定すると、同時に取り込んだ 2 本が互いの記録を見る前に通り、両方が転記される。重複（`checkDuplicateFile`）は、提出時点の内容ハッシュを書く`updateProcessLogAndContentHash_`のロックの中で、恒久ファイルインデックスの全行を読んで判定する（先にハッシュを書いたファイルが原本）。用途修正版（`checkPurposeRevisionCandidate`）は、区分の評価順（区分2→1→3）を守るためロックの外でも判定したうえで、取引を登録する`registerPrepared`のロックの中でもう一度判定し、候補なら何も書かずに区分2へ戻す（先に取引を登録したファイルが原本。承認済みの要因は判定しない＝INV-28）。どちらも 1 本ずつの取込では結果が変わらない。
 - 事後：`diffByIdentityHash`の`ratio`が`SETTINGS.FILE_DIFF_MAX_RATIO`を超える場合、差分反映を提示せず取消し→再取込へ誘導する（INV-23）。
 
 **異常系**：`DUPLICATE_CONTENT`（区分2・`REVIEW_WAIT`）。**`PURPOSE_REVISION_CANDIDATE`（区分2・`REVIEW_WAIT`・要確認`DUPLICATE`）**。処理済みファイル変更は要確認`FILE_CHANGED`。**freee取込済みの取引は自動更新しない**（仕様12.3）。
@@ -4017,7 +4018,7 @@ Ver.2.0はこれらを「期待どおりである」とだけ記していた。�
 
 | 関数名 | 引数 | 戻り値 | 保証すること |
 |---|---|---|---|
-| `registerPrepared(txs, runId)` | 取引配列、実行ID | void | 書込前登録。**取引ログK列（予定最終状態）を書込前登録の時点で確定して保存する**。恒久取引インデックスへも同時に登録する |
+| `registerPrepared(txs, runId, existingByIdHint, options)` | 取引配列、実行ID、（任意）既存行、（任意）`{purposeRevision}` | `{registered, purposeRevision}` | 書込前登録。**取引ログK列（予定最終状態）を書込前登録の時点で確定して保存する**。恒久取引インデックスへも同時に登録する。`options.purposeRevision`があり新しい行があるときは、ロックの中で取引インデックス（前年・今年）を読んで用途修正版を再判定し、候補なら**何も書かずに**`{registered: false, purposeRevision}`を返す（K-W25） |
 | `getTransaction(fullTxId)` | 完全値 | `TxLog` | **`有効=TRUE`の行のみ**を対象とする。2行以上あれば`IntegrityError`（INV-03） |
 | `getTransactionsByStatus(fileId, statuses)` | ファイル、状態配列 | `TxLog[]` | `有効=TRUE`の行のみ（INV-03） |
 | `updateTransactionStatus(fullTxId, fromStatus, toStatus)` | 完全値、遷移元、遷移先 | void | `ALLOWED_TX_TRANSITIONS`を検証し、現在値が`fromStatus`でなければ拒否する（比較更新） |

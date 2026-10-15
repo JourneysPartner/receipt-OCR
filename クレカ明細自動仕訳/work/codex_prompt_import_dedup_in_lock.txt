@@ -1,0 +1,59 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の、**K-W25：二重取込の判定（同じ中身のファイル・用途だけ直したファイル）をロックの中へ移す**直しを受け取ります（取込の並列化 §15-10 の 2 段目。利用者に見える変化は作りません）。
+
+作業ツリーは main の最新（コミット 4bb7bd7）で、`src/`・`test/` に未コミットの変更はありません。あなたの変更は、ステージされていない差分として残してください ── **`git add` しないこと。**開始時の `node test/run-tests.js` の本数は、始める前に自分で数えて報告に書いてください（1543/1543 のはずです）。
+
+開始時の `src/`・`test/` の写しを `work/.kw25-check/baseline/` に置いてあります（私が md5 で一致を確かめました）。サンドボックスで親フォルダの `.git` が読めず `git diff` が使えない場合は、この写しとの比較で「変えたファイルの一覧」を報告してください。写しは消さないこと（私が後で消します）。
+
+## 仕様書
+
+`work/spec_import_dedup_in_lock.md`（1.0）。**全部読んでから始めてください。**§1 は「なぜ」、§2 が直すこと、§3 が変えないこと、§4 がテスト、§5 が変異です。1 段目の仕様書 `work/spec_concurrent_sheet_writes.md` は背景として読んでかまいません（変えません）。
+
+## 直すこと（要点。詳細は仕様書 §2）
+
+1. `src/10_DriveScanner.gs`：`permanentIndexRowsForScan_` の 1 行の写し方を `permanentIndexRowFromValues_` に切り出す（振る舞いは変えない）。
+2. `src/60_ProcessLog.gs`：`updateProcessLogAndContentHash_(fileId, fields, duplicateCheck)`。ロックの中の 1 回の `batchGet` で、処理ログの自分の行と恒久ファイルインデックスの全行を読み、自分の行は全行から探し、`duplicateCheck` があれば重複を判定して戻り値の `duplicate` に入れる（§2.1）。
+3. `src/71_RunOrchestrator.gs`：重複の判定の外の読取（708〜715 行）をやめ、2 の戻り値を `validation.duplicate` に入れる。外の用途修正版の判定（722〜731 行）は残す。
+4. `src/61_TransactionLog.gs`：`queryTxIndex` の行の写し方と絞り込みを補助に切り出す。`registerPrepared(txs, runId, existingByIdHint, options)` は、`options.purposeRevision` があり新しい行があるとき、書かずに組み立てた後、取引インデックス（前年・今年）を 1 回で読んで用途修正版を判定し、候補なら何も書かずに返す。候補でなければ、読んだ末尾を `appendRowsBatched_` の `knownLastRow` に渡して書く（§2.2）。
+5. `src/70_ImportFlow.gs`：`runPreValidationBlock` が条件を満たすとき `options.purposeRevision` を渡し、候補が返ったら判定し直して区分 2 として返す（§2.2-3・4）。
+
+---
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。**
+2. **git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。
+3. **`src/` で変えてよいのは `10_DriveScanner.gs`・`60_ProcessLog.gs`・`61_TransactionLog.gs`・`70_ImportFlow.gs`・`71_RunOrchestrator.gs` の 5 つだけ。**`97_Ops.gs` は変えない（中に生の NUL バイトが 2 個ある。終わったら数えて報告：前後とも 2）。`41_DuplicateChecker.gs`・`30_TransactionValidator.gs`・`52_FileResolution.gs` も変えない。
+4. **改行の形を保つこと。**上の 5 つはいま LF だけ（CR 0）・BOM なし。ファイル全体を書き直す道具を使っても、LF のまま・UTF-8（BOM なし）のままにすること。終わったら 5 つの CR の数を数えて報告すること（0 のはず）。
+5. テストの変更は `kw25 N: …`（仕様書 §4 の 1〜14）を**足すこと**（補助を足してよい）。**既存のテストの期待（assert）は変えないこと。**例外は仕様書 §3 の `pf 1`・`budget 1`・`multi 14` の 3 つだけで、読取が 1 減ったぶんだけ**実測値に合わせる**（余裕を足さない）。実測が 19 にならなければ直さずに止めて報告すること。ほかの既存のテストが赤になったら、変えずに止めて理由を報告すること ── 特に、読取の回数を数えるテスト（`budget`・`multi`・`bulk`・`kw9`・`scope`・`pf`・`rc`・`kw21`・`kw24`・`phase6-round-trips`）、重複・用途修正版のテスト（`phase1b-partner-duplicate`・`phase4-file-resolution`・`phase3-*`）、INV-07・INV-28 のテスト。`test/fixtures/` は変えない。`test/gas-stubs.js`・`test/gas-harness.js` は、足りない仕掛けを足すだけなら変えてよい（足したものを全部報告する）。**模擬ロック `MemoryScriptLock` の「入れ子を拒む」振る舞いは変えないこと。**
+6. **テストを先に赤にしてから直すこと。**kw25 を書き、いまの実装で赤になることを確かめてから直す。いまでも緑になるものはどれかを報告する。
+7. **読取の回数を増やさないこと**（仕様書 §3 の例外：その年の最初の取引インデックスの登録の +1）。kw25 4・9・13 の数は直す前に実測し、その値そのものを固定すること。測った値を報告すること。
+8. Sheets API の読取は既存の口（`sheetsReadRanges_`・`sheetsBatchGetPaced_`・`apiSheetRowCount_`）だけを通すこと。`Sheets.Spreadsheets.Values.batchGet`・`Sheets.Spreadsheets.get` を直に呼ばない。
+9. **入れ子のロックを作らないこと。新しくロックを取らないこと。**変えた関数がロックの中で呼ばれるか外で呼ばれるかを変えない。
+10. **候補・重複のときに書かないものを書かないこと**（仕様書 §2.2-2 の「何も書かずに」：既存行の更新・取引ログと取引インデックスへの追記・シートの作成・実行の取引件数）。ログに金額・店名・用途を出さないこと。
+11. **日本語のコメントは UTF-8 で書くこと。**以前、あなたの書いた日本語が `?` の羅列に化けた。終わったら `grep -a -n '???' src/*.gs src/*.html test/*.js` が空であること（始める前も空）、U+FFFD が `src/` で 0・`test/` で開始時の 1（`test/phase1a-pure-logic.test.js`）のままであることを確かめて報告すること。コメントは周りのコードと同じ密度・語り口（「なぜ」を書く）で。
+12. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断で安全側を外さないこと。迷ったら止めて報告すること。
+
+## 進め方
+
+1. 仕様書を読む。次を読む：`src/71_RunOrchestrator.gs` の `processDiscoveredFile_`（500〜920 行）、`src/60_ProcessLog.gs` の `cachedFileRecord_`〜`getFileRecordsPair_`・`submittedContentHashWrite_`・`writtenRecords_`・`updateProcessLogAndContentHash_`、`src/10_DriveScanner.gs` の `permanentIndexRowsForScan_`、`src/41_DuplicateChecker.gs` の全部、`src/61_TransactionLog.gs` の `getTxIndexSheet`・`registerPrepared`・`appendRowsBatched_`・`queryTxIndex`、`src/01_DataAccessCore.gs` の `withScriptLock_`・`sheetsReadRanges_`・`readSheetRows_`・`sheetRowsFromValues_`・`apiLastDataRow_`・`apiLastDataRows_`、`src/70_ImportFlow.gs` の `runPreValidationBlock`・`processFile`、`src/30_TransactionValidator.gs` の `validationCauseApproved_`・`classifyValidationResult`、`test/phase8-webapp.test.js` の `pf 1`〜`pf 14` と `multi 14`、`test/phase6-round-trips.test.js` の `budget 1`、`test/phase4-concurrent-writes.test.js`（1 段目の書き方の手本）
+2. 始める前の数を取る：`node test/run-tests.js` の最後の行、`???` と U+FFFD の grep、97 の NUL の数、5 つのファイルの CR の数
+3. kw25 を書く → 赤を確かめる（直す前の読取の数もここで測る）
+4. 直す
+5. `node test/run-tests.js` を全部緑にする
+6. 仕様書 §5 の M1〜M18 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら、変異を入れる前の内容と同じか確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する
+7. 変えたファイルの一覧を確かめる（`git diff --stat -- src/ test/`、使えなければ写しとの比較）
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 直す前に kw25 のどれが赤だったか（緑だったものも）
+- `pf 1`・`budget 1`・`multi 14` をどう直したか（直す前と後の数）
+- 実測した読取の数：kw25 4（ハッシュの書込）・9（判定あり・なしの登録）・13（`options` なし）、直す前と後
+- 模擬・ハーネスに足したもの（全部）。「別の実行が先にロックを通った」をどう作ったか
+- M1〜M18 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て（足したテストがあればその名前）
+- `updateProcessLogAndContentHash_`・`registerPrepared`・`appendRowsBatched_`・`queryTxIndex` の呼出し元の一覧（変えた後）
+- 仕様書が間違っていた・足りなかった箇所（黙って直さないこと）、自分で決めた箇所（全部）
+- `???`・U+FFFD・97 の NUL・5 つのファイルの CR の数（前と後）
+- 変えたファイルの一覧（始める前と後）
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。

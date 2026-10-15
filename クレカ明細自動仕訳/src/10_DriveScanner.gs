@@ -88,20 +88,25 @@ function permanentIndexRowsForScan_() {
   return readSheetRows_(permanentFileIndexSheet_(), FILE_INDEX_WIDTH_SCANNER_)
     .filter(function(row) { return String(row.values[0] || '') !== ''; })
     .map(function(row) {
-      return {
-        fileId: String(row.values[0]),
-        customerId: String(row.values[1] || ''),
-        originalFileName: String(row.values[2] || ''),
-        state: String(row.values[3] || ''),
-        binaryHash: String(row.values[4] || ''),
-        contentHash: String(row.values[5] || ''),
-        hashVersion: String(row.values[6] || ''),
-        fileRevision: String(row.values[7] || ''),
-        fileModifiedTime: row.values[8] || null,
-        targetSheetName: String(row.values[12] || ''),
-        _rowNumber: row.rowNumber
-      };
+      return permanentIndexRowFromValues_(row.values, row.rowNumber);
     });
+}
+
+/** 走査とロック内の判定で、同じ列を同じ型へ写す。 */
+function permanentIndexRowFromValues_(values, rowNumber) {
+  return {
+    fileId: String(values[0]),
+    customerId: String(values[1] || ''),
+    originalFileName: String(values[2] || ''),
+    state: String(values[3] || ''),
+    binaryHash: String(values[4] || ''),
+    contentHash: String(values[5] || ''),
+    hashVersion: String(values[6] || ''),
+    fileRevision: String(values[7] || ''),
+    fileModifiedTime: values[8] || null,
+    targetSheetName: String(values[12] || ''),
+    _rowNumber: rowNumber
+  };
 }
 
 /**
