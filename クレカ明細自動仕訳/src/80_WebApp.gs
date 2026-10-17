@@ -25,7 +25,9 @@ var WEBAPP_TRIP_WORST_MS_ = 400;
 var WEBAPP_DEADLINE_MS_ = 300000;
 var WEBAPP_MAX_FILES_PER_IMPORT_ = 6;
 // 1へ戻すと従来の順次取込になる。3本以上は読取の枠が天井なので2本まで。
-var WEBAPP_IMPORT_LANES_ = 2;
+// 2026-10-17 の実機の受入で、2本は1本ずつより速くならなかった（呼出しごとの
+// 頭の読取を2本ぶん払い、枠が天井になる。spec_parallel_import §6）ので1に戻した。
+var WEBAPP_IMPORT_LANES_ = 1;
 var WEBAPP_IMPORT_FILE_FLOOR_MS_ = 60000;
 var WEBAPP_IMPORT_FILE_FACTOR_ = 2;
 var WEBAPP_FORMAT_FILE_WORST_MS_ = 20000;

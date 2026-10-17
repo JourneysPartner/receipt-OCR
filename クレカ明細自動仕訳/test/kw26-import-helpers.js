@@ -1,7 +1,10 @@
 'use strict';
 
-module.exports = ({test, assert, gas, setupWorld, putCsv, createWebDestination,
+module.exports = ({test: register, assert, gas, setupWorld, putCsv, createWebDestination,
   webImport, withMocks, call, plain, latestImportCall, withImportTiming, seedPrefetchFile}) => {
+  // 本番の既定は 1 本に戻した（2026-10-17 の受入）。2 本の道は残してあるので、
+  // ここのテストは 2 本にして試し続ける（戻したときに壊れていないように）。
+  const test = (name, fn) => register(name, () => withMocks({WEBAPP_IMPORT_LANES_: 2}, fn));
   function world(count = 1) {
     const {customer} = setupWorld({knownMerchant: true});
     const ids = Array.from({length: count}, (_, i) => putCsv(customer, {fileId: 'kw26_f' + (i + 1),
@@ -293,5 +296,12 @@ module.exports = ({test, assert, gas, setupWorld, putCsv, createWebDestination,
   test('kw26 17: bootstrap advertises two lanes and six files', () => {
     world(0); const result = call('webAppBootstrap');
     assert.equal(result.importLanes, 2); assert.equal(result.maxFilesPerImport, 6);
+  });
+  register('kw26 28: the shipped default is one lane and the screen keeps the one-at-a-time path', () => {
+    world(0);
+    assert.equal(gas.context.WEBAPP_IMPORT_LANES_, 1, '2026-10-17 の受入で 1 本に戻した');
+    assert.equal(call('webAppBootstrap').importLanes, 1);
+    const {customer} = world(1);
+    assert.equal(prepare(customer).stoppedBy, 'PARALLEL_DISABLED');
   });
 };
