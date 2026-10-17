@@ -24,6 +24,8 @@ var WEBAPP_CLONE_TRIPS_ = 3;
 var WEBAPP_TRIP_WORST_MS_ = 400;
 var WEBAPP_DEADLINE_MS_ = 300000;
 var WEBAPP_MAX_FILES_PER_IMPORT_ = 6;
+// 1へ戻すと従来の順次取込になる。3本以上は読取の枠が天井なので2本まで。
+var WEBAPP_IMPORT_LANES_ = 2;
 var WEBAPP_IMPORT_FILE_FLOOR_MS_ = 60000;
 var WEBAPP_IMPORT_FILE_FACTOR_ = 2;
 var WEBAPP_FORMAT_FILE_WORST_MS_ = 20000;
@@ -209,6 +211,8 @@ function webAppBootstrap() {
       actor: scope.userEmail,
       isOwner: scope.isOwner,
       customers: customers,
+      importLanes: WEBAPP_IMPORT_LANES_,
+      maxFilesPerImport: WEBAPP_MAX_FILES_PER_IMPORT_,
       version: VERSIONS.CODE
     };
   });
@@ -466,7 +470,23 @@ function webAppTransactionsById_(ids) {
  * 速さの話を推測から始めないための計器であり、明細の内容は入れない。
  */
 function webAppRunImport(customerId, folderId, options) {
+  return webAppImportCall_(customerId, folderId, options, false);
+}
+
+/** 複製と前検査は押下に1回だけ。準備からはファイルの処理へ進まない。 */
+function webAppPrepareImport(customerId, folderId) {
+  return webAppImportCall_(customerId, folderId, {}, true);
+}
+
+function webAppImportCall_(customerId, folderId, options, prepare) {
   var opts = options || {};
+  var isLane = !prepare && opts.lane !== null && opts.lane !== undefined;
+  var windowOpened = false;
+  var assignedCandidates = [];
+  var startLock = {count: apiScriptLockWaits_.count, ms: apiScriptLockWaits_.ms,
+    worstMs: apiScriptLockWaits_.worstMs};
+  // 合計の寿命は実行全体のまま、最悪値だけ呼出し区間で測って最後に戻す。
+  if (prepare || isLane) apiScriptLockWaits_.worstMs = 0;
   var startedAt = importClockNow_();
   var startReads = Number(apiReadCount_) || 0;
   var startPacedMs = Number(apiReadPacedTotalMs_) || 0;
@@ -491,8 +511,24 @@ function webAppRunImport(customerId, folderId, options) {
   }
 
   try {
-    loaded = loadSharedReadWindow_();
+    if (!isLane) {
+      loaded = prepare ? loadSharedReadWindowAll_(WEBAPP_IMPORT_LANES_) : loadSharedReadWindow_();
+      windowOpened = true;
+    }
     finalResult = webAppInvoke_(function() {
+      if (isLane) {
+        if (WEBAPP_IMPORT_LANES_ < 2 || !Number.isInteger(opts.lane) ||
+            opts.lane < 0 || opts.lane >= WEBAPP_IMPORT_LANES_ || !opts.destinationSpreadsheetId ||
+            !Array.isArray(opts.fileIds) || !opts.fileIds.length ||
+            opts.fileIds.length > WEBAPP_MAX_FILES_PER_IMPORT_ || opts.fileIds.some(function(id, index) {
+              return typeof id !== 'string' || id.length === 0 || opts.fileIds.indexOf(id) !== index;
+            })) {
+          throw new AuthorizationError('取込の割り振りが正しくありません。画面を開き直してから（F5）もう一度押してください。');
+        }
+        setReadLane_(opts.lane, WEBAPP_IMPORT_LANES_);
+        loaded = loadSharedReadWindow_();
+        windowOpened = true;
+      }
       var now = new Date(startedAt);
       var selected = measureStage('authorize', function() {
         return webAppAuthorizeCustomer_(customerId, 'WEBAPP:記帳');
@@ -517,6 +553,9 @@ function webAppRunImport(customerId, folderId, options) {
         return webAppImportResult_(0, 0, suppliedDestinationId, [],
           'NO_AUTHORIZED_CUSTOMER', null);
       }
+      if (prepare && WEBAPP_IMPORT_LANES_ < 2) {
+        return webAppImportResult_(0, 0, null, [], 'PARALLEL_DISABLED', null);
+      }
 
       var folderData = measureStage('folder', function() {
         var folder = webAppDirectChildFolder_(customer, folderId);
@@ -527,33 +566,69 @@ function webAppRunImport(customerId, folderId, options) {
         return {folder: folder, directFileIds: directFileIds};
       });
       var directFileIds = folderData.directFileIds;
-      if (!Object.keys(directFileIds).length) {
+      if (!prepare && !Object.keys(directFileIds).length) {
         return webAppImportResult_(0, 0, suppliedDestinationId, [], null, null);
       }
       var candidatesBeforeLease = measureStage('scan', function() {
         return scanUnprocessedFiles(customer.customerId, {now: now})
           .filter(function(candidate) {
-            return Boolean(directFileIds[String(candidate.fileId)]);
+            return Boolean(directFileIds[String(candidate.fileId)]) &&
+              (!isLane || opts.fileIds.indexOf(String(candidate.fileId)) >= 0);
           });
       });
 
       var candidateData = measureStage('leases', function() {
         var leaseByFileId = Object.create(null);
+        var importInProgress = false;
         activeLeases_().forEach(function(lease) {
           leaseByFileId[String(lease.fileId)] = lease;
+          if (prepare && lease.purpose === 'PROCESS' &&
+              String(lease.customerId) === String(customer.customerId) &&
+              Number.isFinite(new Date(lease.lastHeartbeat).getTime()) &&
+              startedAt - new Date(lease.lastHeartbeat).getTime() < LIVE_LEASE_MAX_AGE_SECONDS_ * 1000) {
+            importInProgress = true;
+          }
         });
-        return {leaseByFileId: leaseByFileId,
+        return {leaseByFileId: leaseByFileId, importInProgress: importInProgress,
           candidates: candidatesBeforeLease.filter(function(candidate) {
             return !leaseByFileId[String(candidate.fileId)];
           })};
       });
       var candidates = candidateData.candidates;
+      assignedCandidates = candidates.map(function(candidate) { return String(candidate.fileId); });
+      if (candidateData.importInProgress) {
+        return webAppImportResult_(0, 0, null, [], 'IMPORT_IN_PROGRESS', null);
+      }
       if (!candidates.length) {
         return webAppImportResult_(0, 0, suppliedDestinationId, [],
           candidatesBeforeLease.length ? 'LEASE_CONFLICT' : null, null);
       }
 
       var total = candidates.length;
+      if (prepare) {
+        report = measureStage('runImport', function() {
+          return runImport({customerIds: [String(customer.customerId)], fileIds: assignedCandidates,
+            prepareOnly: true, verifyAuditChain: true, precheckExcludesLeasedFiles: true, now: now});
+        });
+        var preparationCustomer = (report.customers || [])[0];
+        var preparationStop = report.stoppedBy || preparationCustomer && preparationCustomer.skipped || null;
+        var prepared = !preparationStop && preparationCustomer && preparationCustomer.prepared || [];
+        var preparationResult = webAppImportResult_(0, prepared.length, null, [], preparationStop, null);
+        if (prepared.length) {
+          var preparedClone = measureStage('clone', function() { return webAppCloneDestination_(customer, now); });
+          preparationResult.schemaValidation = preparedClone.schemaValidation;
+          if (!preparedClone.schemaValidation.ok) {
+            preparationResult.stoppedBy = preparedClone.schemaValidation.code || 'DESTINATION_SCHEMA_MISMATCH';
+            prepared = [];
+          } else {
+            preparationResult.destinationSpreadsheetId = preparedClone.destinationSpreadsheetId;
+          }
+        }
+        preparationResult.fileIds = prepared;
+        preparationResult.total = prepared.length;
+        preparationResult.remaining = prepared.length;
+        return preparationResult;
+      }
       var elapsed = importClockNow_() - startedAt;
       if (elapsed + WEBAPP_IMPORT_BASE_TRIPS_ * WEBAPP_TRIP_WORST_MS_ >
           WEBAPP_DEADLINE_MS_) {
@@ -576,7 +651,7 @@ function webAppRunImport(customerId, folderId, options) {
       }
 
       report = measureStage('runImport', function() {
-        return runImport({
+        var importOptions = {
           customerIds: [String(customer.customerId)],
           fileIds: candidates.map(function(candidate) { return String(candidate.fileId); }),
           maxFilesPerCustomer: WEBAPP_MAX_FILES_PER_IMPORT_,
@@ -589,7 +664,13 @@ function webAppRunImport(customerId, folderId, options) {
           // それを「同じ押下の続き」の印として使う（§7.3.1）。**押下ごとには必ず走る。**
           verifyAuditChain: !suppliedDestinationId,
           now: now
-        });
+        };
+        if (isLane) {
+          importOptions.verifyAuditChain = false;
+          importOptions.retryRenames = false;
+          importOptions.precheckExcludesLeasedFiles = true;
+        }
+        return runImport(importOptions);
       });
       var fileResults = [];
       (report.customers || []).forEach(function(customerReport) {
@@ -625,12 +706,25 @@ function webAppRunImport(customerId, folderId, options) {
       return webAppImportResult_(done, total, destinationSpreadsheetId,
         fileResults, stoppedBy, schemaValidation);
     });
+    if (prepare) {
+      if (!finalResult.fileIds) finalResult.fileIds = [];
+      finalResult.lanes = WEBAPP_IMPORT_LANES_;
+      finalResult.maxFilesPerCall = WEBAPP_MAX_FILES_PER_IMPORT_;
+    } else if (isLane) {
+      var startedIds = finalResult.fileResults.map(function(file) { return String(file.fileId); });
+      finalResult.notStarted = assignedCandidates.filter(function(id) { return startedIds.indexOf(id) < 0; });
+      finalResult.skipped = opts.fileIds.filter(function(id) { return assignedCandidates.indexOf(id) < 0; });
+      finalResult.lane = opts.lane;
+    }
     return finalResult;
   } catch (error) {
     loggedError = String((error && error.code) || (error && error.name) || 'Error');
     throw error;
   } finally {
-    try { saved = saveSharedReadWindow_(); } catch (ignoredSave) { }
+    if (windowOpened) {
+      try { saved = prepare ? saveSharedReadWindowSplit_(WEBAPP_IMPORT_LANES_) : saveSharedReadWindow_(); }
+      catch (ignoredSave) { }
+    }
     try {
       var customerReport = report && (report.customers || []).length ? report.customers[0] : null;
       var fileResults = finalResult && Array.isArray(finalResult.fileResults) ?
@@ -667,9 +761,23 @@ function webAppRunImport(customerId, folderId, options) {
         total: finalResult ? Number(finalResult.total) || 0 : 0,
         stoppedBy: finalResult && finalResult.stoppedBy || null
       };
+      if (prepare || isLane) {
+        record.prepare = Boolean(prepare);
+        record.lane = prepare ? null : opts.lane;
+        record.budget = apiReadBudget_;
+        record.lock = {count: apiScriptLockWaits_.count - startLock.count,
+          ms: apiScriptLockWaits_.ms - startLock.ms, worstMs: apiScriptLockWaits_.worstMs};
+        if (precheck) precheck.excluded = Number(customerReport.integrity.excludedLeasedFiles) || 0;
+        if (isLane) {
+          record.notStarted = finalResult ? finalResult.notStarted.length : 0;
+          record.skipped = finalResult ? finalResult.skipped.length : 0;
+        }
+      }
       if (loggedError) record.error = loggedError;
       Logger.log('IMPORT_CALL ' + JSON.stringify(record));
     } catch (ignoredLog) { }
+    if (prepare || isLane) apiScriptLockWaits_.worstMs = Math.max(startLock.worstMs, apiScriptLockWaits_.worstMs);
+    if (isLane) clearReadLane_();
   }
 }
 

@@ -282,7 +282,9 @@ const SETTINGS = Object.seal({
   LOG_CAPACITY_STOP_PERCENT: 95,
   DRIVE_STORAGE_WARN_PERCENT: 80,
   DRIVE_STORAGE_STOP_PERCENT: 95,
-  LOCK_TIMEOUT_MS: 20000,
+  // 2本並列では相手のロック内処理が最長15秒ほどあり、20秒では足りない。
+  // 60秒の待ちなら、GASの1実行6分の上限にも届かない。
+  LOCK_TIMEOUT_MS: 60000,
   // Apps Scriptの実行は6分で強制終了される。心拍が実行上限＋心拍間隔ぶん
   // 途絶えたリースは確実に死んでいるので、それ以上待つ理由がない。
   LEASE_FORCE_RELEASE_MIN_SECONDS: 600,

@@ -105,7 +105,15 @@ function leaseConflict_(detail) { return makeCatalogError_('LEASE_CONFLICT', det
  */
 function withScriptLock_(callback) {
   var lock = LockService.getScriptLock();
-  if (!lock.tryLock(SETTINGS.LOCK_TIMEOUT_MS)) throw leaseConflict_('Script lock was not acquired');
+  if (readLaneActive_()) paceBeforeScriptLock_();
+  var waitStarted = apiClockNow_();
+  var acquired = lock.tryLock(SETTINGS.LOCK_TIMEOUT_MS);
+  var waited = apiClockNow_() - waitStarted;
+  apiScriptLockWaits_.count += 1;
+  apiScriptLockWaits_.ms += waited;
+  apiScriptLockWaits_.worstMs = Math.max(apiScriptLockWaits_.worstMs, waited);
+  if (!acquired) throw leaseConflict_('Script lock was not acquired');
+  scriptLockHeld_ = true;
   try {
     var result;
     try { result = callback(); } catch (error) {
@@ -115,7 +123,9 @@ function withScriptLock_(callback) {
     }
     SpreadsheetApp.flush();
     return result;
-  } finally { lock.releaseLock(); }
+  } finally {
+    try { lock.releaseLock(); } finally { scriptLockHeld_ = false; }
+  }
 }
 
 /**
@@ -179,6 +189,29 @@ var READ_QUOTA_PER_MINUTE_ = 60;
 var READ_QUOTA_FLOOR_ = 20;
 var apiReadWindow_ = [];
 var apiReadBudget_ = 55;
+var apiReadLane_ = null;
+var apiReadLanes_ = 1;
+var READ_LOCK_RESERVE_ = 5;
+var scriptLockHeld_ = false;
+var apiScriptLockWaits_ = {count: 0, ms: 0, worstMs: 0};
+
+function setReadLane_(lane, lanes) {
+  apiReadLane_ = lane;
+  apiReadLanes_ = lanes;
+  apiReadBudget_ = Math.floor(55 / lanes);
+}
+
+function clearReadLane_() {
+  apiReadLane_ = null;
+  apiReadLanes_ = 1;
+  apiReadBudget_ = 55;
+}
+
+function readLaneActive_() { return apiReadLane_ !== null; }
+
+function sharedReadWindowKey_() {
+  return 'SHEETS_READ_WINDOW_V1' + (readLaneActive_() ? '_LANE_' + apiReadLane_ : '');
+}
 var apiReadLastAt_ = 0;
 var apiReadCount_ = 0;
 var apiQuotaHitCount_ = 0;
@@ -252,7 +285,8 @@ function apiClockNow_() { return Date.now(); }
 
 function resetApiReadWindow_() {
   apiReadWindow_ = [];
-  apiReadBudget_ = 55;
+  clearReadLane_();
+  apiScriptLockWaits_ = {count: 0, ms: 0, worstMs: 0};
   apiReadLastAt_ = 0;
   apiReadPacedTotalMs_ = 0;
   apiReadSmoothing_ = false;
@@ -280,9 +314,13 @@ function trimApiReadWindow_(now) {
  * @return {number} 取り込んだ時刻の数
  */
 function loadSharedReadWindow_() {
+  return loadSharedReadWindowKey_(sharedReadWindowKey_());
+}
+
+function loadSharedReadWindowKey_(key, collected) {
   try {
     var now = apiClockNow_();
-    var raw = CacheService.getScriptCache().get('SHEETS_READ_WINDOW_V1');
+    var raw = CacheService.getScriptCache().get(key);
     if (raw === null || raw === undefined || raw === '') {
       apiReadWindow_ = apiReadWindow_.filter(function(at) {
         return typeof at === 'number' && Number.isFinite(at) && at > now - 60000 && at <= now;
@@ -295,6 +333,7 @@ function loadSharedReadWindow_() {
     var imported = cached.filter(function(at) {
       return typeof at === 'number' && Number.isFinite(at) && at > now - 60000 && at <= now;
     });
+    if (collected) Array.prototype.push.apply(collected, imported);
     var merged = apiReadWindow_.filter(function(at) {
       return typeof at === 'number' && Number.isFinite(at) && at > now - 60000 && at <= now;
     }).concat(imported).sort(function(a, b) { return a - b; });
@@ -324,12 +363,63 @@ function saveSharedReadWindow_() {
     var recent = apiReadWindow_.filter(function(at) {
       return typeof at === 'number' && Number.isFinite(at) && at > now - 60000 && at <= now;
     });
-    CacheService.getScriptCache().put('SHEETS_READ_WINDOW_V1', JSON.stringify(recent), 120);
+    CacheService.getScriptCache().put(sharedReadWindowKey_(), JSON.stringify(recent), 120);
     return recent.length;
   } catch (ignored) {
     apiSharedReadWindowErrors_ += 1;
     return 0;
   }
+}
+
+/** 準備では一般と各本の直前の読取を、重複を除いて引き継ぐ。 */
+function loadSharedReadWindowAll_(lanes) {
+  var imported = [];
+  for (var i = -1; i < lanes; i += 1) {
+    var key = 'SHEETS_READ_WINDOW_V1' + (i < 0 ? '' : '_LANE_' + i);
+    loadSharedReadWindowKey_(key, imported);
+  }
+  return imported.filter(function(at, index) {
+    return imported.indexOf(at) === index && apiReadWindow_.indexOf(at) >= 0;
+  }).length;
+}
+
+/**
+ * 本は自分の控えしか読まない。準備の読取を半分ずつ渡さないと最初の1分が
+ * 20＋27＋27回になり、両方へ全部渡すと20＋7＋7回しか使えない。
+ */
+function saveSharedReadWindowSplit_(lanes) {
+  var now = apiClockNow_();
+  var recent = apiReadWindow_.filter(function(at) {
+    return typeof at === 'number' && Number.isFinite(at) && at > now - 60000 && at <= now;
+  }).sort(function(a, b) { return a - b; });
+  for (var i = -1; i < lanes; i += 1) {
+    var values = i < 0 ? recent : recent.filter(function(at, j) { return j % lanes === i; });
+    try {
+      CacheService.getScriptCache().put('SHEETS_READ_WINDOW_V1' +
+        (i < 0 ? '' : '_LANE_' + i), JSON.stringify(values), 120);
+    } catch (ignored) { apiSharedReadWindowErrors_ += 1; }
+  }
+  return recent.length;
+}
+
+/**
+ * ロックの中で枠に当たると相手も待つ。待つなら取得前に5回ぶん空けておく。
+ * 5回を超える区間も窓の上限は守るので、予約が足りなくても枠は越えない。
+ */
+function paceBeforeScriptLock_() {
+  var now = apiClockNow_();
+  trimApiReadWindow_(now);
+  var limit = Math.max(1, apiReadBudget_ - READ_LOCK_RESERVE_);
+  var n = apiReadWindow_.length;
+  if (n <= limit) return 0;
+  var waitMs = apiReadWindow_[n - limit - 1] + 60000 - now + 250;
+  apiBackoff_.paceCount += 1;
+  apiBackoff_.paceMs += waitMs;
+  apiBackoff_.paceWorstMs = Math.max(apiBackoff_.paceWorstMs, waitMs);
+  apiReadPacedTotalMs_ += waitMs;
+  Utilities.sleep(waitMs);
+  trimApiReadWindow_(apiClockNow_());
+  return waitMs;
 }
 
 /**
@@ -342,7 +432,7 @@ function paceSheetsRead_() {
   var waitMs = 0;
 
   // 均し：前回から一定の間隔を空ける（取込のあいだだけ）。
-  if (apiReadSmoothing_ && apiReadLastAt_) {
+  if (apiReadSmoothing_ && apiReadLastAt_ && !(readLaneActive_() && scriptLockHeld_)) {
     var interval = Math.ceil(60000 / Math.max(1, apiReadBudget_));
     var earliest = apiReadLastAt_ + interval;
     if (earliest > now) waitMs = earliest - now;
@@ -351,7 +441,10 @@ function paceSheetsRead_() {
   // 窓の上限：均しを切っていても、ここは必ず守る。
   // 最も古い要求が窓から出れば1枠空く。250msは時計のずれの余白。
   if (apiReadWindow_.length >= apiReadBudget_) {
-    var clearMs = (apiReadWindow_[0] + 60000) - now + 250;
+    // 準備の控えを半分ずつ引き継ぐと30回あることもある。枠27を既に超えた
+    // 本は、1回だけでなく次の読取が収まる数まで空ける。一般の道は従来どおり。
+    var clearIndex = readLaneActive_() ? apiReadWindow_.length - apiReadBudget_ : 0;
+    var clearMs = (apiReadWindow_[clearIndex] + 60000) - now + 250;
     if (clearMs > waitMs) waitMs = clearMs;
   }
 

@@ -391,6 +391,8 @@
       selectCustomer: '左の一覧から顧客を選んでください。',
       selectFolder: 'カードフォルダを選んでください。',
       noFiles: 'このフォルダに取り込めるファイルはありません。',
+      importInProgress: 'この顧客の取込がまだ動いています（別の画面か、開き直す前の画面で押した取込です）。数分待ってから、もう一度「記帳を実行」を押してください。',
+      parallelDisabled: '取込の設定が変わりました。画面を開き直してから（F5）、もう一度「記帳を実行」を押してください。',
       noReviews: '確定が必要な要確認はありません。',
       noFilteredReviews: '絞り込みに一致する要確認はありません。',
       processing: function(done, total) { return '処理中… ' + done + ' / ' + total; },
@@ -473,6 +475,8 @@
       loadingFiles: false,
       loadingReviews: false,
       importBusy: false,
+      importLanes: 1,
+      maxFilesPerImport: 6,
       resolveBusy: false,
       activeImportDestinationSpreadsheetId: null,
       lastCompletedDestinationSpreadsheetId: null,
@@ -529,6 +533,7 @@
         else if (name === 'webAppListReviews') runner.webAppListReviews(args[0], args[1], args[2]);
         else if (name === 'webAppPartnerNames') runner.webAppPartnerNames(args[0]);
         else if (name === 'webAppRunImport') runner.webAppRunImport(args[0], args[1], args[2]);
+        else if (name === 'webAppPrepareImport') runner.webAppPrepareImport(args[0], args[1]);
         else if (name === 'webAppResolveReviews') runner.webAppResolveReviews(args[0], args[1], args[2]);
         else if (name === 'webAppFinalReview') runner.webAppFinalReview(args[0], args[1], args[2]);
         else if (name === 'webAppExplainUnknownFile') runner.webAppExplainUnknownFile(args[0], args[1], args[2], args[3]);
@@ -671,7 +676,8 @@
       stopProgressTimer(progressId);
       var timerClock = clock || Date;
       var startedAt = timerClock.now();
-      var callStartedAt = null;
+      var calls = [];
+      var nextCall = 0;
       var done = 0;
       var total = 0;
       var intervalId = null;
@@ -700,16 +706,19 @@
         }
         var now = timerClock.now();
         renderProgress(progressId, done, total, now - startedAt,
-          callStartedAt !== null && now - callStartedAt > 60000);
+          calls.length > 0 && now - calls[0].at > 60000);
       }
 
       var handle = {
         beginCall: function() {
-          callStartedAt = timerClock.now();
+          var token = ++nextCall;
+          calls.push({token: token, at: timerClock.now()});
           refresh();
+          return token;
         },
-        endCall: function() {
-          callStartedAt = null;
+        endCall: function(token) {
+          if (token === undefined) calls.shift();
+          else calls = calls.filter(function(call) { return call.token !== token; });
           refresh();
         },
         update: function(nextDone, nextTotal) {
@@ -1512,7 +1521,9 @@
         NO_AUTHORIZED_CUSTOMER: TEXT.noCustomerStaff,
         SETTINGS_INVALID: TEXT.invalidSettings,
         LOG_CAPACITY_EXCEEDED: TEXT.logCapacity,
-        INTEGRITY_STOP: TEXT.integrityStop
+        INTEGRITY_STOP: TEXT.integrityStop,
+        IMPORT_IN_PROGRESS: TEXT.importInProgress,
+        PARALLEL_DISABLED: TEXT.parallelDisabled
       };
       if (code === 'DESTINATION_SHEET_MISSING' ||
           code === 'DESTINATION_SCHEMA_MISMATCH') {
@@ -1540,6 +1551,91 @@
         .map(describe)
         .concat((Array.isArray(validation.warnings) ? validation.warnings : []).map(describe))
         .filter(Boolean);
+    }
+
+    /** 返ってきた未開始分も同じ待ち行列へ戻す。停止後は実行中の返事だけ待つ。 */
+    async function startParallelImport(customerId, folderId, progressTimer, isCurrent) {
+      var mark = progressTimer.beginCall();
+      var preparation;
+      try { preparation = await gasCall('webAppPrepareImport', [customerId, folderId]); }
+      finally { progressTimer.endCall(mark); }
+      if (!isCurrent()) return;
+      if (preparation.destinationSpreadsheetId) {
+        state.activeImportDestinationSpreadsheetId = String(preparation.destinationSpreadsheetId);
+        state.lastCompletedDestinationSpreadsheetId = state.activeImportDestinationSpreadsheetId;
+      }
+      var warnings = schemaValidationLines(preparation);
+      if (preparation.stoppedBy) {
+        showNotice(stoppedByMessage(preparation.stoppedBy), 'warning', warnings);
+        return;
+      }
+      var queue = (preparation.fileIds || []).slice();
+      if (!queue.length) { showNotice(TEXT.noFiles, 'info', warnings); return; }
+      var total = queue.length;
+      var done = 0;
+      var lanes = Math.max(1, Math.min(2, Number(preparation.lanes) || 1));
+      var maxFiles = Number(preparation.maxFilesPerCall) || state.maxFilesPerImport;
+      var inFlight = 0;
+      var waiters = [];
+      var stopped = null;
+      progressTimer.update(done, total);
+
+      function notifyReturned() {
+        var current = waiters;
+        waiters = [];
+        current.forEach(function(resolve) { resolve(); });
+      }
+      async function worker(lane) {
+        while (!stopped && isCurrent()) {
+          if (!queue.length) {
+            if (!inFlight) return;
+            // 相手が未開始分を戻すことがあるので、空になっただけでは終えない。
+            await new Promise(function(resolve) { waiters.push(resolve); });
+            continue;
+          }
+          var k = Math.min(maxFiles, Math.ceil(queue.length / (lanes - inFlight)));
+          var assigned = queue.splice(0, k);
+          inFlight += 1;
+          var call = progressTimer.beginCall();
+          try {
+            var result = await gasCall('webAppRunImport', [customerId, folderId, {
+              destinationSpreadsheetId: preparation.destinationSpreadsheetId, fileIds: assigned, lane: lane
+            }]);
+            if (!isCurrent()) return;
+            collectSessionFiles(result.fileResults);
+            warnings = warnings.concat(customerFixNoticeLines(result.fileResults), schemaValidationLines(result));
+            var completed = Number(result.done) || 0;
+            done += completed;
+            var notStarted = (result.notStarted || []).filter(function(id) { return assigned.indexOf(id) >= 0; });
+            var skipped = (result.skipped || []).filter(function(id) { return assigned.indexOf(id) >= 0; });
+            var results = (result.fileResults || []).map(function(file) { return file.fileId; });
+            queue = notStarted.concat(queue);
+            total -= skipped.length + assigned.filter(function(id) {
+              return results.indexOf(id) < 0 && notStarted.indexOf(id) < 0 && skipped.indexOf(id) < 0;
+            }).length;
+            progressTimer.update(done, total);
+            if (!stopped && result.stoppedBy) stopped = {code: result.stoppedBy};
+            if (!stopped && completed === 0 && notStarted.length === assigned.length) {
+              var failed = (result.fileResults || []).some(function(file) { return file.outcome === 'FAILED'; });
+              stopped = {message: failed ? TEXT.stuckFile : TEXT.timeBudget};
+            }
+          } catch (error) {
+            if (isCurrent() && !stopped) stopped = {error: error};
+          } finally {
+            progressTimer.endCall(call);
+            inFlight -= 1;
+            notifyReturned();
+          }
+        }
+      }
+      var workers = [];
+      for (var lane = 0; lane < lanes; lane += 1) workers.push(worker(lane));
+      await Promise.all(workers);
+      if (!isCurrent()) return;
+      if (stopped && stopped.error) showNotice(failureMessage(stopped.error), 'error');
+      else if (stopped) showNotice(stopped.code ? stoppedByMessage(stopped.code) : stopped.message, 'warning', warnings);
+      else if (!done) showNotice(TEXT.noFiles, 'info', warnings);
+      else showNotice(done + ' 件を取り込みました。', 'success', warnings);
     }
 
     async function startImport() {
@@ -1573,6 +1669,14 @@
             String(folderId) === String(state.selectedFolderId);
         });
         progressTimer.update(0, 0);
+        if (state.importLanes >= 2) {
+          await startParallelImport(customerId, folderId, progressTimer, function() {
+            return token === state.importRun && generation === state.viewGeneration &&
+              String(customerId) === String(state.selectedCustomerId) &&
+              String(folderId) === String(state.selectedFolderId);
+          });
+          return;
+        }
         while (true) {
           var options = state.activeImportDestinationSpreadsheetId ?
             {destinationSpreadsheetId: state.activeImportDestinationSpreadsheetId} : {};
@@ -3291,6 +3395,8 @@
         if (generation !== state.viewGeneration) return;
         state.actor = result.actor || '';
         state.version = result.version || '';
+        state.importLanes = Number(result.importLanes) || 1;
+        state.maxFilesPerImport = Number(result.maxFilesPerImport) || 6;
         state.customers = Array.isArray(result.customers) ? result.customers : [];
         el.actor.textContent = '実行者: ' + state.actor;
         el.version.textContent = state.version ? 'バージョン ' + state.version : '';
