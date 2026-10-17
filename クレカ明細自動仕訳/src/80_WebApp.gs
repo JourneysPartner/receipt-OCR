@@ -326,6 +326,9 @@ function webAppCustomerFixReason_(errorsCell) {
     };
   }
 
+  if (typeof record.detail === 'string' && /^(COUNT_TOTAL_MISMATCH|INPUT_LIMIT)$/.test(record.detail)) {
+    return {source: 'REVIEW_RETURN', returnReason: record.detail};
+  }
   var formatDetail = typeof record.detail === 'string' ?
     /^(PURPOSE_COLUMN_MISSING|PURPOSE_HEADER_VALUE|PURPOSE_IN_ISSUER_COLUMN|OTHER)(?:: ([\s\S]*))?$/.exec(record.detail) : null;
   if (formatDetail) {
@@ -334,14 +337,34 @@ function webAppCustomerFixReason_(errorsCell) {
   return {source: 'NONE'};
 }
 
-/** 選択顧客の未解決 PARTNER 要確認と、その他種別の件数を返す。 */
+/** メニューと同じ操作判定・実行を使うため、要確認を共通の形にそろえる。 */
+function webAppOtherReviewItem_(review) {
+  return {kind: isTransactionScopedReviewType(review.reviewType) ? 'TRANSACTION' : 'FILE',
+    reviewType: String(review.reviewType), customerId: String(review.customerId),
+    customerName: review.customerName, merchantOriginal: review.merchantOriginal, reviews: [review]};
+}
+
+/** 取引先の採用と形式登録は専用画面で扱うため、その操作だけを候補から外す。 */
+function webAppOtherReviewOptions_(item, role, live) {
+  if (item.reviewType === 'INTEGRITY' || item.reviewType === 'FILE_CHANGED') return [];
+  return resolveOptionsFor_(item, role, live).filter(function(option) {
+    if (item.reviewType === 'PARTNER') return option.code === 'EXCLUDE';
+    if (item.reviewType === 'FORMAT_UNKNOWN') return option.code !== 'REGISTER_FORMAT';
+    return true;
+  });
+}
+
+/** 既存の取引先一覧に、メニューと同じ操作を選べる要確認を添える。 */
 function webAppListReviews(customerId, limit, offset) {
   return webAppInvoke_(function() {
-    webAppAuthorizeCustomer_(customerId, 'WEBAPP:一覧');
+    var selected = webAppAuthorizeCustomer_(customerId, 'WEBAPP:一覧');
+    var role = selected.scope.rolesByCustomerId[selected.customer.customerId];
     var wantedCustomerId = String(customerId);
     var customer = getCustomerById(wantedCustomerId);
     var otherCounts = {};
     var partnerReviews = [];
+    var otherCandidates = [];
+    var unsupportedCounts = {integrity: 0, fileChanged: 0};
 
     openReviews({}).forEach(function(review) {
       if (String(review.customerId) !== wantedCustomerId) return;
@@ -351,6 +374,9 @@ function webAppListReviews(customerId, limit, offset) {
       }
       var type = String(review.reviewType || 'UNKNOWN');
       otherCounts[type] = Number(otherCounts[type] || 0) + 1;
+      if (type === 'INTEGRITY') unsupportedCounts.integrity += 1;
+      else if (type === 'FILE_CHANGED') unsupportedCounts.fileChanged += 1;
+      else otherCandidates.push(review);
     });
     partnerReviews.sort(function(a, b) {
       var left = String(a.reviewId);
@@ -365,13 +391,75 @@ function webAppListReviews(customerId, limit, offset) {
     if (partnerReviews.length && actualOffset >= partnerReviews.length) actualOffset = 0;
     if (!partnerReviews.length) actualOffset = 0;
 
+    otherCandidates.sort(function(a, b) {
+      var scopeOrder = Number(!isTransactionScopedReviewType(a.reviewType)) -
+        Number(!isTransactionScopedReviewType(b.reviewType));
+      if (scopeOrder) return scopeOrder;
+      var dateOrder = menuDateMilliseconds_(a.registeredAt) - menuDateMilliseconds_(b.registeredAt);
+      if (dateOrder) return dateOrder;
+      return String(a.reviewId) < String(b.reviewId) ? -1 : String(a.reviewId) > String(b.reviewId) ? 1 : 0;
+    });
+    var otherPage = otherCandidates.slice(0, WEBAPP_REVIEW_LIST_LIMIT_);
     var pageReviews = partnerReviews.slice(actualOffset, actualOffset + actualLimit);
-    var transactionsById = webAppTransactionsById_(pageReviews.map(function(review) {
-      return review.fullTxId;
-    }));
+    var otherTransactions = otherPage.filter(function(review) {
+      return isTransactionScopedReviewType(review.reviewType);
+    });
+    var transactionsById = webAppTransactionsById_(
+      pageReviews.concat(otherTransactions).map(function(review) {
+        return review.fullTxId;
+      }));
+    var fileIds = [];
+    otherPage.forEach(function(review) {
+      if (!isTransactionScopedReviewType(review.reviewType) && fileIds.indexOf(String(review.fileId)) < 0)
+        fileIds.push(String(review.fileId));
+    });
+    var liveCounts = Object.create(null);
+    if (fileIds.length) {
+      var recordsByFile = findRowsByColumnValues_(transactionLogSheet_(), 5, fileIds, TRANSACTION_LOG_WIDTH_);
+      fileIds.forEach(function(fileId) {
+        liveCounts[fileId] = 0;
+        (recordsByFile[fileId] || []).forEach(function(record) {
+          try {
+            var tx = txLogFromRecord_(record);
+            if (tx.active === true && [TX_STATUS.PREPARED, TX_STATUS.WRITING,
+                TX_STATUS.COMMITTED, TX_STATUS.REVIEW_REQUIRED].indexOf(tx.transactionStatus) >= 0)
+              liveCounts[fileId] += 1;
+          } catch (ignored) {
+            // 読めない行を転記なしとみなすと、取消しを選べてしまう。
+            liveCounts[fileId] += 1;
+          }
+        });
+      });
+    }
+    var otherRows = otherPage.map(function(review) {
+      var item = webAppOtherReviewItem_(review);
+      var isTransaction = item.kind === 'TRANSACTION';
+      var tx = isTransaction ? transactionsById[String(review.fullTxId)] : null;
+      var planned = tx && tx.planned;
+      var missing = isTransaction && !tx;
+      return {
+        reviewId: review.reviewId, reviewType: String(review.reviewType),
+        typeLabel: MENU_REVIEW_TYPE_LABELS_[review.reviewType] || String(review.reviewType),
+        scope: item.kind, fileId: String(review.fileId),
+        fileName: menuDisplayFileName_(review) || '（ファイル名不明）', sourceRow: review.sourceRow || null,
+        usageDate: planned ? planned.b : null, amount: planned ? planned.m : null,
+        purpose: planned ? planned.i : null,
+        merchantOriginal: isTransaction ? webAppDisplayMerchant_(review.merchantOriginal ||
+          (tx && tx.originalMerchant) || (planned && planned.k) || '') : null,
+        originalDate: review.originalDate || null, originalAmount: review.originalAmount || null,
+        options: missing ? [] : webAppOtherReviewOptions_(item, role,
+          isTransaction ? tx : {liveTransactionCount: liveCounts[String(review.fileId)] || 0}),
+        problem: missing ? 'TRANSACTION_MISSING' : null
+      };
+    });
     var rows = pageReviews.map(function(review) {
       var tx = transactionsById[String(review.fullTxId)] || null;
       var planned = tx && tx.planned ? tx.planned : null;
+      var exclude = tx ? webAppOtherReviewOptions_(webAppOtherReviewItem_(review), role, tx)
+        .filter(function(option) { return option.code === 'EXCLUDE'; })[0] :
+        {enabled: false, disabledReason: '（取引ログで取引を特定できません。管理者へ）'};
+      if (!exclude) exclude =
+        {enabled: false, disabledReason: '（この取引は画面から対象外にできません。管理者へ）'};
       var learnBlockedBy = null;
       if (!review.merchantNormalized) {
         learnBlockedBy = 'EMPTY_MERCHANT';
@@ -388,13 +476,17 @@ function webAppListReviews(customerId, limit, offset) {
         candidates: webAppUniquePartners_(menuReviewCandidates_(review)),
         usageDate: planned ? planned.b : null,
         amount: planned ? planned.m : null,
-        learnBlockedBy: learnBlockedBy
+        learnBlockedBy: learnBlockedBy,
+        exclude: {enabled: exclude.enabled, disabledReason: exclude.disabledReason}
       };
     });
     return {
       reviews: rows,
       partnerTotal: partnerReviews.length,
       otherCounts: otherCounts,
+      otherReviews: otherRows,
+      otherTotal: otherCandidates.length,
+      unsupportedCounts: unsupportedCounts,
       offset: actualOffset,
       limit: actualLimit
     };
@@ -1057,6 +1149,76 @@ function webAppResolveReviews(customerId, decisions, options) {
 
     outcome.remaining = outcome.notAttempted;
     return outcome;
+  });
+}
+
+/** 一覧の表示後に状態が変わり得るため、実行直前に読み直してメニューの部品へ渡す。 */
+function webAppResolveOtherReview(customerId, reviewId, code, inputs) {
+  return webAppInvoke_(function() {
+    var startedAt = Date.now();
+    var selected = webAppAuthorizeCustomer_(customerId, 'WEBAPP:その他の要確認を確定');
+    var role = selected.scope.rolesByCustomerId[selected.customer.customerId];
+    var review = getReviewById(String(reviewId));
+    if (!review) return {ok: false, code: 'REVIEW_NOT_FOUND'};
+    if (String(review.customerId) !== String(customerId))
+      return {ok: false, code: 'REVIEW_CUSTOMER_MISMATCH'};
+    if (review.status !== 'OPEN' && review.status !== 'IN_PROGRESS')
+      return {ok: false, code: 'ALREADY_SETTLED'};
+    if (review.reviewType === 'INTEGRITY' || review.reviewType === 'FILE_CHANGED')
+      return {ok: false, code: 'NOT_SUPPORTED'};
+    var item = webAppOtherReviewItem_(review);
+    var live;
+    if (item.kind === 'FILE') {
+      live = {liveTransactionCount: getTransactionsByStatus(String(review.fileId),
+        [TX_STATUS.PREPARED, TX_STATUS.WRITING, TX_STATUS.COMMITTED, TX_STATUS.REVIEW_REQUIRED]).length};
+    } else {
+      live = webAppTransactionsById_([review.fullTxId])[String(review.fullTxId)];
+      if (!live) return {ok: false, code: 'TRANSACTION_MISSING'};
+    }
+    code = String(code);
+    var option = webAppOtherReviewOptions_(item, role, live).filter(function(candidate) {
+      return candidate.code === code;
+    })[0];
+    if (!option) return {ok: false, code: 'OPERATION_NOT_OFFERED'};
+    if (!option.enabled) return {ok: false, code: 'OPERATION_DISABLED', message: option.disabledReason};
+    var decisionInputs = {reviewId: review.reviewId};
+    if (code === 'FIX_DATE_AMOUNT') {
+      var date = parseCorrectedDate_(inputs && inputs.correctedDate, new Date());
+      var amount = parseCorrectedAmount_(inputs && inputs.correctedAmount);
+      if (date === null) return {ok: false, code: 'INVALID_DATE'};
+      if (amount === null) return {ok: false, code: 'INVALID_AMOUNT'};
+      if (review.reviewType === 'DATE' && date === '') return {ok: false, code: 'DATE_REQUIRED'};
+      if (review.reviewType === 'AMOUNT' && amount === '') return {ok: false, code: 'AMOUNT_REQUIRED'};
+      if (date !== '') decisionInputs.correctedDate = date;
+      if (amount !== '') decisionInputs.correctedAmount = amount;
+    }
+    var outcome = applyResolveDecision_(item, code, decisionInputs,
+      {startedAt: startedAt, auditReason: 'WEBAPP'});
+    if ((code === 'REJECT_COUNT_MISMATCH' || code === 'RESIZE_INPUT') && outcome.resolved === 1) {
+      try {
+        recordError(String(review.fileId),
+          {code: 'SOURCE_REQUIRES_CUSTOMER_FIX', detail: String(review.reviewType)});
+      } catch (error) {
+        // 確定は済んでいるため、理由の記録だけが失敗したことを分けて伝える。
+        outcome.errors.push({code: 'REASON_NOT_RECORDED',
+          message: '差し戻しの理由を処理ログに残せませんでした（ファイルは【要修正】になっています）。'});
+      }
+    }
+    return {ok: true, reviewId: review.reviewId, code: code, label: option.label,
+      reviewType: String(review.reviewType),
+      typeLabel: MENU_REVIEW_TYPE_LABELS_[review.reviewType] || String(review.reviewType),
+      scope: item.kind, fileId: String(review.fileId), fileName: menuDisplayFileName_(review) || '（ファイル名不明）',
+      resolved: outcome.resolved, committed: outcome.committed, unmetTexts: outcome.unmet.map(menuUnmetText_),
+      completedFiles: outcome.completedFiles.filter(function(completed) {
+        return completed && completed.completed;
+      }).map(function(completed) {
+        return {fileId: String(completed.fileId), stateLabel: menuFileStateLabel_(completed.state)};
+      }),
+      rewound: outcome.rewoundFiles.length > 0,
+      errors: outcome.errors.map(function(error) {
+        return {code: error.code || null, message: String(error.message || '')};
+      }),
+      notAttempted: outcome.notAttempted, skippedByLease: outcome.skippedByLease};
   });
 }
 
