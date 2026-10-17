@@ -160,7 +160,7 @@ module.exports = ({test, assert, gas}) => {
       'webAppFinalReview', 'webAppExplainUnknownFile', 'webAppPreviewFormat',
       'webAppSaveFormat', 'webAppRequeueFormatFiles', 'webAppReturnFileToCustomer',
       'webAppWithdrawFormat', 'webAppRunImport', 'webAppResolveReviews',
-      'webAppRecheckCustomerFixFile']) {
+      'webAppRecheckCustomerFixFile', 'webAppResolveOtherReview', 'webAppPartnerNames']) {
       runner[name] = (...args) => {
         calls.push({name, args});
         const success = runner.success, failure = runner.failure;
@@ -177,7 +177,7 @@ module.exports = ({test, assert, gas}) => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'src', '81_WebAppUi.html'), 'utf8');
     const script = /<script>([\s\S]*?)<\/script>/.exec(source)[1].replace(
       '    bootstrap();',
-      '    globalThis.__ui = {state, el, renderSelection, renderFiles, renderFormatPanel, previewFormat, saveFormat, returnFormatToCustomer, openFormat, chooseFolder, chooseCustomer, loadFinalReview, formatSetBusy, recheckCustomerFix: typeof recheckCustomerFix === "function" ? recheckCustomerFix : null};');
+      '    globalThis.__ui = {state, el, renderSelection, renderFiles, renderFormatPanel, previewFormat, saveFormat, returnFormatToCustomer, openFormat, chooseFolder, chooseCustomer, loadFinalReview, formatSetBusy, loadReviews, recheckCustomerFix: typeof recheckCustomerFix === "function" ? recheckCustomerFix : null};');
     const sandbox = {document, google: {script: {run: runner}}, window: {open() { return {}; }},
       setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {}, console};
     vm.runInNewContext(script, sandbox);
@@ -2338,6 +2338,306 @@ module.exports = ({test, assert, gas}) => {
     assert.deepEqual(JSON.parse(JSON.stringify(gas.call('availableFileResolveOperations',
       ['FORMAT_UNKNOWN']))), ['REGISTER_FORMAT', 'CANCEL_FILE', 'RETURN_TO_CUSTOMER']);
     assert.equal(gas.evaluate("MENU_RESOLVE_OPERATIONS_.RETURN_TO_CUSTOMER"), undefined);
+  });
+
+  function kw2Row(type = 'DATE', id = 'other1', options) {
+    return {reviewId: id, reviewType: type, typeLabel: type === 'DATE' ? '日付' : type,
+      scope: type === 'FORMAT_UNKNOWN' ? 'FILE' : 'TRANSACTION', fileId: 'source1',
+      fileName: '<img src=x>.csv', sourceRow: 3, usageDate: '2026-01-05', amount: 100,
+      merchantOriginal: '<script>店</script>', purpose: '仕入れ', originalDate: '日付不明',
+      originalAmount: '金額不明', problem: null,
+      options: options || [{code: 'FIX_DATE_AMOUNT', label: '日付・金額を修正して確定する', enabled: true},
+        {code: 'EXCLUDE', label: '対象外にする', enabled: false, disabledReason: '取込済み'}]};
+  }
+  function kw2World(rows = [kw2Row()], responses = {}) {
+    const world = browserWorld(Object.assign({
+      webAppListReviews: (customerId) => customerId === 'C001' ?
+        {reviews: [], partnerTotal: 0, otherReviews: rows, otherTotal: rows.length} : {reviews: []},
+      webAppListFolder: {kind: 'FILES', files: []}, webAppPartnerNames: {active: [], retired: []}
+    }, responses));
+    Object.assign(world.ui.state, {customers: [{customerId: 'C001', customerName: '顧客一', canImport: true}],
+      selectedCustomerId: 'C001', selectedFolderId: 'card1', otherReviews: rows, otherTotal: rows.length,
+      unsupportedCounts: {integrity: 0, fileChanged: 0},
+      lastCompletedDestinationSpreadsheetId: 'clone1', finalReviewedFor: 'clone1'});
+    world.ui.renderSelection();
+    return world;
+  }
+  function kw2Control(world, name) { return world.root.querySelector('.' + name); }
+  function kw2Select(world, code = 'FIX_DATE_AMOUNT', date = '2026-01-05', amount = '') {
+    const select = kw2Control(world, 'other-op'); assert.ok(select, 'operation selector');
+    select.value = code; select.fire('change');
+    for (const [name, value] of [['other-date', date], ['other-amount', amount]]) {
+      const input = kw2Control(world, name);
+      if (input) { input.value = value; input.fire('input'); }
+    }
+  }
+  function kw2Success(extra = {}) {
+    return Object.assign({ok: true, resolved: 1, committed: 1, code: 'FIX_DATE_AMOUNT',
+      typeLabel: '日付', label: '日付・金額を修正して確定する', fileName: '<img src=x>.csv',
+      unmetTexts: [], completedFiles: [], rewound: false, errors: [], notAttempted: 0}, extra);
+  }
+  async function kw2Flush() { await new Promise((resolve) => setImmediate(resolve)); }
+  function kw2RefreshCheck(world) {
+    assert.equal(world.ui.state.resolveBusy, false);
+    assert.equal(world.ui.state.finalReviewedFor, null);
+    for (const name of ['webAppListReviews', 'webAppListFolder'])
+      assert.equal(world.calls.filter((c) => c.name === name).length, 1, name);
+  }
+
+  test('kw2 20: banner and other rows show scope details disabled reasons and overflow safely', () => {
+    const empty = kw2World([]);
+    assert.ok(empty.ids['other-review-section']);
+    assert.equal(empty.ids['other-review-section'].hidden, true);
+    assert.equal(empty.ids['other-reviews'].textContent, '');
+    const world = kw2World([kw2Row(), kw2Row('FORMAT_UNKNOWN', 'format', [
+      {code: 'CANCEL_FILE', label: '取消し', enabled: true}])]);
+    world.ui.state.otherTotal = 4; world.ui.state.unsupportedCounts = {integrity: 1, fileChanged: 2};
+    world.ui.renderSelection();
+    assert.equal(world.ids['other-review-section'].hidden, false);
+    assert.equal(world.ids['other-reviews'].textContent,
+      'その他の要確認が 4 件あります（いちばん下の「その他の要確認」で確定します）。' +
+      '整合性 1 件・ファイル変更 2 件は画面から確定できません（管理者へ連絡してください）。');
+    const table = world.ids['other-review-list'];
+    assert.deepEqual(table.querySelectorAll('th').map((n) => n.textContent), ['種類', '内容', '元ファイル', '行', '操作']);
+    assert.ok(table.querySelectorAll('tr').some((n) => n.dataset.reviewId === 'other1'));
+    assert.match(table.textContent, /明細の利用日: 日付不明/);
+    assert.match(table.textContent, /仕入れ/); assert.match(table.textContent, /形式を確認/);
+    assert.equal(table.querySelector('a').href, 'https://drive.google.com/file/d/source1/view');
+    assert.equal(table.querySelector('a').rel, 'noopener noreferrer');
+    assert.ok(table.querySelectorAll('option').some((o) => o.disabled && o.textContent.includes('取込済み')));
+    assert.equal(world.ids['other-review-more'].textContent, '他 2 件（表示分を片付けると出てきます）');
+    assert.equal(table.querySelectorAll('img').length, 0);
+  });
+
+  browserAsyncTest('kw2 21: selection and corrections persist and all busy states disable controls', async () => {
+    const row = kw2Row(), world = kw2World([row]);
+    assert.equal(kw2Control(world, 'other-submit').disabled, true);
+    kw2Select(world, 'EXCLUDE'); assert.equal(kw2Control(world, 'other-submit').disabled, true);
+    assert.equal(kw2Control(world, 'other-date'), null);
+    kw2Select(world, 'FIX_DATE_AMOUNT', '2026-01-09', '200');
+    world.ui.renderSelection();
+    assert.equal(kw2Control(world, 'other-date').value, '2026-01-09');
+    assert.equal(kw2Control(world, 'other-amount').value, '200');
+    assert.equal(kw2Control(world, 'other-submit').disabled, false);
+    for (const busy of ['resolveBusy', 'importBusy', 'formatBusy']) {
+      world.ui.state[busy] = true; world.ui.renderSelection();
+      for (const name of ['other-op', 'other-date', 'other-amount', 'other-submit'])
+        assert.equal(kw2Control(world, name).disabled, true, busy + ' ' + name);
+      world.ui.state[busy] = false;
+    }
+    world.ui.state.otherInputs.set('removed', {code: 'EXCLUDE'});
+    await world.ui.loadReviews('C001', 0, world.ui.state.viewGeneration);
+    assert.equal(world.ui.state.otherInputs.has('removed'), false);
+    assert.equal(world.ui.state.otherInputs.get(row.reviewId).correctedAmount, '200');
+    await world.ui.chooseCustomer('C002');
+    assert.equal(world.ui.state.otherInputs.size, 0);
+    assert.equal(world.ui.state.otherTotal, 0);
+  });
+
+  browserAsyncTest('kw2 22: confirmation gates one RPC and successful operation refreshes both lists', async () => {
+    const row = kw2Row(), world = kw2World([row], {webAppResolveOtherReview: {defer: true}});
+    kw2Select(world, 'FIX_DATE_AMOUNT', '');
+    await kw2Control(world, 'other-submit').fire('click')[0];
+    assert.equal(world.ids.notice.textContent, '利用日を入力してください。');
+    assert.match(world.ids.notice.className, /warning/); assert.equal(world.calls.length, 0);
+    kw2Select(world, 'FIX_DATE_AMOUNT', '2026-01-05', '120');
+    const canceled = kw2Control(world, 'other-submit').fire('click')[0];
+    assert.equal(world.calls.length, 0); assert.equal(world.ids['confirm-dialog'].open, true);
+    assert.match(world.ids['confirm-intro'].textContent, /入力した値だけ/);
+    world.ids['confirm-cancel'].fire('click'); await canceled;
+    assert.equal(world.calls.length, 0);
+    const pending = kw2Control(world, 'other-submit').fire('click')[0];
+    world.ids['confirm-submit'].fire('click'); await kw2Flush();
+    assert.equal(world.ui.state.resolveBusy, true);
+    assert.deepEqual(JSON.parse(JSON.stringify(world.calls)), [{name: 'webAppResolveOtherReview',
+      args: ['C001', row.reviewId, 'FIX_DATE_AMOUNT', {correctedDate: '2026-01-05', correctedAmount: '120'}]}]);
+    world.pending.shift().reply(kw2Success()); await pending; await kw2Flush();
+    assert.equal(world.ids.notice.textContent, '「日付」の要確認を確定しました（日付・金額を修正して確定する）。取引を確定しました。');
+    assert.match(world.ids.notice.className, /success/); kw2RefreshCheck(world);
+    assert.equal(world.ui.state.otherInputs.has(row.reviewId), false);
+  });
+
+  browserAsyncTest('kw2 23: failure notices and exceptions always clear busy state and refresh', async () => {
+    const messages = {
+      REVIEW_NOT_FOUND: 'この要確認は見つかりませんでした。他の担当者が確定したか、取り消された可能性があります。画面を再読み込みしてください。',
+      ALREADY_SETTLED: 'この要確認はすでに確定済みです。画面を再読み込みしてください。',
+      REVIEW_CUSTOMER_MISMATCH: 'この要確認は選択中の顧客のものではありません。画面を再読み込みしてからやり直してください。',
+      NOT_SUPPORTED: 'この要確認は画面から確定できません。管理者へ連絡してください。',
+      TRANSACTION_MISSING: 'この要確認の取引を取引ログで特定できません。管理者へ連絡してください。',
+      OPERATION_NOT_OFFERED: 'この操作はこの要確認では選べません。画面を再読み込みしてください。',
+      OPERATION_DISABLED: 'この操作は選べません（理由）。', DATE_REQUIRED: '利用日を入力してください。',
+      AMOUNT_REQUIRED: '金額を入力してください。',
+      INVALID_DATE: '利用日の形が正しくありません（例: 2026-01-05。2000 年以降、今日から 1 年先まで）。',
+      INVALID_AMOUNT: '金額は整数で入力してください（1 億円未満）。',
+      UNKNOWN: '処理に失敗しました。管理者へ連絡してください。'
+    };
+    const cases = Object.entries(messages).map(([code, text]) => [{ok: false, code, message: '（理由）'}, text, 'warning']);
+    cases.push([kw2Success({errors: [{message: '理由を残せませんでした'}]}), '理由を残せませんでした', 'warning'],
+      [kw2Success({resolved: 0, errors: [{message: 'リース中'}]}), 'この要確認は確定できませんでした。', 'warning'],
+      [kw2Success({resolved: 0, notAttempted: 1}), '時間が足りず確定しませんでした。もう一度押してください。', 'warning'],
+      [kw2Success({resolved: 0}), messages.UNKNOWN, 'warning'], [new Error('通信失敗'), '通信失敗', 'error']);
+    for (const [reply, text, kind] of cases) {
+      const world = kw2World([kw2Row()], {webAppResolveOtherReview: reply});
+      kw2Select(world); const pending = kw2Control(world, 'other-submit').fire('click')[0];
+      world.ids['confirm-submit'].fire('click'); await pending; await kw2Flush();
+      assert.ok(world.ids.notice.textContent.includes(text), world.ids.notice.textContent + ' expected ' + text);
+      assert.ok(world.ids.notice.className.includes(kind)); kw2RefreshCheck(world);
+      if (reply.errors && reply.errors.length) assert.equal(world.ids.notice.querySelectorAll('li').length, reply.errors.length);
+    }
+  });
+
+  browserAsyncTest('kw2 24: partner exclusion removes only its selection and inputs on success', async () => {
+    for (const success of [true, false]) {
+      const rows = ['p1', 'p2', 'p3'].map((id, i) => ({reviewId: id, fileId: 'file', fileName: '明細.csv',
+        sourceRow: i + 2, merchantOriginal: '店' + i, usageDate: '2026-01-05', amount: 100,
+        candidates: [], exclude: {enabled: i !== 2, disabledReason: i === 2 ? '押せません' : null}}));
+      const world = kw2World([], {webAppResolveOtherReview: success ? kw2Success({code: 'EXCLUDE'}) : {ok: false, code: 'ALREADY_SETTLED'},
+        webAppListReviews: {reviews: rows, partnerTotal: 3}});
+      Object.assign(world.ui.state, {reviews: rows, partnerTotal: 3, lastSelectedReviewId: 'p1'});
+      rows.slice(0, 2).forEach((r) => { world.ui.state.selectedReviewIds.add(r.reviewId); world.ui.state.partnerInputs.set(r.reviewId, r.reviewId); });
+      world.ui.renderSelection();
+      const buttons = world.root.querySelectorAll('.partner-exclude');
+      assert.equal(buttons.length, 3); assert.equal(buttons[2].disabled, true); assert.equal(buttons[2].title, '押せません');
+      const pending = buttons[0].fire('click')[0];
+      assert.equal(world.ids['confirm-title'].textContent, '対象外にする');
+      assert.match(world.ids['confirm-intro'].textContent, /「店0」.*明細.csv 2 行目）を対象外にします。/);
+      world.ids['confirm-submit'].fire('click'); await pending; await kw2Flush();
+      const rpc = world.calls.filter((c) => c.name === 'webAppResolveOtherReview');
+      assert.deepEqual(JSON.parse(JSON.stringify(rpc)), [{name: 'webAppResolveOtherReview', args: ['C001', 'p1', 'EXCLUDE', {}]}]);
+      assert.equal(world.ui.state.selectedReviewIds.has('p1'), !success);
+      assert.equal(world.ui.state.partnerInputs.has('p1'), !success);
+      assert.equal(world.ui.state.selectedReviewIds.has('p2'), true);
+      assert.equal(world.ui.state.partnerInputs.get('p2'), 'p2');
+      assert.equal(world.ui.state.lastSelectedReviewId, success ? null : 'p1');
+      world.ui.state.reviewFilter = '該当しない店'; world.ui.renderSelection();
+      assert.equal(world.ids['review-table'].querySelector('td').colSpan, 9);
+      kw2RefreshCheck(world);
+    }
+  });
+
+  browserAsyncTest('kw2 25: untrusted review text stays literal in rows confirmation and notices', async () => {
+    const payload = '<img src=x onerror=alert(1)>';
+    const value = (name) => name + payload;
+    const row = kw2Row();
+    for (const key of ['typeLabel', 'fileName', 'merchantOriginal', 'purpose', 'originalDate'])
+      row[key] = value(key);
+    row.options[0].label = value('label');
+    row.options[1].disabledReason = value('disabledReason');
+    const reply = kw2Success({typeLabel: row.typeLabel, label: row.options[0].label,
+      fileName: row.fileName, completedFiles: [{stateLabel: value('stateLabel')}],
+      errors: [{message: value('error')}]});
+    const world = kw2World([row], {webAppResolveOtherReview: reply});
+    const table = world.ids['other-review-list'];
+    for (const key of ['typeLabel', 'fileName', 'merchantOriginal', 'purpose', 'originalDate', 'label', 'disabledReason'])
+      assert.ok(table.textContent.includes(value(key)), key);
+    const noImages = () => assert.equal(world.root.querySelectorAll('img').length, 0);
+    noImages();
+    kw2Select(world);
+    const pending = kw2Control(world, 'other-submit').fire('click')[0];
+    assert.equal(world.ids['confirm-title'].textContent, value('label'));
+    for (const key of ['typeLabel', 'fileName', 'merchantOriginal'])
+      assert.ok(world.ids['confirm-intro'].textContent.includes(value(key)), key);
+    noImages();
+    world.ids['confirm-submit'].fire('click');
+    await pending;
+    await kw2Flush();
+    for (const key of ['typeLabel', 'label', 'fileName', 'stateLabel', 'error'])
+      assert.ok(world.ids.notice.textContent.includes(value(key)), key);
+    noImages();
+
+    const partner = {reviewId: 'partner', fileId: 'file', fileName: value('fileName'),
+      merchantOriginal: value('merchantOriginal'), sourceRow: 2, usageDate: '2026-01-05',
+      amount: 100, candidates: [], exclude: {enabled: false, disabledReason: value('disabledReason')}};
+    const partnerWorld = kw2World([], {webAppResolveOtherReview: kw2Success({code: 'EXCLUDE',
+      typeLabel: value('typeLabel'), label: value('label')})});
+    Object.assign(partnerWorld.ui.state, {reviews: [partner], partnerTotal: 1});
+    partnerWorld.ui.renderSelection();
+    for (const key of ['fileName', 'merchantOriginal'])
+      assert.ok(partnerWorld.ids['review-table'].textContent.includes(value(key)), key);
+    assert.equal(kw2Control(partnerWorld, 'partner-exclude').title, value('disabledReason'));
+    assert.equal(kw2Control(partnerWorld, 'partner-exclude').disabled, true);
+    partner.exclude.enabled = true;
+    partnerWorld.ui.renderSelection();
+    const partnerPending = kw2Control(partnerWorld, 'partner-exclude').fire('click')[0];
+    for (const key of ['fileName', 'merchantOriginal'])
+      assert.ok(partnerWorld.ids['confirm-intro'].textContent.includes(value(key)), key);
+    assert.equal(partnerWorld.root.querySelectorAll('img').length, 0);
+    partnerWorld.ids['confirm-submit'].fire('click');
+    await partnerPending;
+    await kw2Flush();
+    for (const key of ['typeLabel', 'label'])
+      assert.ok(partnerWorld.ids.notice.textContent.includes(value(key)), key);
+    assert.equal(partnerWorld.root.querySelectorAll('img').length, 0);
+  });
+
+  test('kw2 26: customer fix review return reasons have explicit labels and unknown fallback', () => {
+    assert.deepEqual(clientEval("['COUNT_TOTAL_MISMATCH','INPUT_LIMIT','NEW_REASON'].map(function(reason) { return customerFixReasonLines({source:'REVIEW_RETURN',returnReason:reason}); })"),
+      [['件数・合計が明細と合わないため、顧客に確認を依頼しました'],
+        ['ファイルが大きすぎるため、顧客に分割を依頼しました'], ['NEW_REASON']]);
+  });
+
+  browserAsyncTest('kw2 31: failure keeps typed inputs, AMOUNT needs an amount, other operations send no corrections', async () => {
+    // 失敗したら打った値を残す ── 押し直すときに打ち直させない。
+    const row = kw2Row();
+    const world = kw2World([row], {webAppResolveOtherReview: {ok: false, code: 'ALREADY_SETTLED'}});
+    kw2Select(world, 'FIX_DATE_AMOUNT', '2026-01-07', '300');
+    const pending = kw2Control(world, 'other-submit').fire('click')[0];
+    world.ids['confirm-submit'].fire('click');
+    await pending;
+    await kw2Flush();
+    assert.deepEqual(JSON.parse(JSON.stringify(world.ui.state.otherInputs.get(row.reviewId))),
+      {code: 'FIX_DATE_AMOUNT', correctedDate: '2026-01-07', correctedAmount: '300'});
+
+    const amountWorld = kw2World([kw2Row('AMOUNT', 'amount1')]);
+    kw2Select(amountWorld, 'FIX_DATE_AMOUNT', '2026-01-07', '');
+    await kw2Control(amountWorld, 'other-submit').fire('click')[0];
+    assert.equal(amountWorld.ids.notice.textContent, '金額を入力してください。');
+    assert.equal(amountWorld.calls.length, 0);
+
+    const switchRow = kw2Row('DATE', 'switch1', [
+      {code: 'FIX_DATE_AMOUNT', label: '日付・金額を修正して確定する', enabled: true},
+      {code: 'EXCLUDE', label: '対象外にする', enabled: true}]);
+    const switchWorld = kw2World([switchRow],
+      {webAppResolveOtherReview: kw2Success({code: 'EXCLUDE'})});
+    kw2Select(switchWorld, 'FIX_DATE_AMOUNT', '2026-01-07', '300');
+    kw2Select(switchWorld, 'EXCLUDE');
+    const switched = kw2Control(switchWorld, 'other-submit').fire('click')[0];
+    switchWorld.ids['confirm-submit'].fire('click');
+    await switched;
+    await kw2Flush();
+    const rpc = switchWorld.calls.filter((c) => c.name === 'webAppResolveOtherReview');
+    assert.deepEqual(JSON.parse(JSON.stringify(rpc)),
+      [{name: 'webAppResolveOtherReview', args: ['C001', 'switch1', 'EXCLUDE', {}]}]);
+  });
+
+  test('kw2 32: confirmation effect texts match the specification for every operation', () => {
+    const keep = '取り消せません（戻すには管理者の操作が必要です）。';
+    const rewind = 'ファイルを取込待ちに戻します。［記帳を実行］で取り込み直し、そのときもう一度確かめます。' +
+      '戻すだけでは転記先に何も書きません。';
+    const returned = 'ファイルを【要修正】にします。顧客に修正を依頼してください。' +
+      '直ったら中央の一覧の［修正済み → 取込待ちに戻す］で戻せます。';
+    const exclude = '転記行の B・F・I・K・M列と取引 ID を空にし、取引を対象外にします。' +
+      '取り消せません（戻すには管理者による再取込が必要です）。';
+    const expected = {
+      POST_ZERO_AMOUNT: '要確認を確定し、いまの転記行の内容をそのまま残します。' + keep,
+      POST_PRIOR_YEAR: '要確認を確定し、いまの転記行の内容をそのまま残します。' + keep,
+      EXCLUDE: exclude,
+      EXCLUDE_PRIOR_YEAR: exclude,
+      CONFIRM_EMPTY_FILE: '0 件で正しいことを記録し、ファイルを【完了】にします。転記先には何も書きません。' + keep,
+      APPROVE_COUNT_MISMATCH: rewind,
+      APPROVE_SCAN_TRUNCATION: rewind,
+      REGISTER_FORMAT: rewind,
+      CONFIRM_DESTINATION_FIXED: rewind,
+      REJECT_COUNT_MISMATCH: returned,
+      RESIZE_INPUT: returned,
+      KEEP_ORIGINAL_RESULT: 'この新しいファイルを【対象外】にします。既に取り込んだ元のファイルの結果は変わりません。' + keep,
+      CANCEL_FILE: 'ファイルを【取消済】にします。転記先に行はありません。' + keep
+    };
+    const actual = clientEval('(' + JSON.stringify(Object.keys(expected)) +
+      ').map(function(code) { return TEXT.otherEffect(code, {}); })');
+    assert.deepEqual(actual, Object.values(expected));
+    assert.equal(clientEval("TEXT.otherEffect('FIX_DATE_AMOUNT', {correctedDate: '2026-01-05', correctedAmount: '1200'})"),
+      '入力した値だけを転記先の B列（利用日）・M列（金額）へ書いて確定します。利用日: 2026-01-05。金額: 1,200。' + keep);
   });
 };
 

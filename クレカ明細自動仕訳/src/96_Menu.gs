@@ -902,7 +902,7 @@ function applyResolveDecision_(item, code, inputs, options) {
     if (definition.unit === 'FILE' && nextStateByFile[fileId] === FILE_STATE.VALIDATING) {
       try {
         rewindFileForReimportAudited_(fileId, auth.userEmail,
-          {from: FILE_STATE.VALIDATING, operation: code, customerId: item.customerId});
+          {from: FILE_STATE.VALIDATING, operation: code, customerId: item.customerId, reason: options.auditReason});
         outcome.rewoundFiles.push(fileId);
       } catch (error) {
         outcome.errors.push({fileId: fileId, code: error && error.code || null,

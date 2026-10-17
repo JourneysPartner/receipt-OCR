@@ -6788,4 +6788,407 @@ module.exports = ({test, assert, gas}) => {
     webImport, importFileResults, openReviewsFor, withMocks, call, plain});
   require('./kw26-import-helpers')({test, assert, gas, setupWorld, putCsv, createWebDestination,
     webImport, withMocks, call, plain, latestImportCall, withImportTiming, seedPrefetchFile});
+
+  function kw2Seed(rows = ['日付不明,既知店,1000,仕入れ'], options = {}) {
+    const seeded = setupWorld(Object.assign({knownMerchant: true}, options));
+    seeded.fileId = putCsv(seeded.customer, {rows});
+    seeded.result = webImport(seeded.customer);
+    seeded.reviews = openReviewsFor(seeded.customer.customerId);
+    return seeded;
+  }
+  function kw2File(type, seeded) {
+    seeded = seeded || setupWorld();
+    const fileId = putCsv(seeded.customer, {rows: []});
+    call('createOrUpdateProcessLog', ['KW2', call('getCustomerById', [seeded.customer.customerId]),
+      {id: fileId, name: '明細.csv', binaryHash: 'b'.repeat(64), contentHash: 'c'.repeat(64),
+        hashVersion: '3', state: 'REVIEW_WAIT'}]);
+    const registered = call('registerReview', [{reviewType: type, fileId,
+      customerId: seeded.customer.customerId, customerName: seeded.customer.customerName,
+      fileNameOriginal: '明細.csv'}]);
+    return Object.assign({}, seeded, {fileId, review: reviewById(registered.reviewId)});
+  }
+  function kw2Item(review) {
+    return {kind: call('isTransactionScopedReviewType', [review.reviewType]) ? 'TRANSACTION' : 'FILE',
+      reviewType: review.reviewType, customerId: review.customerId, customerName: review.customerName,
+      merchantOriginal: review.merchantOriginal, reviews: [review]};
+  }
+  function kw2Resolve(review, code, inputs = {}, customerId = review.customerId) {
+    return call('webAppResolveOtherReview', [customerId, review.reviewId, code, inputs]);
+  }
+  function kw2Snapshot(withAudit = true) {
+    return spreadsheetIds().map((id) => ({id, sheets: gas.stubs.getSpreadsheet(id).getSheets()
+      .filter((sheet) => withAudit || sheet.getName() !== '監査ログ')
+      .map((sheet) => ({name: sheet.getName(), values: sheet.getDataRange().getValues(),
+        formulas: sheet.getDataRange().getFormulas()}))}));
+  }
+  function kw2NoWrite(fn, expected) {
+    const before = kw2Snapshot();
+    const result = fn();
+    assert.equal(result.ok, false); assert.equal(result.code, expected);
+    assert.deepEqual(kw2Snapshot(), before);
+    return result;
+  }
+  function kw2List(customerId = 'C001') { return call('webAppListReviews', [customerId, 15, 0]); }
+  function kw2TxReview(seeded, type) {
+    const review = seeded.reviews.find((r) => r.reviewType === type);
+    assert.ok(review, 'fixture must contain ' + type);
+    return review;
+  }
+  function kw2AuditReason() {
+    return gas.stubs.getSpreadsheet('master').getSheetByName('監査ログ').getDataRange().getValues()
+      .filter((row) => row[2] === 'REVIEW_RESOLVE' && String(row[10]).includes('DISCOVERED'));
+  }
+
+  test('kw2 1: list retains partner fields and adds menu options and transaction details', () => {
+    const seeded = kw2Seed(['日付不明,既知店,1000,仕入れ', '2026/01/05,既知店,0,仕入れ',
+      '2026/01/06,未知店,100,仕入れ']);
+    const listed = kw2List();
+    assert.equal(listed.reviews.length, 1);
+    assert.deepEqual(listed.otherCounts, {DATE: 1, ZERO_AMOUNT: 1});
+    assert.equal(listed.otherTotal, 2);
+    assert.deepEqual(listed.unsupportedCounts, {integrity: 0, fileChanged: 0});
+    assert.deepEqual(listed.reviews[0].exclude, {enabled: true, disabledReason: null});
+    for (const row of listed.otherReviews) {
+      const review = reviewById(row.reviewId), tx = transactionFor(review);
+      assert.deepEqual(Object.keys(row).sort(), ['reviewId', 'reviewType', 'typeLabel', 'scope',
+        'fileId', 'fileName', 'sourceRow', 'usageDate', 'amount', 'purpose', 'merchantOriginal',
+        'originalDate', 'originalAmount', 'options', 'problem'].sort());
+      assert.equal(row.typeLabel, gas.context.MENU_REVIEW_TYPE_LABELS_[row.reviewType]);
+      assert.equal(row.scope, 'TRANSACTION'); assert.equal(row.usageDate, tx.planned.b);
+      assert.equal(row.amount, tx.planned.m); assert.equal(row.purpose, tx.planned.i);
+      assert.equal(row.merchantOriginal, review.merchantOriginal || tx.originalMerchant || tx.planned.k);
+      assert.equal(row.problem, null);
+      assert.deepEqual(row.options, call('resolveOptionsFor_', [kw2Item(review), 'REVIEWER', tx]));
+    }
+    assert.deepEqual(listed.otherReviews.map((r) => r.reviewType).sort(), ['DATE', 'ZERO_AMOUNT']);
+    assert.equal(seeded.result.fileResults.length, 1);
+  });
+
+  test('kw2 2: list batchGet budgets use the measured four worlds', () => {
+    const counts = [];
+    for (const kind of ['a', 'b', 'c', 'd']) {
+      const rows = kind === 'a' ? ['2026/01/05,未知店,100,仕入れ'] :
+        kind === 'b' ? ['日付不明,未知店,100,仕入れ'] : ['日付不明,既知店,100,仕入れ'];
+      const seeded = kw2Seed(rows);
+      if (kind === 'd') kw2File('EMPTY_FILE', seeded);
+      gas.stubs.resetApiCallCounts(); kw2List();
+      counts.push(gas.stubs.getApiCallCounts().batchGet);
+    }
+    console.log('KW2_LIST_READS ' + JSON.stringify(counts));
+    // 実装前は [6, 6, 4, 4]。取引先と相乗りし、必要なログだけを増やす。
+    assert.deepEqual(counts, [6, 6, 6, 7]);
+  });
+
+  test('kw2 3: corrected date writes only the clone and respects unresolved partner', () => {
+    for (const merchant of ['既知店', '未知店']) {
+      const seeded = kw2Seed(['日付不明,' + merchant + ',1000,仕入れ']);
+      const review = kw2TxReview(seeded, 'DATE'), tx = transactionFor(review);
+      const template = destinationSnapshot(seeded.customer.destinationId);
+      const result = kw2Resolve(review, 'FIX_DATE_AMOUNT', {correctedDate: '2026-01-05'});
+      assert.equal(result.ok, true); assert.equal(result.resolved, 1);
+      assert.equal(call('toTokyoDateString_', [destinationValue(review.destinationSpreadsheetId, tx.destinationRow, 2)]), '2026-01-05');
+      assert.deepEqual(destinationSnapshot(seeded.customer.destinationId), template);
+      assert.equal(reviewById(review.reviewId).status, 'RESOLVED');
+      assert.equal(result.committed, merchant === '既知店' ? 1 : 0);
+      assert.equal(transactionFor(review).transactionStatus, merchant === '既知店' ? 'COMMITTED' : 'REVIEW_REQUIRED');
+      if (merchant === '未知店') assert.match(result.unmetTexts.join(' '), /取引先が未解決/);
+    }
+  });
+
+  test('kw2 4: invalid or absent corrections write nothing and unrelated inputs are discarded', () => {
+    const seeded = kw2Seed(); const date = kw2TxReview(seeded, 'DATE');
+    kw2NoWrite(() => kw2Resolve(date, 'FIX_DATE_AMOUNT', {}), 'DATE_REQUIRED');
+    kw2NoWrite(() => kw2Resolve(date, 'FIX_DATE_AMOUNT', {correctedDate: '2026-02-30'}), 'INVALID_DATE');
+    const amountId = call('registerReview', [Object.assign({}, date, {reviewId: undefined,
+      reviewType: 'AMOUNT', suppressionKey: undefined})]).reviewId;
+    const amount = reviewById(amountId);
+    kw2NoWrite(() => kw2Resolve(amount, 'FIX_DATE_AMOUNT', {}), 'AMOUNT_REQUIRED');
+    kw2NoWrite(() => kw2Resolve(amount, 'FIX_DATE_AMOUNT', {correctedAmount: '12a'}), 'INVALID_AMOUNT');
+    const zero = kw2TxReview(kw2Seed(['2026/01/05,既知店,0,仕入れ']), 'ZERO_AMOUNT');
+    const tx = transactionFor(zero), before = destinationSnapshot(zero.destinationSpreadsheetId);
+    const apply = gas.context.applyResolveDecision_;
+    withMocks({applyResolveDecision_(item, code, inputs, options) {
+      assert.deepEqual(plain(inputs), {reviewId: zero.reviewId});
+      return apply(item, code, inputs, options);
+    }}, () => assert.equal(kw2Resolve(zero, 'POST_ZERO_AMOUNT',
+      {correctedDate: '2026-01-07', correctedAmount: '999'}).resolved, 1));
+    assert.deepEqual(destinationSnapshot(zero.destinationSpreadsheetId), before);
+    assert.deepEqual(transactionFor(zero).planned, tx.planned);
+  });
+
+  test('kw2 5: zero posting retains row and exclusion clears only the clone', () => {
+    for (const code of ['POST_ZERO_AMOUNT', 'EXCLUDE']) {
+      const seeded = kw2Seed(['2026/01/05,既知店,0,仕入れ']);
+      const review = kw2TxReview(seeded, 'ZERO_AMOUNT'), tx = transactionFor(review);
+      const before = destinationSnapshot(review.destinationSpreadsheetId);
+      const template = destinationSnapshot(seeded.customer.destinationId);
+      assert.equal(kw2Resolve(review, code).resolved, 1);
+      if (code === 'POST_ZERO_AMOUNT') assert.deepEqual(destinationSnapshot(review.destinationSpreadsheetId), before);
+      else for (const column of [2, 3, 4, 5, 6, 7])
+        assert.equal(destinationValue(review.destinationSpreadsheetId, tx.destinationRow, column), '');
+      assert.equal(transactionFor(review).transactionStatus, code === 'EXCLUDE' ? 'CANCELED' : 'COMMITTED');
+      assert.deepEqual(destinationSnapshot(seeded.customer.destinationId), template);
+    }
+  });
+
+  test('kw2 6: prior year posting and exclusion match menu effects', () => {
+    for (const code of ['POST_PRIOR_YEAR', 'EXCLUDE_PRIOR_YEAR']) {
+      const outcomes = [];
+      for (const web of [false, true]) {
+        const seeded = kw2Seed(['2025/01/05,既知店,100,仕入れ'],
+          {customer: {customerCategory: 'INDIVIDUAL', fiscalYear: 2026}});
+        const review = kw2TxReview(seeded, 'PRIOR_YEAR');
+        const result = web ? kw2Resolve(review, code) :
+          call('applyResolveDecision_', [kw2Item(review), code, {reviewId: review.reviewId}, {}]);
+        assert.equal(result.resolved, 1);
+        const tx = transactionFor(review);
+        outcomes.push({status: tx.transactionStatus, reviewStatus: reviewById(review.reviewId).status,
+          row: [2, 3, 4, 5, 6].map((c) => destinationValue(review.destinationSpreadsheetId, tx.destinationRow, c))});
+      }
+      assert.deepEqual(outcomes[1], outcomes[0]);
+    }
+  });
+
+  test('kw2 7: partner exclusion affects one review and rejects partner adoption paths', () => {
+    const seeded = seedPartnerViaWeb({count: 2}); const review = seeded.reviews[0];
+    for (const code of ['ADOPT_EXISTING_PARTNER', 'RESOLVE_WITHOUT_PARTNER'])
+      kw2NoWrite(() => kw2Resolve(review, code, {partnerName: '既知店'}), 'OPERATION_NOT_OFFERED');
+    assert.equal(kw2Resolve(review, 'EXCLUDE').resolved, 1);
+    const tx = transactionFor(review);
+    for (const column of [2, 3, 4, 5, 6, 7]) assert.equal(destinationValue(review.destinationSpreadsheetId, tx.destinationRow, column), '');
+    assert.equal(tx.transactionStatus, 'CANCELED');
+    assert.ok(!['OPEN', 'IN_PROGRESS'].includes(reviewById(review.reviewId).status));
+    assert.equal(reviewById(seeded.reviews[1].reviewId).status, 'OPEN');
+  });
+
+  test('kw2 8: live freee state disables exclusion on both lists and execution', () => {
+    const seeded = kw2Seed(['日付不明,未知店,100,仕入れ']);
+    const review = kw2TxReview(seeded, 'DATE'), tx = transactionFor(review);
+    txLogSheet().getRange(tx._rowNumber, 13).setValue('IMPORTED');
+    const expected = call('resolveOptionsFor_', [kw2Item(review), 'REVIEWER', transactionFor(review)])
+      .find((o) => o.code === 'EXCLUDE');
+    const listed = kw2List(), option = listed.otherReviews[0].options.find((o) => o.code === 'EXCLUDE');
+    assert.equal(option.enabled, false); assert.equal(option.disabledReason, expected.disabledReason);
+    assert.deepEqual(listed.reviews[0].exclude, {enabled: false, disabledReason: expected.disabledReason});
+    assert.equal(kw2NoWrite(() => kw2Resolve(review, 'EXCLUDE'), 'OPERATION_DISABLED').message, expected.disabledReason);
+  });
+
+  test('kw2 9: imported empty file offers completion without destination writes', () => {
+    const seeded = kw2Seed([]); const review = kw2TxReview(seeded, 'EMPTY_FILE');
+    const row = kw2List().otherReviews[0];
+    assert.equal(row.scope, 'FILE');
+    assert.deepEqual(row.options.map((o) => o.code), ['CONFIRM_EMPTY_FILE', 'CANCEL_FILE']);
+    const before = destinationSnapshot(seeded.customer.destinationId);
+    assert.equal(kw2Resolve(review, 'CONFIRM_EMPTY_FILE').resolved, 1);
+    assert.equal(call('getFileState', [seeded.fileId]), 'COMPLETED');
+    assert.deepEqual(destinationSnapshot(seeded.customer.destinationId), before);
+  });
+
+  test('kw2 10: duplicate keep and cancel preserve original transactions and rows', () => {
+    for (const code of ['KEEP_ORIGINAL_RESULT', 'CANCEL_FILE']) {
+      const rows = ['2026/01/05,既知店,100,仕入れ']; const seeded = kw2Seed(rows);
+      const original = call('getTransactionsForFile_', [seeded.fileId]);
+      const before = destinationSnapshot(seeded.result.destinationSpreadsheetId);
+      const secondId = putCsv(seeded.customer, {rows}); webImport(seeded.customer);
+      const review = openReviewsFor('C001', {fileId: secondId}).find((r) => r.reviewType === 'DUPLICATE');
+      assert.ok(review); assert.equal(kw2Resolve(review, code).resolved, 1);
+      assert.equal(call('getFileState', [secondId]), code === 'CANCEL_FILE' ? 'CANCELED' : 'EXCLUDED');
+      assert.deepEqual(call('getTransactionsForFile_', [seeded.fileId]), original);
+      assert.deepEqual(destinationSnapshot(seeded.result.destinationSpreadsheetId), before);
+    }
+  });
+
+  test('kw2 11: mismatch approval audits WEBAPP and returns record a visible reason', () => {
+    const approved = kw2File('COUNT_TOTAL_MISMATCH');
+    const result = kw2Resolve(approved.review, 'APPROVE_COUNT_MISMATCH');
+    assert.equal(result.resolved, 1); assert.equal(result.rewound, true);
+    assert.equal(call('getFileState', [approved.fileId]), 'DISCOVERED');
+    assert.equal(call('hasCategory2Approval', [approved.fileId, 'COUNT_TOTAL_MISMATCH', 'c'.repeat(64), '3']), true);
+    assert.ok(kw2AuditReason().some((row) => row.includes('WEBAPP')));
+    for (const type of ['COUNT_TOTAL_MISMATCH', 'INPUT_LIMIT']) {
+      const seeded = kw2File(type), code = type === 'INPUT_LIMIT' ? 'RESIZE_INPUT' : 'REJECT_COUNT_MISMATCH';
+      assert.equal(kw2Resolve(seeded.review, code).resolved, 1);
+      assert.equal(call('getFileState', [seeded.fileId]), 'CUSTOMER_FIX_REQUIRED');
+      const listed = call('webAppListFolder', ['C001', seeded.customer.cardId]);
+      assert.deepEqual(listed.files.find((f) => f.fileId === seeded.fileId).fixReason,
+        {source: 'REVIEW_RETURN', returnReason: type});
+    }
+    const seeded = kw2File('COUNT_TOTAL_MISMATCH');
+    const real = gas.context.recordError;
+    withMocks({recordError(id, error) {
+      if (error.code === 'SOURCE_REQUIRES_CUSTOMER_FIX') throw new Error('reason storage unavailable');
+      return real(id, error);
+    }}, () => {
+      const failedReason = kw2Resolve(seeded.review, 'REJECT_COUNT_MISMATCH');
+      assert.equal(failedReason.ok, true); assert.equal(failedReason.resolved, 1);
+      assert.ok(failedReason.errors.some((e) => e.code === 'REASON_NOT_RECORDED'));
+    });
+  });
+
+  test('kw2 12: unknown format offers cancellation only', () => {
+    const seeded = kw2File('FORMAT_UNKNOWN');
+    assert.deepEqual(kw2List().otherReviews[0].options.map((o) => o.code), ['CANCEL_FILE']);
+    kw2NoWrite(() => kw2Resolve(seeded.review, 'REGISTER_FORMAT'), 'OPERATION_NOT_OFFERED');
+    assert.equal(kw2Resolve(seeded.review, 'CANCEL_FILE').resolved, 1);
+    assert.equal(call('getFileState', [seeded.fileId]), 'CANCELED');
+  });
+
+  test('kw2 13: reviewer cannot execute admin operation and owner can', () => {
+    const seeded = kw2File('DESTINATION_FIX');
+    const option = () => kw2List().otherReviews[0].options.find((o) => o.code === 'CONFIRM_DESTINATION_FIXED');
+    assert.equal(option().enabled, false); assert.equal(option().disabledReason, '（システム管理者のみ）');
+    kw2NoWrite(() => kw2Resolve(seeded.review, 'CONFIRM_DESTINATION_FIXED'), 'OPERATION_DISABLED');
+    gas.stubs.setActiveUser('owner@example.com'); assert.equal(option().enabled, true);
+    assert.equal(kw2Resolve(seeded.review, 'CONFIRM_DESTINATION_FIXED').resolved, 1);
+  });
+
+  test('kw2 14: file cancellation counts live and unreadable transaction records', () => {
+    const seeded = kw2Seed(['2026/01/05,既知店,100,仕入れ']);
+    const id = call('registerReview', [{reviewType: 'DESTINATION_FIX', fileId: seeded.fileId,
+      customerId: 'C001', fileNameOriginal: '明細.csv'}]).reviewId;
+    const review = reviewById(id);
+    const check = () => {
+      const option = kw2List().otherReviews.find((r) => r.reviewId === id).options.find((o) => o.code === 'CANCEL_FILE');
+      assert.equal(option.enabled, false);
+      assert.equal(option.disabledReason, call('resolveOptionsFor_', [kw2Item(review), 'REVIEWER',
+        {liveTransactionCount: 1}]).find((o) => o.code === 'CANCEL_FILE').disabledReason);
+    };
+    check(); kw2NoWrite(() => kw2Resolve(review, 'CANCEL_FILE'), 'OPERATION_DISABLED');
+    withMocks({txLogFromRecord_() { throw new Error('corrupt record'); }}, check);
+  });
+
+  test('kw2 15: rejected identities and states leave all business stores unchanged', () => {
+    const seeded = kw2File('EMPTY_FILE');
+    kw2NoWrite(() => kw2Resolve({...seeded.review, reviewId: 'absent'}, 'CONFIRM_EMPTY_FILE'), 'REVIEW_NOT_FOUND');
+    addCustomer(seeded.world, {customerId: 'C002', suffix: '2'});
+    kw2NoWrite(() => kw2Resolve(seeded.review, 'CONFIRM_EMPTY_FILE', {}, 'C002'), 'REVIEW_CUSTOMER_MISMATCH');
+    const sheet = gas.stubs.getSpreadsheet('master').getSheetByName('要確認');
+    sheet.getRange(seeded.review._rowNumber, 2).setValue('RESOLVED');
+    kw2NoWrite(() => kw2Resolve(seeded.review, 'CONFIRM_EMPTY_FILE'), 'ALREADY_SETTLED');
+    for (const type of ['INTEGRITY', 'FILE_CHANGED', 'DATE']) {
+      const id = call('registerReview', [{reviewType: type, fileId: seeded.fileId,
+        fullTxId: 'missing-' + type, customerId: 'C001'}]).reviewId;
+      kw2NoWrite(() => kw2Resolve(reviewById(id), 'EXCLUDE'), type === 'DATE' ? 'TRANSACTION_MISSING' : 'NOT_SUPPORTED');
+    }
+    const missing = kw2List().otherReviews.find((r) => r.reviewType === 'DATE');
+    assert.equal(missing.problem, 'TRANSACTION_MISSING'); assert.deepEqual(missing.options, []);
+    gas.stubs.setActiveUser('stranger@example.com');
+    const before = kw2Snapshot(false), permissions = permissionRows().length;
+    assert.throws(() => kw2Resolve(seeded.review, 'CONFIRM_EMPTY_FILE'));
+    assert.deepEqual(kw2Snapshot(false), before); assert.equal(permissionRows().length, permissions + 1);
+  });
+
+  test('kw2 16: leases block file and transaction operations without business writes', () => {
+    const file = kw2File('EMPTY_FILE');
+    call('acquireLease', ['C001', file.fileId, 'OTHER', 'worker', 'PROCESS']);
+    let before = kw2Snapshot();
+    const error = caught(() => kw2Resolve(file.review, 'CONFIRM_EMPTY_FILE'));
+    assert.equal(error.code, 'LEASE_CONFLICT'); assert.match(error.message, /別の処理.*使用中/);
+    assert.deepEqual(kw2Snapshot(), before);
+    const seeded = kw2Seed(); const review = kw2TxReview(seeded, 'DATE');
+    call('acquireLease', ['C001', seeded.fileId, 'OTHER', 'worker', 'PROCESS']);
+    before = kw2Snapshot();
+    const result = kw2Resolve(review, 'FIX_DATE_AMOUNT', {correctedDate: '2026-01-05'});
+    assert.equal(result.resolved, 0); assert.ok(result.errors.some((e) => e.code === 'LEASE_CONFLICT'));
+    assert.deepEqual(kw2Snapshot(), before);
+  });
+
+  test('kw2 17: unsupported counts and transaction first ordering are deterministic', () => {
+    const seeded = kw2Seed(); kw2File('EMPTY_FILE', seeded);
+    for (const type of ['INTEGRITY', 'FILE_CHANGED']) call('registerReview', [{reviewType: type,
+      customerId: 'C001', fileId: seeded.fileId, fullTxId: 'unsupported-' + type}]);
+    const listed = kw2List();
+    assert.deepEqual(listed.unsupportedCounts, {integrity: 1, fileChanged: 1});
+    assert.equal(listed.otherCounts.INTEGRITY, 1); assert.equal(listed.otherCounts.FILE_CHANGED, 1);
+    assert.deepEqual(listed.otherReviews.map((r) => r.scope), ['TRANSACTION', 'FILE']);
+    assert.equal(listed.otherTotal, 2);
+  });
+
+  test('kw2 18: menu rewind retains MENU audit reason without auditReason', () => {
+    const seeded = kw2File('COUNT_TOTAL_MISMATCH');
+    const result = call('applyResolveDecision_', [kw2Item(seeded.review), 'APPROVE_COUNT_MISMATCH',
+      {reviewId: seeded.review.reviewId}, {}]);
+    assert.equal(result.resolved, 1); assert.equal(call('getFileState', [seeded.fileId]), 'DISCOVERED');
+    assert.ok(kw2AuditReason().some((row) => row.includes('MENU')));
+  });
+
+  test('kw2 19: execution batchGet budgets are the measured values', () => {
+    const counts = [];
+    for (const code of ['FIX_DATE_AMOUNT', 'CONFIRM_EMPTY_FILE']) {
+      const seeded = code === 'FIX_DATE_AMOUNT' ? kw2Seed() : kw2File('EMPTY_FILE');
+      const review = seeded.review || kw2TxReview(seeded, 'DATE');
+      gas.stubs.resetApiCallCounts();
+      assert.equal(kw2Resolve(review, code, {correctedDate: '2026-01-05'}).resolved, 1);
+      counts.push(gas.stubs.getApiCallCounts().batchGet);
+    }
+    console.log('KW2_RESOLVE_READS ' + JSON.stringify(counts));
+    assert.deepEqual(counts, [34, 14]);
+  });
+
+  test('kw2 27: partner exclusion is found by code and missing option disables only exclusion', () => {
+    kw2Seed(['2026/01/05,未知店,100,仕入れ']);
+    const original = gas.context.webAppOtherReviewOptions_;
+    try {
+      const unrelated = {code: 'UNRELATED', enabled: true, disabledReason: null};
+      gas.context.webAppOtherReviewOptions_ = () => [unrelated];
+      const missing = kw2List();
+      assert.equal(missing.reviews.length, 1);
+      assert.deepEqual(missing.reviews[0].exclude, {enabled: false,
+        disabledReason: '（この取引は画面から対象外にできません。管理者へ）'});
+      gas.context.webAppOtherReviewOptions_ = () => [];
+      assert.deepEqual(kw2List().reviews[0].exclude, missing.reviews[0].exclude);
+      gas.context.webAppOtherReviewOptions_ = () => [unrelated,
+        {code: 'EXCLUDE', enabled: false, disabledReason: '対象外の理由'}];
+      assert.deepEqual(kw2List().reviews[0].exclude,
+        {enabled: false, disabledReason: '対象外の理由'});
+    } finally {
+      gas.context.webAppOtherReviewOptions_ = original;
+    }
+  });
+
+  test('kw2 28: only FORMAT_UNKNOWN drops REGISTER_FORMAT; other format reviews keep the menu options', () => {
+    // 形式の画面が受け持つのは形式不明だけ。ほかの種類から再検査を消すと、画面で動かせなくなる。
+    for (const type of ['FORMAT_AMBIGUOUS', 'MULTI_SHEET', 'SCAN_TRUNCATED']) {
+      const seeded = kw2File(type);
+      const row = kw2List().otherReviews.find((r) => r.reviewId === seeded.review.reviewId);
+      const expected = call('resolveOptionsFor_', [kw2Item(seeded.review), 'REVIEWER',
+        {liveTransactionCount: 0}]);
+      assert.deepEqual(row.options, expected, type);
+      assert.ok(row.options.some((o) => o.code === 'REGISTER_FORMAT'), type);
+    }
+  });
+
+  test('kw2 29: other list is capped by the list limit, keeps the full total and orders by registration', () => {
+    const first = kw2File('EMPTY_FILE');
+    const second = kw2File('EMPTY_FILE', first);
+    const third = kw2File('EMPTY_FILE', first);
+    const sheet = gas.stubs.getSpreadsheet('master').getSheetByName('要確認');
+    [[first.review, '2026-10-03T00:00:00.000Z'], [second.review, '2026-10-02T00:00:00.000Z'],
+      [third.review, '2026-10-01T00:00:00.000Z']].forEach(([review, registeredAt]) => {
+      sheet.getRange(review._rowNumber, 27).setValue(registeredAt);
+    });
+    const ordered = [third.review.reviewId, second.review.reviewId, first.review.reviewId];
+    assert.deepEqual(kw2List().otherReviews.map((r) => r.reviewId), ordered);
+    const original = gas.context.WEBAPP_REVIEW_LIST_LIMIT_;
+    try {
+      gas.context.WEBAPP_REVIEW_LIST_LIMIT_ = 2;
+      const capped = kw2List();
+      assert.deepEqual(capped.otherReviews.map((r) => r.reviewId), ordered.slice(0, 2));
+      assert.equal(capped.otherTotal, 3);
+    } finally {
+      gas.context.WEBAPP_REVIEW_LIST_LIMIT_ = original;
+    }
+  });
+
+  test('kw2 30: a partner row whose transaction cannot be identified cannot be excluded', () => {
+    seedPartnerViaWeb();
+    withMocks({webAppTransactionsById_() { return {}; }}, () => {
+      const listed = kw2List();
+      assert.ok(listed.reviews.length > 0);
+      listed.reviews.forEach((row) => {
+        assert.deepEqual(row.exclude,
+          {enabled: false, disabledReason: '（取引ログで取引を特定できません。管理者へ）'});
+      });
+    });
+  });
 };

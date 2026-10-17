@@ -334,6 +334,11 @@
             <span id="excel-status" class="excel-status"></span>
           </div>
           <div id="final-summary" class="final-summary" role="status" aria-live="polite" hidden></div>
+          <section id="other-review-section" class="other-review-section" aria-labelledby="other-review-heading" hidden>
+            <h3 id="other-review-heading" class="subheading">その他の要確認 <span id="other-review-total">0</span> 件</h3>
+            <div id="other-review-list" class="review-table-wrap"></div>
+            <div id="other-review-more" class="muted"></div>
+          </section>
         </div>
       </div>
     </section>
@@ -421,6 +426,50 @@
       comingSoon: 'この画面は準備中です。',
       chooseReview: '確定する要確認を選んでください。',
       unknownFailure: '処理に失敗しました。管理者へ連絡してください。',
+      otherDateRequired: '利用日を入力してください。',
+      otherAmountRequired: '金額を入力してください。',
+      otherTransactionMissing: 'この要確認の取引を取引ログで特定できません。管理者へ連絡してください。',
+      partnerExcludeConfirm: function(review) {
+        return '「' + review.merchantOriginal + '」（' + formatDate(review.usageDate, false) + '・' +
+          formatAmount(review.amount) + '、' + (review.fileName || '（ファイル名不明）') +
+          (review.sourceRow ? ' ' + review.sourceRow + ' 行目' : '') + '）を対象外にします。';
+      },
+      otherEffect: function(code, inputs) {
+        if (code === 'FIX_DATE_AMOUNT') return '入力した値だけを転記先の B列（利用日）・M列（金額）へ書いて確定します。' +
+          (inputs.correctedDate ? '利用日: ' + inputs.correctedDate + '。' : '') +
+          (inputs.correctedAmount !== '' && inputs.correctedAmount !== undefined ? '金額: ' + formatAmount(inputs.correctedAmount) + '。' : '') +
+          '取り消せません（戻すには管理者の操作が必要です）。';
+        if (code === 'POST_ZERO_AMOUNT' || code === 'POST_PRIOR_YEAR')
+          return '要確認を確定し、いまの転記行の内容をそのまま残します。取り消せません（戻すには管理者の操作が必要です）。';
+        if (code === 'EXCLUDE' || code === 'EXCLUDE_PRIOR_YEAR')
+          return '転記行の B・F・I・K・M列と取引 ID を空にし、取引を対象外にします。取り消せません（戻すには管理者による再取込が必要です）。';
+        if (code === 'CONFIRM_EMPTY_FILE')
+          return '0 件で正しいことを記録し、ファイルを【完了】にします。転記先には何も書きません。取り消せません（戻すには管理者の操作が必要です）。';
+        if (['APPROVE_COUNT_MISMATCH', 'APPROVE_SCAN_TRUNCATION', 'REGISTER_FORMAT', 'CONFIRM_DESTINATION_FIXED'].indexOf(code) >= 0)
+          return 'ファイルを取込待ちに戻します。［記帳を実行］で取り込み直し、そのときもう一度確かめます。戻すだけでは転記先に何も書きません。';
+        if (code === 'REJECT_COUNT_MISMATCH' || code === 'RESIZE_INPUT')
+          return 'ファイルを【要修正】にします。顧客に修正を依頼してください。直ったら中央の一覧の［修正済み → 取込待ちに戻す］で戻せます。';
+        if (code === 'KEEP_ORIGINAL_RESULT')
+          return 'この新しいファイルを【対象外】にします。既に取り込んだ元のファイルの結果は変わりません。取り消せません（戻すには管理者の操作が必要です）。';
+        if (code === 'CANCEL_FILE')
+          return 'ファイルを【取消済】にします。転記先に行はありません。取り消せません（戻すには管理者の操作が必要です）。';
+        return '';
+      },
+      otherReviewHelp: {
+        DATE: '利用日が読めないか、ありえない日付です。正しい利用日を入れて確定するか、対象外にします。',
+        AMOUNT: '金額が読めません。正しい金額を入れて確定するか、対象外にします。',
+        ZERO_AMOUNT: '金額が 0 円です。0 円のまま計上するか、対象外にします。',
+        PRIOR_YEAR: '利用日が前年以前です（個人の顧客）。前年の利用分として計上するか、対象外にします。',
+        FORMAT_UNKNOWN: 'カードの形式が分かりません。形式の登録は中央のファイル一覧の［形式を確認］から行います。ここではファイルの取消しだけできます。',
+        FORMAT_AMBIGUOUS: '2 つ以上の形式に当たります。形式を直してから再検査します（システム管理者）。',
+        MULTI_SHEET: '形式に当たるシートが 2 つ以上あります。形式を直してから再検査します（システム管理者）。',
+        DUPLICATE: '同じ内容（または使用用途だけ違う）のファイルが既に取り込まれています。',
+        COUNT_TOTAL_MISMATCH: '件数・合計が明細の読取結果と合いません。承認して取り込み直すか、顧客に差し戻します。',
+        EMPTY_FILE: '明細が 0 件です。0 件で正しければ完了にします。',
+        INPUT_LIMIT: 'ファイルが大きすぎて処理できません。顧客に分割を依頼します。',
+        DESTINATION_FIX: '転記先シートの形が合いません。転記先を直してから再検査します（システム管理者）。',
+        SCAN_TRUNCATED: '空行の後にも明細らしい行があります。形式を直すか、打切りを承認して再検査します（システム管理者）。'
+      },
       learnEmpty: '辞書に登録しません：この店名は辞書の鍵にできません',
       learnDifferent: '辞書に登録しません：同じ店名に別の取引先名が入っています',
       learnDuplicate: '辞書に登録しません：同じ店名の 1 件目で登録します',
@@ -464,6 +513,10 @@
       reviewFilter: '',
       partnerTotal: 0,
       otherCounts: {},
+      otherReviews: [],
+      otherTotal: 0,
+      unsupportedCounts: {integrity: 0, fileChanged: 0},
+      otherInputs: new Map(),
       reviewOffset: 0,
       reviewLimit: 0,
       viewGeneration: 0,
@@ -511,6 +564,7 @@
       'import-progress', 'import-progress-label', 'import-progress-arrows',
       'import-progress-value', 'import-progress-hint', 'import-disabled-reason', 'import-button', 'review-total',
       'review-window', 'review-empty', 'review-content', 'other-reviews', 'review-table',
+      'other-review-section', 'other-review-total', 'other-review-list', 'other-review-more',
       'review-filter', 'review-count', 'bulk-partner', 'bulk-partner-options', 'partner-name-options', 'bulk-apply',
       'select-clear', 'review-pager',
       'review-more', 'review-prev', 'review-next', 'resolve-progress', 'resolve-progress-label',
@@ -535,6 +589,7 @@
         else if (name === 'webAppRunImport') runner.webAppRunImport(args[0], args[1], args[2]);
         else if (name === 'webAppPrepareImport') runner.webAppPrepareImport(args[0], args[1]);
         else if (name === 'webAppResolveReviews') runner.webAppResolveReviews(args[0], args[1], args[2]);
+        else if (name === 'webAppResolveOtherReview') runner.webAppResolveOtherReview(args[0], args[1], args[2], args[3]);
         else if (name === 'webAppFinalReview') runner.webAppFinalReview(args[0], args[1], args[2]);
         else if (name === 'webAppExplainUnknownFile') runner.webAppExplainUnknownFile(args[0], args[1], args[2], args[3]);
         else if (name === 'webAppPreviewFormat') runner.webAppPreviewFormat(args[0], args[1], args[2], args[3]);
@@ -597,10 +652,17 @@
     function customerFixReasonLines(fixReason) {
       if (!fixReason || fixReason.source === 'NONE' ||
           (fixReason.source !== 'IMPORT' && fixReason.source !== 'FORMAT_REVIEW' &&
-           fixReason.source !== 'UNAVAILABLE')) {
+           fixReason.source !== 'UNAVAILABLE' && fixReason.source !== 'REVIEW_RETURN')) {
         return ['理由の記録はありません'];
       }
       if (fixReason.source === 'UNAVAILABLE') return ['理由を読み込めませんでした'];
+      if (fixReason.source === 'REVIEW_RETURN') {
+        var reviewReturnLabels = {
+          COUNT_TOTAL_MISMATCH: '件数・合計が明細と合わないため、顧客に確認を依頼しました',
+          INPUT_LIMIT: 'ファイルが大きすぎるため、顧客に分割を依頼しました'
+        };
+        return [reviewReturnLabels[fixReason.returnReason] || fixReason.returnReason];
+      }
 
       if (fixReason.source === 'FORMAT_REVIEW') {
         var labels = {
@@ -948,18 +1010,131 @@
 
     function renderOtherReviews() {
       el['other-reviews'].textContent = '';
-      var entries = Object.keys(state.otherCounts || {}).filter(function(key) {
-        return Number(state.otherCounts[key] || 0) > 0;
-      });
-      if (!entries.length) return;
+      var message = state.otherTotal > 0 ? 'その他の要確認が ' + state.otherTotal +
+        ' 件あります（いちばん下の「その他の要確認」で確定します）。' : '';
+      var unsupported = state.unsupportedCounts;
+      if (unsupported.integrity > 0 || unsupported.fileChanged > 0) message +=
+        '整合性 ' + unsupported.integrity + ' 件・ファイル変更 ' + unsupported.fileChanged +
+        ' 件は画面から確定できません（管理者へ連絡してください）。';
+      if (!message) return;
       var box = document.createElement('div');
       box.className = 'other-reviews';
-      box.textContent = entries.map(function(key) {
-        return reviewTypeLabel(key) + ' ' + state.otherCounts[key] + ' 件' +
-          (key === 'FORMAT_UNKNOWN' ? '（中央のファイル一覧の［形式を確認］から扱えます）' : '');
-      }).join('、') + '。' + (entries.some(function(key) { return key !== 'FORMAT_UNKNOWN'; }) ?
-        'その他の要確認はメニューから確定してください。' : '');
+      box.textContent = message;
       el['other-reviews'].appendChild(box);
+    }
+
+    /** 描き直しても操作と訂正値を保てるよう、入力は要確認ごとの状態から戻す。 */
+    function renderOtherReviewList() {
+      el['other-review-section'].hidden = state.otherTotal === 0;
+      el['other-review-total'].textContent = String(state.otherTotal);
+      el['other-review-list'].textContent = '';
+      el['other-review-more'].textContent = state.otherTotal > state.otherReviews.length ?
+        '他 ' + (state.otherTotal - state.otherReviews.length) + ' 件（表示分を片付けると出てきます）' : '';
+      if (!state.otherTotal) return;
+      var table = document.createElement('table');
+      table.className = 'review-table other-review-table';
+      var head = document.createElement('thead');
+      var header = document.createElement('tr');
+      ['種類', '内容', '元ファイル', '行', '操作'].forEach(function(label) {
+        var cell = document.createElement('th');
+        cell.textContent = label;
+        header.appendChild(cell);
+      });
+      head.appendChild(header);
+      table.appendChild(head);
+      var body = document.createElement('tbody');
+      state.otherReviews.forEach(function(review) {
+        var id = String(review.reviewId);
+        var row = document.createElement('tr');
+        row.dataset.reviewId = id;
+        var type = document.createElement('td');
+        type.textContent = review.typeLabel;
+        row.appendChild(type);
+        var content = document.createElement('td');
+        function line(text, muted) {
+          var div = document.createElement('div');
+          div.textContent = text;
+          if (muted) div.className = 'muted';
+          content.appendChild(div);
+        }
+        if (review.scope === 'TRANSACTION') {
+          line(formatDate(review.usageDate, false) + ' / ' + formatAmount(review.amount) + ' / ' +
+            review.merchantOriginal + (review.purpose ? ' / ' + review.purpose : ''));
+          if (review.reviewType === 'DATE' && review.originalDate) line('明細の利用日: ' + review.originalDate);
+          if (review.reviewType === 'AMOUNT' && review.originalAmount) line('明細の金額: ' + review.originalAmount);
+          if (review.problem === 'TRANSACTION_MISSING') line(TEXT.otherTransactionMissing);
+        }
+        if (TEXT.otherReviewHelp[review.reviewType]) line(TEXT.otherReviewHelp[review.reviewType], true);
+        row.appendChild(content);
+        var file = document.createElement('td');
+        appendDriveFileName(file, review.fileId, review.fileName || '（ファイル名不明）');
+        row.appendChild(file);
+        var source = document.createElement('td');
+        source.textContent = review.sourceRow || '—';
+        row.appendChild(source);
+        var operations = document.createElement('td');
+        var saved = state.otherInputs.get(id) || {code: '', correctedDate: '', correctedAmount: ''};
+        var options = review.options || [];
+        var selected = options.filter(function(option) {
+          return option.code === saved.code && option.enabled;
+        })[0];
+        var select = document.createElement('select');
+        select.className = 'other-op';
+        var placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = '操作を選ぶ';
+        select.appendChild(placeholder);
+        options.forEach(function(option) {
+          var choice = document.createElement('option');
+          choice.value = option.code;
+          choice.textContent = option.label + (option.enabled ? '' : ' ' + option.disabledReason);
+          choice.disabled = !option.enabled;
+          select.appendChild(choice);
+        });
+        select.value = selected ? selected.code : '';
+        select.disabled = isMutationBusy();
+        select.addEventListener('change', function() {
+          saved.code = select.value;
+          state.otherInputs.set(id, saved);
+          renderOtherReviewList();
+        });
+        operations.appendChild(select);
+        if (selected && selected.code === 'FIX_DATE_AMOUNT') {
+          [['correctedDate', '利用日', 'date', 'other-date'], ['correctedAmount', '金額', 'text', 'other-amount']]
+            .forEach(function(field) {
+              var label = document.createElement('label');
+              label.textContent = field[1];
+              var input = document.createElement('input');
+              input.type = field[2];
+              input.className = field[3];
+              input.value = saved[field[0]] || '';
+              input.disabled = isMutationBusy();
+              if (field[0] === 'correctedAmount') {
+                input.setAttribute('inputmode', 'numeric');
+                input.placeholder = review.reviewType === 'AMOUNT' ? '金額（必須）' : '変えないなら空欄';
+              }
+              input.addEventListener('input', function() {
+                saved[field[0]] = input.value;
+                state.otherInputs.set(id, saved);
+              });
+              label.appendChild(input);
+              operations.appendChild(label);
+            });
+        }
+        var submit = document.createElement('button');
+        submit.type = 'button';
+        submit.className = 'button other-submit';
+        submit.textContent = '確定…';
+        submit.disabled = isMutationBusy() || !selected;
+        submit.addEventListener('click', function() {
+          return resolveOtherReview(review);
+        });
+        operations.appendChild(submit);
+        row.appendChild(operations);
+        body.appendChild(row);
+      });
+      table.appendChild(body);
+      el['other-review-list'].appendChild(table);
     }
 
     function candidateNames(review) {
@@ -1180,6 +1355,7 @@
       el['review-filter'].disabled = isMutationBusy() || state.loadingReviews;
       el['bulk-partner'].disabled = isMutationBusy();
       renderOtherReviews();
+      renderOtherReviewList();
       el['review-table'].textContent = '';
       var visibleReviews = state.reviews.filter(function(review) {
         return reviewMatchesFilter(review, state.reviewFilter);
@@ -1215,7 +1391,7 @@
         selectAll.addEventListener('change', onSelectAllVisibleChanged);
         selectAllCell.appendChild(selectAll);
         headRow.appendChild(selectAllCell);
-        ['利用日', '金額', '摘要（元店名）', '推測候補', '取引先', '元ファイル', '行']
+        ['利用日', '金額', '摘要（元店名）', '推測候補', '取引先', '元ファイル', '行', '操作']
           .forEach(function(label) {
             var th = document.createElement('th');
             th.textContent = label;
@@ -1274,12 +1450,24 @@
           var sourceCell = document.createElement('td');
           sourceCell.textContent = review.sourceRow === null || review.sourceRow === undefined ? '—' : String(review.sourceRow);
           row.appendChild(sourceCell);
+          var operationCell = document.createElement('td');
+          var exclude = document.createElement('button');
+          exclude.type = 'button';
+          exclude.className = 'button partner-exclude';
+          exclude.textContent = '対象外…';
+          exclude.disabled = isMutationBusy() || !(review.exclude && review.exclude.enabled);
+          exclude.title = review.exclude && review.exclude.disabledReason || '';
+          exclude.addEventListener('click', function() {
+            return excludePartnerReview(review);
+          });
+          operationCell.appendChild(exclude);
+          row.appendChild(operationCell);
           tbody.appendChild(row);
         });
         if (!visibleReviews.length) {
           var noMatchRow = document.createElement('tr');
           var noMatchCell = document.createElement('td');
-          noMatchCell.colSpan = 8;
+          noMatchCell.colSpan = 9;
           noMatchCell.textContent = TEXT.noFilteredReviews;
           noMatchRow.appendChild(noMatchCell);
           tbody.appendChild(noMatchRow);
@@ -1376,6 +1564,10 @@
       state.files = [];
       state.reviews = [];
       state.partnerInputs.clear();
+      state.otherReviews = [];
+      state.otherTotal = 0;
+      state.unsupportedCounts = {integrity: 0, fileChanged: 0};
+      state.otherInputs.clear();
       state.selectedReviewIds.clear();
       state.lastSelectedReviewId = null;
       state.reviewFilter = '';
@@ -1499,6 +1691,11 @@
         state.reviews = Array.isArray(result.reviews) ? result.reviews : [];
         state.partnerTotal = Number(result.partnerTotal || 0);
         state.otherCounts = result.otherCounts || {};
+        state.otherReviews = Array.isArray(result.otherReviews) ? result.otherReviews : [];
+        state.otherTotal = Number(result.otherTotal || 0);
+        state.unsupportedCounts = result.unsupportedCounts || {integrity: 0, fileChanged: 0};
+        var otherIds = new Set(state.otherReviews.map(function(review) { return String(review.reviewId); }));
+        state.otherInputs.forEach(function(value, id) { if (!otherIds.has(id)) state.otherInputs.delete(id); });
         state.reviewOffset = Number(result.offset || 0);
         state.reviewLimit = Number(result.limit || 0);
       } catch (error) {
@@ -2141,6 +2338,120 @@
           loadReviews(customerId, state.reviewOffset, generation);
         }
       }
+    }
+
+    async function resolveOtherReview(review) {
+      if (isMutationBusy()) return;
+      var saved = state.otherInputs.get(String(review.reviewId)) || {};
+      var option = (review.options || []).filter(function(candidate) {
+        return candidate.code === saved.code && candidate.enabled;
+      })[0];
+      if (!option) return;
+      var inputs = {};
+      if (option.code === 'FIX_DATE_AMOUNT') {
+        inputs = {correctedDate: saved.correctedDate || '', correctedAmount: saved.correctedAmount || ''};
+        if (review.reviewType === 'DATE' && !inputs.correctedDate) {
+          showNotice(TEXT.otherDateRequired, 'warning');
+          return;
+        }
+        if (review.reviewType === 'AMOUNT' && !inputs.correctedAmount) {
+          showNotice(TEXT.otherAmountRequired, 'warning');
+          return;
+        }
+      }
+      var target = '「' + review.typeLabel + '」' + (review.fileName || '（ファイル名不明）');
+      if (review.scope === 'TRANSACTION') target += (review.sourceRow ? ' ' + review.sourceRow + ' 行目' : '') +
+        '（' + formatDate(review.usageDate, false) + '・' + formatAmount(review.amount) + '・' + review.merchantOriginal + '）';
+      return runOtherReviewOperation(review, option.code, inputs, option.label,
+        target + '。' + TEXT.otherEffect(option.code, inputs));
+    }
+
+    async function excludePartnerReview(review) {
+      if (isMutationBusy() || !(review.exclude && review.exclude.enabled)) return;
+      return runOtherReviewOperation(review, 'EXCLUDE', {}, '対象外にする',
+        TEXT.partnerExcludeConfirm(review) + TEXT.otherEffect('EXCLUDE', {}), function() {
+          var id = String(review.reviewId);
+          state.selectedReviewIds.delete(id);
+          state.partnerInputs.delete(id);
+          if (state.lastSelectedReviewId === id) state.lastSelectedReviewId = null;
+        });
+    }
+
+    /** 例外でも状態の変化を取りこぼさないよう、呼出し後は両方の一覧を読み直す。 */
+    async function runOtherReviewOperation(review, code, inputs, title, message, onResolved) {
+      if (isMutationBusy()) return;
+      if (!await formatConfirm(title, message)) return;
+      var token = ++state.resolveRun;
+      var generation = state.viewGeneration;
+      var customerId = state.selectedCustomerId;
+      state.resolveBusy = true;
+      clearNotice();
+      renderSelection();
+      try {
+        var result = await gasCall('webAppResolveOtherReview', [customerId, review.reviewId, code, inputs]);
+        if (token !== state.resolveRun || generation !== state.viewGeneration ||
+            String(customerId) !== String(state.selectedCustomerId)) return;
+        if (result.ok === true && result.resolved === 1) {
+          state.otherInputs.delete(String(review.reviewId));
+          if (onResolved) onResolved();
+        }
+        showOtherReviewResult(result);
+      } catch (error) {
+        if (token === state.resolveRun && generation === state.viewGeneration &&
+            String(customerId) === String(state.selectedCustomerId)) showNotice(failureMessage(error), 'error');
+      } finally {
+        if (token === state.resolveRun && generation === state.viewGeneration) {
+          state.resolveBusy = false;
+          markFinalReviewStale();
+          renderSelection();
+          loadReviews(customerId, state.reviewOffset, generation);
+          if (state.selectedFolderId) loadFiles(customerId, state.selectedFolderId, generation);
+        }
+      }
+    }
+
+    /** 確定後の後処理だけが失敗した場合も、済んだ操作と残った問題を分けて伝える。 */
+    function showOtherReviewResult(result) {
+      if (result.ok === false) {
+        var messages = {
+          REVIEW_NOT_FOUND: TEXT.reviewMissing, ALREADY_SETTLED: TEXT.alreadySettled,
+          REVIEW_CUSTOMER_MISMATCH: TEXT.reviewMismatch,
+          NOT_SUPPORTED: 'この要確認は画面から確定できません。管理者へ連絡してください。',
+          TRANSACTION_MISSING: TEXT.otherTransactionMissing,
+          OPERATION_NOT_OFFERED: 'この操作はこの要確認では選べません。画面を再読み込みしてください。',
+          OPERATION_DISABLED: 'この操作は選べません' + (result.message || '') + '。',
+          DATE_REQUIRED: TEXT.otherDateRequired, AMOUNT_REQUIRED: TEXT.otherAmountRequired,
+          INVALID_DATE: '利用日の形が正しくありません（例: 2026-01-05。2000 年以降、今日から 1 年先まで）。',
+          INVALID_AMOUNT: '金額は整数で入力してください（1 億円未満）。'
+        };
+        showNotice(messages[result.code] || TEXT.unknownFailure, 'warning');
+        return;
+      }
+      var errors = (result.errors || []).map(function(error) {
+        return error.message;
+      });
+      if (result.resolved !== 1) {
+        showNotice(errors.length ? 'この要確認は確定できませんでした。' : result.notAttempted > 0 ?
+          '時間が足りず確定しませんでした。もう一度押してください。' : TEXT.unknownFailure, 'warning', errors);
+        return;
+      }
+      var message = '「' + result.typeLabel + '」の要確認を確定しました（' + result.label + '）。';
+      var code = result.code, fileName = result.fileName;
+      if (['FIX_DATE_AMOUNT', 'POST_ZERO_AMOUNT', 'POST_PRIOR_YEAR'].indexOf(code) >= 0) {
+        if (result.committed > 0) message += '取引を確定しました。';
+        else if (result.unmetTexts && result.unmetTexts.length) message += '取引はまだ確定していません（' + result.unmetTexts[0] + '）。';
+      } else if (code === 'EXCLUDE' || code === 'EXCLUDE_PRIOR_YEAR') message += '転記行を空にし、取引を対象外にしました。';
+      else if (code === 'CONFIRM_EMPTY_FILE') message += '「' + fileName + '」を完了にしました。';
+      else if (['APPROVE_COUNT_MISMATCH', 'APPROVE_SCAN_TRUNCATION', 'REGISTER_FORMAT', 'CONFIRM_DESTINATION_FIXED'].indexOf(code) >= 0) {
+        if (result.rewound) message += '「' + fileName + '」を取込待ちに戻しました。［記帳を実行］で取り込み直します。';
+      } else if (code === 'REJECT_COUNT_MISMATCH' || code === 'RESIZE_INPUT')
+        message += '「' + fileName + '」を【要修正】にしました。顧客に修正を依頼してください。';
+      else if (code === 'KEEP_ORIGINAL_RESULT') message += '「' + fileName + '」を対象外にしました。元のファイルの結果は変わりません。';
+      else if (code === 'CANCEL_FILE') message += '「' + fileName + '」を取り消しました。';
+      (result.completedFiles || []).forEach(function(completed) {
+        message += 'ファイル「' + fileName + '」の要確認がすべて片付きました（' + completed.stateLabel + '）。';
+      });
+      showNotice(message, errors.length ? 'warning' : 'success', errors);
     }
 
     function finalReviewIsCurrent() {
