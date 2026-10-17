@@ -1,0 +1,59 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の、**K-W26：Web アプリの取込を 2 本並列にする**直しを受け取ります（取込の並列化 §15-10 の 3 段目。1 段目 K-W24・2 段目 K-W25 は入っています）。
+
+作業ツリーは main の最新（コミット c4d14ca）で、`src/`・`test/` に未コミットの変更はありません。あなたの変更は、ステージされていない差分として残してください ── **`git add` しないこと。**開始時の `node test/run-tests.js` の本数は、始める前に自分で数えて報告に書いてください（1570/1570 のはずです）。
+
+開始時の `src/`・`test/` の写しを `work/.kw26-check/baseline/` に置いてあります（私が md5 で一致を確かめました）。サンドボックスで親フォルダの `.git` が読めず `git diff` が使えない場合は、この写しとの比較で「変えたファイルの一覧」を報告してください。写しは消さないこと（私が後で消します）。
+
+## 仕様書
+
+`work/spec_parallel_import.md`（1.0）。**全部読んでから始めてください。**§0 は決めたこと、§1 は「なぜ」、§2 が直すこと、§3 が変えないこと、§4 がテスト、§5 が変異、付録 A が文言です。1 段目・2 段目の仕様書（`work/spec_concurrent_sheet_writes.md`・`work/spec_import_dedup_in_lock.md`）は背景として読んでかまいません（変えません）。
+
+## 直すこと（要点。詳細は仕様書 §2）
+
+1. `src/00_Config.gs`：`LOCK_TIMEOUT_MS` の既定を 60000 に（§2.2-3）。
+2. `src/01_DataAccessCore.gs`：本の扱い（`setReadLane_`・`readLaneActive_`・枠 27・本ごとの控えの鍵）、準備用の控えの読み書き（`loadSharedReadWindowAll_`・`saveSharedReadWindowSplit_`）、`withScriptLock_` の「ロックの前に空きを作る」（`paceBeforeScriptLock_`、本の扱いだけ）と `scriptLockHeld_`・ロック待ちの計測、`paceSheetsRead_` の「本の扱いでロックの中なら均さない」（§2.5・§2.6）。
+3. `src/71_RunOrchestrator.gs`：`runImport` の `prepareOnly`・`retryRenames`・`precheckExcludesLeasedFiles` と本の扱いの均し（§2.7）、`runCustomerIntegrityCheck_` の `excludeLeasedFiles`（s1・s2、生きたリース、`LIVE_LEASE_MAX_AGE_SECONDS_`）（§2.8）。
+4. `src/80_WebApp.gs`：`WEBAPP_IMPORT_LANES_`、`webAppBootstrap` の 2 項目、新しい公開関数 `webAppPrepareImport`、`webAppRunImport` の本の呼出し（入力の検査・`fileIds` で絞る・`notStarted`・`skipped`）、`IMPORT_CALL` の項目（§2.2〜§2.4・§2.10）。
+5. `src/81_WebAppUi.html`：`importLanes` で道を分け、2 本の道（準備 → 待ち行列 → 本ごとの繰り返し → 止める規則 → お知らせ）、進捗の時計を呼出しの印で数える、文言 2 つ（§2.9・付録 A）。
+
+---
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。**
+2. **git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。
+3. **`src/` で変えてよいのは `00_Config.gs`・`01_DataAccessCore.gs`・`71_RunOrchestrator.gs`・`80_WebApp.gs`・`81_WebAppUi.html` の 5 つだけ。**`97_Ops.gs` は変えない（中に生の NUL バイトが 2 個ある。終わったら数えて報告：前後とも 2）。`11_FileStateManager.gs`・`43`・`45`・`50`・`55`・`60`・`61`・`62`・`70` も変えない。
+4. **改行の形を保つこと。**上の 5 つはいま LF だけ（CR 0）・BOM なし。ファイル全体を書き直す道具を使っても、LF のまま・UTF-8（BOM なし）のままにすること。終わったら 5 つの CR の数を数えて報告すること（0 のはず）。
+5. テストの変更は `kw26 N: …`（仕様書 §4 の 1〜27）を**足すこと**（補助を足してよい）。**既存のテストの期待（assert）は変えないこと。**仕様書 §3 のとおり、直してよい既存のテストは無い見込みです。既存のテストが赤になったら、変えずに止めて理由を報告すること ── 特に、読取の回数を数えるテスト（`budget`・`multi`・`bulk`・`kw9`・`scope`・`pf`・`rc`・`kw21`・`kw24`・`kw25`・`phase6-round-trips`）、均しと窓のテスト（`phase6-round-trips` の 980〜1070 行付近・`multi 9`・`multi 13`）、ロックとリースのテスト（`INV-19`・`phase4-lease-recovery`・`phase4-concurrent-writes`）、画面のテスト（`ui 1〜5`・`phase9-format-registration` の画面）。`test/fixtures/` は変えない。`test/gas-stubs.js`・`test/gas-harness.js` は、足りない仕掛けを足すだけなら変えてよい（足したものを全部報告する）。**模擬ロック `MemoryScriptLock` の「入れ子を拒む」振る舞いは変えないこと。**
+6. **テストを先に赤にしてから直すこと。**kw26 を書き、いまの実装で赤になることを確かめてから直す。いまでも緑になるものはどれかを報告する。
+7. **今日の道（`lane` を渡さない `webAppRunImport`・`WEBAPP_IMPORT_LANES_` が 1）の読取の回数・戻り値・`IMPORT_CALL` を変えないこと。**kw26 14 の数は直す前に実測し、その値そのものを固定すること。測った値を報告すること。本の呼出し・準備の読取の数も測って報告すること（前検査の +2 以外に増えたら理由を書く）。
+8. Sheets API の読取は既存の口（`sheetsReadRanges_`・`sheetsBatchGetPaced_`・`apiSheetRowCount_`・`readSheetRows_` など）だけを通すこと。`Sheets.Spreadsheets.Values.batchGet`・`Sheets.Spreadsheets.get` を直に呼ばない。
+9. **入れ子のロックを作らないこと。新しくロックを取らないこと。**`withScriptLock_` の「ロックの前に空きを作る」の眠りは、`tryLock` の前（ロックを持たない間）に置くこと。
+10. **準備の呼出しはファイルを取り込まず、リースを取らないこと。**本の入力の検査で拒んだときは、読取・リース・書込・複製・控えの書込をしないこと。ログに金額・店名・用途・ファイル名を出さないこと（`IMPORT_CALL` は数と ID の扱いを今と同じに）。
+11. **日本語のコメントは UTF-8 で書くこと。**以前、あなたの書いた日本語が `?` の羅列に化けた。終わったら `grep -a -n '???' src/*.gs src/*.html test/*.js` が空であること（始める前も空）、U+FFFD が `src/` で 0・`test/` で開始時の 1（`test/phase1a-pure-logic.test.js`）のままであることを確かめて報告すること。コメントは周りのコードと同じ密度・語り口（「なぜ」を書く）で。画面の文言は付録 A のとおりに。
+12. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断で安全側を外さないこと。迷ったら止めて報告すること。
+
+## 進め方
+
+1. 仕様書を読む。次を読む：`src/80_WebApp.gs` の 1〜34 行（定数）・`webAppBootstrap`（189 行）・`webAppRunImport`（457〜674 行）・`webAppInvoke_`・`webAppAuthorizeCustomer_`・`webAppDirectChildFolder_`・`webAppValidateDestination_`・`webAppCloneDestination_`・`webAppImportResult_`、`src/71_RunOrchestrator.gs` の `runCustomerIntegrityCheck_`（187〜261 行）・`runImport`（265〜484 行）、`src/01_DataAccessCore.gs` の `withScriptLock_`（101〜119 行）・読取の窓と均し（154〜393 行）・`sheetsReadRanges_`・`sheetsReadWithRetry_`、`src/11_FileStateManager.gs` の `leaseForceReleaseMinSeconds_`・`retryPendingRenames`・`activeLeases_`・`acquireLease`、`src/44_IntegrityChecker.gs`、`src/81_WebAppUi.html` の `TEXT`（390 行〜）・`state` の初期値・`gasCall`（524 行）・進捗（573〜728 行）・`stoppedByMessage`・`startImport`（1507〜1628 行）・`collectSessionFiles`・`bootstrap`（3287 行）、`test/phase8-webapp.test.js` の準備の補助（185〜410 行）と `multi 1〜15`・`pf 1`・`webapp 02`・`webapp 03b`、`test/phase9-format-registration.test.js` の 140〜185 行（模擬の DOM と `google.script.run`）、`test/phase4-concurrent-writes.test.js` と `test/kw25-import-helpers.js`（「別の実行が割り込む」の作り方の手本）、`test/phase6-round-trips.test.js` の均しと窓のテスト。
+2. 始める前の数を取る：`node test/run-tests.js` の最後の行、`???` と U+FFFD の grep、97 の NUL の数、5 つのファイルの CR の数。
+3. kw26 を書く → 赤を確かめる（kw26 14 の今日の道の数はここで測る）。
+4. 直す。
+5. `node test/run-tests.js` を全部緑にする。
+6. 仕様書 §5 の M1〜M24 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら、変異を入れる前の内容と同じか確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する。
+7. 変えたファイルの一覧を確かめる（`git diff --stat -- src/ test/`、使えなければ写しとの比較）。
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 直す前に kw26 のどれが赤だったか（緑だったものも）
+- 実測した読取の数：kw26 14（今日の道、直す前と後）、準備の呼出し・本の呼出し（1 ファイル・2 ファイル）、前検査の外す扱いの増分
+- 本の扱いの 1 回のロックの中の読取の数（取込 1 ファイルの中で、ロックごとの最大と分布）。`READ_LOCK_RESERVE_`（5）を超えるロックがあれば、どこか
+- 模擬・ハーネスに足したもの（全部）。画面のテストの模擬をどう作ったか。「前検査の途中で相手がリースを取る」をどう作ったか
+- M1〜M24 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て（足したテストがあればその名前）
+- `webAppPrepareImport`・`webAppRunImport`・`runImport`・`runCustomerIntegrityCheck_`・`withScriptLock_`・`loadSharedReadWindow_`・`saveSharedReadWindow_` の呼出し元の一覧（変えた後）
+- 仕様書が間違っていた・足りなかった箇所（黙って直さないこと）、自分で決めた箇所（全部）
+- `???`・U+FFFD・97 の NUL・5 つのファイルの CR の数（前と後）
+- 変えたファイルの一覧（始める前と後）
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。

@@ -6786,4 +6786,6 @@ module.exports = ({test, assert, gas}) => {
 
   require('./kw25-import-helpers')({test, assert, gas, setupWorld, putCsv, createWebDestination,
     webImport, importFileResults, openReviewsFor, withMocks, call, plain});
+  require('./kw26-import-helpers')({test, assert, gas, setupWorld, putCsv, createWebDestination,
+    webImport, withMocks, call, plain, latestImportCall, withImportTiming, seedPrefetchFile});
 };

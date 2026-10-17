@@ -206,7 +206,29 @@ function detectionKeywordUnion_(definitions) {
  * 発見は、取込の前ではなく読むだけの `opsCheckIntegrityAllDestinations`
  * （97）の仕事である ── 範囲を絞らず、全部の複製を見る。
  */
-function runCustomerIntegrityCheck_(customer, fileIdsInScope) {
+// GASは1実行6分で終わる。7分を過ぎた心拍は「いま書いている」根拠にしない。
+// 強制解放の600秒とは別で、短いほうが前検査の見落としを減らせる。
+var LIVE_LEASE_MAX_AGE_SECONDS_ = 420;
+
+function liveLeaseForCustomer_(lease, customerId, now) {
+  var heartbeat = new Date(lease.lastHeartbeat).getTime();
+  return String(lease.customerId) === String(customerId) && Number.isFinite(heartbeat) &&
+    now - heartbeat < LIVE_LEASE_MAX_AGE_SECONDS_ * 1000;
+}
+
+function runCustomerIntegrityCheck_(customer, fileIdsInScope, options) {
+  var excludeLeasedFiles = Boolean(options && options.excludeLeasedFiles);
+  var excluded = Object.create(null);
+  var findingsByFile = Object.create(null);
+  var leasedAtStart = Object.create(null);
+  if (excludeLeasedFiles) {
+    var startNow = Date.now();
+    activeLeases_().forEach(function(lease) {
+      if (liveLeaseForCustomer_(lease, customer.customerId, startNow)) {
+        leasedAtStart[String(lease.fileId)] = true;
+      }
+    });
+  }
   var findings = [];
   var resolver = makeDestinationIndexResolver_(customer);
   var inScope = Object.create(null);
@@ -215,7 +237,12 @@ function runCustomerIntegrityCheck_(customer, fileIdsInScope) {
   var targetRows = permanentIndexRowsForScan_()
     .filter(function(row) {
       if (row.customerId !== customer.customerId) return false;
-      return Boolean(inScope[String(row.fileId)]) || unfinished.indexOf(row.state) >= 0;
+      var targeted = Boolean(inScope[String(row.fileId)]) || unfinished.indexOf(row.state) >= 0;
+      if (targeted && leasedAtStart[String(row.fileId)]) {
+        excluded[String(row.fileId)] = true;
+        return false;
+      }
+      return targeted;
     });
   if (targetRows.length) {
     var fileIds = targetRows.map(function(row) { return String(row.fileId); });
@@ -245,8 +272,24 @@ function runCustomerIntegrityCheck_(customer, fileIdsInScope) {
           String(processRecord.values[PROCESS_FIELD_COLUMNS_.internalState - 1]) : null,
         permanentIndexState: row.state
       });
-      findings = findings.concat(outcome.findings);
+      if (excludeLeasedFiles) findingsByFile[fileId] = outcome.findings;
+      else findings = findings.concat(outcome.findings);
     });
+  }
+  if (excludeLeasedFiles) {
+    // 状態を進める実行はリースを持つ。読取途中で取られたリースも最後に見る。
+    // 両端に見えず途中で完走する競合は、数秒の検査より1ファイルの処理が長い
+    // あいだは起きない。起きても食い違いをSTOPにする向きの誤りになる。
+    var endNow = Date.now();
+    activeLeases_().forEach(function(lease) {
+      var id = String(lease.fileId);
+      if (liveLeaseForCustomer_(lease, customer.customerId, endNow) &&
+          Object.prototype.hasOwnProperty.call(findingsByFile, id)) {
+        delete findingsByFile[id];
+        excluded[id] = true;
+      }
+    });
+    Object.keys(findingsByFile).forEach(function(id) { findings = findings.concat(findingsByFile[id]); });
   }
   resolver.stats().unreadable.forEach(function(destination) {
     findings.push(integrityFinding_('DESTINATION_UNREADABLE', 'REVIEW', {
@@ -255,9 +298,11 @@ function runCustomerIntegrityCheck_(customer, fileIdsInScope) {
       transactions: destination.transactions
     }));
   });
-  return {ok: findings.length === 0,
+  var result = {ok: findings.length === 0,
     stop: findings.some(function(f) { return f.severity === 'STOP'; }),
     findings: findings, indexesBuilt: resolver.stats().built};
+  if (excludeLeasedFiles) result.excludedLeasedFiles = Object.keys(excluded).length;
+  return result;
 }
 
 function importClockNow_() { return Date.now(); }
@@ -353,7 +398,9 @@ function runImport(options) {
     report.customers.push(customerReport);
     try {
       // step 7：名称変更の再試行。1件の例外で顧客ループを中断しない。
-      runStage('renames', function() { return retryPendingRenames(customer.customerId); });
+      if (opts.retryRenames !== false) {
+        runStage('renames', function() { return retryPendingRenames(customer.customerId); });
+      }
 
       // step 5：未処理ファイル検索（モード1）。**step 4 より先に行う** ──
       // 前検査は「今回触るファイル」を知らないと範囲を絞れない。走査は
@@ -375,6 +422,10 @@ function runImport(options) {
 
       // step 4：事前整合性チェック（監査ログ連鎖は通知のみ。INV-29）。
       var integrity = runStage('precheck', function() {
+        if (opts.precheckExcludesLeasedFiles === true) {
+          return runCustomerIntegrityCheck_(customer,
+            candidates.map(function(candidate) { return candidate.fileId; }), {excludeLeasedFiles: true});
+        }
         return runCustomerIntegrityCheck_(customer,
           candidates.map(function(candidate) { return candidate.fileId; }));
       });
@@ -399,10 +450,14 @@ function runImport(options) {
         customerReport.skipped = 'INTEGRITY_STOP';
         return;
       }
+      if (opts.prepareOnly === true) {
+        customerReport.prepared = candidates.map(function(candidate) { return candidate.fileId; });
+        return;
+      }
 
       // step 8以降：ファイルループ。
       filesPlanned += candidates.length;
-      setReadQuotaSmoothing_(filesPlanned > 1);
+      setReadQuotaSmoothing_(filesPlanned > 1 || readLaneActive_());
       // **次のファイルを始める門**（Web アプリだけが渡す。spec_import_multi_file §2.1）。
       //
       // 1呼出し1ファイルだと、呼出しの固定費（認可・走査・前検査・マスターの
