@@ -5806,6 +5806,34 @@ module.exports = ({test, assert, gas}) => {
     assert.deepEqual(result.details, ['【要修正】a.xlsx：使用用途が空：5 行目']);
   });
 
+  test('ui 6: hidden で始まる要素は、class が display を決めていても隠れる', () => {
+    // `display` を書いた class は `hidden` 属性を打ち消す（作者の CSS が UA の
+    // `[hidden] { display: none }` に勝つ）。2026-10-12 に進捗の矢印、
+    // 2026-10-18 に取引先 0 件でも出ていたページ送りで、同じ形を踏んだ。
+    const style = /<style>([\s\S]*?)<\/style>/.exec(WEBAPP_UI_SOURCE)[1];
+    const displayed = new Set();
+    const hiddenRule = new Set();
+    for (const rule of style.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+      const declares = /(?:^|;)\s*display:\s*(?!none\b)[a-z-]+/.test(rule[2]);
+      const hides = /(?:^|;)\s*display:\s*none\b/.test(rule[2]);
+      rule[1].split(',').map((selector) => selector.trim()).forEach((selector) => {
+        const plainClass = /^\.([\w-]+)$/.exec(selector);
+        const hiddenClass = /^\.([\w-]+)\[hidden\]$/.exec(selector);
+        if (plainClass && declares) displayed.add(plainClass[1]);
+        if (hiddenClass && hides) hiddenRule.add(hiddenClass[1]);
+      });
+    }
+    const missing = [];
+    for (const tag of WEBAPP_UI_SOURCE.matchAll(/<[a-z][a-z0-9]*\b[^>]*\shidden(?=[\s>])[^>]*>/g)) {
+      const classes = /\sclass="([^"]*)"/.exec(tag[0]);
+      (classes ? classes[1].split(/\s+/) : []).forEach((name) => {
+        if (displayed.has(name) && !hiddenRule.has(name)) missing.push(name + ' in ' + tag[0]);
+      });
+    }
+    assert.ok(displayed.has('pager'), 'the pager class sets display');
+    assert.deepEqual(missing, []);
+  });
+
   function seedPrefetchFile(customer, fileId, options = {}) {
     const name = options.name || `${fileId}.csv`;
     gas.stubs.createFile(fileId, {name, data: 'a,b\n1,2\n'});
