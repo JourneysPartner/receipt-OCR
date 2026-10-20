@@ -991,8 +991,15 @@ module.exports = ({test, assert, gas}) => {
     requireWebFunction('webAppResolveReviews');
     const seeded = seedPartnerViaWeb();
     const decisions = [decision(seeded.reviews[0], '甲社')];
+    const realBatch = gas.context.resolvePartnerReviewsBatch;
     let commitArgumentCount = null;
     const result = withMocks({
+      // D2 で掃除が飛ばないよう、数えられなかった形にする（spec_resolve_fixed_cost §6）
+      resolvePartnerReviewsBatch(...args) {
+        const result = realBatch.apply(this, args);
+        result.followUp = null;
+        return result;
+      },
       commitSettledTransactions_: function() {
         commitArgumentCount = arguments.length;
         return {deferred: 0};
@@ -5133,7 +5140,8 @@ module.exports = ({test, assert, gas}) => {
     }, () => webResolve(seeded.customer.customerId,
       seeded.reviews.map((review) => decision(review, '株式会社掃除先')), 'bulk-cleanup'));
     assert.equal(result.resolved, 1);
-    assert.deepEqual(cleanups.commit, [seeded.fileIds[1]]);
+    // 孤児の無いファイルは D2 で掃除を呼ばない（spec_resolve_fixed_cost §4.2）
+    assert.deepEqual(cleanups.commit, []);
     assert.deepEqual(cleanups.complete, [seeded.fileIds[1]]);
   });
 
@@ -7616,5 +7624,412 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(files[0].recoverable, false);
     assert.equal(files[0].leaseUnavailable, true);
     assert.ok(files[0].failReason, '理由は今どおり読む');
+  });
+  for (const [label, sizes, readLimit] of [
+    ['a', [1, 1, 1, 1, 1, 1], 119],
+    ['b', [1], 29],
+    ['c', [10, 10, 10], 66]
+  ]) {
+    test(`fc 1${label}: ${sizes.join('+')}件の確定の読取回数を上限内に収める`, () => {
+      const seeded = seedWebReviewFiles(sizes, `fc_reads_${label}`);
+      const decisions = seeded.reviews.map((review, index) =>
+        decision(review, label === 'c' && index % 2 ? '' : '株式会社まとめ先'));
+      gas.stubs.resetApiCallCounts();
+      const result = webResolve(seeded.customer.customerId, decisions, `fc-reads-${label}`);
+      const reads = gas.stubs.getApiCallCounts().batchGet;
+      console.log(`FC1_${label} reads=${reads}`);
+      assert.equal(result.resolved, decisions.length);
+      assert.deepEqual(result.errors, []);
+      assert.equal(result.completedFiles.filter((file) => file.completed).length, sizes.length);
+      assert.ok(reads <= readLimit, `${reads} reads > ${readLimit}`);
+    });
+  }
+
+  test('fc 2: 押下の取引読取は1回、ファイルごとの読取は部品と完了判定だけ', () => {
+    const seeded = seedWebReviewFiles([1, 1, 1, 1, 1, 1], 'fc_tx_reads');
+    const realFileRead = gas.context.getTransactionsForFile_;
+    const realMultiRead = gas.context.findRowsByColumnValues_;
+    const realBatch = gas.context.resolvePartnerReviewsBatch;
+    const realCommit = gas.context.commitSettledTransactions_;
+    const realComplete = gas.context.completeFileIfFullyResolved_;
+    const reads = {fromWeb: 0, byFile: {}, multi: []};
+    let phase = 'web';
+    function inPhase(name, fn, receiver, args) {
+      const previous = phase;
+      phase = name;
+      try { return fn.apply(receiver, args); } finally { phase = previous; }
+    }
+    const result = withMocks({
+      getTransactionsForFile_(fileId) {
+        reads.byFile[fileId] = (reads.byFile[fileId] || 0) + 1;
+        if (phase === 'web') reads.fromWeb += 1;
+        return realFileRead.call(this, fileId);
+      },
+      resolvePartnerReviewsBatch(...args) { return inPhase('batch', realBatch, this, args); },
+      commitSettledTransactions_(...args) { return inPhase('cleanup', realCommit, this, args); },
+      completeFileIfFullyResolved_(...args) { return inPhase('complete', realComplete, this, args); },
+      findRowsByColumnValues_(sheet, column, values, width) {
+        if (sheet.getName() === 'クレカ取引ログ') reads.multi.push([column, [...values], width]);
+        return realMultiRead.call(this, sheet, column, values, width);
+      }
+    }, () => webResolve(seeded.customer.customerId,
+      seeded.reviews.map((review) => decision(review, '株式会社回数先')), 'fc-tx-reads'));
+    console.log('FC2 ' + JSON.stringify(reads));
+    assert.equal(result.resolved, 6);
+    assert.equal(reads.fromWeb, 0);
+    assert.deepEqual(reads.byFile, Object.fromEntries(seeded.fileIds.map((fileId) => [fileId, 2])));
+    assert.deepEqual(reads.multi, [[5, seeded.fileIds, 47]]);
+  });
+
+  test('fc 3: 複数ファイルでも空店名・カード名用途・競合を学ばず通常行だけ学ぶ', () => {
+    const {customer} = setupWorld({customer: {cardNamePartnerPurposes: ['年会費']}});
+    let destinationSpreadsheetId;
+    const reviews = [];
+    for (let fileIndex = 0; fileIndex < 2; fileIndex += 1) {
+      const fileId = putCsv(customer, {fileId: `fc_learning_${fileIndex}`, rows: [
+        '2025/12/10,\u0001,1000,仕入れ',
+        `2025/12/11,カード名店${fileIndex},1100,年会費`,
+        `2025/12/12,競合店${fileIndex},1200,仕入れ`,
+        `2025/12/13,通常店${fileIndex},1300,仕入れ`
+      ]});
+      const imported = webImport(customer, {fileIds: [fileId], destinationSpreadsheetId});
+      destinationSpreadsheetId = imported.destinationSpreadsheetId;
+      reviews.push(...openReviewsFor(customer.customerId, {fileId})
+        .filter((review) => review.reviewType === 'PARTNER')
+        .sort((a, b) => Number(a.sourceRow) - Number(b.sourceRow)));
+    }
+    assert.equal(reviews.length, 8);
+    const before = dictionaryCount();
+    const realBatch = gas.context.resolvePartnerReviewsBatch;
+    const learns = [];
+    const result = withMocks({resolvePartnerReviewsBatch(...args) {
+      learns.push(...args[2].map((item) => item.learn));
+      return realBatch.apply(this, args);
+    }}, () => webResolve(customer.customerId, reviews.map((review, index) =>
+      decision(review, `株式会社学習先${index}`, index % 4 === 2)), 'fc-learning'));
+    assert.equal(result.resolved, 8);
+    assert.deepEqual(result.errors, []);
+    assert.deepEqual(learns, [false, false, false, true, false, false, false, true]);
+    assert.equal(dictionaryCount(), before + 2);
+  });
+
+  test('fc 4: STATE_TRANSITIONの文言に押下で読んだ取消状態を出す', () => {
+    const seeded = seedPartnerViaWeb({rows: ['日付不明,取消文言店,1000,仕入れ']});
+    const date = openReviewsFor(seeded.customer.customerId, {fileId: seeded.fileId})
+      .find((review) => review.reviewType === 'DATE');
+    call('resolveReview', [date.reviewId, 'EXCLUDE', {}]);
+    assert.equal(transactionFor(seeded.reviews[0]).transactionStatus, 'CANCELED');
+    const result = webResolve(seeded.customer.customerId,
+      [decision(seeded.reviews[0], '株式会社取消先')], 'fc-state');
+    assert.equal(result.resolved, 0);
+    assert.equal(result.errors[0].code, 'STATE_TRANSITION');
+    assert.equal(result.errors[0].message,
+      'この取引は既に取り消されたか除外されています（状態 CANCELED）。画面を再読み込みしてください。');
+  });
+
+  // 同じ状態を別の押下で作り直し、読取の測定に候補数の照合を混ぜない。
+  function fcFollowUpScenario(kind, compareCandidates = false) {
+    const seeded = kind === 'other-review'
+      ? seedPartnerViaWeb({rows: ['日付不明,別要確認店,1000,仕入れ']})
+      : seedWebReviewFiles([kind.startsWith('multiple') ? 3 :
+        (kind === 'concurrent' ? 1 : 2)], `fc_${kind}`);
+    const fileId = seeded.fileId || seeded.fileIds[0];
+    let selected = seeded.reviews;
+    if (kind === 'partial') selected = selected.slice(0, 1);
+    if (kind === 'orphan') {
+      settleWithoutCommitting(seeded.customer.customerId, selected[0]);
+      assert.equal(transactionFor(selected[0]).transactionStatus, 'REVIEW_REQUIRED');
+      selected = selected.slice(1);
+    }
+    const realBatch = gas.context.resolvePartnerReviewsBatch;
+    const realRead = gas.context.partnerBatchReadTransactions_;
+    const realCommit = gas.context.commitSettledTransactions_;
+    const realComplete = gas.context.completeFileIfFullyResolved_;
+    const observed = {batches: [], probes: [], commit: [], complete: []};
+    let batchNumber = 0;
+    let readNumber = 0;
+    const result = withMocks({
+      PARTNER_BATCH_MAX_ITEMS_: kind.startsWith('multiple') ? 1 : 100,
+      partnerBatchReadTransactions_(...args) {
+        readNumber += 1;
+        const rows = realRead.apply(this, args);
+        // 要確認は書けたが取引の再読取で失敗し、確定だけが残った状態を作る。
+        if (readNumber === 2 && (kind === 'concurrent' ||
+            (kind === 'multiple-last-orphan' && batchNumber === 3))) return Object.create(null);
+        return rows;
+      },
+      resolvePartnerReviewsBatch(...args) {
+        batchNumber += 1;
+        readNumber = 0;
+        if (kind === 'multiple-throw' && batchNumber === 3) {
+          throw Object.assign(new Error('部品の途中失敗'), {code: 'TEST_COMPONENT_FAILURE'});
+        }
+        const batch = realBatch.apply(this, args);
+        if (compareCandidates) {
+          const probe = realCommit.call(this, fileId, {maxOrphanCommits: 0});
+          observed.probes.push(probe.candidates);
+          assert.equal(batch.followUp && batch.followUp.orphanCandidates, probe.candidates,
+            `${kind} / batch ${batchNumber}: 掃除と同じ候補数`);
+          assert.equal(probe.evaluated, 0);
+        }
+        if (kind === 'multiple-null' && batchNumber === 2) batch.followUp = null;
+        observed.batches.push(plain(batch));
+        return batch;
+      },
+      commitSettledTransactions_(id, ...args) {
+        observed.commit.push(String(id));
+        return realCommit.call(this, id, ...args);
+      },
+      completeFileIfFullyResolved_(id, ...args) {
+        observed.complete.push(String(id));
+        return realComplete.call(this, id, ...args);
+      }
+    }, () => webResolve(seeded.customer.customerId,
+      selected.map((review) => decision(review, '株式会社候補先')), `fc-${kind}`));
+    return {seeded, fileId, result, observed};
+  }
+
+  test('fc 5: 全部確定したファイルは候補0で掃除せず完了する', () => {
+    const {fileId, result, observed} = fcFollowUpScenario('all');
+    assert.deepEqual(observed.batches[0].followUp, {orphanCandidates: 0});
+    assert.deepEqual(observed.commit, []);
+    assert.deepEqual(observed.complete, [fileId]);
+    assert.equal(result.resolved, 2);
+    assert.equal(result.committed, 2);
+    assert.equal(result.deferredCommits, 0);
+    assert.equal(fileStateOf(fileId), 'COMPLETED');
+    const log = gas.stubs.getLogs().filter((line) => line.startsWith('PARTNER_BATCH ')).pop();
+    assert.equal(JSON.parse(log.slice('PARTNER_BATCH '.length)).orphanCandidates, 0);
+  });
+
+  test('fc 6: 一部確定でも開いた要確認は孤児にせず掃除を省く', () => {
+    const {fileId, result, observed} = fcFollowUpScenario('partial');
+    assert.deepEqual(observed.batches[0].followUp, {orphanCandidates: 0});
+    assert.deepEqual(observed.commit, []);
+    assert.deepEqual(observed.complete, [fileId]);
+    assert.equal(result.resolved, 1);
+    assert.equal(fileStateOf(fileId), 'REVIEW_WAIT');
+  });
+
+  test('fc 7: 同じ取引のDATEが開いていればunmetで孤児候補0', () => {
+    const {fileId, result, observed} = fcFollowUpScenario('other-review');
+    assert.equal(result.unmet.length, 1);
+    assert.deepEqual(result.unmet[0].openReviewTypes, ['DATE']);
+    assert.deepEqual(observed.batches[0].followUp, {orphanCandidates: 0});
+    assert.deepEqual(observed.commit, []);
+    assert.deepEqual(observed.complete, [fileId]);
+    assert.equal(fileStateOf(fileId), 'REVIEW_WAIT');
+  });
+
+  test('fc 8: 押下前からの孤児は候補に数えて掃除で確定し完了する', () => {
+    const {seeded, fileId, result, observed} = fcFollowUpScenario('orphan');
+    assert.deepEqual(observed.batches[0].followUp, {orphanCandidates: 1});
+    assert.deepEqual(observed.commit, [fileId]);
+    assert.deepEqual(observed.complete, [fileId]);
+    assert.equal(result.resolved, 1);
+    assert.equal(transactionFor(seeded.reviews[0]).transactionStatus, 'COMMITTED');
+    assert.equal(fileStateOf(fileId), 'COMPLETED');
+  });
+
+  test('fc 9: 要確認を書いた後のCONCURRENT_CHANGEを孤児に数えて掃除する', () => {
+    const {seeded, fileId, result, observed} = fcFollowUpScenario('concurrent');
+    assert.equal(result.errors[0].code, 'CONCURRENT_CHANGE');
+    assert.equal(reviewById(seeded.reviews[0].reviewId).status, 'RESOLVED');
+    assert.deepEqual(observed.batches[0].followUp, {orphanCandidates: 1});
+    assert.deepEqual(observed.commit, [fileId]);
+    assert.deepEqual(observed.complete, [fileId]);
+    assert.equal(transactionFor(seeded.reviews[0]).transactionStatus, 'COMMITTED');
+    assert.equal(fileStateOf(fileId), 'COMPLETED');
+  });
+
+  for (const [kind, expectedCounts, cleanup] of [
+    ['multiple', [0, 0, 0], false],
+    ['multiple-last-orphan', [0, 0, 1], true],
+    ['multiple-throw', [0, 0], true],
+    ['multiple-null', [0, null, 0], true]
+  ]) {
+    test(`fc 10: ${kind}で最後の候補数と途中の不明を使って掃除を決める`, () => {
+      const {fileId, result, observed} = fcFollowUpScenario(kind);
+      assert.deepEqual(observed.batches.map((batch) => batch.followUp === null ? null :
+        batch.followUp && batch.followUp.orphanCandidates), expectedCounts);
+      assert.deepEqual(observed.commit, cleanup ? [fileId] : []);
+      assert.deepEqual(observed.complete, [fileId]);
+      assert.equal(result.remaining, 0);
+      assert.equal(result.resolved, kind === 'multiple' || kind === 'multiple-null' ? 3 : 2);
+      if (kind === 'multiple-throw') {
+        assert.equal(result.errors[0].code, 'TEST_COMPONENT_FAILURE');
+        assert.equal(fileStateOf(fileId), 'REVIEW_WAIT');
+      } else {
+        assert.equal(fileStateOf(fileId), 'COMPLETED');
+      }
+    });
+  }
+
+  test('fc 11: fc 5〜10の各呼出し直後の候補数が掃除のcandidatesと一致する', () => {
+    for (const kind of ['all', 'partial', 'other-review', 'orphan', 'concurrent',
+      'multiple', 'multiple-last-orphan', 'multiple-throw', 'multiple-null']) {
+      const {observed} = fcFollowUpScenario(kind, true);
+      assert.equal(observed.probes.length, observed.batches.length, kind);
+      assert.ok(observed.probes.length > 0, kind);
+    }
+  });
+
+  for (const leased of [false, true]) {
+    test(`fc 12: ${leased ? 'リース衝突' : '部品のREVIEW_NOT_FOUND'}は候補不明で後始末を${leased ? 'しない' : '呼ぶ'}`, () => {
+      const seeded = seedWebReviewFiles([1], `fc_unknown_${leased}`);
+      const fileId = seeded.fileIds[0];
+      if (leased) call('acquireLease', [seeded.customer.customerId, fileId,
+        'other-run', 'other@example.com', 'PROCESS']);
+      const realBatch = gas.context.resolvePartnerReviewsBatch;
+      const realCommit = gas.context.commitSettledTransactions_;
+      const realComplete = gas.context.completeFileIfFullyResolved_;
+      const cleanups = {commit: [], complete: []};
+      let componentResult;
+      const result = withMocks({
+        resolvePartnerReviewsBatch(...args) {
+          if (!leased) args[2] = args[2].map((item) => Object.assign({}, item,
+            {reviewId: 'missing-review'}));
+          componentResult = realBatch.apply(this, args);
+          return componentResult;
+        },
+        commitSettledTransactions_(id, ...args) {
+          cleanups.commit.push(id);
+          return realCommit.call(this, id, ...args);
+        },
+        completeFileIfFullyResolved_(id, ...args) {
+          cleanups.complete.push(id);
+          return realComplete.call(this, id, ...args);
+        }
+      }, () => webResolve(seeded.customer.customerId,
+        seeded.reviews.map((review) => decision(review, '株式会社不明先')), 'fc-unknown'));
+      assert.equal(componentResult.followUp, null);
+      assert.equal(result.errors[0].code, leased ? 'LEASE_CONFLICT' : 'REVIEW_NOT_FOUND');
+      assert.deepEqual(cleanups.commit, leased ? [] : [fileId]);
+      assert.deepEqual(cleanups.complete, leased ? [] : [fileId]);
+      const log = gas.stubs.getLogs().filter((line) => line.startsWith('PARTNER_BATCH ')).pop();
+      assert.equal(JSON.parse(log.slice('PARTNER_BATCH '.length)).orphanCandidates, null);
+    });
+  }
+
+  test('fc 12: 非整数・負数・欠落したfollowUpでは掃除を省かない', () => {
+    for (const followUp of [undefined, {}, {orphanCandidates: -1},
+      {orphanCandidates: 0.5}, {orphanCandidates: '0'}]) {
+      const seeded = seedWebReviewFiles([1], 'fc_invalid_followup');
+      const realBatch = gas.context.resolvePartnerReviewsBatch;
+      const realCommit = gas.context.commitSettledTransactions_;
+      let cleanups = 0;
+      withMocks({
+        resolvePartnerReviewsBatch(...args) {
+          const result = realBatch.apply(this, args);
+          result.followUp = followUp;
+          return result;
+        },
+        commitSettledTransactions_(...args) {
+          cleanups += 1;
+          return realCommit.apply(this, args);
+        }
+      }, () => webResolve(seeded.customer.customerId,
+        seeded.reviews.map((review) => decision(review, '株式会社検算先')), 'fc-invalid'));
+      assert.equal(cleanups, 1, JSON.stringify(followUp));
+    }
+  });
+
+  test('fc 13: 押下の取引読取が投げたら全決定をエラーにして部品も書込も呼ばない', () => {
+    const seeded = seedWebReviewFiles([2, 1, 1], 'fc_read_error');
+    const realRead = gas.context.findRowsByColumnValues_;
+    let componentCalls = 0;
+    gas.stubs.resetApiCallCounts();
+    const result = withMocks({
+      findRowsByColumnValues_(sheet, ...args) {
+        if (sheet.getName() === 'クレカ取引ログ') {
+          throw Object.assign(new Error('取引を読めない'), {code: 'TEST_READ_FAILED'});
+        }
+        return realRead.call(this, sheet, ...args);
+      },
+      resolvePartnerReviewsBatch() { componentCalls += 1; throw new Error('部品を呼んではならない'); }
+    }, () => webResolve(seeded.customer.customerId,
+      seeded.reviews.map((review) => decision(review, '株式会社読取先')), 'fc-read-error'));
+    assert.equal(componentCalls, 0);
+    assert.equal(result.resolved, 0);
+    assert.equal(result.committed, 0);
+    assert.equal(result.remaining, 0);
+    assert.equal(result.notAttempted, 0);
+    assert.deepEqual(result.completedFiles, []);
+    assert.deepEqual(result.errors.map((error) => [error.reviewId, error.code]),
+      seeded.reviews.map((review) => [review.reviewId, 'TEST_READ_FAILED']));
+    assert.ok(result.errors.every((error) => error.message ===
+      call('menuOperationErrorMessage_', [Object.assign(new Error('取引を読めない'),
+        {code: 'TEST_READ_FAILED'})])));
+    assert.equal(gas.stubs.getApiCallCounts().batchUpdate, 0);
+    assert.equal(gas.stubs.getApiCallCounts().cellsWritten, 0);
+    assert.ok(seeded.reviews.every((review) => reviewById(review.reviewId).status === 'OPEN'));
+  });
+
+  test('fc 13: ファイルのまとまりが空なら取引を読まない', () => {
+    const {customer} = setupWorld();
+    let reads = 0;
+    const realRead = gas.context.findRowsByColumnValues_;
+    const result = withMocks({findRowsByColumnValues_(sheet, ...args) {
+      if (sheet.getName() === 'クレカ取引ログ') reads += 1;
+      return realRead.call(this, sheet, ...args);
+    }}, () => webResolve(customer.customerId, [], 'fc-empty'));
+    assert.equal(reads, 0);
+    assert.equal(result.resolved, 0);
+    assert.deepEqual(result.errors, []);
+  });
+
+  // 監査で足した（私の変異 Y11 がすり抜けた）：押下の頭の読取も、ファイルごとの
+  // `getTransactionsForFile_` と同じく有効な行だけを見る。取り消した古い行が混ざると
+  // 取引が 1 件に決まらず、カード名を用途にする取引まで学習してしまう。
+  test('fc 14: 無効な古い取引行が残っていてもカード名用途は学ばない', () => {
+    const {customer} = setupWorld({customer: {cardNamePartnerPurposes: ['年会費']}});
+    const fileId = putCsv(customer, {fileId: 'fc_inactive_copy', rows: [
+      '2025/12/11,カード名無効行店,1100,年会費', '2025/12/13,通常無効行店,1300,仕入れ']});
+    webImport(customer, {fileIds: [fileId]});
+    const reviews = openReviewsFor(customer.customerId, {fileId})
+      .filter((review) => review.reviewType === 'PARTNER')
+      .sort((a, b) => Number(a.sourceRow) - Number(b.sourceRow));
+    assert.equal(reviews.length, 2);
+    const copy = transactionFor(reviews[0])._values.slice();
+    copy[41] = false;
+    gas.stubs.getSpreadsheet('master').getSheetByName('クレカ取引ログ').appendRow(copy);
+    const realBatch = gas.context.resolvePartnerReviewsBatch;
+    const learns = [];
+    const result = withMocks({resolvePartnerReviewsBatch(...args) {
+      learns.push(...args[2].map((item) => item.learn));
+      return realBatch.apply(this, args);
+    }}, () => webResolve(customer.customerId, reviews.map((review, index) =>
+      decision(review, `株式会社無効行先${index}`)), 'fc-inactive'));
+    assert.equal(result.resolved, 2, JSON.stringify(result.errors));
+    assert.deepEqual(learns, [false, true]);
+  });
+
+  // 監査で足した（私の変異 Y14 がすり抜けた）：担当者が判断中（IN_PROGRESS）の
+  // 要確認も開いている扱い。掃除の候補（`openReviews`）と同じ定義でなければならない。
+  test('fc 15: 判断中の別の要確認が指す取引は孤児に数えない', () => {
+    const seeded = seedPartnerViaWeb({rows: ['日付不明,判断中店,1000,仕入れ']});
+    const date = openReviewsFor(seeded.customer.customerId, {fileId: seeded.fileId})
+      .find((review) => review.reviewType === 'DATE');
+    gas.call('reviewSheet_').getRange(reviewById(date.reviewId)._rowNumber, 2).setValue('IN_PROGRESS');
+    assert.equal(reviewById(date.reviewId).status, 'IN_PROGRESS');
+    const realBatch = gas.context.resolvePartnerReviewsBatch;
+    const realCommit = gas.context.commitSettledTransactions_;
+    const observed = {followUps: [], probes: [], commit: []};
+    withMocks({
+      resolvePartnerReviewsBatch(...args) {
+        const batch = realBatch.apply(this, args);
+        observed.followUps.push(plain(batch.followUp));
+        observed.probes.push(realCommit.call(this, seeded.fileId, {maxOrphanCommits: 0}).candidates);
+        return batch;
+      },
+      commitSettledTransactions_(id, ...args) {
+        observed.commit.push(String(id));
+        return realCommit.call(this, id, ...args);
+      }
+    }, () => webResolve(seeded.customer.customerId,
+      [decision(seeded.reviews[0], '株式会社判断中先')], 'fc-in-progress'));
+    assert.deepEqual(observed.followUps, [{orphanCandidates: 0}]);
+    assert.deepEqual(observed.probes, [0]);
+    assert.deepEqual(observed.commit, []);
   });
 };

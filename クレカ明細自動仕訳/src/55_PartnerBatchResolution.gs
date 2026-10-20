@@ -185,7 +185,7 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
     runId: generateId('RB'), fileId: fileId, customerId: customerId,
     resolvedReviewIds: [], committedReviewIds: [], unmet: [], errors: [],
     skippedByLeaseReviewIds: [], notAttemptedReviewIds: [], leaseConflict: null,
-    learnedDictIds: [], ms: 0, reads: 0
+    learnedDictIds: [], followUp: null, ms: 0, reads: 0
   };
   var logStats = {items: decisions.length, destinations: 0};
   function finish() {
@@ -196,7 +196,8 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
       committed: result.committedReviewIds.length, errors: result.errors.length,
       skippedByLease: result.skippedByLeaseReviewIds.length,
       notAttempted: result.notAttemptedReviewIds.length,
-      destinations: logStats.destinations, ms: result.ms, reads: result.reads}));
+      destinations: logStats.destinations, ms: result.ms, reads: result.reads,
+      orphanCandidates: result.followUp ? result.followUp.orphanCandidates : null}));
     return result;
   }
 
@@ -598,6 +599,26 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
         if (update.item.failed) return;
         result.committedReviewIds.push(update.item.reviewId);
       });
+
+      // この段で閉じた要確認と確定した取引を除き、掃除が要るかを手元の値で返す。
+      var closedReviewIds = Object.create(null);
+      openNow.forEach(function(item) { closedReviewIds[String(item.reviewId)] = true; });
+      var committedTxIds = Object.create(null);
+      commitUpdates.forEach(function(update) {
+        if (!update.item.failed) committedTxIds[String(update.tx.fullTxId)] = true;
+      });
+      var openTxIds = Object.create(null);
+      currentReviews.forEach(function(review) {
+        if ((review.status === 'OPEN' || review.status === 'IN_PROGRESS') &&
+            !closedReviewIds[String(review.reviewId)]) {
+          openTxIds[String(review.fullTxId)] = true;
+        }
+      });
+      result.followUp = {orphanCandidates: fileTransactions.filter(function(tx) {
+        var key = String(tx.fullTxId);
+        return tx.active === true && tx.transactionStatus === TX_STATUS.REVIEW_REQUIRED &&
+          !committedTxIds[key] && !openTxIds[key];
+      }).length};
     });
   } finally {
     releaseLeaseById(leaseId, 'RESOLVE_DONE');

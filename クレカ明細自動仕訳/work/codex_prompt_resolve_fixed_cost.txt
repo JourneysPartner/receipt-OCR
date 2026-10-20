@@ -1,0 +1,54 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の Web アプリの **確定の固定費を削る（同じ読取の重複だけ）** 作業を受け取ります。
+
+作業ツリーは main の最新（コミット 639c15f）で、`src/`・`test/` に未コミットの変更はありません。あなたの変更は、ステージされていない差分として残してください ── **`git add` しないこと。**開始時の `node test/run-tests.js` の本数は、始める前に自分で数えて報告に書いてください（1656/1656 のはずです）。
+
+開始時の src・test の写しを `work/.fc-check/baseline/` に置いてあります（私が開始時の md5 と照らしてあります）。サンドボックスで親フォルダの `.git` が読めず `git diff` が使えない場合は、この写しとの比較で「変えたファイルの一覧」を報告してください。写しは消さなくてよい ── 私が後で消します。
+
+## 仕様書
+
+`work/spec_resolve_fixed_cost.md`（1.0）。**全部読んでから始めてください。**
+
+## 作ること（要点。詳細は仕様書）
+
+1. `55_PartnerBatchResolution.gs`：`resolvePartnerReviewsBatch` の戻り値に `followUp`（既定 `null`、ロックの段を通ったときだけ `{orphanCandidates: N}`）。`PARTNER_BATCH` のログに `orphanCandidates`。**書くもの・順番・判定は一切変えない。**
+2. `80_WebApp.gs`：`webAppResolveReviews` の D1（取引を押下の頭で 1 回読む）と D2（最後の呼出しの `followUp` が 0 のときだけ `commitSettledTransactions_` を呼ばない。完了の判定は毎回）。
+
+---
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。**
+2. **git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。
+3. **`src/` で変えてよいのは `55_PartnerBatchResolution.gs`・`80_WebApp.gs` だけ。**80 で変えるのは `webAppResolveReviews` の中だけ。`97_Ops.gs`（`commitSettledTransactions_`・`completeFileIfFullyResolved_`・`opsAutoAdoptPartners`）・`50`・`51`・`61`・`96`・`81` は変えないこと。
+4. 改行の形を変えないこと（55・80 は今 LF、CR は 0）。
+5. テストの変更は `fc N: …`（仕様書 §6 の 1〜13）を `test/phase8-webapp.test.js` の最後のテストの後へ足すこと。補助はそのテストファイルの中に置いてよい。**既存のテストの期待（assert）は 1 つも変えないこと。**既存のテストが赤になったら、変えずに止めて理由を報告すること ── 特に `bulk 1〜19`・`batch N`（55 の部品）・`kw2 N`・読取回数のテスト（`budget`・`multi`・`rc 8`・`kw2 19`・`sf 11` など）、K-W12 の `sf N`。`test/fixtures/`・`test/gas-stubs.js`・`test/gas-harness.js` は変えない。
+6. **テストを先に赤にしてから直すこと。**fc 1〜13 を書き、いまの実装で赤になることを確かめてから作る。いまでも緑になるもの（fc 3・fc 4 など）はどれかを報告する。**fc 1 の「作る前の読取の回数」は作る前に測って報告に書くこと**（(a) は 147 のはず。違えば報告）。
+7. 読取の上限（fc 1）は、**作った後に測った値そのもの**を上限にすること（余裕を足さない）。既存の読取回数のテストの上限は変えないこと。
+8. **日本語は UTF-8 で書くこと。**終わったら `grep -n '???' src/*.gs src/*.html test/*.js` が空であること（始める前も空）を確かめて報告すること。U+FFFD も、既存の `phase1a`（わざと入れた文字）以外に 0 であること。コメントを足すなら、周りと同じ密度・語り口（「なぜ」を書く）で。
+9. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断をしたら全部報告すること。迷ったら止めて報告すること。特に、`commitSettledTransactions_` の候補の数え方が仕様書 §3 の定義と違ったら、黙って合わせずに止めて報告すること。
+
+## 進め方
+
+1. 仕様書を読む。次を読む：
+   - `src/55_PartnerBatchResolution.gs` の全部（`resolvePartnerReviewsBatch`・`partnerBatchReadTransactions_`・`partnerBatchCommitBlocking_`）
+   - `src/80_WebApp.gs`：`webAppResolveReviews`・`webAppResolveErrorMessage_`・`webAppResolveOutcome_`・`webAppDecisionError_`・`webAppFileError_`
+   - `src/97_Ops.gs`（`grep -a` で探す）：`commitSettledTransactions_`・`completeFileIfFullyResolved_`、`src/50_ReviewStore.gs`：`openReviews`・`isFileFullyResolved`・`isTransactionCommittable`・`commitIfConditionsMet`、`src/61_TransactionLog.gs`：`getTransactionsForFile_`・`getTransactionsByStatus`・`txLogFromRecord_`、`src/01_DataAccessCore.gs`：`findRowsByColumnValues_`
+   - `test/phase8-webapp.test.js` の `seedPartnerViaWeb`・`seedWebReviewFiles`・`decision`・`webResolve`・`batchResolve`、`bulk 3`・`bulk 8`・`bulk 16`・`batch 25`・`batch 26`
+2. fc 1〜13 を書く → 赤を確かめる（fc 1 の作る前の値を測る）
+3. 作る
+4. `node test/run-tests.js` を全部緑にする
+5. 仕様書 §7 の M1〜M12 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら差分が変異を入れる前と同じか確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する
+6. 変えたファイルの一覧（`git diff --stat -- src/ test/`、使えなければ写しとの比較）を確かめる
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 直す前に fc 1〜13 のどれが赤だったか（緑だったものも）
+- fc 1 の (a)〜(c) の作る前と作った後の読取の回数、fc 2 の呼出しの回数
+- M1〜M12 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て（足したテストがあればその名前）
+- 仕様書が間違っていた・足りなかった箇所（黙って直さないこと）、自分で決めた箇所（全部）
+- 改行の形（55・80 の前と後）
+- `???` の grep と U+FFFD の結果（前と後）
+- 変えたファイルの一覧（始める前と後）
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。

@@ -1076,8 +1076,35 @@ function webAppResolveReviews(customerId, decisions, options) {
       filesById[fileId].items.push(item);
     });
 
-    var maxBatchMs = 0;
     var attemptedCount = 0;
+    if (fileGroups.length) {
+      try {
+        var transactionsByFile = findRowsByColumnValues_(transactionLogSheet_(), 5,
+          fileGroups.map(function(group) { return group.fileId; }), TRANSACTION_LOG_WIDTH_);
+        fileGroups.forEach(function(group) {
+          group.txsById = Object.create(null);
+          transactionsByFile[group.fileId].map(txLogFromRecord_).forEach(function(tx) {
+            if (!tx.active) return;
+            var key = String(tx.fullTxId);
+            if (!group.txsById[key]) group.txsById[key] = [];
+            group.txsById[key].push(tx);
+          });
+        });
+      } catch (transactionReadError) {
+        var readCode = transactionReadError && transactionReadError.code || 'RESOLVE_FAILED';
+        fileGroups.forEach(function(group) {
+          group.items.forEach(function(item) {
+            webAppDecisionError_(outcome, item.reviewId, readCode,
+              menuOperationErrorMessage_(transactionReadError));
+          });
+          attemptedCount += group.items.length;
+        });
+        outcome.remaining = outcome.notAttempted;
+        return outcome;
+      }
+    }
+
+    var maxBatchMs = 0;
     var perCallLimit = Math.max(0, Math.floor(Number(WEBAPP_MAX_PER_CALL_) || 0));
     function deferUnstartedFiles(firstIndex) {
       for (var deferredIndex = firstIndex; deferredIndex < fileGroups.length; deferredIndex += 1) {
@@ -1097,11 +1124,13 @@ function webAppResolveReviews(customerId, decisions, options) {
 
       var fileId = fileGroup.fileId;
       var queue = fileGroup.items.slice();
-      var txsById = Object.create(null);
+      var txsById = fileGroup.txsById;
       var fileStartedAt = null;
       var fileTouched = false;
       var leaseConflict = false;
       var leaseErrorReported = false;
+      var followUpKnown = true;
+      var orphanCandidates = null;
 
       while (queue.length) {
         var gateMaxBatchMs = maxBatchMs;
@@ -1119,22 +1148,6 @@ function webAppResolveReviews(customerId, decisions, options) {
 
         if (fileStartedAt === null) {
           fileStartedAt = partnerBatchClockNow_();
-          try {
-            getTransactionsForFile_(fileId).forEach(function(tx) {
-              var key = String(tx.fullTxId);
-              if (!txsById[key]) txsById[key] = [];
-              txsById[key].push(tx);
-            });
-          } catch (transactionReadError) {
-            var readCode = transactionReadError && transactionReadError.code || 'RESOLVE_FAILED';
-            queue.forEach(function(item) {
-              webAppDecisionError_(outcome, item.reviewId, readCode,
-                menuOperationErrorMessage_(transactionReadError));
-            });
-            attemptedCount += queue.length;
-            queue = [];
-            break;
-          }
         }
 
         var available = perCallLimit - attemptedCount;
@@ -1163,6 +1176,7 @@ function webAppResolveReviews(customerId, decisions, options) {
             {actor: sentItems[0].auth.userEmail, customer: customer,
               partnerListRows: partnerListRows});
         } catch (componentError) {
+          followUpKnown = false;
           var componentCode = componentError && componentError.code || 'RESOLVE_FAILED';
           sentItems.forEach(function(item) {
             webAppDecisionError_(outcome, item.reviewId, componentCode,
@@ -1172,6 +1186,14 @@ function webAppResolveReviews(customerId, decisions, options) {
           fileTouched = true;
           queue = laterItems;
           continue;
+        }
+
+        var followUp = componentResult.followUp;
+        if (followUp && Number.isInteger(followUp.orphanCandidates) &&
+            followUp.orphanCandidates >= 0) {
+          orphanCandidates = followUp.orphanCandidates;
+        } else {
+          followUpKnown = false;
         }
 
         var returnedNotAttempted = componentResult.notAttemptedReviewIds || [];
@@ -1225,11 +1247,13 @@ function webAppResolveReviews(customerId, decisions, options) {
       }
 
       if (fileTouched && !leaseConflict) {
-        try {
-          var committed = commitSettledTransactions_(fileId);
-          outcome.deferredCommits += Number(committed && committed.deferred || 0);
-        } catch (commitError) {
-          webAppFileError_(outcome, fileId, commitError);
+        if (!(followUpKnown && orphanCandidates === 0)) {
+          try {
+            var committed = commitSettledTransactions_(fileId);
+            outcome.deferredCommits += Number(committed && committed.deferred || 0);
+          } catch (commitError) {
+            webAppFileError_(outcome, fileId, commitError);
+          }
         }
         try {
           outcome.completedFiles.push(completeFileIfFullyResolved_(fileId,
