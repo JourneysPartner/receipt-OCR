@@ -168,6 +168,61 @@ function webAppRecheckCustomerFixFile(customerId, folderId, fileId) {
   });
 }
 
+function webAppRecoverStuckFile(customerId, folderId, fileId) {
+  return webAppInvoke_(function() {
+    var scope = authorize(ROLE.SYSTEM_ADMIN, String(customerId),
+      {operation: 'WEBAPP:止まったファイルを取込待ちへ戻す'});
+    var customer = scope.customers[0];
+    var folder = webAppDirectChildFolder_(customer, folderId);
+    fileId = String(fileId);
+    var file = webAppIteratorToArray_(folder.getFiles()).filter(function(item) {
+      return String(item.getId()) === fileId;
+    })[0];
+    if (!file) throw new AuthorizationError('選択されたファイルはこのフォルダにありません。');
+    var fileName = String(file.getName());
+    var row = permanentIndexRowsForScan_().filter(function(item) {
+      return String(item.fileId) === fileId;
+    })[0];
+    if (!row) return {ok: false, code: 'STATE_CHANGED', fileId: fileId,
+      fileName: fileName, state: null, stateLabel: '未登録'};
+    if (String(row.customerId) !== String(customerId))
+      throw new AuthorizationError('選択されたファイルはこのフォルダにありません。');
+    var state = getFileState(fileId);
+    if ([FILE_STATE.VALIDATING, FILE_STATE.WRITING, FILE_STATE.FAILED].indexOf(state) < 0)
+      return {ok: false, code: 'STATE_CHANGED', fileId: fileId, fileName: fileName,
+        state: state, stateLabel: menuFileStateLabel_(state)};
+    var leases = activeLeases_().filter(function(lease) { return String(lease.fileId) === fileId; });
+    if (state === FILE_STATE.FAILED) {
+      if (leases.length) throw leaseConflict_('Lease owned by ' + leases[0].owner +
+        ' since ' + leases[0].acquiredAt);
+    } else {
+      var minimumSeconds = leaseForceReleaseMinSeconds_();
+      var nowMs = Date.now();
+      var youngestSeconds = Math.min.apply(null, leases.map(function(lease) {
+        return (nowMs - new Date(lease.lastHeartbeat).getTime()) / 1000;
+      }));
+      if (youngestSeconds <= minimumSeconds)
+        return {ok: false, code: 'STILL_RUNNING', fileId: fileId, fileName: fileName,
+          waitMinutes: Math.max(1, Math.ceil((minimumSeconds - youngestSeconds) / 60))};
+      leases.forEach(function(lease) {
+        forceReleaseLease(lease.leaseId, 'WEBAPP_STUCK_RECOVERY', scope.userEmail);
+      });
+    }
+    var outcome = recoverStuckFile_({fileId: fileId, customerId: String(customerId),
+      state: state, originalFileName: row.originalFileName}, scope.userEmail,
+      {runId: 'RUN_' + Utilities.getUuid(), audit: {customerId: String(customerId), reason: 'WEBAPP'}});
+    if (outcome.rewound === true) return {ok: true, fileId: fileId, fileName: fileName,
+      nextState: FILE_STATE.DISCOVERED, recovered: (outcome.recovered || []).length,
+      waitMinutes: webAppStableWaitMinutes_(file.getLastUpdated().getTime(), Date.now())};
+    if (outcome.code === 'STATE_CHANGED') return {ok: false, code: 'STATE_CHANGED',
+      fileId: fileId, fileName: fileName, state: outcome.currentState,
+      stateLabel: menuFileStateLabel_(outcome.currentState)};
+    var code = outcome.code || 'RECOVERY_FAILED';
+    return {ok: false, code: code, fileId: fileId, fileName: fileName,
+      label: ERROR_CATALOG[code] ? ERROR_CATALOG[code].message : null};
+  });
+}
+
 function webAppWithdrawFormat(customerId, formatId) {
   return webAppInvoke_(function() {
     var scope = authorize(ROLE.SYSTEM_ADMIN, customerId, {operation: 'WEBAPP:形式取消し'});
@@ -247,6 +302,33 @@ function webAppListFolder(customerId, folderId) {
     var files = webAppIteratorToArray_(folder.getFiles()).map(function(file) {
       return webAppFolderFile_(file, stateByFileId, nowMs);
     });
+    var recoveryFiles = files.filter(function(file) {
+      return [FILE_STATE.VALIDATING, FILE_STATE.WRITING, FILE_STATE.FAILED].indexOf(file.state) >= 0;
+    });
+    if (recoveryFiles.length) {
+      try {
+        var leases = activeLeases_();
+        var minimumSeconds = leaseForceReleaseMinSeconds_();
+        recoveryFiles.forEach(function(file) {
+          var fileLeases = leases.filter(function(lease) { return String(lease.fileId) === file.fileId; });
+          if (file.state === FILE_STATE.FAILED) {
+            file.recoverable = fileLeases.length === 0;
+          } else if (fileLeases.every(function(lease) {
+            return (nowMs - new Date(lease.lastHeartbeat).getTime()) / 1000 > minimumSeconds;
+          })) {
+            file.recoverable = true;
+            file.stuck = true;
+            file.stuckAfterMinutes = Math.ceil(minimumSeconds / 60);
+            file.stateLabel = '処理中のまま止まっています (' + file.state + ')';
+          }
+        });
+      } catch (error) {
+        recoveryFiles.forEach(function(file) {
+          file.recoverable = false;
+          file.leaseUnavailable = true;
+        });
+      }
+    }
     var reviewsByFile = Object.create(null);
     if (files.some(function(file) { return file.state === FILE_STATE.REVIEW_WAIT; })) {
       openReviews({reviewType: 'FORMAT_UNKNOWN'}).forEach(function(review) {
@@ -259,22 +341,25 @@ function webAppListFolder(customerId, folderId) {
     files.forEach(function(file) {
       file.formatReviewId = reviewsByFile[file.fileId] || null;
     });
-    var customerFixFiles = files.filter(function(file) {
-      return file.state === FILE_STATE.CUSTOMER_FIX_REQUIRED;
+    var reasonFiles = files.filter(function(file) {
+      return file.state === FILE_STATE.CUSTOMER_FIX_REQUIRED || file.state === FILE_STATE.FAILED;
     });
-    if (customerFixFiles.length) {
+    if (reasonFiles.length) {
       try {
         var errorRowsByFile = findRowsByColumnValues_(processLogSheet_(),
           PROCESS_FIELD_COLUMNS_.fileId,
-          customerFixFiles.map(function(file) { return file.fileId; }), PROCESS_LOG_WIDTH_);
-        customerFixFiles.forEach(function(file) {
+          reasonFiles.map(function(file) { return file.fileId; }), PROCESS_LOG_WIDTH_);
+        reasonFiles.forEach(function(file) {
           var rows = errorRowsByFile[file.fileId] || [];
-          file.fixReason = rows.length === 1 ?
-            webAppCustomerFixReason_(rows[0].values[PROCESS_FIELD_COLUMNS_.errors - 1]) :
-            {source: 'NONE'};
+          var failed = file.state === FILE_STATE.FAILED;
+          file[failed ? 'failReason' : 'fixReason'] = rows.length === 1 ?
+            (failed ? webAppFailedFileReason_ : webAppCustomerFixReason_)(
+              rows[0].values[PROCESS_FIELD_COLUMNS_.errors - 1]) : {source: 'NONE'};
         });
       } catch (error) {
-        customerFixFiles.forEach(function(file) { file.fixReason = {source: 'UNAVAILABLE'}; });
+        reasonFiles.forEach(function(file) {
+          file[file.state === FILE_STATE.FAILED ? 'failReason' : 'fixReason'] = {source: 'UNAVAILABLE'};
+        });
       }
     }
     files.sort(function(a, b) {
@@ -283,6 +368,21 @@ function webAppListFolder(customerId, folderId) {
     });
     return {kind: 'FILES', folders: [], files: files};
   });
+}
+
+/** 例外の本文には転記先の ID などが入るため、最後のコードと固定の語彙だけを返す。 */
+function webAppFailedFileReason_(errorsCell) {
+  var errors;
+  try { errors = jsonCell_(errorsCell, null); }
+  catch (error) { return {source: 'NONE'}; }
+  if (!Array.isArray(errors)) return {source: 'NONE'};
+  for (var index = errors.length - 1; index >= 0; index -= 1) {
+    var entry = errors[index];
+    if (!entry || entry.truncated || typeof entry.code !== 'string' || entry.code === '') continue;
+    return {source: 'ERROR', code: String(entry.code),
+      label: ERROR_CATALOG[entry.code] ? ERROR_CATALOG[entry.code].message : null};
+  }
+  return {source: 'NONE'};
 }
 
 /** 処理ログの診断情報だけを画面向けに整え、古い切詰め印は理由として扱わない。 */
@@ -1315,6 +1415,7 @@ function webAppFolderFile_(file, stateByFileId, nowMs) {
     size: Number(file.getSize()),
     state: state,
     stateLabel: stateLabel,
+    recoverable: false,
     importable: supported && stable && (!registered || state === FILE_STATE.DISCOVERED)
   };
 }

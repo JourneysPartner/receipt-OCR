@@ -2604,7 +2604,7 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(result.stoppedBy, 'FILE_FAILED');
     assert.equal(gate.stoppedBy, 'FAILED');
     assert.equal(clientStoppedByMessage('FILE_FAILED'),
-      'このファイルは処理中のまま止まっています。管理者へ連絡してください。');
+      '取り込めなかったファイルがあります。ファイル一覧の［取込待ちに戻す］で戻してから、もう一度［記帳を実行］を押してください。同じ理由でまた止まるときは管理者へ連絡してください。');
 
     const firstFails = setupWorld({knownMerchant: true});
     putCsv(firstFails.customer, {fileId: 'multi_failed_first',
@@ -7218,5 +7218,403 @@ module.exports = ({test, assert, gas}) => {
           {enabled: false, disabledReason: '（取引ログで取引を特定できません。管理者へ）'});
       });
     });
+  });
+
+  function sfEmpty(state = 'FAILED', fileId = 'sf_empty') {
+    const seeded = setupWorld({actor: 'owner@example.com', knownMerchant: true});
+    putCsv(seeded.customer, {fileId, rows: ['2025/12/10,既知店,1000,仕入れ']});
+    call('createOrUpdateProcessLog', ['RUN_SF', call('getCustomerById', ['C001']),
+      {id: fileId, name: gas.context.DriveApp.getFileById(fileId).getName(),
+        binaryHash: 'b'.repeat(64), state}]);
+    return {...seeded, fileId};
+  }
+
+  function sfRecover(seeded) {
+    return call('webAppRecoverStuckFile', [seeded.customer.customerId,
+      seeded.customer.cardId, seeded.fileId]);
+  }
+
+  function sfList(seeded) {
+    return call('webAppListFolder', [seeded.customer.customerId, seeded.customer.cardId]).files;
+  }
+
+  function sfPartial() {
+    const seeded = setupWorld({actor: 'owner@example.com', knownMerchant: true});
+    const fileId = putCsv(seeded.customer, {fileId: 'sf_partial', rows: [
+      '2025/12/10,既知店,1000,仕入れ', '2025/12/11,既知店,2000,仕入れ']});
+    gas.evaluate('SETTINGS.FAULT_INJECTION={SHEET_WRITE_USER_ENTERED_BEFORE:true}; resetFaultInjectionCache_();');
+    let result;
+    try { result = webImport(seeded.customer); }
+    finally { gas.evaluate('SETTINGS.FAULT_INJECTION=null; resetFaultInjectionCache_();'); }
+    assert.equal(fileStateOf(fileId), 'FAILED');
+    const txs = call('getTransactionsByStatus', [fileId, ['PREPARED', 'WRITING']]);
+    assert.equal(txs.length, 2);
+    const destinationSpreadsheetId = result.destinationSpreadsheetId;
+    assert.equal(txIdRowsIn(destinationSpreadsheetId, 'C001').length, 2);
+    const sheet = gas.stubs.getSpreadsheet(destinationSpreadsheetId).getSheetByName('入力用シート');
+    txIdRowsIn(destinationSpreadsheetId, 'C001').forEach((row) => {
+      assert.equal(sheet.getRange(row, 2).getValue(), '', 'USER_ENTERED did not run');
+      assert.ok(sheet.getRange(row, 7).getValue(), 'RAW transaction ID remains');
+    });
+    return {...seeded, fileId, destinationSpreadsheetId, txs};
+  }
+
+  function sfTxCounts(seeded) {
+    const rows = gas.stubs.getSpreadsheet(seeded.destinationSpreadsheetId)
+      .getSheetByName('入力用シート').getDataRange().getValues();
+    return seeded.txs.map((tx) => rows.filter((row) => row[6] === tx.fullTxId).length);
+  }
+
+  function sfSnapshot(ignorePermission = false) {
+    return JSON.stringify(spreadsheetIds().map((id) => [id,
+      gas.stubs.getSpreadsheet(id).getSheets().map((sheet) => [sheet.getName(),
+        sheet.getDataRange().getValues().slice(ignorePermission && sheet.getName() === '監査ログ' ? 1 : 0).filter((row) =>
+          !ignorePermission || sheet.getName() !== '監査ログ' || row[2] !== 'PERMISSION')
+          .map((row) => {
+            if (!ignorePermission) return row;
+            const values = row.slice();
+            while (values.length && values.at(-1) === '') values.pop();
+            return values;
+          }).filter((row) => !ignorePermission || row.some((value) => value !== ''))]) ]));
+  }
+
+  function sfLease(seeded, seconds, purpose = 'PROCESS') {
+    const id = call('acquireLease', ['C001', seeded.fileId, 'RUN_OTHER',
+      'owner@example.com', purpose]);
+    const row = call('activeLeases_').find((lease) => lease.leaseId === id)._rowNumber;
+    gas.call('leaseSheet_').getRange(row, 8).setValue(new Date(Date.now() - seconds * 1000).toISOString());
+    return id;
+  }
+
+  test('sf 1: stopped WRITING recovers the clone once and audited rewind survives a fresh import', () => {
+    const seeded = seedPartnerViaWeb({count: 2, world: {actor: 'owner@example.com'}});
+    clearDestinationRow(seeded.reviews[0].fullTxId);
+    forceFileState(seeded.fileId, 'WRITING');
+    const file = sfList(seeded)[0];
+    assert.equal(file.recoverable, true); assert.equal(file.stuck, true);
+    assert.equal(file.stateLabel, '処理中のまま止まっています (WRITING)');
+    const result = sfRecover(seeded);
+    assert.equal(result.ok, true); assert.equal(result.recovered, 1);
+    assert.equal(result.nextState, 'DISCOVERED');
+    assert.equal(fileStateOf(seeded.fileId), 'DISCOVERED');
+    const records = call('getFileRecordsPair_', [seeded.fileId]);
+    assert.equal(records.process.values[12], ''); assert.equal(records.permanent.values[5], '');
+    const audits = gas.call('auditSheet_').getDataRange().getValues()
+      .filter((row) => row[2] === 'REVIEW_RESOLVE');
+    assert.equal(audits.length, 1);
+    const audit = audits[0];
+    assert.equal(audit[3], 'owner@example.com'); assert.equal(audit[8], 'C001');
+    assert.equal(audit[11], 'WEBAPP'); assert.equal(audit[7], seeded.fileId);
+    assert.deepEqual(JSON.parse(audit[9]), {fileState: 'WRITING'});
+    assert.deepEqual(JSON.parse(audit[10]), {fileState: 'DISCOVERED', operation: 'RECOVER'});
+    assert.deepEqual(call('activeLeases_'), []);
+    const before = sfTotalDestinationRows();
+    assert.equal(before, 2);
+    const next = webImport(seeded.customer);
+    assert.ok(importFileResults(next).every((file) => file.outcome !== 'FAILED'));
+    assert.equal(sfTotalDestinationRows(), before);
+    const rows = gas.stubs.getSpreadsheet(seeded.destinationSpreadsheetId)
+      .getSheetByName('入力用シート').getDataRange().getValues();
+    seeded.reviews.forEach((review) => assert.equal(rows.filter((row) => row[6] === review.fullTxId).length, 1));
+    assert.equal(txIdRowsIn(seeded.destinationSpreadsheetId, 'C001').length, 2);
+    assert.equal(txIdRowsIn(seeded.customer.destinationId, 'C001').length, 0);
+  });
+
+  function sfTotalDestinationRows() {
+    return spreadsheetIds().filter((id) => gas.stubs.getSpreadsheet(id).getSheetByName('入力用シート'))
+      .reduce((count, id) => count + txIdRowsIn(id, 'C001').length, 0);
+  }
+
+  test('sf 2: retry after a real mid-write FAILED never duplicates either transaction', () => {
+    const seeded = sfPartial();
+    assert.deepEqual(call('opsRetryFailedFiles'), [seeded.fileId]);
+    webImport(seeded.customer, {destinationSpreadsheetId: seeded.destinationSpreadsheetId});
+    const counts = sfTxCounts(seeded);
+    console.log('SF2_RETRY_ROWS ' + JSON.stringify(counts));
+    assert.deepEqual(counts, [1, 1]);
+  });
+
+  test('sf 2: Web recovery finishes RAW-only rows before rewind and reimport', () => {
+    const seeded = sfPartial(), file = sfList(seeded)[0];
+    assert.equal(file.recoverable, true); assert.equal(file.failReason.source, 'ERROR');
+    const result = sfRecover(seeded);
+    assert.equal(result.ok, true); assert.ok(result.recovered >= 1);
+    assert.deepEqual(sfTxCounts(seeded), [1, 1]);
+    webImport(seeded.customer);
+    assert.deepEqual(sfTxCounts(seeded), [1, 1]);
+    assert.equal(txIdRowsIn(seeded.customer.destinationId, 'C001').length, 0);
+  });
+
+  function sfBeforeWrite() {
+    const seeded = setupWorld({actor: 'owner@example.com', knownMerchant: true});
+    const fileId = putCsv(seeded.customer, {fileId: 'sf_before'});
+    withMocks({runPreValidationBlock() {
+      const error = new Error('before registering transactions'); error.code = 'FAULT_INJECTED'; throw error;
+    }}, () => webImport(seeded.customer));
+    assert.equal(fileStateOf(fileId), 'FAILED');
+    assert.deepEqual(call('recoveryTargetsFor_', [fileId]), []);
+    return {...seeded, fileId};
+  }
+
+  test('sf 3: failure before transaction registration rewinds empty then imports once', () => {
+    const seeded = sfBeforeWrite(), result = sfRecover(seeded);
+    assert.equal(result.ok, true); assert.equal(result.recovered, 0);
+    assert.equal(fileStateOf(seeded.fileId), 'DISCOVERED');
+    const next = webImport(seeded.customer);
+    assert.ok(['COMPLETED', 'REVIEW_WAIT'].includes(fileStateOf(seeded.fileId)));
+    assert.equal(txIdRowsIn(next.destinationSpreadsheetId, 'C001').length, 1);
+  });
+
+  test('sf 4: heartbeat boundaries follow the configured 600 and 420 seconds', () => {
+    const now = Date.now, fixed = now(); Date.now = () => fixed;
+    const minimum = gas.evaluate('SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS');
+    assert.equal(minimum, 600);
+    try {
+      for (const [min, ages] of [[minimum, [0, 599, 600, 601]], [420, [420, 421]]]) {
+        for (const age of ages) {
+          const seeded = sfEmpty('WRITING');
+          gas.evaluate(`SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS = ${min};`);
+          sfLease(seeded, age);
+          const file = sfList(seeded)[0];
+          assert.equal(file.recoverable, age > min, `${min}/${age}`);
+          if (age <= min) assert.equal(file.stateLabel, '処理中（転記中） (WRITING)');
+          else assert.equal(file.stuckAfterMinutes, Math.ceil(min / 60));
+          const before = sfSnapshot(), result = sfRecover(seeded);
+          if (age <= min) {
+            assert.equal(result.code, 'STILL_RUNNING'); assert.equal(result.ok, false);
+            assert.equal(result.waitMinutes, Math.max(1, Math.ceil((min - age) / 60)));
+            assert.equal(sfSnapshot(), before);
+          } else {
+            assert.equal(result.ok, true); assert.deepEqual(call('activeLeases_'), []);
+            const audit = gas.call('auditSheet_').getDataRange().getValues()
+              .find((row) => row[2] === 'LEASE_FORCE_RELEASE');
+            assert.equal(audit[11], 'WEBAPP_STUCK_RECOVERY'); assert.equal(audit[3], 'owner@example.com');
+          }
+        }
+      }
+    } finally { Date.now = now; gas.evaluate(`SETTINGS.LEASE_FORCE_RELEASE_MIN_SECONDS = ${minimum};`); }
+  });
+
+  test('sf 5: FAILED with even an old lease is unavailable and throws the Japanese conflict without writes', () => {
+    const seeded = sfEmpty(); sfLease(seeded, 1000, 'WRITE_ONLY');
+    assert.equal(sfList(seeded)[0].recoverable, false);
+    const before = sfSnapshot(), error = caught(() => sfRecover(seeded));
+    assert.equal(error.code, 'LEASE_CONFLICT'); assert.match(error.message, /別の処理.*使用中/);
+    assert.equal(sfSnapshot(), before);
+  });
+
+  test('sf 6: ineligible and unregistered states are unchanged without writes', () => {
+    for (const state of ['COMPLETED', 'DISCOVERED', 'REVIEW_WAIT', 'CUSTOMER_FIX_REQUIRED', null]) {
+      const seeded = sfEmpty(state || 'FAILED');
+      if (state === null) seeded.fileId = putCsv(seeded.customer, {fileId: 'sf_unregistered'});
+      assert.equal(sfList(seeded).find((file) => file.fileId === seeded.fileId).recoverable, false);
+      const before = sfSnapshot(), result = sfRecover(seeded);
+      assert.equal(result.ok, false); assert.equal(result.code, 'STATE_CHANGED');
+      assert.equal(result.state, state);
+      assert.equal(result.stateLabel, state === null ? '未登録' : call('menuFileStateLabel_', [state]));
+      assert.equal(sfSnapshot(), before);
+    }
+  });
+
+  test('sf 7: state is rechecked under the lease before targets or destinations on helper and Web paths', () => {
+    for (const web of [false, true]) {
+      const seeded = sfEmpty('WRITING'), acquire = gas.context.acquireLease;
+      let recovered = 0, targets = 0, rewinds = 0;
+      const result = withMocks({acquireLease(...args) {
+        const id = acquire(...args); forceFileState(seeded.fileId, 'DISCOVERED'); return id;
+      }, recoveryTargetsFor_() { targets++; return []; },
+      recoverPartialFailure() { recovered++; }, rewindFileForReimport_() { rewinds++; }}, () => web
+        ? sfRecover(seeded)
+        : call('recoverStuckFile_', [call('permanentIndexRowsForScan_')[0], 'owner@example.com', {runId: 'RUN_SF'}]));
+      assert.equal(result.code, 'STATE_CHANGED');
+      assert.equal(web ? result.state : result.currentState, 'DISCOVERED');
+      assert.equal(recovered, 0); assert.equal(targets, 0); assert.equal(rewinds, 0);
+      assert.deepEqual(call('activeLeases_'), []);
+    }
+  });
+
+  test('sf 8: mismatched and ambiguous destinations fail without exposing internal errors or retaining leases', () => {
+    for (const kind of ['review-mismatch', 'template-mismatch', 'ambiguous']) {
+      const seeded = seedPartnerViaWeb({count: 2, world: {actor: 'owner@example.com'}});
+      clearRecordedDestinationsForFile(seeded.fileId);
+      clearDestinationRow(seeded.reviews[0].fullTxId); forceFileState(seeded.fileId, 'WRITING');
+      if (kind === 'review-mismatch') setReviewDestination(seeded.reviews.map((r) => r.reviewId), seeded.customer.destinationId);
+      if (kind === 'template-mismatch') blankReviewRows(seeded.reviews.map((r) => r.reviewId));
+      if (kind === 'ambiguous') setReviewDestination([seeded.reviews[0].reviewId], seeded.customer.destinationId);
+      const before = destinationSnapshot(seeded.customer.destinationId), result = sfRecover(seeded);
+      const code = kind === 'ambiguous' ? 'DESTINATION_AMBIGUOUS' : 'DESTINATION_MISMATCH';
+      assert.equal(result.ok, false); assert.equal(result.code, code);
+      assert.equal(result.label, code === 'DESTINATION_AMBIGUOUS' ? null : gas.evaluate('ERROR_CATALOG.DESTINATION_MISMATCH.message'));
+      assert.equal(Object.hasOwn(result, 'error'), false);
+      assert.equal(JSON.stringify(result).includes('索引に見つかりません'), false);
+      assert.equal(JSON.stringify(result).includes(seeded.destinationSpreadsheetId), false);
+      assert.equal(fileStateOf(seeded.fileId), 'WRITING');
+      assert.equal(destinationSnapshot(seeded.customer.destinationId), before);
+      assert.deepEqual(call('activeLeases_'), []);
+    }
+  });
+
+  test('sf 9: folder membership customer ownership and administrator authorization reject before mutation', () => {
+    for (const kind of ['other-file', 'nested-folder', 'other-customer', 'reviewer', 'index-owner']) {
+      const seeded = sfEmpty(), args = ['C001', seeded.customer.cardId, seeded.fileId];
+      if (kind === 'other-file') {
+        seeded.customer.cardFolder.fileIds.length = 0;
+        gas.stubs.createFolder('sf_elsewhere', {fileIds: [seeded.fileId]});
+      }
+      if (kind === 'nested-folder') {
+        gas.stubs.createFolder('sf_nested', {fileIds: [seeded.fileId]});
+        seeded.customer.cardFolder.subFolderIds.push('sf_nested'); args[1] = 'sf_nested';
+      }
+      if (kind === 'other-customer') {
+        addCustomer(seeded.world, {customerId: 'C002', admins: 'another@example.com', reviewers: 'another@example.com'});
+        gas.stubs.setActiveUser('reviewer@example.com'); args[0] = 'C002';
+      }
+      if (kind === 'reviewer') gas.stubs.setActiveUser('reviewer@example.com');
+      if (kind === 'index-owner') {
+        const sheet = gas.call('permanentFileIndexSheet_');
+        sheet.getRange(2, 2).setValue('C002');
+      }
+      // 初回監査に伴う CHAIN_ANCHOR も比較できるよう、連鎖を先に作る。
+      call('appendAudit', [{type: 'PERMISSION', reason: 'SF9_SETUP'}]);
+      const permissions = permissionRows().length, before = sfSnapshot(true);
+      const error = caught(() => call('webAppRecoverStuckFile', args));
+      assert.equal(error.name, 'AuthorizationError', kind);
+      assert.equal(sfSnapshot(true), before, kind);
+      assert.equal(permissionRows().length - permissions, ['reviewer', 'other-customer'].includes(kind) ? 1 : 0);
+    }
+  });
+
+  test('sf 10: latest fixed-vocabulary failed reasons never expose detail and share unavailable handling', () => {
+    const cases = [
+      [[{code: 'DESTINATION_MISMATCH', detail: 'SECRET_ID'}], {source: 'ERROR', code: 'DESTINATION_MISMATCH', label: gas.evaluate('ERROR_CATALOG.DESTINATION_MISMATCH.message')}],
+      [[{code: 'SOURCE_REQUIRES_CUSTOMER_FIX'}, {code: 'UNKNOWN_FAILURE', detail: 'SECRET_ID'}], {source: 'ERROR', code: 'UNKNOWN_FAILURE', label: null}],
+      [[{truncated: true, code: 'FAKE', detail: 'SECRET_ID'}, {code: 'UNKNOWN_FAILURE'}, {truncated: true, code: 'SKIP'}, {code: ''}, {code: 42}, null], {source: 'ERROR', code: 'UNKNOWN_FAILURE', label: null}],
+      [[{detail: 'SECRET_ID'}], {source: 'NONE'}], [[], {source: 'NONE'}],
+      ['', {source: 'NONE'}], ['{broken', {source: 'NONE'}], ['{}', {source: 'NONE'}]
+    ];
+    for (const [errors, expected] of cases) {
+      const cell = typeof errors === 'string' ? errors : JSON.stringify(errors);
+      assert.deepEqual(call('webAppFailedFileReason_', [cell]), expected);
+      const seeded = sfEmpty(); call('updateProcessLog', [seeded.fileId, {errors: cell}]);
+      const result = sfList(seeded)[0];
+      assert.deepEqual(result.failReason, expected); assert.equal(JSON.stringify(result).includes('SECRET_ID'), false);
+    }
+    const seeded = sfEmpty();
+    const fix = putCsv(seeded.customer, {fileId: 'sf_fix'});
+    call('createOrUpdateProcessLog', ['RUN_SF', call('getCustomerById', ['C001']),
+      {id: fix, name: 'fix.csv', state: 'CUSTOMER_FIX_REQUIRED'}]);
+    const find = gas.context.findRowsByColumnValues_;
+    withMocks({findRowsByColumnValues_(sheet, ...args) {
+      if (sheet.getName() === 'クレカ処理ログ') throw new Error('SECRET_ID');
+      return find(sheet, ...args);
+    }}, () => {
+      const files = sfList(seeded);
+      assert.deepEqual(files.find((f) => f.fileId === seeded.fileId).failReason, {source: 'UNAVAILABLE'});
+      assert.deepEqual(files.find((f) => f.fileId === fix).fixReason, {source: 'UNAVAILABLE'});
+    });
+    for (const duplicate of [false, true]) {
+      const seed = sfEmpty(), sheet = gas.call('processLogSheet_');
+      if (duplicate) sheet.appendRow(sheet.getRange(2, 1, 1, 40).getValues()[0]);
+      else sheet.getRange(2, 8).setValue('sf_not_target');
+      assert.deepEqual(sfList(seed)[0].failReason, {source: 'NONE'});
+    }
+  });
+
+  test('sf 11: listing and empty recovery use the exact measured batchGet budgets', () => {
+    const reads = [];
+    for (const state of ['COMPLETED', 'WRITING', 'FAILED', 'both']) {
+      const seeded = sfEmpty(state === 'both' ? 'FAILED' : state);
+      if (state === 'both') {
+        const fileId = putCsv(seeded.customer, {fileId: 'sf_fix'});
+        call('createOrUpdateProcessLog', ['RUN_SF', call('getCustomerById', ['C001']),
+          {id: fileId, name: 'fix.csv', state: 'CUSTOMER_FIX_REQUIRED'}]);
+      }
+      gas.stubs.resetApiCallCounts(); sfList(seeded);
+      reads.push(gas.stubs.getApiCallCounts().batchGet);
+    }
+    console.log('SF11_LIST_READS ' + JSON.stringify(reads));
+    assert.deepEqual(reads, [2, 3, 5, 5]);
+    const seeded = sfBeforeWrite(), api = gas.context.Sheets.Spreadsheets.Values, write = api.batchUpdate;
+    let destinationWrites = 0;
+    api.batchUpdate = function(request, id) { if (id !== 'master') destinationWrites++; return write.apply(this, arguments); };
+    let count;
+    try {
+      gas.stubs.resetApiCallCounts(); assert.equal(sfRecover(seeded).ok, true);
+      count = gas.stubs.getApiCallCounts().batchGet;
+    } finally { api.batchUpdate = write; }
+    console.log('SF11_RECOVER_READS ' + count);
+    assert.ok(count <= 13, `empty recovery reads: ${count}`);
+    assert.equal(destinationWrites, 0);
+  });
+
+  test('sf 12: failed retry uses WRITE_ONLY and recovers before rewind but leaves leased FAILED alone', () => {
+    const seeded = sfPartial(), acquire = gas.context.acquireLease, purposes = [];
+    const retried = withMocks({acquireLease(...args) { purposes.push(args[4]); return acquire(...args); }}, () => call('opsRetryFailedFiles'));
+    assert.deepEqual(retried, [seeded.fileId]); assert.deepEqual(purposes, ['WRITE_ONLY']);
+    assert.deepEqual(sfTxCounts(seeded), [1, 1]); webImport(seeded.customer);
+    assert.deepEqual(sfTxCounts(seeded), [1, 1]);
+    const leased = sfEmpty(); sfLease(leased, 1000, 'WRITE_ONLY');
+    const before = sfSnapshot(); assert.deepEqual(call('opsRetryFailedFiles'), []);
+    assert.equal(fileStateOf(leased.fileId), 'FAILED'); assert.equal(sfSnapshot(), before);
+  });
+
+  test('sf 13: recovery cannot rewind an empty WRITING file while its 360-second lease remains', () => {
+    const seeded = sfEmpty('WRITING'); sfLease(seeded, 360);
+    const result = call('opsRecoverStuckFiles')[0];
+    console.log('SF13_RESULT ' + JSON.stringify({result, state: fileStateOf(seeded.fileId), leases: call('activeLeases_').length}));
+    assert.equal(result.code, 'LEASE_CONFLICT'); assert.ok(result.leaseNote);
+    assert.equal(result.rewound, undefined); assert.equal(fileStateOf(seeded.fileId), 'WRITING');
+  });
+
+  test('sf 13: operations recovery acquires PROCESS for WRITING and WRITE_ONLY for REVIEW_WAIT', () => {
+    for (const state of ['WRITING', 'REVIEW_WAIT']) {
+      const seeded = seedPartnerViaWeb({world: {actor: 'owner@example.com'}});
+      clearDestinationRow(seeded.reviews[0].fullTxId); forceFileState(seeded.fileId, state);
+      const acquire = gas.context.acquireLease, purposes = [];
+      const result = withMocks({acquireLease(...args) { purposes.push(args[4]); return acquire(...args); }}, () => call('opsRecoverStuckFiles')[0]);
+      assert.deepEqual(purposes, [state === 'WRITING' ? 'PROCESS' : 'WRITE_ONLY']);
+      assert.equal(result.error, undefined); assert.equal(result.recovered.length, 1);
+      assert.equal(fileStateOf(seeded.fileId), state === 'WRITING' ? 'DISCOVERED' : 'REVIEW_WAIT');
+      assert.deepEqual(call('activeLeases_'), []);
+    }
+  });
+
+  test('sf 14: FILE_FAILED directs the operator to recovery and a new import', () => {
+    assert.equal(clientStoppedByMessage('FILE_FAILED'),
+      '取り込めなかったファイルがあります。ファイル一覧の［取込待ちに戻す］で戻してから、もう一度［記帳を実行］を押してください。同じ理由でまた止まるときは管理者へ連絡してください。');
+  });
+
+  // 監査で足した（私の変異 X22・X23 がすり抜けた）：リースはファイルごとに見る。
+  // 隣のファイルの取込中のリースで戻せなくなったり、隣の止まったリースを
+  // 戻す操作が強制解放したりしてはならない。
+  test('sf 19: leases of another file neither block recovery nor get force-released', () => {
+    for (const [targetState, otherAge] of [['FAILED', 0], ['WRITING', 0], ['WRITING', 1000]]) {
+      const seeded = sfEmpty(targetState, 'sf_target');
+      const otherId = putCsv(seeded.customer, {fileId: 'sf_other', rows: ['2025/12/12,既知店,3000,仕入れ']});
+      call('createOrUpdateProcessLog', ['RUN_SF_OTHER', call('getCustomerById', ['C001']),
+        {id: otherId, name: gas.context.DriveApp.getFileById(otherId).getName(),
+          binaryHash: 'c'.repeat(64), state: 'WRITING'}]);
+      const otherLease = sfLease({fileId: otherId}, otherAge);
+      const target = sfList(seeded).find((file) => file.fileId === 'sf_target');
+      assert.equal(target.recoverable, true, `${targetState}/${otherAge}`);
+      const result = sfRecover(seeded);
+      assert.equal(result.ok, true, `${targetState}/${otherAge}: ${JSON.stringify(result)}`);
+      assert.ok(call('activeLeases_').some((lease) => lease.leaseId === otherLease),
+        `${targetState}/${otherAge}: 隣のファイルのリースは残る`);
+      assert.equal(gas.call('auditSheet_').getDataRange().getValues()
+        .filter((row) => row[2] === 'LEASE_FORCE_RELEASE').length, 0);
+    }
+  });
+
+  // 監査で足した（私の変異 X13 がすり抜けた）：リース表が読めなければ、止まったか
+  // 動いているかを決められないので、どのファイルにもボタンを出さない（§4.1 の 1）。
+  test('sf 20: an unreadable lease table offers no recovery but still lists the folder', () => {
+    const seeded = sfEmpty('FAILED');
+    const files = withMocks({activeLeases_() { throw new Error('lease table unreadable'); }},
+      () => sfList(seeded));
+    assert.equal(files.length, 1);
+    assert.equal(files[0].recoverable, false);
+    assert.equal(files[0].leaseUnavailable, true);
+    assert.ok(files[0].failReason, '理由は今どおり読む');
   });
 };

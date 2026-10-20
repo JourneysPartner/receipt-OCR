@@ -27,7 +27,11 @@ param(
   [string]$Project     = (Split-Path $PSScriptRoot -Parent),
   [int]   $IdleMinutes = 10,
   [int]   $MaxResumes  = 20,
-  [string]$Codex       = ""
+  [string]$Codex       = "",
+  # Pinned on every launch (and on every resume) so a change in the user's
+  # Codex defaults cannot silently swap the model for implementation work.
+  [string]$Model       = "gpt-6.1-sol",
+  [string]$Effort      = "xhigh"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -132,7 +136,10 @@ function Start-CodexRun([string[]]$CodexArgs, [string]$StdinFile) {
 # quote them. The project path contains spaces ("receipt OCR"), so it must be
 # quoted here or the parser splits it and rejects the trailing "-".
 $q = '"' + $projectFull + '"'
-$argsFirst = @('exec', '-C', $q, '-s', 'workspace-write', '--skip-git-repo-check', '-')
+# "-c key=value" falls back to a plain string when the value is not TOML, so
+# the model name and effort need no quotes (Start-Process would not keep them).
+$modelArgs = @('-c', "model=$Model", '-c', "model_reasoning_effort=$Effort")
+$argsFirst = @('exec', '-C', $q, '-s', 'workspace-write') + $modelArgs + @('--skip-git-repo-check', '-')
 
 Write-Host "prompt : $PromptFile"
 Write-Host "idle   : $IdleMinutes min / max resumes: $MaxResumes"
@@ -180,8 +187,8 @@ while ($true) {
              "Continue from where it was interrupted. Do not redo work that is already " +
              "complete. Check the current state first, then carry on."
     Set-Content -Path $nudge -Value $text -Encoding UTF8
-    $argsResume = @('exec', 'resume', $id, '-c', "sandbox_mode='workspace-write'",
-                    '--skip-git-repo-check', '-')
+    $argsResume = @('exec', 'resume', $id, '-c', "sandbox_mode='workspace-write'") +
+                  $modelArgs + @('--skip-git-repo-check', '-')
     $proc = Start-CodexRun $argsResume $nudge
   }
 }

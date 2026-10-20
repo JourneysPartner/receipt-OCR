@@ -160,7 +160,7 @@ module.exports = ({test, assert, gas}) => {
       'webAppFinalReview', 'webAppExplainUnknownFile', 'webAppPreviewFormat',
       'webAppSaveFormat', 'webAppRequeueFormatFiles', 'webAppReturnFileToCustomer',
       'webAppWithdrawFormat', 'webAppRunImport', 'webAppResolveReviews',
-      'webAppRecheckCustomerFixFile', 'webAppResolveOtherReview', 'webAppPartnerNames']) {
+      'webAppRecheckCustomerFixFile', 'webAppResolveOtherReview', 'webAppPartnerNames', 'webAppRecoverStuckFile']) {
       runner[name] = (...args) => {
         calls.push({name, args});
         const success = runner.success, failure = runner.failure;
@@ -177,7 +177,7 @@ module.exports = ({test, assert, gas}) => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'src', '81_WebAppUi.html'), 'utf8');
     const script = /<script>([\s\S]*?)<\/script>/.exec(source)[1].replace(
       '    bootstrap();',
-      '    globalThis.__ui = {state, el, renderSelection, renderFiles, renderFormatPanel, previewFormat, saveFormat, returnFormatToCustomer, openFormat, chooseFolder, chooseCustomer, loadFinalReview, formatSetBusy, loadReviews, recheckCustomerFix: typeof recheckCustomerFix === "function" ? recheckCustomerFix : null};');
+      '    globalThis.__ui = {state, el, renderSelection, renderFiles, renderFormatPanel, previewFormat, saveFormat, returnFormatToCustomer, openFormat, chooseFolder, chooseCustomer, loadFinalReview, formatSetBusy, loadReviews, recheckCustomerFix: typeof recheckCustomerFix === "function" ? recheckCustomerFix : null, recoverStuckFile: typeof recoverStuckFile === "function" ? recoverStuckFile : null, failedFileReasonLines: typeof failedFileReasonLines === "function" ? failedFileReasonLines : null};');
     const sandbox = {document, google: {script: {run: runner}}, window: {open() { return {}; }},
       setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {}, console};
     vm.runInNewContext(script, sandbox);
@@ -194,6 +194,152 @@ module.exports = ({test, assert, gas}) => {
     world.ui.renderSelection();
     return world;
   }
+  function sfBrowserWorld(responses = {}) {
+    const world = recheckBrowserWorld(responses);
+    world.ui.state.files = [{fileId: 'sf_target', fileName: '<img src=x>.csv',
+      state: 'FAILED', stateLabel: '失敗 (FAILED)', recoverable: true,
+      failReason: {source: 'ERROR', code: 'DESTINATION_MISMATCH', label: '転記先の食い違い'}}];
+    world.ui.renderFiles(); return world;
+  }
+  function sfButtons(world) {
+    return world.ids['file-list'].querySelectorAll('button')
+      .filter((node) => node.textContent === '取込待ちに戻す');
+  }
+  const sfFlush = () => new Promise((resolve) => setImmediate(resolve));
+
+  test('sf 15: recovery buttons reasons and busy flags appear only on eligible non-format rows', () => {
+    const world = sfBrowserWorld(), state = world.ui.state, failed = state.files[0];
+    state.files.push({...failed, fileId: 'stuck', state: 'WRITING', stuck: true, stuckAfterMinutes: 10},
+      ...['WRITING', 'FAILED', 'DISCOVERED', 'COMPLETED', 'CUSTOMER_FIX_REQUIRED', null].map((value, index) =>
+        ({fileId: 'other' + index, fileName: 'file.csv', state: value, recoverable: false})),
+      {...failed, fileId: 'format', state: 'REVIEW_WAIT', formatReviewId: 'format-review'});
+    world.ui.renderFiles(); const buttons = sfButtons(world);
+    assert.equal(buttons.length, 2);
+    buttons.forEach((button) => {
+      assert.equal(button.type, 'button'); assert.equal(button.className, 'button');
+      assert.equal(button.disabled, false);
+      const cell = button.parentNode;
+      assert.equal(cell.parentNode.children[3], cell);
+      assert.equal(cell.children.at(-2).tagName, 'BR');
+      assert.equal(cell.children.at(-3).className, 'fix-reason');
+    });
+    assert.equal(buttons[0].parentNode.querySelector('.fix-reason').textContent,
+      '理由：転記先の食い違い（DESTINATION_MISMATCH）');
+    assert.equal(buttons[1].parentNode.querySelector('.fix-reason').textContent,
+      '10 分以上動きがありません。実行の時間の上限（6 分）で止まった可能性があります。');
+    state.files[1].stuckAfterMinutes = 7;
+    world.ui.renderFiles();
+    assert.equal(sfButtons(world)[1].parentNode.querySelector('.fix-reason').textContent,
+      '7 分以上動きがありません。実行の時間の上限（6 分）で止まった可能性があります。');
+    assert.equal(world.ids['file-list'].querySelectorAll('button').length, 4, 'two recovery, one recheck, one format');
+    for (const busy of ['importBusy', 'resolveBusy', 'formatBusy']) {
+      state[busy] = true; world.ui.renderFiles();
+      sfButtons(world).forEach((button) => { assert.equal(button.disabled, true); button.fire('click'); });
+      assert.equal(world.calls.length, 0); state[busy] = false;
+    }
+    for (const [reason, expected] of [
+      [{source: 'ERROR', code: 'UNKNOWN', label: null}, '理由：UNKNOWN'],
+      [{source: 'NONE'}, '理由の記録はありません'],
+      [{source: 'UNAVAILABLE'}, '理由を読み込めませんでした'],
+      [{source: 'other'}, '理由の記録はありません'], [null, '理由の記録はありません']]) {
+      state.files = [{...failed, failReason: reason}]; world.ui.renderFiles();
+      assert.equal(sfButtons(world)[0].parentNode.querySelector('.fix-reason').textContent, expected);
+      assert.deepEqual(Array.from(world.ui.failedFileReasonLines(reason)), [expected]);
+    }
+  });
+
+  browserAsyncTest('sf 16: confirmation cancellation busy lifetime success notice and one file refresh', async () => {
+    const cancelled = sfBrowserWorld();
+    assert.equal(sfButtons(cancelled).length, 1);
+    const pendingCancel = sfButtons(cancelled)[0].fire('click')[0];
+    assert.equal(cancelled.ids['confirm-title'].textContent, '取込待ちに戻す');
+    assert.equal(cancelled.ids['confirm-intro'].textContent,
+      '「<img src=x>.csv」を取込待ちに戻します。途中まで転記した行があれば、先に仕上げてから戻します（同じ取引を二重に書きません）。取り込み直すのは［記帳を実行］を押したときです。同じ理由でまた止まるときは管理者へ連絡してください。');
+    assert.equal(cancelled.calls.length, 0);
+    cancelled.ids['confirm-cancel'].fire('click'); await pendingCancel;
+    assert.equal(cancelled.calls.length, 0); assert.equal(cancelled.ui.state.formatBusy, false);
+    for (const busy of ['importBusy', 'resolveBusy', 'formatBusy']) {
+      cancelled.ui.state[busy] = true;
+      await cancelled.ui.recoverStuckFile(cancelled.ui.state.files[0]);
+      assert.equal(cancelled.calls.length, 0); assert.equal(cancelled.ui.state.formatConfirmResolve, null);
+      cancelled.ui.state[busy] = false;
+    }
+    for (const [recovered, waitMinutes] of [[0, 0], [2, 7]]) {
+      let notice;
+      const world = sfBrowserWorld({webAppRecoverStuckFile: {defer: true}, webAppListFolder() {
+        assert.equal(world.ui.state.formatBusy, false); notice = world.ids.notice.textContent;
+        return {kind: 'FILES', files: []};
+      }});
+      const pending = sfButtons(world)[0].fire('click')[0];
+      assert.equal(world.calls.length, 0);
+      world.ids['confirm-submit'].fire('click'); await sfFlush();
+      assert.equal(world.ui.state.formatBusy, true); assert.equal(sfButtons(world)[0].disabled, true);
+      assert.deepEqual(JSON.parse(JSON.stringify(world.calls)),
+        [{name: 'webAppRecoverStuckFile', args: ['C001', 'card', 'sf_target']}]);
+      world.pending.shift().reply({ok: true, fileName: '<img src=x>.csv', recovered, waitMinutes});
+      await pending;
+      const expected = '「<img src=x>.csv」を取込待ちに戻しました。［記帳を実行］で取り込みます。' +
+        (recovered ? '途中まで転記していた 2 件を仕上げました。' : '') +
+        (waitMinutes ? 'Drive で最近更新されたため、取り込めるのはあと 7 分たってからです。' : '');
+      assert.equal(world.ids.notice.textContent, expected); assert.equal(notice, expected);
+      assert.equal(world.ids.notice.className, 'notice visible success');
+      assert.equal(world.ui.state.formatBusy, false);
+      assert.deepEqual(world.calls.map((call) => call.name), ['webAppRecoverStuckFile', 'webAppListFolder']);
+      assert.deepEqual(Array.from(world.calls[1].args), ['C001', 'card']);
+      assert.equal(world.root.querySelectorAll('img').length, 0);
+    }
+  });
+
+  browserAsyncTest('sf 17: changed running coded unknown and exception responses refresh once and release busy', async () => {
+    const cases = [
+      [{ok: false, code: 'STATE_CHANGED', fileName: '現在.csv', stateLabel: '完了 (COMPLETED)'},
+        'warning', '「現在.csv」は状態が変わっています（現在: 完了 (COMPLETED)）。一覧を読み直しました。'],
+      [{ok: false, code: 'STILL_RUNNING', fileName: '現在.csv', waitMinutes: 7},
+        'warning', '「現在.csv」はまだ取込中の可能性があります。あと 7 分たってから、一覧を読み直してもう一度お試しください。'],
+      [{ok: false, code: 'DESTINATION_MISMATCH', label: '<img src=x>', fileName: '現在.csv'},
+        'error', '「現在.csv」を戻せませんでした（<img src=x>）。管理者へ連絡してください。'],
+      [{ok: false, code: 'UNKNOWN', label: null, fileName: '現在.csv'},
+        'error', '「現在.csv」を戻せませんでした（UNKNOWN）。管理者へ連絡してください。'],
+      [new Error('<img src=x> サーバーで停止'), 'error', '<img src=x> サーバーで停止'],
+      ...[null, {}, {ok: 'true'}].map((reply) => [reply, 'error', '処理に失敗しました。管理者へ連絡してください。'])
+    ];
+    for (const [reply, kind, text] of cases) {
+      const world = sfBrowserWorld({webAppRecoverStuckFile: {defer: true}});
+      assert.equal(sfButtons(world).length, 1);
+      const pending = sfButtons(world)[0].fire('click')[0];
+      world.ids['confirm-submit'].fire('click'); await sfFlush();
+      assert.equal(world.ui.state.formatBusy, true);
+      const request = world.pending.shift();
+      if (reply instanceof Error) request.reject(reply); else request.reply(reply);
+      await pending;
+      assert.equal(world.ui.state.formatBusy, false);
+      assert.equal(world.ids.notice.textContent, text); assert.equal(world.ids.notice.className, 'notice visible ' + kind);
+      assert.deepEqual(world.calls.map((call) => call.name), ['webAppRecoverStuckFile', 'webAppListFolder']);
+      assert.equal(world.root.querySelectorAll('img').length, 0);
+    }
+  });
+
+  test('sf 18: recovery paths render hostile strings as text and contain no HTML-writing sinks', () => {
+    const world = sfBrowserWorld(), hostile = '<img src=x onerror=alert(1)>';
+    assert.equal(typeof world.ui.recoverStuckFile, 'function');
+    assert.equal(typeof world.ui.failedFileReasonLines, 'function');
+    const reason = {source: 'ERROR', code: hostile, label: hostile};
+    world.ui.state.files[0].fileName = hostile; world.ui.state.files[0].failReason = reason;
+    world.ui.renderFiles();
+    assert.equal(world.ids['file-list'].querySelector('.fix-reason').textContent,
+      '理由：' + hostile + '（' + hostile + '）');
+    assert.deepEqual(Array.from(world.ui.failedFileReasonLines(reason)), ['理由：' + hostile + '（' + hostile + '）']);
+    assert.equal(world.root.querySelectorAll('img').length, 0);
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', '81_WebAppUi.html'), 'utf8');
+    for (const name of ['renderFiles', 'recoverStuckFile', 'failedFileReasonLines']) {
+      const start = source.indexOf('function ' + name + '(');
+      assert.ok(start >= 0, name);
+      const end = source.indexOf('\n    }', start), body = source.slice(start, end);
+      for (const sink of ['inner' + 'HTML', 'outer' + 'HTML', 'insertAdjacent' + 'HTML', 'document.write'])
+        assert.equal(body.includes(sink), false, name + ': ' + sink);
+    }
+  });
+
   function recheckButtons(world) {
     return world.ids['file-list'].querySelectorAll('button')
       .filter((node) => node.textContent === '修正済み → 取込待ちに戻す');

@@ -1,0 +1,65 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の Web アプリに、**止まった・失敗したファイルを画面から取込待ちへ戻すボタン（K-W12）**を付ける作業を受け取ります。運用関数 `opsRetryFailedFiles` の二重転記の穴を塞ぐ直しも含みます。
+
+作業ツリーは main の最新（コミット 433a98e）で、`src/`・`test/` に未コミットの変更はありません。あなたの変更は、ステージされていない差分として残してください ── **`git add` しないこと。**開始時の `node test/run-tests.js` の本数は、始める前に自分で数えて報告に書いてください（1634/1634 のはずです）。
+
+開始時の src・test の写しを `work/.kw12-check/baseline/` に置いてあります（私が開始時の md5 と照らしてあります）。サンドボックスで親フォルダの `.git` が読めず `git diff` が使えない場合は、この写しとの比較で「変えたファイルの一覧」を報告してください（`git diff --stat` の代わり）。写しは消さなくてよい ── 私が後で消します。
+
+## 仕様書
+
+`work/spec_stuck_file_recovery.md`（1.0）。**全部読んでから始めてください。**
+
+## 作ること（要点。詳細は仕様書）
+
+1. `97_Ops.gs`：
+   - 非公開の部品 `recoverStuckFile_(row, actor, options)`（§3.1）。今の `opsRecoverStuckFiles` の 1 ファイルぶんを移し、**リースを先に取ってから状態を確かめ直す**形にする。リースの目的は状態で分ける。戻しは `options.audit` で監査つき／なしを選ぶ（§3.2）。
+   - `opsRecoverStuckFiles` はこの部品を使う（対象の選び方・止まったリースの強制解放・戻り値の形は今のまま。§3.3）。
+   - `opsRetryFailedFiles` もこの部品を使う（戻り値の形は今のまま。§3.4）。
+2. `80_WebApp.gs`：
+   - `webAppListFolder` に `recoverable`・`stuck`・`failReason`（と読めないときの `leaseUnavailable`）を足す。処理ログの読取は要修正の理由と 1 回にまとめる（§4.1）。純関数 `webAppFailedFileReason_(errorsCell)`。
+   - 公開関数 `webAppRecoverStuckFile(customerId, folderId, fileId)`（§4.2）。
+3. `81_WebAppUi.html`：`gasCall` の枝、`renderFiles` の理由とボタン、`failedFileReasonLines`、`recoverStuckFile`、`TEXT.stuckFile` の文（§4.3・§5）。
+
+---
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。**
+2. **git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。
+3. **`src/` で変えてよいのは `80_WebApp.gs`・`81_WebAppUi.html`・`97_Ops.gs` だけ。**`43_SheetWriter.gs`（`recoverPartialFailure`・`recoveryTargetsFor_`）・`11_FileStateManager.gs`（リース）・`70`・`71`・`96` は変えないこと（今の部品をそのまま使うのがこの仕事の芯です）。97 で変えるのは仕様書 §3 の範囲だけ（`stuckFileWriteCustomer_`・`rewindFileForReimport_`・`rewindFileForReimportAudited_` は変えない）。
+4. **改行の形を変えないこと**（3 つとも今は LF、CR は 0）。**`97_Ops.gs` は文字列の中に生の NUL バイトが 2 つあり、git はバイナリとして扱う**（`grep -a` で読む）。ファイル全体を書き直す道具で CRLF にしたり NUL を落としたりしないこと。終わったら 97 の NUL が 2 バイト・CR が 0 であることを確かめて報告すること。
+5. テストの変更は `sf N: …`（仕様書 §7 の 1〜18）を足すこと。サーバーは `test/phase8-webapp.test.js` の最後のテストの後へ、画面は `test/phase9-format-registration.test.js` の world（DOM と `gasCall` の記録がある）で（どこに置いたか報告）。補助はそのテストファイルの中に置いてよい。**既存のテストの期待（assert）は、仕様書 §4.3 の `multi 6` の 1 か所（`clientStoppedByMessage('FILE_FAILED')` の文）以外、1 つも変えないこと。**既存のテストが赤になったら、変えずに止めて理由を報告すること ── 特に `webapp 45h`〜`45k` と `opsRecoverStuckFiles` を呼ぶほかのテスト（phase8・phase6-partner-decisions・phase7-notifications）、`opsRetryFailedFiles rewinds only FAILED files to DISCOVERED`（phase6-setup-helpers）、K-W21 のリースのテスト、K-W22 の要修正の理由、K-W23 の `rc N`、K-W2 の `kw2 N`、読取回数のテスト（`budget`・`multi`・`rc 8`・`kw2 19` など）。phase9 の world の「呼べる関数の一覧」や「画面の関数の取り出し」を広げる必要があれば、既存の行の置き換えで広げてよい（期待は変えない。何を変えたか報告）。`test/fixtures/`・`test/gas-stubs.js`・`test/gas-harness.js` は変えない。
+6. **テストを先に赤にしてから直すこと。**sf 1〜18 を書き、いまの実装で赤になることを確かめてから作る。いまでも緑になるものはどれかを報告する。**特に sf 2 の「今の `opsRetryFailedFiles` → 取込で同じ取引が 2 行になる」と sf 13 の「今の `opsRecoverStuckFiles` がリースの残るファイルを戻してしまう」は、作る前に赤（＝穴が本物）であることを確かめて、何行になったか・何が起きたかを報告に書くこと。**穴が再現できなければ、作らずに止めて報告すること（仕様書の前提が違うことになるため）。
+7. 読取の上限（sf 11）は、**測った値そのもの**を上限にすること（余裕を足さない）。測った値と、sf 11 (a) が今の実装と同じ値であることを報告すること。既存の読取回数のテストの上限は変えないこと。
+8. 画面へ文字を入れるときは今と同じく `textContent` だけを使うこと（`innerHTML` 等を使わない）。
+9. **日本語は UTF-8 で書くこと。**以前、あなたの書いた日本語が `?` の羅列に化けた。終わったら `grep -n '???' src/*.gs src/*.html test/*.js` が空であること（始める前も空）を確かめて報告すること。U+FFFD も、既存の `phase1a`（わざと入れた文字）以外に 0 であること。コメントを足すなら、周りと同じ密度・語り口（「なぜ」を書く）で。
+10. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断をしたら全部報告すること。迷ったら止めて報告すること。特に、今の部品（`recoverPartialFailure`・`stuckFileWriteCustomer_`・`acquireLease`・`forceReleaseLease`・`rewindFileForReimportAudited_`）の振る舞いが仕様書の前提と違ったら、黙って補わずに止めて報告すること。
+
+## 進め方
+
+1. 仕様書を読む。次を読む：
+   - `src/97_Ops.gs`（`grep -a` で探す）：`opsRecoverStuckFiles`・`stuckFileWriteCustomer_`・`opsRetryFailedFiles`・`rewindFileForReimport_`・`rewindFileForReimportAudited_`・`opsInspectStuckFiles`・`opsExplainStuckFileTransactions`
+   - `src/43_SheetWriter.gs`：`recoveryTargetsFor_`・`recoverPartialFailure`、`src/70_ImportFlow.gs` の書込（段階 1〜3 の扱い、`getTransactionsByStatus(fileId, [PREPARED, WRITING])` からの予約）、`src/71_RunOrchestrator.gs` のファイルの `catch`（`FAILED` への遷移）
+   - `src/11_FileStateManager.gs`：`leaseForceReleaseMinSeconds_`・`activeLeases_`・`acquireLease`・`releaseLeaseById`・`assertLeaseHeldForWrite`・`forceReleaseLease`・`leaseStallCheck_`・`detectStalledLeases`・`getFileState`
+   - `src/80_WebApp.gs`：`webAppListFolder`・`webAppFolderFile_`・`webAppStableWaitMinutes_`・`webAppCustomerFixReason_`・`webAppRecheckCustomerFixFile`・`webAppFormatContext_`・`webAppInvoke_`・`webAppAuthorizeCustomer_`・`webAppDirectChildFolder_`
+   - `src/96_Menu.gs`：`menuAssertNoLease_`・`menuFileStateLabel_`・`classifyMenuError_`、`src/06_ErrorCatalog.gs` の `ERROR_CATALOG`、`src/60_ProcessLog.gs` の `recordError`、`src/03_Authorization.gs` の `authorize`
+   - `src/81_WebAppUi.html`：`TEXT`・`gasCall`・`customerFixReasonLines`・`renderFiles`・`recheckCustomerFix`・`formatConfirm`・`formatSetBusy`・`isMutationBusy`・`showNotice`・`loadFiles`・`stoppedByMessage`
+   - `test/phase8-webapp.test.js` の世界の作り方（`setupWorld`・`putCsv`・`webImport`・`seedPartnerViaWeb`・`forceFileState`・`clearDestinationRow`・`blankReviewRows`・`setReviewDestination`・`txIdRowsIn`・`call`・`clientEval`・`clientStoppedByMessage`）と `webapp 45h`〜`45k`・`multi 6`・`rc 1`〜`rc 8`、`test/phase6-setup-helpers.test.js` の `opsRetryFailedFiles` のテスト、`test/phase9-format-registration.test.js` の world、障害注入の仕組み（`FAULT_INJECTED`・`webImport` の `failAt` など。sf 2 で書込の途中に例外を起こす手段を探す）
+2. sf 1〜18 を書く → 赤を確かめる（sf 2・sf 13 の穴の再現、sf 11 (a) の今の読取を測る）
+3. 作る
+4. `node test/run-tests.js` を全部緑にする
+5. 仕様書 §8 の R1〜R24 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら差分が変異を入れる前と同じか確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する
+6. 変えたファイルの一覧（`git diff --stat -- src/ test/`、使えなければ写しとの比較）を確かめる
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 直す前に sf 1〜18 のどれが赤だったか（緑だったものも）。sf 2・sf 13 の穴の再現の中身（何行になったか・何が起きたか）と、sf 2 で書込の途中の例外を起こした手段
+- sf 11 の (a)〜(d) と `webAppRecoverStuckFile` の読取の回数（(a) は今の実装の値も）
+- R1〜R24 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て（足したテストがあればその名前）
+- 仕様書が間違っていた・足りなかった箇所（黙って直さないこと）、自分で決めた箇所（全部）
+- 変えたテストの土台（phase9 の world の一覧など）と `multi 6` の 1 か所の差分
+- 改行の形（80・81・97 の前と後）、97 の NUL バイトの数（前と後）
+- `???` の grep と U+FFFD の結果（前と後）
+- 変えたファイルの一覧（始める前と後）
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。

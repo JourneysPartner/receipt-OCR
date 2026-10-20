@@ -420,7 +420,7 @@
       exportBlocked: '書き出し画面が開けませんでした。複数の Google アカウントにログインしている場合は、このシステムのアカウントだけでログインし直してからもう一度お試しください。',
       notAssignee: 'この顧客はあなたが担当者として登録されていません（顧客マスター Q列・R列）。',
       noCustomerStaff: 'この顧客の担当者が登録されていないため、記帳を実行できません（顧客マスター Q列・R列）。管理者へ連絡してください。',
-      stuckFile: 'このファイルは処理中のまま止まっています。管理者へ連絡してください。',
+      stuckFile: '取り込めなかったファイルがあります。ファイル一覧の［取込待ちに戻す］で戻してから、もう一度［記帳を実行］を押してください。同じ理由でまた止まるときは管理者へ連絡してください。',
       invalidSettings: 'システムの設定に不備があるため実行できません。管理者へ連絡してください。',
       logCapacity: 'ログの容量が上限に達しているため実行できません。管理者へ連絡してください。',
       integrityStop: 'この顧客の帳簿に不整合が見つかったため実行できません。管理者へ連絡してください。',
@@ -598,6 +598,7 @@
         else if (name === 'webAppRequeueFormatFiles') runner.webAppRequeueFormatFiles(args[0], args[1], args[2]);
         else if (name === 'webAppReturnFileToCustomer') runner.webAppReturnFileToCustomer(args[0], args[1], args[2], args[3], args[4]);
         else if (name === 'webAppRecheckCustomerFixFile') runner.webAppRecheckCustomerFixFile(args[0], args[1], args[2]);
+        else if (name === 'webAppRecoverStuckFile') runner.webAppRecoverStuckFile(args[0], args[1], args[2]);
         else if (name === 'webAppWithdrawFormat') runner.webAppWithdrawFormat(args[0], args[1]);
         else reject(new Error('Unknown server function'));
       });
@@ -648,6 +649,15 @@
       if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '0:00';
       var seconds = Math.floor(ms / 1000);
       return Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+    }
+
+    function failedFileReasonLines(failReason) {
+      if (failReason && failReason.source === 'ERROR') {
+        return ['理由：' + (failReason.label ?
+          failReason.label + '（' + failReason.code + '）' : failReason.code)];
+      }
+      if (failReason && failReason.source === 'UNAVAILABLE') return ['理由を読み込めませんでした'];
+      return ['理由の記録はありません'];
     }
 
     function customerFixReasonLines(fixReason) {
@@ -981,6 +991,25 @@
             }
             row.appendChild(td);
           });
+        if (file.recoverable === true && !file.formatReviewId) {
+          var recoveryCell = row.lastChild;
+          var lines = file.state === 'FAILED' ? failedFileReasonLines(file.failReason) :
+            [file.stuckAfterMinutes + ' 分以上動きがありません。実行の時間の上限（6 分）で止まった可能性があります。'];
+          lines.forEach(function(line) {
+            var reason = document.createElement('div');
+            reason.className = 'fix-reason';
+            reason.textContent = line;
+            recoveryCell.appendChild(reason);
+          });
+          var recoveryButton = document.createElement('button');
+          recoveryButton.type = 'button';
+          recoveryButton.className = 'button';
+          recoveryButton.textContent = '取込待ちに戻す';
+          recoveryButton.disabled = isMutationBusy();
+          recoveryButton.addEventListener('click', function() { return recoverStuckFile(file); });
+          recoveryCell.appendChild(document.createElement('br'));
+          recoveryCell.appendChild(recoveryButton);
+        }
         if (file.state === 'CUSTOMER_FIX_REQUIRED' && !file.formatReviewId) {
           var recheckButton = document.createElement('button');
           recheckButton.type = 'button';
@@ -3618,6 +3647,36 @@
         await refreshFormatLists();
       }
       finally { formatSetBusy(false); }
+    }
+
+    async function recoverStuckFile(file) {
+      if (isMutationBusy()) return;
+      if (!await formatConfirm('取込待ちに戻す', '「' + file.fileName +
+          '」を取込待ちに戻します。途中まで転記した行があれば、先に仕上げてから戻します（同じ取引を二重に書きません）。' +
+          '取り込み直すのは［記帳を実行］を押したときです。同じ理由でまた止まるときは管理者へ連絡してください。')) return;
+      formatSetBusy(true);
+      try {
+        var result = await gasCall('webAppRecoverStuckFile',
+          [state.selectedCustomerId, state.selectedFolderId, file.fileId]);
+        if (result && result.ok === true) {
+          var message = '「' + result.fileName + '」を取込待ちに戻しました。［記帳を実行］で取り込みます。';
+          if (result.recovered > 0) message += '途中まで転記していた ' + result.recovered + ' 件を仕上げました。';
+          if (result.waitMinutes > 0) message += 'Drive で最近更新されたため、取り込めるのはあと ' +
+            result.waitMinutes + ' 分たってからです。';
+          showNotice(message, 'success');
+        } else if (result && result.code === 'STATE_CHANGED') {
+          showNotice('「' + result.fileName + '」は状態が変わっています（現在: ' +
+            result.stateLabel + '）。一覧を読み直しました。', 'warning');
+        } else if (result && result.code === 'STILL_RUNNING') {
+          showNotice('「' + result.fileName + '」はまだ取込中の可能性があります。あと ' +
+            result.waitMinutes + ' 分たってから、一覧を読み直してもう一度お試しください。', 'warning');
+        } else if (result && result.code) {
+          showNotice('「' + result.fileName + '」を戻せませんでした（' +
+            (result.label || result.code) + '）。管理者へ連絡してください。', 'error');
+        } else showNotice(TEXT.unknownFailure, 'error');
+      } catch (error) { showNotice(failureMessage(error), 'error'); }
+      finally { formatSetBusy(false); }
+      await loadFiles(state.selectedCustomerId, state.selectedFolderId, state.viewGeneration);
     }
 
     async function recheckCustomerFix(file) {
