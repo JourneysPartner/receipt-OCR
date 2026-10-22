@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(**/.env)",
+      "Read(**/.env.local)",
+      "Read(**/.env.production)",
+      "Read(**/.env.development)",
+      "Read(**/.env.*.local)",
+      "Read(**/client_secret*.json)",
+      "Read(**/credentials/**)",
+      "Read(**/service-account*.json)",
+      "Read(**/*-credentials.json)",
+      "Read(**/*-key.json)",
+      "Read(**/.clasprc.json)",
+      "Read(**/*.pem)",
+      "Read(**/*.p12)",
+      "Read(**/*.pfx)",
+      "Read(~/.clasprc.json)"
+    ]
+  }
+}

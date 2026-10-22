@@ -15,6 +15,13 @@ credentials/
 service-account.json
 *-credentials.json
 *-key.json
+client_secret*.json
+.env.*
+!.env.example
+.clasprc.json
+*.pem
+*.p12
+*.pfx
 
 # IDE
 .vscode/
@@ -28,3 +35,4 @@ Thumbs.db
 .coverage
 htmlcov/
 .pytest_cache/
+.hypothesis/

@@ -1,0 +1,13 @@
+title = "receipt-ocr gitleaks config"
+
+[extend]
+useDefault = true
+
+# gitleaks の既定ルールに対する、確認済みの誤検知だけを許可する（広い許可は書かない）。
+[[allowlists]]
+description = "src/drive/client.py: 変数名 credentials_path を渡すコード行（秘密値ではない。2026-10-22 確認）"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)src/drive/client\.py$''']
+regexTarget = "line"
+regexes = ['''credentials_path, scopes=self\.SCOPES''']

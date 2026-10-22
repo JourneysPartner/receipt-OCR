@@ -1,0 +1,15 @@
+#!/bin/sh
+# ステージ済みの変更に秘密情報が含まれていたらコミットを止める（gitleaks）。
+# 有効化: git config core.hooksPath .githooks
+# gitleaks が無い場合も止める（fail-closed）。導入: winget install --id Gitleaks.Gitleaks
+GL="$(command -v gitleaks 2>/dev/null)"
+if [ -z "$GL" ] && [ -n "$LOCALAPPDATA" ]; then
+  for p in "$LOCALAPPDATA"/Microsoft/WinGet/Packages/Gitleaks.Gitleaks_*/gitleaks.exe; do
+    if [ -x "$p" ]; then GL="$p"; break; fi
+  done
+fi
+if [ -z "$GL" ]; then
+  echo "pre-commit: gitleaks が見つかりません。導入するか、利用者に確認してから回避してください。" >&2
+  exit 1
+fi
+exec "$GL" git --pre-commit --staged --redact=100 --no-banner

@@ -1,0 +1,2 @@
+# フックは sh で実行するため、チェックアウト時に CRLF へ変換させない。
+.githooks/* text eol=lf
