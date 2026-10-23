@@ -10,10 +10,11 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   if [ "$remote_sha" != "$zero" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
     range="$remote_sha..$local_sha"
   else
-    # 新しい ref、または相手の先端が手元に無いとき: どのリモートにも無いコミットを全部見る。
-    range="$local_sha --not --remotes"
+    # 新しい ref、または相手の先端が手元に無いとき: 送る先端から辿れる全履歴を見る。
+    # （作り直したリモートでは手元の追跡情報が古く、--not --remotes では検査が空になりうる）
+    range="$local_sha"
   fi
-  # range は複数の引数に分けて渡すため、引用符で囲まない。
+  # range は引用符で囲まずに渡す（範囲指定をそのまま git に渡すため）。
   git log --name-only -z --diff-filter=ACMR --format= $range </dev/null | tr '\0' '\n' |
     confidential_path_check "$local_ref" || status=1
   "$GL" git --log-opts="$range" --redact=100 --no-banner </dev/null || status=1

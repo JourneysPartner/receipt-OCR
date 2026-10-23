@@ -36,3 +36,6 @@ Thumbs.db
 htmlcov/
 .pytest_cache/
 .hypothesis/
+
+# Claude Code の個人設定（この PC で許可するコマンドなど）。GitHub には置かない。
+.claude/settings.local.json
