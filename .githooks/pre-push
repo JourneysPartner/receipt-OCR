@@ -1,0 +1,23 @@
+#!/bin/sh
+# push する範囲のコミットを、コミット時と同じ検査にかける。--no-verify で作った
+# コミットや、フックの無い環境で作ったコミットも、公開される前にここで止める。
+. "$(dirname "$0")/confidential-check.sh"
+confidential_find_gitleaks || exit 1
+zero=0000000000000000000000000000000000000000
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue  # ref の削除は送る中身が無い
+  if [ "$remote_sha" != "$zero" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+    range="$remote_sha..$local_sha"
+  else
+    # 新しい ref、または相手の先端が手元に無いとき: どのリモートにも無いコミットを全部見る。
+    range="$local_sha --not --remotes"
+  fi
+  # range は複数の引数に分けて渡すため、引用符で囲まない。
+  git log --name-only -z --diff-filter=ACMR --format= $range </dev/null | tr '\0' '\n' |
+    confidential_path_check "$local_ref" || status=1
+  "$GL" git --log-opts="$range" --redact=100 --no-banner </dev/null || status=1
+  git log -p --text -U0 --no-color --format= $range </dev/null |
+    confidential_denylist_check "$local_ref" || status=1
+done
+exit $status

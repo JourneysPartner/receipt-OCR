@@ -11,3 +11,41 @@ targetRules = ["generic-api-key"]
 paths = ['''(^|/)src/drive/client\.py$''']
 regexTarget = "line"
 regexes = ['''credentials_path, scopes=self\.SCOPES''']
+
+# ── このプロジェクト専用の規則（2026-10-23 追加）────────────────────────────
+# このリポジトリは公開する。実明細・実物の ID・個人の連絡先が入るのを止める。
+# 顧客名などは一覧そのものが機密なので、ここではなく
+# .git/info/confidential-denylist.txt（.githooks/confidential-check.sh）で止める。
+
+[[rules]]
+id = "real-statement-files"
+description = "実明細そのもの・実明細から生成した固定データ・Codex の全記録（手元専用）"
+path = '''(^|/)(samples|テスト用クレカ明細|test/fixtures)/|\.(xlsx|xlsm|xls|csv|pdf)$|(^|/)tools/codex-logs/err-'''
+
+[[rules]]
+id = "google-drive-id"
+description = "Google ドライブのファイル・フォルダ、スプレッドシート、Apps Script（スクリプト・デプロイ）の実物の ID"
+regex = '''(?:^|[^A-Za-z0-9_-])(1[A-Za-z0-9_-]{32}|1[A-Za-z0-9_-]{43}|1[A-Za-z0-9_-]{54,60}|0B[A-Za-z0-9_-]{26}|AKfy[A-Za-z0-9_-]{50,})(?:[^A-Za-z0-9_-]|$)'''
+secretGroup = 1
+entropy = 3.5
+
+[[rules]]
+id = "personal-email"
+description = "個人のメールアドレス（フリーメール・携帯）"
+regex = '''(?i)[a-z0-9._%+-]+@(?:gmail\.com|googlemail\.com|yahoo\.co\.jp|ymail\.ne\.jp|icloud\.com|me\.com|mac\.com|outlook\.com|outlook\.jp|hotmail\.com|hotmail\.co\.jp|live\.com|live\.jp|docomo\.ne\.jp|ezweb\.ne\.jp|au\.com|softbank\.ne\.jp|i\.softbank\.jp|nifty\.com|biglobe\.ne\.jp|ocn\.ne\.jp|so-net\.ne\.jp)\b'''
+
+[[rules]]
+id = "card-last4"
+description = "伏字のカード番号の下4桁（0000 は架空として通す）"
+regex = '''[*＊xX●]{4}[- ]?[*＊xX●]{4}[- ]?[*＊xX●]{4}[- ]?([0-9]{4})'''
+secretGroup = 1
+[[rules.allowlists]]
+regexes = ['''^0000$''']
+
+[[rules]]
+id = "jp-phone-number"
+description = "日本の電話番号（テストの架空の番号は下で通す）"
+regex = '''(?:^|[^0-9-])(0[0-9]{1,4}-[0-9]{1,4}-[0-9]{4}|0[789]0[0-9]{8})(?:[^0-9-]|$)'''
+secretGroup = 1
+[[rules.allowlists]]
+regexes = ['''^0+-0+-0+$''', '''1234-?5678$''']

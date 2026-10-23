@@ -1,7 +1,13 @@
 
 # 顧客から預かった実明細そのもの。リポジトリには入れない。
-# 先頭の / が必須 ── これが無いと test/fixtures/samples/ まで巻き込む。
+# 先頭の / は直下の samples/ だけを指す（固定データは下で別に外す）。
 /samples/
+
+# 実明細から生成した固定データ。伏字は名前と長い番号だけで、取引（日付・店名・
+# 金額・カード下4桁）は実物のまま。手元のテスト専用で、リポジトリには入れない
+# （2026-10-23、公開リポジトリへの混入が分かって外した）。
+# 再生成: node tools/gen-sample-fixtures.js samples test/fixtures/samples
+/test/fixtures/
 
 # Web アプリの動作確認に使う実明細（2026-09-16 に置いた 86 ファイル）。
 # Drive の「テスト2」フォルダの写しであって、リポジトリに入れる理由が無い。
@@ -18,3 +24,8 @@ tools/codex-logs/out-*.txt
 
 # Claude Code の個人設定（clasp push の許可など。コミットしない）。
 .claude/settings.local.json
+
+# clasp の接続先（本番のスクリプト ID と Google Cloud のプロジェクト番号）。実物の
+# ID は公開リポジトリに入れない。clasp はこの PC の手元のファイルを読むので動作は変わらない
+# （2026-10-23 に管理から外した）。別の PC では clasp clone で作り直す。
+.clasp.json

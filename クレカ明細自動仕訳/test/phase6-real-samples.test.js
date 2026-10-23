@@ -12,6 +12,10 @@ const path = require('node:path');
  * 手書きの標本ではこの3点を取り違え、ハーネスが緑のまま実機が
  * `UNKNOWN_CARD_FORMAT`を返す事故を起こした（2026-09-03）。以後、判定の
  * 検証はこの固定データを正とする。
+ *
+ * 固定データは顧客の実明細から作るため、リポジトリには入れない（手元専用。
+ * 2026-10-23 に公開リポジトリへの混入が分かって管理から外した）。期待値に
+ * 実明細の店名や金額を書き写さず、必要なら固定データ自身から取る。
  */
 module.exports = ({test, assert, gas}) => {
   const plain = (v) => JSON.parse(JSON.stringify(v));
@@ -213,14 +217,19 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(parsed.stop.reason, 'SECTION_BREAK');
     assert.ok(parsed.txs.every((tx) => String(tx.merchantOriginal).trim() !== ''),
       '店名が空欄の取引を作らない（区分1で差し戻される）');
-    assert.equal(parsed.txs[0].merchantOriginal, 'ｄ払いＢ／カワチ薬品テスト店');
-    assert.equal(parsed.txs[0].amountBillingJpy, 0);
+    // 先頭の取引は3行目そのもの。店名と金額の期待値は固定データ自身から取る。
+    const firstRow = fixture.sheets[0].rows[2];
+    assert.equal(parsed.txs[0].merchantOriginal, String(firstRow[4]).trim(), 'E列の店名');
+    assert.equal(parsed.txs[0].amountBillingJpy, firstRow[5], 'F列の金額');
     assert.equal(parsed.txs[0].purpose, '仕入れ');
     assert.equal(parsed.txs[0].dateHashKey, '2025-08-16');
     // 返品行は負の金額のまま残す。
     const refund = parsed.txs.filter((tx) => tx.amountBillingJpy < 0);
     assert.equal(refund.length, 1);
-    assert.equal(refund[0].amountBillingJpy, 0);
+    const rawRefunds = fixture.sheets[0].rows.slice(2, 30)
+      .filter((row) => typeof row[5] === 'number' && row[5] < 0);
+    assert.equal(rawRefunds.length, 1, '3〜30行目の負の金額は1件');
+    assert.equal(refund[0].amountBillingJpy, rawRefunds[0][5]);
     assert.equal(refund[0].purpose, '返品');
   });
 
