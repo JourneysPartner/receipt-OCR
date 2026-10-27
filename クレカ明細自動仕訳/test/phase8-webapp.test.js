@@ -8148,4 +8148,143 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(listed.otherReviews.length, 1);
     assert.equal(reads, 7);
   });
+
+  function dlList(customer) {
+    return call('webAppListDestinations', [customer.customerId, customer.cardId]);
+  }
+  function dlFile(customer, fileId) {
+    return putCsv(customer, {fileId, name: '架空明細202601_' + fileId + '.csv',
+      rows: ['2025/12/10,架空店アルファ,1000,仕入れ']});
+  }
+  function dlDestination(customer, id, stamp = '20260102-0930') {
+    gas.stubs.createFile(id, {name: customer.customerName + '_' + stamp});
+    customer.destinationParent.fileIds.push(id);
+    return id;
+  }
+  function dlRecord(customer, fileId, destinationId, status = 'COMMITTED', active = true) {
+    const sheet = gas.stubs.getSpreadsheet('master').getSheetByName('クレカ取引ログ');
+    const row = blank(47);
+    Object.assign(row, {0: 'dl_tx_' + sheet.getLastRow(), 3: customer.customerId,
+      4: fileId, 9: status, 28: destinationId, 29: '入力用シート', 41: active ? 'TRUE' : 'FALSE'});
+    sheet.appendRow(row);
+  }
+  test('dl 1: two imports list clones newest first with counts and unique files', () => {
+    const {customer} = setupWorld({customer: {customerName: '架空顧客アルファ'}});
+    seedDictionaryRow(customer.customerId, {dictId: 'dl_dictionary', original: '架空店アルファ',
+      partnerName: '架空取引先アルファ'});
+    const alpha = putCsv(customer, {fileId: 'dl_alpha', name: '架空明細202601_a.csv', rows: [
+      '2025/12/10,架空店アルファ,1000,仕入れ', '2025/12/11,架空店ベータ,2000,仕入れ',
+      '2025/12/12,架空店アルファ,3000,仕入れ']});
+    const extra = dlFile(customer, 'dl_extra'); const first = webImport(customer);
+    const beta = putCsv(customer, {fileId: 'dl_beta', name: '架空明細202601_b.csv',
+      rows: ['2025/12/13,架空店アルファ,4000,仕入れ']}); const second = webImport(customer);
+    assert.notEqual(first.destinationSpreadsheetId, second.destinationSpreadsheetId);
+    gas.context.DriveApp.getFileById(first.destinationSpreadsheetId).setName(customer.customerName + '_20260101-0915');
+    gas.context.DriveApp.getFileById(second.destinationSpreadsheetId).setName(customer.customerName + '_20260102-1030');
+    createWebDestination(customer);
+    assert.deepEqual(dlList(customer), {destinations: [
+      {destinationSpreadsheetId: second.destinationSpreadsheetId, name: customer.customerName + '_20260102-1030',
+        createdLabel: '2026/01/02 10:30', transactionCount: 1, reviewCount: 0, fileIds: [beta]},
+      {destinationSpreadsheetId: first.destinationSpreadsheetId, name: customer.customerName + '_20260101-0915',
+        createdLabel: '2026/01/01 09:15', transactionCount: 4, reviewCount: 1, fileIds: [alpha, extra]}
+    ], legacyTransactionCount: 0, unavailableCount: 0});
+    gas.context.DriveApp.getFileById(first.destinationSpreadsheetId).setName(customer.customerName + '_20260102-1030');
+    assert.deepEqual(dlList(customer).destinations.map((item) => item.destinationSpreadsheetId),
+      [first.destinationSpreadsheetId, second.destinationSpreadsheetId].sort());
+  });
+  test('dl 2: other cards are absent and shared sheets count only this card', () => {
+    const {customer} = setupWorld(); const own = dlFile(customer, 'dl_own');
+    const otherFolder = gas.stubs.createFolder('dl_other_card', {name: '架空カードベータ', fileIds: []});
+    customer.rootFolder.subFolderIds.push('dl_other_card');
+    const other = Object.assign({}, customer, {cardId: 'dl_other_card', cardFolder: otherFolder});
+    const foreign = dlFile(other, 'dl_foreign');
+    const shared = dlDestination(customer, 'dl_shared'), foreignOnly = dlDestination(customer, 'dl_foreign_only');
+    dlRecord(customer, own, shared); dlRecord(customer, foreign, shared, 'REVIEW_REQUIRED'); dlRecord(customer, foreign, foreignOnly);
+    const result = dlList(customer);
+    assert.equal(result.destinations.length, 1); assert.equal(result.destinations[0].destinationSpreadsheetId, shared);
+    assert.equal(result.destinations[0].transactionCount, 1); assert.equal(result.destinations[0].reviewCount, 0);
+    assert.deepEqual(result.destinations[0].fileIds, [own]);
+  });
+  test('dl 3: missing destinations and template transactions count only as legacy', () => {
+    const {customer} = setupWorld(); const fileId = dlFile(customer, 'dl_legacy');
+    for (const id of ['', '   ', customer.destinationId]) dlRecord(customer, fileId, id);
+    dlRecord(customer, fileId, '', 'CANCELED'); dlRecord(customer, fileId, '', 'COMMITTED', false);
+    assert.deepEqual(dlList(customer), {destinations: [], legacyTransactionCount: 3, unavailableCount: 0});
+  });
+  test('dl 4: invalid names parents and Drive errors hide only unavailable sheets', () => {
+    const {customer} = setupWorld(); const fileId = dlFile(customer, 'dl_validation');
+    const ids = ['dl_good', 'dl_name', 'dl_prefix', 'dl_parent', 'dl_multi_parent', 'dl_missing', 'dl_throw'];
+    ids.forEach((id) => { dlDestination(customer, id); dlRecord(customer, fileId, id); });
+    gas.stubs.getFile('dl_name').name = customer.customerName + '_20260102-0930_extra';
+    gas.stubs.getFile('dl_prefix').name = '架空別顧客_20260102-0930';
+    customer.destinationParent.fileIds = customer.destinationParent.fileIds.filter((id) => id !== 'dl_parent');
+    gas.stubs.createFolder('dl_wrong_parent', {fileIds: ['dl_parent', 'dl_multi_parent']});
+    const drive = gas.context.DriveApp;
+    const result = withMocks({DriveApp: Object.assign({}, drive, {getFileById(id) {
+      if (id === 'dl_missing' || id === 'dl_throw') throw new Error('架空のDrive読取失敗');
+      return drive.getFileById(id);
+    }})}, () => dlList(customer));
+    assert.deepEqual(result.destinations.map((item) => item.destinationSpreadsheetId), ['dl_good']); assert.equal(result.unavailableCount, 6);
+    for (const templateParentCount of [0, 2]) {
+      const missing = withMocks({DriveApp: Object.assign({}, drive, {getFileById(id) {
+        const file = drive.getFileById(id); if (id !== customer.destinationId) return file;
+        return Object.assign({}, file, {getParents() {
+          let remaining = templateParentCount;
+          return {hasNext: () => remaining > 0, next() { remaining -= 1; return {getId: () => 'dl_parent_id'}; }};
+        }});
+      }})}, () => dlList(customer));
+      assert.equal(missing.destinations.length, 0); assert.equal(missing.unavailableCount, ids.length);
+    }
+    const denied = withMocks({DriveApp: Object.assign({}, drive, {getFileById(id) {
+      if (id === customer.destinationId) throw new Error('架空の雛形読取失敗'); return drive.getFileById(id);
+    }})}, () => dlList(customer));
+    assert.equal(denied.destinations.length, 0); assert.equal(denied.unavailableCount, ids.length);
+  });
+  test('dl 5: only active eligible statuses count and unmappable rows are skipped', () => {
+    const {customer} = setupWorld(); const fileId = dlFile(customer, 'dl_statuses');
+    const live = dlDestination(customer, 'dl_live'), dead = dlDestination(customer, 'dl_dead');
+    for (const status of ['COMMITTED', 'REVIEW_REQUIRED', 'PREPARED', 'WRITING']) {
+      dlRecord(customer, fileId, live, status); dlRecord(customer, fileId, dead, status, false);
+    }
+    for (const status of ['CANCELED', 'DELETED_ACCEPTED', '架空の状態']) dlRecord(customer, fileId, dead, status);
+    const mapper = gas.context.txLogFromRecord_;
+    const bad = dlDestination(customer, 'dl_bad_record'); dlRecord(customer, fileId, bad);
+    const result = withMocks({txLogFromRecord_(record) {
+      if (record.values[28] === bad) throw new Error('架空の行の変換失敗'); return mapper(record);
+    }}, () => dlList(customer));
+    assert.equal(result.destinations.length, 1); assert.equal(result.destinations[0].destinationSpreadsheetId, live);
+    assert.equal(result.destinations[0].transactionCount, 4); assert.equal(result.destinations[0].reviewCount, 1);
+    assert.equal(result.unavailableCount, 0);
+  });
+  test('dl 6: measured batchGet ceiling is three with files one without and no destination opens', () => {
+    const {customer} = setupWorld(); const fileId = dlFile(customer, 'dl_reads');
+    const destinationId = dlDestination(customer, 'dl_reads_destination');
+    dlRecord(customer, fileId, destinationId);
+    const spreadsheetApp = gas.context.SpreadsheetApp, opened = [];
+    const destinationIds = new Set([customer.destinationId, destinationId]);
+    withMocks({SpreadsheetApp: Object.assign({}, spreadsheetApp, {openById(id) {
+        opened.push(String(id));
+        assert.equal(destinationIds.has(String(id)), false, "一覧では転記シートを開かない");
+        return spreadsheetApp.openById(id);
+      }})}, () => {
+      gas.stubs.resetApiCallCounts(); const result = dlList(customer);
+      const reads = gas.stubs.getApiCallCounts().batchGet; console.log('DL6_BATCH_GET_READS files=' + reads);
+      assert.equal(result.destinations.length, 1); assert.ok(reads <= 3, "実測の上限 3 を超えた");
+      assert.deepEqual(opened.filter((id) => destinationIds.has(id)), []);
+      customer.cardFolder.fileIds = []; gas.stubs.resetApiCallCounts();
+      assert.deepEqual(dlList(customer), {destinations: [], legacyTransactionCount: 0, unavailableCount: 0});
+      console.log('DL6_BATCH_GET_READS empty=' + gas.stubs.getApiCallCounts().batchGet);
+      assert.equal(gas.stubs.getApiCallCounts().batchGet, 1);
+      assert.deepEqual(opened.filter((id) => destinationIds.has(id)), []);
+    });
+  });
+  test('dl 7: nonchild folders and unauthorized customers throw', () => {
+    const {world, customer} = setupWorld();
+    gas.stubs.createFolder('dl_nested', {fileIds: []}); customer.cardFolder.subFolderIds.push('dl_nested');
+    const other = addCustomer(world, {suffix: 'dl', customerId: 'dl_other_customer', customerName: '架空顧客ベータ', reviewers: 'dl-other@example.com'});
+    for (const folderId of [customer.rootId, 'dl_nested', other.cardId]) {
+      assert.throws(() => gas.call('webAppListDestinations', [customer.customerId, folderId]), (error) => error.name === 'AuthorizationError');
+    }
+    assert.throws(() => gas.call('webAppListDestinations', [other.customerId, other.cardId]), (error) => error.name === 'AuthorizationError');
+  });
 };

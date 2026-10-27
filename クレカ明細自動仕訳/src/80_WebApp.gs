@@ -370,6 +370,82 @@ function webAppListFolder(customerId, folderId) {
   });
 }
 
+/** カード内の取引ログから転記先を引き、一覧では重いシート読取を行わない。 */
+function webAppListDestinations(customerId, folderId) {
+  return webAppInvoke_(function() {
+    var customer = webAppAuthorizeCustomer_(customerId, 'WEBAPP:一覧').customer;
+    var folder = webAppDirectChildFolder_(customer, folderId);
+    var fileIds = webAppIteratorToArray_(folder.getFiles()).map(function(file) {
+      return String(file.getId());
+    });
+    var result = {destinations: [], legacyTransactionCount: 0, unavailableCount: 0};
+    if (!fileIds.length) return result;
+
+    var recordsByFile = findRowsByColumnValues_(transactionLogSheet_(), 5, fileIds, TRANSACTION_LOG_WIDTH_);
+    var byDestination = Object.create(null);
+    var statuses = [TX_STATUS.COMMITTED, TX_STATUS.REVIEW_REQUIRED, TX_STATUS.PREPARED, TX_STATUS.WRITING];
+    fileIds.forEach(function(fileId) {
+      (recordsByFile[fileId] || []).forEach(function(record) {
+        var tx;
+        try { tx = txLogFromRecord_(record); } catch (error) { return; }
+        if (!tx || tx.active !== true || statuses.indexOf(tx.transactionStatus) < 0) return;
+        var destination = recordedDestinationOf_(tx, customer);
+        if (!destination || destination.spreadsheetId === String(customer.destinationSpreadsheetId)) {
+          result.legacyTransactionCount += 1;
+          return;
+        }
+        var id = destination.spreadsheetId;
+        if (!byDestination[id]) {
+          byDestination[id] = {destinationSpreadsheetId: id, transactionCount: 0, reviewCount: 0, fileIds: []};
+        }
+        var group = byDestination[id];
+        group.transactionCount += 1;
+        if (tx.transactionStatus === TX_STATUS.REVIEW_REQUIRED) group.reviewCount += 1;
+        if (group.fileIds.indexOf(fileId) < 0) group.fileIds.push(fileId);
+      });
+    });
+
+    var ids = Object.keys(byDestination);
+    if (!ids.length) return result;
+    var templateParentId = null;
+    try {
+      var parents = webAppIteratorToArray_(DriveApp.getFileById(customer.destinationSpreadsheetId).getParents());
+      if (parents.length === 1) templateParentId = String(parents[0].getId());
+    } catch (error) {
+      // 雛形の場所が分からなければ、どの転記先も確かめたことにはしない。
+    }
+    var prefix = String(customer.customerName) + '_';
+    ids.forEach(function(id) {
+      var group = byDestination[id];
+      try {
+        if (templateParentId === null) throw new Error('雛形の保存場所を確かめられません。');
+        var file = DriveApp.getFileById(id);
+        var name = String(file.getName() || '');
+        var stamp = name.slice(prefix.length);
+        if (name.indexOf(prefix) !== 0 || !/^\d{8}-\d{4}$/.test(stamp)) {
+          throw new Error('転記先の名前が規則に合いません。');
+        }
+        var destinationParents = webAppIteratorToArray_(file.getParents());
+        if (destinationParents.length !== 1 || String(destinationParents[0].getId()) !== templateParentId) {
+          throw new Error('転記先の保存場所が正しくありません。');
+        }
+        group.name = name;
+        group.createdLabel = stamp.slice(0, 4) + '/' + stamp.slice(4, 6) + '/' + stamp.slice(6, 8) +
+          ' ' + stamp.slice(9, 11) + ':' + stamp.slice(11, 13);
+        result.destinations.push(group);
+      } catch (error) {
+        result.unavailableCount += 1;
+      }
+    });
+    result.destinations.sort(function(a, b) {
+      if (a.name !== b.name) return a.name > b.name ? -1 : 1;
+      return a.destinationSpreadsheetId < b.destinationSpreadsheetId ? -1 :
+        (a.destinationSpreadsheetId > b.destinationSpreadsheetId ? 1 : 0);
+    });
+    return result;
+  });
+}
+
 /** 例外の本文には転記先の ID などが入るため、最後のコードと固定の語彙だけを返す。 */
 function webAppFailedFileReason_(errorsCell) {
   var errors;

@@ -156,7 +156,7 @@ module.exports = ({test, assert, gas}) => {
       withSuccessHandler(success) { this.success = success; return this; },
       withFailureHandler(failure) { this.failure = failure; return this; }
     };
-    for (const name of ['webAppBootstrap', 'webAppListFolder', 'webAppListReviews',
+    for (const name of ['webAppBootstrap', 'webAppListFolder', 'webAppListDestinations', 'webAppListReviews',
       'webAppFinalReview', 'webAppExplainUnknownFile', 'webAppPreviewFormat',
       'webAppSaveFormat', 'webAppRequeueFormatFiles', 'webAppReturnFileToCustomer',
       'webAppWithdrawFormat', 'webAppRunImport', 'webAppResolveReviews',
@@ -177,7 +177,7 @@ module.exports = ({test, assert, gas}) => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'src', '81_WebAppUi.html'), 'utf8');
     const script = /<script>([\s\S]*?)<\/script>/.exec(source)[1].replace(
       '    bootstrap();',
-      '    globalThis.__ui = {state, el, renderSelection, renderFiles, renderFormatPanel, previewFormat, saveFormat, returnFormatToCustomer, openFormat, chooseFolder, chooseCustomer, loadFinalReview, formatSetBusy, loadReviews, recheckCustomerFix: typeof recheckCustomerFix === "function" ? recheckCustomerFix : null, recoverStuckFile: typeof recoverStuckFile === "function" ? recoverStuckFile : null, failedFileReasonLines: typeof failedFileReasonLines === "function" ? failedFileReasonLines : null};');
+      '    globalThis.__ui = {state, el, window, startImport, loadFiles, updateActionButtons, invalidateOperations, renderDestinations: typeof renderDestinations === "function" ? renderDestinations : null, loadDestinations: typeof loadDestinations === "function" ? loadDestinations : null, chooseDestination: typeof chooseDestination === "function" ? chooseDestination : null, renderSelection, renderFiles, renderFormatPanel, previewFormat, saveFormat, returnFormatToCustomer, openFormat, chooseFolder, chooseCustomer, loadFinalReview, formatSetBusy, loadReviews, recheckCustomerFix: typeof recheckCustomerFix === "function" ? recheckCustomerFix : null, recoverStuckFile: typeof recoverStuckFile === "function" ? recoverStuckFile : null, failedFileReasonLines: typeof failedFileReasonLines === "function" ? failedFileReasonLines : null};');
     const sandbox = {document, google: {script: {run: runner}}, window: {open() { return {}; }},
       setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {}, console};
     vm.runInNewContext(script, sandbox);
@@ -284,8 +284,9 @@ module.exports = ({test, assert, gas}) => {
       assert.equal(world.ids.notice.textContent, expected); assert.equal(notice, expected);
       assert.equal(world.ids.notice.className, 'notice visible success');
       assert.equal(world.ui.state.formatBusy, false);
-      assert.deepEqual(world.calls.map((call) => call.name), ['webAppRecoverStuckFile', 'webAppListFolder']);
+      assert.deepEqual(world.calls.map((call) => call.name), ['webAppRecoverStuckFile', 'webAppListFolder', 'webAppListDestinations']);
       assert.deepEqual(Array.from(world.calls[1].args), ['C001', 'card']);
+      assert.deepEqual(Array.from(world.calls[2].args), ['C001', 'card']);
       assert.equal(world.root.querySelectorAll('img').length, 0);
     }
   });
@@ -314,7 +315,8 @@ module.exports = ({test, assert, gas}) => {
       await pending;
       assert.equal(world.ui.state.formatBusy, false);
       assert.equal(world.ids.notice.textContent, text); assert.equal(world.ids.notice.className, 'notice visible ' + kind);
-      assert.deepEqual(world.calls.map((call) => call.name), ['webAppRecoverStuckFile', 'webAppListFolder']);
+      assert.deepEqual(world.calls.map((call) => call.name), ['webAppRecoverStuckFile', 'webAppListFolder', 'webAppListDestinations']);
+      assert.deepEqual(Array.from(world.calls[2].args), ['C001', 'card']);
       assert.equal(world.root.querySelectorAll('img').length, 0);
     }
   });
@@ -416,8 +418,9 @@ module.exports = ({test, assert, gas}) => {
       assert.equal(world.ids.notice.querySelectorAll('img').length, 0);
       assert.equal(world.ui.state.formatBusy, false);
       assert.deepEqual(world.calls.map((item) => item.name),
-        ['webAppRecheckCustomerFixFile', 'webAppListFolder']);
+        ['webAppRecheckCustomerFixFile', 'webAppListFolder', 'webAppListDestinations']);
       assert.deepEqual(Array.from(world.calls[1].args), ['C001', 'card']);
+      assert.deepEqual(Array.from(world.calls[2].args), ['C001', 'card']);
     }
   });
 
@@ -443,7 +446,8 @@ module.exports = ({test, assert, gas}) => {
       assert.equal(world.ids.notice.textContent, item.text);
       assert.equal(world.ids.notice.className, 'notice visible ' + item.kind);
       assert.deepEqual(world.calls.map((call) => call.name),
-        ['webAppRecheckCustomerFixFile', 'webAppListFolder']);
+        ['webAppRecheckCustomerFixFile', 'webAppListFolder', 'webAppListDestinations']);
+      assert.deepEqual(Array.from(world.calls[2].args), ['C001', 'card']);
     }
   });
 
@@ -2854,6 +2858,171 @@ module.exports = ({test, assert, gas}) => {
       assert.equal(world.ids[id].querySelectorAll('img').length, 0);
     }
   });
+  const dlPlain = (value) => JSON.parse(JSON.stringify(value));
+  function dlItem(id = 'dl_destination') {
+    return {destinationSpreadsheetId: id, name: '架空顧客_20260102-0930', createdLabel: '2026/01/02 09:30',
+      transactionCount: 3, reviewCount: 1, fileIds: ['dl_source_alpha', 'dl_source_beta']};
+  }
+  function dlBrowser(responses = {}) {
+    const world = browserWorld(Object.assign({webAppListFolder: {kind: 'FILES', files: []},
+      webAppListReviews: {reviews: [], otherReviews: []},
+      webAppListDestinations: {destinations: [], legacyTransactionCount: 0, unavailableCount: 0}}, responses));
+    const state = world.ui.state;
+    state.customers = [{customerId: 'dl_customer', customerName: '架空顧客', canImport: true}];
+    state.selectedCustomerId = 'dl_customer';
+    state.folders = [{folderId: 'dl_card_alpha', folderName: '架空カードアルファ'}, {folderId: 'dl_card_beta', folderName: '架空カードベータ'}];
+    world.ui.renderSelection(); return world;
+  }
+  function dlButtons(world) { return world.ids['destination-list'].querySelectorAll('button'); }
+  function dlFinal(id) {
+    return {destinationSpreadsheetId: id, headers: [], rows: [], reconciliation: {files: [], totals: {balanced: true}, problems: []}};
+  }
+  browserAsyncTest('dl 8: folder success loads destinations and switching clears rows before reloading', async () => {
+    const world = dlBrowser({webAppListFolder: {defer: true}, webAppListDestinations: {defer: true}});
+    const {state} = world.ui;
+    assert.equal(world.ids['destination-list'].hidden, true);
+    await world.ui.chooseFolder('dl_card_alpha');
+    assert.equal(world.calls.filter((call) => call.name === 'webAppListDestinations').length, 0);
+    world.pending.find((call) => call.name === 'webAppListFolder').reply({kind: 'FILES', files: []}); await sfFlush();
+    assert.match(world.ids['destination-list'].textContent, /読み込み中…/);
+    const old = world.pending.find((call) => call.name === 'webAppListDestinations');
+    assert.deepEqual(dlPlain(old.args), ['dl_customer', 'dl_card_alpha']);
+    old.reply({destinations: [dlItem()], legacyTransactionCount: 0, unavailableCount: 0}); await sfFlush();
+    assert.equal(dlButtons(world).length, 1); assert.match(world.ids['destination-list'].textContent, /このカードの転記シート（Excel）/);
+    assert.equal(world.ids['destination-list'].querySelectorAll('th').map((node) => node.textContent).join(','), '記帳した日時,件数,操作');
+    await world.ui.chooseFolder('dl_card_beta');
+    assert.equal(state.destinations, null); assert.equal(dlButtons(world).length, 0);
+    assert.doesNotMatch(world.ids['destination-list'].textContent, /2026\/01\/02/);
+    world.pending.filter((call) => call.name === 'webAppListFolder').at(-1).reply({kind: 'FILES', files: []}); await sfFlush();
+    const next = world.pending.filter((call) => call.name === 'webAppListDestinations').at(-1);
+    assert.deepEqual(dlPlain(next.args), ['dl_customer', 'dl_card_beta']);
+    next.reply({destinations: [], legacyTransactionCount: 0, unavailableCount: 0}); await sfFlush();
+    assert.match(world.ids['destination-list'].textContent, /このカードの取引が書かれた転記シートはまだありません。/);
+    await world.ui.chooseCustomer('dl_customer');
+    assert.equal(state.destinations, null); assert.equal(world.ids['destination-list'].hidden, true);
+  });
+  browserAsyncTest('dl 8: loading error empty notes selected rows and busy buttons render', async () => {
+    const world = dlBrowser({webAppListDestinations: new Error('架空の一覧失敗')});
+    await world.ui.chooseFolder('dl_card_alpha'); await sfFlush();
+    const section = world.ids['destination-list']; assert.match(section.textContent, /転記シートを読み込めませんでした/);
+    const {state, renderDestinations} = world.ui;
+    state.destinationsError = null; state.destinations = []; renderDestinations();
+    assert.match(section.textContent, /このカードの取引が書かれた転記シートはまだありません。/);
+    state.destinations = [dlItem(), {...dlItem('dl_selected'), reviewCount: 0}];
+    state.legacyTransactionCount = 4; state.unavailableDestinationCount = 2;
+    state.lastCompletedDestinationSpreadsheetId = 'dl_selected'; renderDestinations();
+    assert.match(section.textContent, /3 件（うち要確認 1 件）/);
+    assert.match(section.textContent, /この画面より前の取込の取引 4 件は、雛形のシートにあります（ここには出ません）。/);
+    assert.match(section.textContent, /確かめられなかった転記シートが 2 枚あります。/);
+    assert.match(section.textContent, /選択中/); assert.equal(dlButtons(world).length, 1);
+    const rows = section.querySelectorAll('tbody')[0].children;
+    assert.equal(rows[1].querySelectorAll('button').length, 0); assert.equal(rows[0].children[0].title, state.destinations[0].name);
+    const button = dlButtons(world)[0]; assert.equal(button.type, 'button'); assert.equal(button.className, 'button');
+    for (const busy of ['importBusy', 'resolveBusy', 'formatBusy', 'finalLoading']) {
+      state[busy] = true; world.ui.updateActionButtons(); assert.equal(dlButtons(world)[0].disabled, true);
+      await world.ui.chooseDestination(state.destinations[0]);
+      assert.equal(world.calls.filter((call) => call.name === 'webAppFinalReview').length, 0);
+      state[busy] = false; world.ui.updateActionButtons(); assert.equal(dlButtons(world)[0].disabled, false);
+    }
+  });
+  browserAsyncTest('dl 8: stale destination success and failure replies cannot replace the current view', async () => {
+    const world = dlBrowser({webAppListDestinations: {defer: true}});
+    await world.ui.chooseFolder('dl_card_alpha'); await sfFlush(); const {state} = world.ui;
+    const old = world.pending.find((call) => call.name === 'webAppListDestinations');
+    await world.ui.chooseFolder('dl_card_beta'); await sfFlush();
+    const current = world.pending.filter((call) => call.name === 'webAppListDestinations').at(-1);
+    current.reply({destinations: [dlItem('dl_current')], legacyTransactionCount: 0, unavailableCount: 0}); await sfFlush();
+    old.reply({destinations: [dlItem('dl_stale')], legacyTransactionCount: 8, unavailableCount: 9}); await sfFlush();
+    assert.equal(state.destinations[0].destinationSpreadsheetId, 'dl_current');
+    assert.equal(state.legacyTransactionCount, 0); assert.equal(state.unavailableDestinationCount, 0);
+    for (const change of ['request', 'generation', 'customer']) {
+      const customerId = state.selectedCustomerId, generation = state.viewGeneration;
+      const first = world.ui.loadDestinations(customerId, state.selectedFolderId, generation); const pending = world.pending.at(-1);
+      if (change === 'request') {
+        const next = world.ui.loadDestinations(customerId, state.selectedFolderId, generation);
+        world.pending.at(-1).reply({destinations: [dlItem('dl_new_request')], legacyTransactionCount: 0, unavailableCount: 0}); await next;
+      } else if (change === 'generation') state.viewGeneration += 1;
+      else state.selectedCustomerId = 'dl_other_customer';
+      const before = dlPlain({rows: state.destinations, error: state.destinationsError, loading: state.loadingDestinations});
+      pending.reject(new Error('架空の古い失敗')); await first;
+      assert.deepEqual(dlPlain({rows: state.destinations, error: state.destinationsError, loading: state.loadingDestinations}), before);
+    }
+  });
+  browserAsyncTest('dl 9: choosing a sheet opens one final review before enabling its Excel export', async () => {
+    const destination = dlItem();
+    const world = dlBrowser({webAppListDestinations: {destinations: [destination], legacyTransactionCount: 0, unavailableCount: 0}, webAppFinalReview: {defer: true}});
+    await world.ui.chooseFolder('dl_card_alpha'); await sfFlush(); const {state} = world.ui, opened = [];
+    world.ui.window.open = (...args) => { opened.push(args); return {}; };
+    state.activeImportDestinationSpreadsheetId = 'dl_next_import'; state.finalReviewedFor = 'dl_previous';
+    world.ids['excel-status'].textContent = '架空の古い出力表示';
+    const choosing = dlButtons(world)[0].fire('click'); await sfFlush();
+    const calls = world.calls.filter((call) => call.name === 'webAppFinalReview');
+    assert.equal(calls.length, 1); assert.deepEqual(dlPlain(calls[0].args), ['dl_customer', destination.destinationSpreadsheetId, destination.fileIds]);
+    assert.equal(state.lastCompletedDestinationSpreadsheetId, destination.destinationSpreadsheetId);
+    assert.deepEqual(dlPlain(state.sessionFileIds), destination.fileIds); assert.notEqual(state.sessionFileIds, state.destinations[0].fileIds);
+    assert.equal(state.activeImportDestinationSpreadsheetId, 'dl_next_import');
+    assert.equal(state.finalReviewedFor, null); assert.equal(world.ids['excel-status'].textContent, '');
+    assert.equal(world.ids['excel-button'].disabled, true); world.ids['excel-button'].fire('click'); assert.equal(opened.length, 0);
+    world.pending.find((call) => call.name === 'webAppFinalReview').reply(dlFinal(destination.destinationSpreadsheetId));
+    await Promise.all(choosing); await sfFlush();
+    assert.equal(world.ids['final-panel'].hidden, false); assert.equal(world.ids['excel-button'].disabled, false);
+    world.ids['excel-button'].fire('click');
+    assert.deepEqual(opened, [['https://docs.google.com/spreadsheets/d/dl_destination/export?format=xlsx', '_blank']]);
+  });
+  browserAsyncTest('dl 9: failed final review leaves Excel disabled after choosing', async () => {
+    const world = dlBrowser({webAppFinalReview: new Error('架空の最終確認失敗')}); world.ui.state.selectedFolderId = 'dl_card_alpha';
+    await world.ui.chooseDestination(dlItem());
+    assert.equal(world.ui.state.finalReviewedFor, null); assert.equal(world.ids['excel-button'].disabled, true);
+    assert.match(world.ids.notice.textContent, /架空の最終確認失敗/);
+  });
+  // 監査で足した（私の変異 Z5 がすり抜けた）：取込中・最終確認の読込中は、ボタンが
+  // 押せない形でも、選ぶ処理そのものが何も変えない。取込の転記先を途中で差し替えない。
+  browserAsyncTest('dl 12: choosing a sheet while busy or loading changes nothing', async () => {
+    for (const busy of ['importBusy', 'finalLoading']) {
+      const world = dlBrowser({}); const {state} = world.ui;
+      state.selectedFolderId = 'dl_card_alpha';
+      state.lastCompletedDestinationSpreadsheetId = 'dl_current'; state.sessionFileIds = ['dl_current_file'];
+      state[busy] = true;
+      await world.ui.chooseDestination(dlItem());
+      assert.equal(state.lastCompletedDestinationSpreadsheetId, 'dl_current', busy);
+      assert.deepEqual(dlPlain(state.sessionFileIds), ['dl_current_file'], busy);
+      assert.equal(world.calls.filter((call) => call.name === 'webAppFinalReview').length, 0, busy);
+    }
+  });
+  browserAsyncTest('dl 10: import completion reloads destinations and selects that new sheet', async () => {
+    let completed = false;
+    const world = dlBrowser({webAppRunImport() {
+      completed = true; return {destinationSpreadsheetId: 'dl_imported', done: 1, remaining: 0, fileResults: [{fileId: 'dl_imported_file'}]};
+    }, webAppListDestinations() {
+      return {destinations: completed ? [dlItem('dl_imported')] : [], legacyTransactionCount: 0, unavailableCount: 0};
+    }});
+    await world.ui.chooseFolder('dl_card_alpha'); await sfFlush();
+    assert.equal(world.calls.filter((call) => call.name === 'webAppListDestinations').length, 1);
+    await world.ui.startImport(); await sfFlush();
+    assert.equal(world.calls.filter((call) => call.name === 'webAppListDestinations').length, 2);
+    assert.equal(world.ui.state.lastCompletedDestinationSpreadsheetId, 'dl_imported');
+    assert.deepEqual(dlPlain(world.ui.state.sessionFileIds), ['dl_imported_file']);
+    assert.match(world.ids['destination-list'].textContent, /選択中/); assert.equal(dlButtons(world).length, 0);
+    assert.equal(world.ids['excel-button'].disabled, true);
+  });
+  test('dl 11: destination text uses textContent and the sheet name only uses title', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', '81_WebAppUi.html'), 'utf8');
+    const body = /function renderDestinations\(\) \{[\s\S]*?(?=\n    (?:async )?function )/.exec(source);
+    assert.ok(body, 'renderDestinations が必要');
+    assert.doesNotMatch(body[0], /innerHTML|outerHTML|insertAdjacentHTML|document\.write|createContextualFragment|DOMParser|innerText|nodeValue/);
+    assert.match(body[0], /\.textContent\s*=/); assert.match(body[0], /\.title\s*=\s*destination\.name/);
+    assert.match(source, /<div id="file-list"><\/div>\s*<div id="destination-list"[^>]*><\/div>/);
+    const world = dlBrowser(), state = world.ui.state;
+    for (const property of ['innerHTML', 'outerHTML', 'innerText']) Object.defineProperty(world.Node.prototype, property, {set() { assert.fail('文字の代入は textContent を使う'); }});
+    const literal = '<img src=x onerror="dl_probe()">架空の文字';
+    state.selectedFolderId = 'dl_card_alpha'; state.destinations = [{...dlItem(), name: literal, createdLabel: literal, transactionCount: literal, reviewCount: 2}];
+    world.ui.renderDestinations(); const section = world.ids['destination-list'];
+    assert.equal(section.querySelectorAll('img').length, 0); const cells = section.querySelectorAll('td');
+    assert.equal(cells[0].textContent, literal); assert.equal(cells[0].title, literal);
+    assert.equal(cells[0].children.length, 1); assert.equal(cells[0].firstChild.tagName, '#TEXT');
+    assert.equal(cells[1].textContent, literal + ' 件（うち要確認 2 件）');
+  });
+
 };
 
 if (require.main === module && process.argv[2] === '--browser-case') {
