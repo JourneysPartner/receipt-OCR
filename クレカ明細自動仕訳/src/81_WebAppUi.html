@@ -151,6 +151,7 @@
     .file-name, .review-file { overflow-wrap: anywhere; }
     .file-name a, .review-file a { color: var(--brand); }
     .file-name a:hover, .review-file a:hover { text-decoration: none; }
+    .review-folder { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
     .fix-reason { color: var(--warn); font-size: 11px; overflow-wrap: anywhere; }
     .status-line { min-height: 21px; margin: 8px 0; color: var(--muted); }
     .progress-arrows { display: inline-flex; margin-right: .35em; }
@@ -305,7 +306,7 @@
           <div id="other-reviews"></div>
           <div class="review-tools" aria-label="要確認の絞り込みと一括入力">
             <label for="review-filter">絞り込み
-              <input id="review-filter" type="search" placeholder="摘要・ファイル名で絞り込み">
+              <input id="review-filter" type="search" placeholder="摘要・カード・ファイル名で絞り込み">
             </label>
             <span id="review-count" class="review-count"></span>
             <label for="bulk-partner">選択中に一括入力
@@ -1097,7 +1098,7 @@
         if (TEXT.otherReviewHelp[review.reviewType]) line(TEXT.otherReviewHelp[review.reviewType], true);
         row.appendChild(content);
         var file = document.createElement('td');
-        appendDriveFileName(file, review.fileId, review.fileName || '（ファイル名不明）');
+        appendReviewFileCell(file, review);
         row.appendChild(file);
         var source = document.createElement('td');
         source.textContent = review.sourceRow || '—';
@@ -1181,7 +1182,8 @@
     function reviewMatchesFilter(review, text) {
       var query = reviewFilterText(text);
       if (!query) return true;
-      return [review && review.merchantOriginal, review && review.fileName].some(function(value) {
+      return [review && review.merchantOriginal, review && review.fileName,
+        review && review.cardFolderName].some(function(value) {
         return reviewFilterText(value).indexOf(query) >= 0;
       });
     }
@@ -1357,6 +1359,16 @@
       cell.appendChild(link);
     }
 
+    function appendReviewFileCell(cell, review) {
+      if (typeof review.cardFolderName === 'string' && review.cardFolderName) {
+        var folder = document.createElement('div');
+        folder.className = 'review-folder';
+        folder.textContent = review.cardFolderName;
+        cell.appendChild(folder);
+      }
+      appendDriveFileName(cell, review.fileId, review.fileName || '（ファイル名不明）');
+    }
+
     function renderBulkPartnerOptions() {
       el['bulk-partner-options'].textContent = '';
       var names = new Set();
@@ -1475,7 +1487,7 @@
           row.appendChild(inputCell);
           var fileCell = document.createElement('td');
           fileCell.className = 'review-file';
-          appendDriveFileName(fileCell, review.fileId, review.fileName || '（ファイル名不明）');
+          appendReviewFileCell(fileCell, review);
           row.appendChild(fileCell);
           var sourceCell = document.createElement('td');
           sourceCell.textContent = review.sourceRow === null || review.sourceRow === undefined ? '—' : String(review.sourceRow);

@@ -1,0 +1,41 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の Web アプリで、**要確認の表の元ファイルにカードフォルダ名を出す**作業を受け取ります。
+
+作業ツリーは main の最新（コミット adf6342）で、`src/`・`test/` に未コミットの変更はありません。あなたの変更は、ステージされていない差分として残してください ── **`git add` しないこと。**開始時の `node test/run-tests.js` の本数は、始める前に自分で数えて報告に書いてください（1679/1679 のはずです）。
+
+開始時の src・test の写しを `work/.rf-check/baseline/` に置いてあります。サンドボックスで親フォルダの `.git` が読めず `git diff` が使えない場合は、この写しとの比較で「変えたファイルの一覧」を報告してください。写しは消さなくてよい ── 私が後で消します。
+
+## 仕様書
+
+`work/spec_review_card_folder.md`（1.0）。**全部読んでから始めてください。**短い仕様です。
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。
+2. **`src/` で変えてよいのは `80_WebApp.gs`・`81_WebAppUi.html` だけ。**80 で変えるのは `webAppListReviews` と新しい部品 `webAppCardFolderNamesByFileId_` だけ。
+3. 改行の形を変えないこと（80・81 は今 LF、CR は 0）。
+4. テストは `rf N: …`（仕様書 §6 の 1〜9）を足すこと。**既存のテストの期待（assert）は 1 つも変えないこと。**既存のテストが赤になったら、変えずに止めて理由を報告すること ── 特に一覧の読取回数のテスト（`bulk 1`・`kw2 2` など）、要確認の表の描き方のテスト（`kw2 N`・`bulk N`・`ui N`）、絞り込みのテスト（`bulk 9` など）、案内文を期待するテスト。phase9 の world の「呼べる関数の一覧」や「画面の関数の取り出し」を広げる必要があれば、既存の行の置き換えで広げてよい（期待は変えない。何を変えたか報告）。`test/fixtures/`・`test/gas-stubs.js`・`test/gas-harness.js` は変えない。**テストに実在の店名・地名・人名・ID を書かないこと**（このリポジトリは公開。架空の値だけ）。
+5. **テストを先に赤にしてから直すこと。**rf 1〜9 を書き、いまの実装で赤になることを確かめてから作る。いまでも緑になるもの（rf 5・rf 7 など）はどれかを報告する。**rf 7 の Sheets の読取は作る前に測って報告に書くこと。**
+6. 画面へ文字を入れるときは `textContent` だけ。
+7. **日本語は UTF-8 で書くこと。**終わったら `grep -n '???' src/*.gs src/*.html test/*.js` が空であること（始める前も空）を確かめて報告すること。U+FFFD も、既存の `phase1a`（わざと入れた文字）以外に 0 であること。コメントを足すなら、周りと同じ密度・語り口（「なぜ」を書く）で。
+8. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断をしたら全部報告すること。迷ったら止めて報告すること。
+
+## 進め方
+
+1. 仕様書を読む。次を読む：`src/80_WebApp.gs` の `webAppListReviews`・`webAppDirectChildFolder_`・`webAppIteratorToArray_`・`webAppListFolder`、`src/81_WebAppUi.html` の `renderReviews`・`renderOtherReviews`・`appendDriveFileName`・`reviewMatchesFilter`・`reviewFilterText`・CSS の `.review-file`・`.fix-reason`・絞り込みの欄（`review-filter`）、`test/gas-stubs.js` の Drive のスタブ（`getParents`・`getFolders`）、`test/phase8-webapp.test.js` の `setupWorld`・`putCsv`・`webImport`・`seedPartnerViaWeb`・`withMocks`・`bulk 1`・`kw2 2`、`test/phase9-format-registration.test.js` の world
+2. rf 1〜9 を書く → 赤を確かめる（rf 7 の作る前の読取を測る）
+3. 作る
+4. `node test/run-tests.js` を全部緑にする
+5. 仕様書 §7 の R1〜R10 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら差分が変異を入れる前と同じか確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する
+6. 変えたファイルの一覧を確かめる
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 直す前に rf 1〜9 のどれが赤だったか（緑だったものも）
+- rf 7 の読取の回数（作る前と作った後）
+- R1〜R10 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て（足したテストがあればその名前）
+- 仕様書が間違っていた・足りなかった箇所、自分で決めた箇所（全部。CSS の色の変数も）
+- 改行の形（80・81 の前と後）、`???` と U+FFFD の結果
+- 変えたファイルの一覧（始める前と後）
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。

@@ -2785,6 +2785,75 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(clientEval("TEXT.otherEffect('FIX_DATE_AMOUNT', {correctedDate: '2026-01-05', correctedAmount: '1200'})"),
       '入力した値だけを転記先の B列（利用日）・M列（金額）へ書いて確定します。利用日: 2026-01-05。金額: 1,200。' + keep);
   });
+
+  test('rf 8: 両方の表のリンクの上にカード名を出しカード名で絞れる', () => {
+    const world = browserWorld();
+    const {state} = world.ui;
+    const names = ['架空カードＡ', null, '', '架空カードＢ'];
+    state.selectedCustomerId = 'C001';
+    state.reviews = names.map((cardFolderName, index) => ({
+      reviewId: 'rf_partner_' + index, fileId: 'rf_source_' + index,
+      fileName: '架空明細.csv', merchantOriginal: '架空店', cardFolderName
+    }));
+    state.partnerTotal = state.reviews.length;
+    state.otherReviews = names.map((cardFolderName, index) => Object.assign(
+      kw2Row('FORMAT_UNKNOWN', 'rf_other_' + index), {cardFolderName, fileName: '架空不明.csv'}));
+    state.otherTotal = state.otherReviews.length;
+    world.ui.renderSelection();
+    const partnerCells = world.ids['review-table'].querySelectorAll('.review-file');
+    const otherCells = world.ids['other-review-list'].querySelectorAll('tr')
+      .filter((row) => row.dataset.reviewId).map((row) => row.children[2]);
+    for (const cells of [partnerCells, otherCells]) {
+      assert.equal(cells.length, 4);
+      cells.forEach((cell, index) => {
+        const folders = cell.querySelectorAll('.review-folder');
+        assert.equal(folders.length, names[index] ? 1 : 0);
+        const link = cell.querySelector('a');
+        assert.ok(link);
+        assert.equal(link.target, '_blank');
+        assert.equal(link.rel, 'noopener noreferrer');
+        if (names[index]) {
+          assert.equal(cell.firstChild, folders[0]);
+          assert.equal(folders[0].tagName, 'DIV');
+          assert.equal(folders[0].textContent, names[index]);
+          assert.equal(cell.children[1], link);
+        } else assert.equal(cell.firstChild, link);
+      });
+    }
+    state.reviewFilter = ' 架空 ｶｰﾄﾞ a ';
+    world.ui.renderSelection();
+    assert.deepEqual(world.ids['review-table'].querySelectorAll('tr')
+      .filter((row) => row.dataset.reviewId).map((row) => row.dataset.reviewId), ['rf_partner_0']);
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', '81_WebAppUi.html'), 'utf8');
+    assert.match(source, /id="review-filter"[^>]*placeholder="摘要・カード・ファイル名で絞り込み"/);
+    const css = /\.review-folder\s*\{([^}]+)\}/.exec(source);
+    assert.ok(css);
+    assert.match(css[1], /font-size:\s*11px/);
+    assert.match(css[1], /color:\s*var\(--muted\)/);
+    assert.match(css[1], /overflow-wrap:\s*anywhere/);
+  });
+
+  test('rf 9: カード名をHTMLとして解釈せずtextContentだけで描く', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', '81_WebAppUi.html'), 'utf8');
+    const helper = /function appendReviewFileCell\(cell, review\)\s*\{[\s\S]*?\n    \}/.exec(source);
+    assert.ok(helper);
+    assert.doesNotMatch(helper[0], /innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
+    const name = '<img src=x onerror="rf_probe()">架空カード';
+    const world = kw2World([Object.assign(kw2Row('FORMAT_UNKNOWN', 'rf_literal_other'),
+      {cardFolderName: name})]);
+    world.ui.state.reviews = [{reviewId: 'rf_literal_partner', fileId: 'rf_literal_source',
+      fileName: '架空明細.csv', merchantOriginal: '架空店', cardFolderName: name}];
+    world.ui.state.partnerTotal = 1;
+    world.ui.renderSelection();
+    for (const id of ['review-table', 'other-review-list']) {
+      const folders = world.ids[id].querySelectorAll('.review-folder');
+      assert.equal(folders.length, 1);
+      assert.equal(folders[0].textContent, name);
+      assert.equal(folders[0].children.length, 1);
+      assert.equal(folders[0].firstChild.tagName, '#TEXT');
+      assert.equal(world.ids[id].querySelectorAll('img').length, 0);
+    }
+  });
 };
 
 if (require.main === module && process.argv[2] === '--browser-case') {

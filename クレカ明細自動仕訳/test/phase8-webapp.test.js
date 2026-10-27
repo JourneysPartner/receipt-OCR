@@ -6887,7 +6887,7 @@ module.exports = ({test, assert, gas}) => {
     for (const row of listed.otherReviews) {
       const review = reviewById(row.reviewId), tx = transactionFor(review);
       assert.deepEqual(Object.keys(row).sort(), ['reviewId', 'reviewType', 'typeLabel', 'scope',
-        'fileId', 'fileName', 'sourceRow', 'usageDate', 'amount', 'purpose', 'merchantOriginal',
+        'fileId', 'fileName', 'cardFolderName', 'sourceRow', 'usageDate', 'amount', 'purpose', 'merchantOriginal',
         'originalDate', 'originalAmount', 'options', 'problem'].sort());
       assert.equal(row.typeLabel, gas.context.MENU_REVIEW_TYPE_LABELS_[row.reviewType]);
       assert.equal(row.scope, 'TRANSACTION'); assert.equal(row.usageDate, tx.planned.b);
@@ -8031,5 +8031,121 @@ module.exports = ({test, assert, gas}) => {
     assert.deepEqual(observed.followUps, [{orphanCandidates: 0}]);
     assert.deepEqual(observed.probes, [0]);
     assert.deepEqual(observed.commit, []);
+  });
+
+  function rfWorld() {
+    const seeded = setupWorld();
+    const {customer} = seeded;
+    customer.cardFolder.name = '架空カードＡ';
+    const alpha = putCsv(customer, {fileId: 'rf_alpha', name: '架空明細202601.csv',
+      rows: ['2025/12/10,架空店アルファ,1000,仕入れ']});
+    webImport(customer);
+    const second = gas.stubs.createFolder('rf_card_beta', {name: '架空カードＢ', fileIds: []});
+    customer.rootFolder.subFolderIds.push('rf_card_beta');
+    const otherCard = Object.assign({}, customer, {cardId: 'rf_card_beta', cardFolder: second});
+    const beta = putCsv(otherCard, {fileId: 'rf_beta', name: '架空明細202601.csv',
+      rows: ['2025/12/11,架空店ベータ,1100,仕入れ']});
+    const unknown = putUnknownFile(otherCard, 'rf_unknown');
+    webImport(otherCard);
+    return Object.assign(seeded, {alpha, beta, unknown});
+  }
+
+  test('rf 1: 両方の表で元ファイルのカードフォルダ名を返す', () => {
+    const seeded = rfWorld();
+    const listed = call('webAppListReviews', [seeded.customer.customerId]);
+    assert.equal(listed.reviews.length, 2);
+    assert.equal(listed.otherReviews.length, 1);
+    assert.deepEqual(listed.reviews.map((row) => [row.fileId, row.cardFolderName]).sort(),
+      [[seeded.alpha, '架空カードＡ'], [seeded.beta, '架空カードＢ']]);
+    assert.deepEqual(listed.otherReviews.map((row) => [row.fileId, row.cardFolderName]),
+      [[seeded.unknown, '架空カードＢ']]);
+  });
+
+  test('rf 2: 1ファイルのDrive例外はその行だけnullにする', () => {
+    const seeded = rfWorld();
+    const drive = gas.context.DriveApp;
+    const listed = withMocks({DriveApp: Object.assign({}, drive, {
+      getFileById(id) {
+        if (id === seeded.alpha) throw new Error('架空のファイル読取失敗');
+        return drive.getFileById(id);
+      }
+    })}, () => call('webAppListReviews', [seeded.customer.customerId]));
+    assert.equal(listed.reviews.length, 2);
+    assert.equal(listed.reviews.find((row) => row.fileId === seeded.alpha).cardFolderName, null);
+    assert.equal(listed.reviews.find((row) => row.fileId === seeded.beta).cardFolderName, '架空カードＢ');
+    assert.equal(listed.otherReviews[0].cardFolderName, '架空カードＢ');
+  });
+
+  test('rf 3: カードフォルダ一覧のDrive例外でも全行をnullで返す', () => {
+    const seeded = rfWorld();
+    const drive = gas.context.DriveApp;
+    let fileCalls = 0;
+    const listed = withMocks({DriveApp: Object.assign({}, drive, {
+      getFolderById(id) {
+        assert.equal(id, seeded.customer.rootId);
+        return {getFolders() { throw new Error('架空のフォルダ一覧失敗'); }};
+      },
+      getFileById() { fileCalls += 1; throw new Error('ファイルは引かない'); }
+    })}, () => call('webAppListReviews', [seeded.customer.customerId]));
+    assert.equal(listed.reviews.length, 2);
+    assert.equal(listed.otherReviews.length, 1);
+    assert.deepEqual(listed.reviews.concat(listed.otherReviews).map((row) => row.cardFolderName),
+      [null, null, null]);
+    assert.equal(fileCalls, 0);
+  });
+
+  test('rf 4: 顧客ルート直下のカードフォルダ以外の親は採らない', () => {
+    const seeded = rfWorld();
+    seeded.customer.cardFolder.fileIds.length = 0;
+    const nested = gas.stubs.createFolder('rf_nested', {name: '架空の下位フォルダ', fileIds: [seeded.alpha]});
+    seeded.customer.cardFolder.subFolderIds.push(nested.id);
+    const listed = call('webAppListReviews', [seeded.customer.customerId]);
+    assert.equal(listed.reviews.find((row) => row.fileId === seeded.alpha).cardFolderName, null);
+    assert.equal(listed.reviews.find((row) => row.fileId === seeded.beta).cardFolderName, '架空カードＢ');
+  });
+
+  test('rf 5: 要確認が無い一覧はDriveを呼ばない', () => {
+    const {customer} = setupWorld();
+    const calls = [];
+    const listed = withMocks({DriveApp: {
+      getFolderById() { calls.push('folder'); throw new Error('Driveを呼ばない'); },
+      getFileById() { calls.push('file'); throw new Error('Driveを呼ばない'); }
+    }}, () => call('webAppListReviews', [customer.customerId]));
+    assert.deepEqual(listed.reviews, []);
+    assert.deepEqual(listed.otherReviews, []);
+    assert.deepEqual(calls, []);
+  });
+
+  test('rf 6: 同じファイルの要確認3件はDriveから1回だけ引く', () => {
+    const {customer} = setupWorld();
+    const fileId = putCsv(customer, {fileId: 'rf_repeated', name: '架空明細202601.csv',
+      rows: [10, 11, 12].map((day) => `2025/12/${day},架空店ガンマ,1000,仕入れ`)});
+    webImport(customer);
+    const drive = gas.context.DriveApp;
+    const calls = [];
+    let folderCalls = 0, iteratorCalls = 0;
+    const listed = withMocks({DriveApp: Object.assign({}, drive, {
+      getFileById(id) { calls.push(id); return drive.getFileById(id); },
+      getFolderById(id) {
+        folderCalls += 1;
+        const folder = drive.getFolderById(id);
+        return {getFolders() { iteratorCalls += 1; return folder.getFolders(); }};
+      }
+    })}, () => call('webAppListReviews', [customer.customerId]));
+    assert.equal(listed.reviews.length, 3);
+    assert.deepEqual(calls, [fileId]);
+    assert.equal(folderCalls, 1);
+    assert.equal(iteratorCalls, 1);
+  });
+
+  test('rf 7: 同じ世界の一覧でSheetsのbatchGet読取回数を増やさない', () => {
+    const seeded = rfWorld();
+    gas.stubs.resetApiCallCounts();
+    const listed = call('webAppListReviews', [seeded.customer.customerId]);
+    const reads = gas.stubs.getApiCallCounts().batchGet;
+    console.log('RF7_BATCH_GET_READS ' + reads);
+    assert.equal(listed.reviews.length, 2);
+    assert.equal(listed.otherReviews.length, 1);
+    assert.equal(reads, 7);
   });
 };

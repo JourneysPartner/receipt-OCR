@@ -501,6 +501,8 @@ function webAppListReviews(customerId, limit, offset) {
     });
     var otherPage = otherCandidates.slice(0, WEBAPP_REVIEW_LIST_LIMIT_);
     var pageReviews = partnerReviews.slice(actualOffset, actualOffset + actualLimit);
+    var cardFolderNames = webAppCardFolderNamesByFileId_(customer,
+      pageReviews.concat(otherPage).map(function(review) { return review.fileId; }));
     var otherTransactions = otherPage.filter(function(review) {
       return isTransactionScopedReviewType(review.reviewType);
     });
@@ -541,6 +543,7 @@ function webAppListReviews(customerId, limit, offset) {
         reviewId: review.reviewId, reviewType: String(review.reviewType),
         typeLabel: MENU_REVIEW_TYPE_LABELS_[review.reviewType] || String(review.reviewType),
         scope: item.kind, fileId: String(review.fileId),
+        cardFolderName: cardFolderNames[String(review.fileId)] || null,
         fileName: menuDisplayFileName_(review) || '（ファイル名不明）', sourceRow: review.sourceRow || null,
         usageDate: planned ? planned.b : null, amount: planned ? planned.m : null,
         purpose: planned ? planned.i : null,
@@ -569,6 +572,7 @@ function webAppListReviews(customerId, limit, offset) {
       return {
         reviewId: review.reviewId,
         fileId: review.fileId,
+        cardFolderName: cardFolderNames[String(review.fileId)] || null,
         fileName: menuDisplayFileName_(review) || '（ファイル名不明）',
         sourceRow: review.sourceRow,
         merchantOriginal: webAppDisplayMerchant_(review.merchantOriginal),
@@ -1401,6 +1405,43 @@ function webAppDirectChildFolder_(customer, folderId) {
     if (String(folder.getId()) === wanted) return folder;
   }
   throw new AuthorizationError('選択されたフォルダはこの顧客の直下にありません。');
+}
+
+/** カード名が引けなくても要確認を止めないよう、表示分だけをファイル単位で補う。 */
+function webAppCardFolderNamesByFileId_(customer, fileIds) {
+  var names = Object.create(null);
+  var ids = fileIds.map(String).filter(function(fileId) {
+    if (!fileId || Object.prototype.hasOwnProperty.call(names, fileId)) return false;
+    names[fileId] = null;
+    return true;
+  });
+  if (!ids.length) return names;
+
+  var folderNames = Object.create(null);
+  try {
+    var folders = DriveApp.getFolderById(customer.sourceFolderId).getFolders();
+    while (folders.hasNext()) {
+      var folder = folders.next();
+      folderNames[String(folder.getId())] = String(folder.getName() || '');
+    }
+  } catch (ignored) {
+    return names;
+  }
+  ids.forEach(function(fileId) {
+    try {
+      var parents = DriveApp.getFileById(fileId).getParents();
+      while (parents.hasNext()) {
+        var parentId = String(parents.next().getId());
+        if (Object.prototype.hasOwnProperty.call(folderNames, parentId)) {
+          names[fileId] = folderNames[parentId] || null;
+          break;
+        }
+      }
+    } catch (ignored) {
+      names[fileId] = null;
+    }
+  });
+  return names;
 }
 
 /** 戻したファイルも未登録と同じ待ち時間で案内し、取込候補とのずれを防ぐ。 */
