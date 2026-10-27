@@ -19,7 +19,7 @@
  * 実装時に確定する。
  */
 var MASTER_SHEET_SPECS_ = Object.freeze([
-  {key: 'CUSTOMER_MASTER', width: 42, label: '顧客ID'},
+  {key: 'CUSTOMER_MASTER', width: 43, label: '顧客ID'},
   {key: 'COMMON_PARTNER_LIST', width: 6, label: '取引先ID'},
   {key: 'COMMON_PARTNER_DICT', width: 18, label: '辞書ID'},
   {key: 'CUSTOMER_PARTNER_DICT', width: 18, label: '辞書ID'},
@@ -233,10 +233,12 @@ function registerTestCustomer(config) {
     JSON.stringify(config.cashbackMerchants) : '';
   // AP列：相手税区分の転記先列（任意）。未設定なら税区分を一切書かない。
   row[41] = Number.isInteger(config.columns.G) ? config.columns.G : '';
+  row[42] = config.columns.L === undefined || config.columns.L === null ? '' : config.columns.L;
 
   var masterSheet = requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.CUSTOMER_MASTER);
   ensureSheetWidth_(masterSheet, CUSTOMER_MASTER_COLUMNS_);
   var existing = findRowsByColumnValue_(masterSheet, 1, config.customerId, CUSTOMER_MASTER_COLUMNS_);
+  if (config.columns.L === undefined && existing.length) row[42] = existing[0].values[42] || '';
   var rowNumber = existing.length ? existing[0].rowNumber : masterSheet.getLastRow() + 1;
   ensureRowExists_(masterSheet, rowNumber);
   masterSheet.getRange(rowNumber, 1, 1, CUSTOMER_MASTER_COLUMNS_).setValues([row]);

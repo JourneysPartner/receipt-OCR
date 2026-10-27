@@ -1,5 +1,19 @@
 'use strict';
 
+// 両列に値がある行は、どの予定金額とも一致させない。数値の0も空欄ではない。
+const DESTINATION_AMOUNT_CONFLICT_ = Object.freeze({incomeExpenseConflict: true});
+
+function signedDestinationAmount_(customer, row) {
+  var mapping = customer.columnMapping;
+  var expense = row[mapping.M - 1];
+  if (!mapping.L) return expense;
+  var income = row[mapping.L - 1];
+  var empty = function(value) { return value === '' || value === null || value === undefined; };
+  if (empty(income)) return normalizeReadValue('M', expense);
+  if (!empty(expense)) return DESTINATION_AMOUNT_CONFLICT_;
+  return -normalizeReadValue('M', income);
+}
+
 const SYSTEM_TIMEZONE = 'Asia/Tokyo';
 const MILLIS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -362,6 +376,7 @@ function normalizeReadValue(column, raw) {
     return raw === null || raw === undefined ? '' : String(raw);
   }
   if (normalizedColumn === 'M') {
+    if (raw === DESTINATION_AMOUNT_CONFLICT_) return raw;
     return raw === null || raw === undefined || raw === '' ? '' : toJpyInteger(raw);
   }
   return raw;
@@ -375,6 +390,7 @@ function normalizeReadValue(column, raw) {
  * @return {boolean}
  */
 function canonicalReadValuesEqual(column, planned, raw) {
+  if (planned === DESTINATION_AMOUNT_CONFLICT_ || raw === DESTINATION_AMOUNT_CONFLICT_) return false;
   var normalizedPlanned = normalizeReadValue(column, planned);
   var normalizedRead = normalizeReadValue(column, raw);
   return normalizedPlanned === normalizedRead;

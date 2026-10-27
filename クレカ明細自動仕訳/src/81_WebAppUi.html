@@ -2784,12 +2784,14 @@
       el['final-row-count'].textContent = String(rows.length);
       var headers = Array.isArray(result.headers) ? result.headers : [];
       var amountIndex = Number(result.amountColumnIndex);
+      var incomeIndex = result.incomeColumnIndex === null || result.incomeColumnIndex === undefined
+        ? -1 : Number(result.incomeColumnIndex);
       var table = document.createElement('table');
       var headRow = document.createElement('tr');
       headRow.appendChild(cellNode('th', '行', 'num'));
       headRow.appendChild(cellNode('th', '状態'));
       headers.forEach(function(label, index) {
-        headRow.appendChild(cellNode('th', label || columnName(index), index === amountIndex ? 'num' : ''));
+        headRow.appendChild(cellNode('th', label || columnName(index), index === amountIndex || index === incomeIndex ? 'num' : ''));
       });
       var rowsHead = document.createElement('thead'); rowsHead.appendChild(headRow); table.appendChild(rowsHead);
       var rowsBody = document.createElement('tbody');
@@ -2801,7 +2803,7 @@
           'state-badge ' + (settled ? 'done' : 'wait'));
         var statusCell = document.createElement('td'); statusCell.appendChild(badge); tr.appendChild(statusCell);
         (row.cells || []).forEach(function(value, index) {
-          tr.appendChild(cellNode('td', value, index === amountIndex ? 'num' : ''));
+          tr.appendChild(cellNode('td', value, index === amountIndex || index === incomeIndex ? 'num' : ''));
         });
         rowsBody.appendChild(tr);
       });

@@ -1,6 +1,6 @@
 'use strict';
 
-const CUSTOMER_MASTER_COLUMNS_ = 42;
+const CUSTOMER_MASTER_COLUMNS_ = 43;
 
 function parseCustomerJson_(raw, label, allowEmpty) {
   if ((raw === '' || raw === null || raw === undefined) && allowEmpty) return {};
@@ -23,7 +23,8 @@ function customerFromRow_(values, rowNumber) {
     destinationSheetName: String(values[7] || ''), partnerListSheetName: String(values[8] || ''),
     // AP列（税区分の転記先列）は任意。未設定なら相手税区分を一切書かない。
     columnMapping: {B: Number(values[9]), F: Number(values[10]), I: Number(values[11]), K: Number(values[12]), M: Number(values[13]), txId: Number(values[14]),
-      G: values[41] === '' || values[41] === null || values[41] === undefined ? null : Number(values[41])},
+      G: values[41] === '' || values[41] === null || values[41] === undefined ? null : Number(values[41]),
+      L: values[42] === '' || values[42] === null || values[42] === undefined ? null : Number(values[42])},
     schemaVersion: String(values[15] || ''), reviewers: csvEmails_(values[16]), admins: csvEmails_(values[17]),
     reviewCount: Number(values[18] || 0), reviewSummarySheetName: String(values[20] || CONFIG.REVIEW_SUMMARY.DEFAULT_SHEET_NAME),
     parallelState: String(values[21] || ''), parallelStartedOn: values[22] || null,
@@ -131,6 +132,14 @@ function validateCustomerValues_(customer) {
   var systemColumns = [customer.columnMapping.B, customer.columnMapping.F,
     customer.columnMapping.I, customer.columnMapping.K, customer.columnMapping.M,
     customer.columnMapping.txId];
+  var incomeColumn = customer.columnMapping.L;
+  if (incomeColumn !== null && incomeColumn !== undefined) {
+    if (!Number.isInteger(incomeColumn) || incomeColumn < 1 || incomeColumn > customer.rowScanLastColumn ||
+        systemColumns.concat([customer.columnMapping.G]).indexOf(incomeColumn) >= 0) {
+      throw new MasterDataError('AQ must be a distinct column within the scan range: CUSTOMER_MASTER_INVALID');
+    }
+    systemColumns.push(incomeColumn);
+  }
   customer.rowScanExcludedColumns.forEach(function(column) {
     if (!Number.isInteger(column) || column < 1) {
       throw new MasterDataError('AL entries must be positive column numbers: CUSTOMER_MASTER_INVALID');

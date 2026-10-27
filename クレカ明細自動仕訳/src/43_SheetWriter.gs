@@ -139,6 +139,7 @@ function expandTemplateRows(customer, sheet, shortage, templateSourceRow, contex
   var ownedColumns = [customer.columnMapping.B, customer.columnMapping.F,
     customer.columnMapping.I, customer.columnMapping.K,
     customer.columnMapping.M, customer.columnMapping.txId];
+  if (customer.columnMapping.L) ownedColumns.push(customer.columnMapping.L);
   added.forEach(function(rowNumber) {
     ownedColumns.forEach(function(column) {
       sheet.getRange(rowNumber, column).clearContent();
@@ -155,9 +156,10 @@ function expandTemplateRows(customer, sheet, shortage, templateSourceRow, contex
 
 /** システムが所有する列がすべて空か。空なら複製元として使える。 */
 function systemOwnedColumnsAreEmpty_(customer, values) {
-  return [customer.columnMapping.B, customer.columnMapping.F, customer.columnMapping.I,
-    customer.columnMapping.K, customer.columnMapping.M, customer.columnMapping.txId]
-    .every(function(column) {
+  var columns = [customer.columnMapping.B, customer.columnMapping.F, customer.columnMapping.I,
+    customer.columnMapping.K, customer.columnMapping.M, customer.columnMapping.txId];
+  if (customer.columnMapping.L) columns.push(customer.columnMapping.L);
+  return columns.every(function(column) {
       var value = values[column - 1];
       return value === '' || value === null || value === undefined;
     });
@@ -179,7 +181,7 @@ function writeColumnNumber_(customer, key) {
   var mapping = customer.columnMapping || {};
   var map = {
     b: mapping.B, f: mapping.F, i: mapping.I,
-    k: mapping.K, m: mapping.M, txId: mapping.txId, g: mapping.G
+    k: mapping.K, m: mapping.M, txId: mapping.txId, g: mapping.G, l: mapping.L
   };
   var column = Number(map[key]);
   if (!Number.isInteger(column) || column < 1) {
@@ -211,13 +213,15 @@ function writeTransactionRows(customer, rowWrites, leaseId, fileId) {
 
     var groups = [
       {option: 'RAW', keys: ['txId', 'f', 'i', 'k', 'g']},
-      {option: 'USER_ENTERED', keys: ['b', 'm']}
+      {option: 'USER_ENTERED', keys: ['b', 'm', 'l']}
     ];
     var sheetName = customer.destinationSheetName;
 
     // 行番号順に並べてから、列ごとに連続行をまとめる。1セル1レンジだと
     // 200件で1,200レンジになり、リクエストサイズ上限と実行時間の双方に近づく。
-    var sorted = rowWrites.slice().sort(function(a, b) { return a.rowNumber - b.rowNumber; });
+    var sorted = rowWrites.map(function(write) {
+      return Object.assign({}, write, {values: sheetMoneyWriteValues_(customer, write.values || {})});
+    }).sort(function(a, b) { return a.rowNumber - b.rowNumber; });
 
     groups.forEach(function(group) {
       var data = [];
@@ -268,7 +272,9 @@ function clearTransactionRows(customer, rowNumbers, leaseId, fileId) {
     assertLeaseHeldForWrite(fileId || null, leaseId);
     var data = [];
     rowNumbers.forEach(function(rowNumber) {
-      ['txId', 'b', 'f', 'i', 'k', 'm'].forEach(function(key) {
+      var keys = ['txId', 'b', 'f', 'i', 'k', 'm'];
+      if (customer.columnMapping.L) keys.push('l');
+      keys.forEach(function(key) {
         data.push({
           range: a1Range_(customer.destinationSheetName, rowNumber, writeColumnNumber_(customer, key), writeColumnNumber_(customer, key)),
           values: [['']]
@@ -406,6 +412,20 @@ function updateTransactionLocation(fullTxId, rowNumber, customer) {
  * あるいはB・M列だけを更新する（4.23の呼出経路表）。全列を書き直すと、
  * 解決とは無関係な列まで上書きされ、担当者が手で直した値が消える。
  */
+function sheetMoneyWriteValues_(customer, values) {
+  if (!customer.columnMapping.L || values.m === undefined) return values;
+  // 金額だけを直す操作でも両列を書く。片側を省くと、以前の金額が残る。
+  var result = Object.assign({}, values);
+  // 取引ログから読み戻した金額が文字列でも、マイナスなら入金へ回す。数だけを
+  // 見ると、文字列で残った返品が出金列にマイナスのまま書かれる。
+  var amount = typeof values.m === 'number' ? values.m :
+    (typeof values.m === 'string' && values.m.trim() !== '' ? Number(values.m) : NaN);
+  var income = isFinite(amount) && amount < 0;
+  result.l = income ? -amount : '';
+  result.m = income ? '' : values.m;
+  return result;
+}
+
 function buildRowWrite(rowNumber, txLog) {
   var all = {
     b: txLog.planned.b, f: txLog.planned.f, i: txLog.planned.i,
@@ -468,6 +488,7 @@ function readDestinationRows_(customer, rowNumbers, index) {
       var value = row[columns[key] - 1];
       cells[key] = value === undefined ? '' : value;
     });
+    if (customer.columnMapping.L) cells.m = signedDestinationAmount_(customer, row);
     result[rowNumber] = cells;
   });
   return result;

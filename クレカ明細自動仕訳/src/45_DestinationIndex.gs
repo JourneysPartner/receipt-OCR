@@ -122,7 +122,7 @@ function getValuesByRow(index, rowNumber) {
   if (!mapping) throw new TypeError('Destination index has no column mapping');
   return {b: normalizeReadValue('B', row[mapping.B - 1]), f: normalizeReadValue('F', row[mapping.F - 1]),
     i: normalizeReadValue('I', row[mapping.I - 1]), k: normalizeReadValue('K', row[mapping.K - 1]),
-    m: normalizeReadValue('M', row[mapping.M - 1]), txId: normalizeReadValue('INTERNAL_TRANSACTION_ID', row[mapping.txId - 1])};
+    m: normalizeReadValue('M', signedDestinationAmount_({columnMapping: mapping}, row)), txId: normalizeReadValue('INTERNAL_TRANSACTION_ID', row[mapping.txId - 1])};
 }
 
 function isRowEmpty(index, rowNumber, customer) {

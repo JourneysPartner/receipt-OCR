@@ -1654,6 +1654,7 @@ function webAppCloneDestination_(customer, now) {
   // 飛ばされ、ダウンロードした Excel に出る（2026-10-03、ドコモの取込の転記先の
   // 47・56 行目。雛形に初期の取込のキャッシュバック行が残っていた）。
   var owned = ['B', 'F', 'I', 'K', 'M', 'txId'];
+  if (customer.columnMapping.L) owned.push('L');
   var taxColumn = Number(customer.columnMapping.G);
   if (Number.isInteger(taxColumn) && taxColumn >= 1 &&
       (customer.rowScanExcludedColumns || []).map(Number).indexOf(taxColumn) < 0) {
@@ -1717,6 +1718,7 @@ function webAppFinalReview(customerId, destinationSpreadsheetId, fileIds) {
       destinationSpreadsheetId: destinationId,
       headers: sheet.headers,
       amountColumnIndex: sheet.amountColumnIndex,
+      incomeColumnIndex: sheet.incomeColumnIndex,
       rows: sheet.rows,
       reconciliation: reconciliation
     };
@@ -1746,10 +1748,10 @@ function finalReviewSheet_(customer) {
   }
 
   var txIdIndex = Number(customer.columnMapping.txId) - 1;
-  // **金額は M 列である**（71 の `planned`：B日付・F取引先・Iメモ・K摘要・M金額）。
-  // freee の列記号で呼ぶので名前から推し量ると取り違える ── 2026-09-23 に
-  // 実際に K を金額と読み違え、テストが「転記した合計 0」で捕まえた。
+  // 表示はシートのまま、照合に渡す金額は入金を負に戻す。ログの予定値と
+  // 同じ符号でなければ、返品のあるファイルの合計が合わなくなる。
   var amountIndex = Number(customer.columnMapping.M) - 1;
+  var incomeIndex = customer.columnMapping.L ? Number(customer.columnMapping.L) - 1 : null;
   var rows = [];
   for (var offset = 1; offset < raw.length; offset += 1) {
     var rawRow = raw[offset] || [];
@@ -1761,7 +1763,7 @@ function finalReviewSheet_(customer) {
       var cell = shownRow[index];
       cells.push(cell === undefined || cell === null ? '' : String(cell));
     }
-    var amount = rawRow[amountIndex];
+    var amount = signedDestinationAmount_(customer, rawRow);
     rows.push({
       rowNumber: headerRow + offset,
       txId: String(txId),
@@ -1769,7 +1771,7 @@ function finalReviewSheet_(customer) {
       amount: typeof amount === 'number' ? amount : null
     });
   }
-  return {headers: headers, rows: rows, amountColumnIndex: amountIndex};
+  return {headers: headers, rows: rows, amountColumnIndex: amountIndex, incomeColumnIndex: incomeIndex};
 }
 
 /** 転記されているはずの状態。`PREPARED`・`WRITING` が残っていれば書き損じである。 */
