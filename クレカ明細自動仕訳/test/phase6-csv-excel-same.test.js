@@ -302,16 +302,18 @@ module.exports = ({test, assert, gas}) => {
   });
 
   const rootId = 'diag-root-fake';
-  function world() {
+  function world(sharedName) {
     setup(true);
+    gas.evaluate("SETTINGS.PARALLEL_WORK_FOLDER_ID=''");
     gas.context.PropertiesService.getScriptProperties().setProperty('CUSTOMER_ROOT_FOLDER_ID', '  ' + rootId + '  ');
     const root = gas.stubs.createFolder(rootId, {name: '架空共通'});
     const category = gas.stubs.createFolder('diag-corp-fake', {name: '法人', parentId: root.id});
     const customer = gas.stubs.createFolder('diag-customer-fake', {name: '架空 Ａ 顧客', parentId: category.id});
-    const year = gas.stubs.createFolder('diag-year-fake', {name: '2026年度', parentId: customer.id});
+    const shared = sharedName ? gas.stubs.createFolder('diag-shared-fake', {name: sharedName, parentId: customer.id}) : null;
+    const year = gas.stubs.createFolder('diag-year-fake', {name: '2026年度', parentId: (shared || customer).id});
     const accounting = gas.stubs.createFolder('diag-accounting-fake', {name: '経費', parentId: year.id});
     const statement = gas.stubs.createFolder('diag-statement-fake', {name: 'クレカ明細', parentId: accounting.id});
-    return {root, category, customer, year, accounting, statement};
+    return {root, category, customer, shared, year, accounting, statement};
   }
   const diagnose = (fragment = '架空A顧客', options) => plain(call('opsDiagnoseCustomerFolder', fragment,
     {yearFolderId: 'diag-year-fake', ...options}));
@@ -508,6 +510,7 @@ module.exports = ({test, assert, gas}) => {
 
   test('diag 9: Excel resolves its matching sheet using one definition load and leaves only temporary work', () => {
     const {statement: customer} = world(); installDiagnosticFormat();
+    gas.evaluate("SETTINGS.PARALLEL_WORK_FOLDER_ID='diag-work-fake'");
     const id = 'diag-excel-fake';
     gas.stubs.createFile(id, {name: '架空.XLSX', bytes: Buffer.from('FAKE_XLSX'),
       xlsxSheets: [{name: 'FAKE_UNRELATED_SHEET', values: [['架空無関係']], maxRows: 1, maxColumns: 1},
@@ -551,6 +554,7 @@ module.exports = ({test, assert, gas}) => {
 
   test('diag 10: multiple matching sheets keep ambiguity and use the largest shape with distinct candidates', () => {
     const {statement: customer} = world();
+    gas.evaluate("SETTINGS.PARALLEL_WORK_FOLDER_ID='diag-work-fake'");
     const largest = rows(8).concat([['架空最後見出し']]);
     gas.stubs.createFile('diag-multisheet-fake', {name: '架空複数.xlsx', bytes: Buffer.from('FAKE_XLSX'),
       xlsxSheets: [{name: 'FAKE_SMALL_SHEET', values: rows(), maxRows: 3, maxColumns: 7},
@@ -678,7 +682,7 @@ module.exports = ({test, assert, gas}) => {
       assert.deepEqual(report.folders, []); assert.deepEqual(report.csvOnlyFormats, []);
       assert.equal(report.nextSkip, null);
       assert.deepEqual(access.files, []);
-      assert.deepEqual(access.folders, [rootId, 'diag-corp-fake', 'diag-customer-fake', ...folderIds]);
+      assert.deepEqual(access.folders, [rootId, 'diag-corp-fake', 'diag-customer-fake', 'diag-customer-fake', ...folderIds]);
       assert.deepEqual(access.ids, [rootId]);
       assert.equal(gas.stubs.getLogs().at(-1), JSON.stringify(report));
       return report;
@@ -800,6 +804,59 @@ module.exports = ({test, assert, gas}) => {
       assert.equal(zero.stoppedBy, 'TIME_BUDGET'); assert.equal(zero.nextSkip, 3);
       assert.equal(zero.counts.examined, 0);
     } finally { gas.context.Date.now = realDateNow; }
+  });
+
+  test('diag 21: one shared folder adds a level and files beside the year stay unread', () => {
+    const {customer, shared, year, accounting, statement} = world('☆架空 資料共有フォルダ');
+    const past = gas.stubs.createFolder('diag-shared-past-fake', {name: '架空過年度分', parentId: shared.id});
+    [customer, shared, past].forEach((folder, i) => addFile(folder, 'FAKE_OUTSIDE_FILE_' + i + '.csv'));
+    const inside = addFile(statement, 'A.csv');
+    const read = gas.context.readFile, reads = [];
+    mock({readFile(id, ...args) { reads.push(id); return read(id, ...args); }}, () => {
+      const stopped = diagnose(undefined, {yearFolderId: null});
+      assert.equal(stopped.stoppedBy, 'YEAR_FOLDER_REQUIRED');
+      assert.deepEqual(stopped.folderChoices, {level: 'year', choices: [
+        {id: year.id, name: year.name}, {id: past.id, name: past.name}]});
+      assert.deepEqual(reads, []);
+      const report = diagnose();
+      assert.equal(report.stoppedBy, null);
+      const path = [shared.name, year.name, accounting.name, statement.name];
+      assert.deepEqual(report.statementFolder, {id: statement.id, path});
+      assert.deepEqual(reads, [inside]);
+      assert.deepEqual(report.folders.map(f => f.path), [path]);
+    });
+  });
+
+  test('diag 22: two shared folders stop at the year and read nothing', () => {
+    const {customer, shared, statement} = world('架空資料共有A');
+    const other = gas.stubs.createFolder('diag-shared-other-fake', {name: '架空資料共有B', parentId: customer.id});
+    addFile(shared, 'FAKE_OUTSIDE_FILE.csv'); addFile(statement, 'A.csv');
+    const report = diagnose();
+    assert.equal(report.stoppedBy, 'YEAR_FOLDER_REQUIRED');
+    assert.deepEqual(report.folderChoices, {level: 'year', choices: [
+      {id: shared.id, name: shared.name}, {id: other.id, name: other.name}]});
+    assert.equal(report.counts.examined, 0); assert.equal(report.statementFolder, null);
+  });
+
+  test('diag 23: Excel is listed but not read until a work folder is set', () => {
+    const {statement} = world();
+    gas.stubs.createFile('diag-excel-fake', {name: 'A.xlsx', bytes: Buffer.from('FAKE_XLSX'),
+      xlsxSheets: [{name: 'FAKE_SHEET', values: rows(), maxRows: 3, maxColumns: 7}]});
+    statement.fileIds.push('diag-excel-fake');
+    const csv = addFile(statement, 'B.csv');
+    const read = gas.context.readFile, reads = [];
+    mock({readFile(id, ...args) { reads.push(id); return read(id, ...args); }}, () => {
+      const report = diagnose();
+      assert.equal(allFiles(report)[0].status, 'EXCEL_NOT_READ');
+      assert.equal(allFiles(report)[0].size, Buffer.byteLength('FAKE_XLSX'));
+      assert.notEqual(allFiles(report)[1].status, 'EXCEL_NOT_READ');
+      assert.deepEqual(reads, [csv]);
+      assert.equal(report.counts.byStatus.EXCEL_NOT_READ, 1); assert.equal(report.counts.examined, 2);
+      gas.evaluate("SETTINGS.PARALLEL_WORK_FOLDER_ID='diag-work-fake'");
+      const withFolder = diagnose();
+      assert.notEqual(allFiles(withFolder)[0].status, 'EXCEL_NOT_READ');
+      assert.deepEqual(reads, [csv, 'diag-excel-fake', csv]);
+    });
   });
 
 };

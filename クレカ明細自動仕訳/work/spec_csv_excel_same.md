@@ -1,6 +1,6 @@
 # CSV と Excel を同じものとして扱う 仕様書
 
-版：1.2（2026-11-01。診断の読む範囲を当事業年度の明細フォルダだけに絞る。§3.6）
+版：1.3（2026-11-02。実際の顧客フォルダに合わせて診断に「資料共有」の段を足し、作業フォルダが無いときは Excel を読まない。§3.7）
 対象：`src/13_CardDetector.gs`・`src/24_Parser_Generic.gs`・`src/97_Ops.gs`（運用関数 2 つとその部品）。
 発端：2026-11-01、利用者の決定「CSV でも Excel でも同じものとして欲しい」。本番の明細はほとんど CSV で、最初の本番の顧客（以下「1 人目の顧客」）の明細を通す準備である。
 
@@ -161,6 +161,13 @@ function billingDateTextsCanonical_(subject) {
 
 `stoppedBy` の値に `YEAR_FOLDER_REQUIRED`・`FOLDER_UNCLEAR` を足す。戻り値に `statementFolder: null`・`folderChoices: null` を足す。
 
+### 3.7 「資料共有」の段と Excel（1.3 の変更）
+
+発端：本番の診断の 1 回目で、1 人目の顧客の階層は 顧客フォルダ → 「資料共有」を含むフォルダ → 当事業年度 → 経費 → 明細 と分かった。§3.6 は 1 段少なく、そのままでは `経費` の下を全部読むしかない。また作業フォルダ（`PARALLEL_WORK_FOLDER_ID`）が未設定で、Excel の一時ファイルが顧客と共有のフォルダに出る。
+
+1. **資料共有の段：**顧客フォルダの子のうち、名前（`diagNameKey_` を通す）が `資料共有` を含むものがちょうど 1 つなら、そこへ 1 段下りてから §3.6 の 3 段を選ぶ。`statementFolder.path` と `folders[].path` の先頭にその名前が入る。0 件なら今までどおり。2 件以上なら下りず、顧客フォルダの子の中から当事業年度を選ぶ段で止まる（§3.6 の 1。下りる先を推測しない）。
+2. **Excel：**`SETTINGS.PARALLEL_WORK_FOLDER_ID` が空なら `xlsx` は読まない。`status: 'EXCEL_NOT_READ'`・名前・`fileType`・`size` だけを返し、次のファイルへ進む。設定されていれば今までどおり読む。
+
 ## 4. テスト（`test/phase6-csv-excel-same.test.js`、新規）
 
 実在の店名・人名・ID・カード番号を書かない。実サンプルの値を写さない。`csvx 9` だけ `test/fixtures/samples/` を読む（手元専用。`phase6-real-samples.test.js` と同じ読み方）。
@@ -190,6 +197,9 @@ function billingDateTextsCanonical_(subject) {
 - **diag 18（名前の揺れ）：**`経費`・`経理部`・`クレジットカード明細`・`カード明細`・全角半角の違いで進む。
 - **diag 19（決まらないとき）：**経理・明細の候補が 0 件または 2 件 → `FOLDER_UNCLEAR`・`level`・`choices`、ファイルを読まない。`accountingFolderId`・`statementFolderId` で 1 つ選べて、名前が条件に合わなくても進む。候補の外の ID では止まる。
 - **diag 20（続きから）：**範囲を絞っても `skip`・`nextSkip` が今までどおり効く。
+- **diag 21（資料共有の段）：**資料共有の下に年度があるとき、年度が無ければ資料共有の子を候補に止まり、年度があれば明細の下だけ読む。顧客フォルダ・資料共有・過年度のファイルは読まない。
+- **diag 22（資料共有が 2 つ）：**下りずに `YEAR_FOLDER_REQUIRED` で止まり、ファイルを読まない。
+- **diag 23（Excel）：**作業フォルダが空なら `EXCEL_NOT_READ` で読まず、隣の CSV は読む。設定すれば読む。`diag 10` は Excel を読むので作業フォルダを設定する。
 
 §3.6 に合わせ、既存の diag の Drive の世界は 当事業年度 → 経理 → クレカ明細 の形に直してよい。`assert` の意味は変えない。`diag 3` の深さは明細フォルダから数える。
 
@@ -233,13 +243,18 @@ function billingDateTextsCanonical_(subject) {
 - R28：止まるときにファイルを読む（`usable` を読む）
 - R29：`folderChoices` に子フォルダの中のファイル名を入れる
 - R30：`accountingFolderId` が候補の外でも進む
+- R31：資料共有の段を下りない
+- R32：資料共有が 2 件のとき先頭へ下りる
+- R33：作業フォルダが空でも Excel を読む
+- R34：作業フォルダがあっても Excel を読まない
+- R35：`EXCEL_NOT_READ` で次のファイルへ進まない
 
 ## 6. 本番での実行（私が行う。利用者の許可を得てから）
 
 1. push の前に `clasp pull` で実機と git の一致を確かめ、push 後にもう一度確かめる。
 2. push の直後に `opsRetireSmbcCsvFormat()`（読むだけ）→ 許可を得て `opsRetireSmbcCsvFormat(true)`。**この間は記帳しない**（三井住友系が `AMBIGUOUS` になる。誤読はしない）。
 3. 日付の読み方に触るので `releaseGateReport` を実機で流す。
-4. `opsDiagnoseCustomerFolder('<1 人目の顧客の名前>')` を読むだけで実行し、`folderChoices` のフォルダ名から当事業年度を確かめる。次に `{yearFolderId: '<当事業年度の ID>'}` を渡して実行し、カードごとの結果を利用者に見せる。
+4. `opsDiagnoseCustomerFolder('<1 人目の顧客の名前>')` を読むだけで実行し、`folderChoices` のフォルダ名から当事業年度を確かめる。次に `{yearFolderId: '<当事業年度の ID>'}` を渡して実行し、カードごとの結果を利用者に見せる。Excel は作業フォルダを設定するまで `EXCEL_NOT_READ` のまま読まない（§3.7）。
 5. 結果を見て、足りない読み方と本番の顧客の登録の入口を決める。
 
 ## 7. 受入
@@ -255,3 +270,4 @@ function billingDateTextsCanonical_(subject) {
 - 変異を 25 個足して回し、すり抜けた 3 個（読めない金額に 0 円を数える・「様」を 1 列目だけ見る・`csvOnlyFormats` に兼用の形式を入れる）を `diag 15` で赤にした。終了時 1782/1782。
 - 請求月の 0 埋めの変異は `csvx 9`（手元の実サンプル）でだけ赤になる。
 - 1.2 の実装は Codex 1 回（1782 → 1787、R21〜R30 すべて赤）。`src` の差分は `opsDiagnoseCustomerFolder` と部品 `diagChooseChildFolder_` だけ。ID の空文字は「未指定」でなく「不一致」として止める（`null`・`undefined` は未指定）。監査で変異を 20 個足し、18 個は赤。すり抜けた 2 個のうち「空文字を未指定にする」は `diag 19` で赤にした。「同じ名前の子の ID の順を外す」は候補の表示順だけで選び方に効かないので残した。`diagSortedEntries_` を使い回さないのは、名前を 1 回だけ聞く決まりを保つため。
+- 1.3 の実装は小さな直しなので Claude Code が直接行った（1787 → 1790、R31〜R35 と追加の変異 4 つすべて赤）。資料共有の有無を見るので顧客フォルダの子を 2 回一覧する（`diag 17`・`diag 19` の期待に足した。読むフォルダの範囲は変わらない）。`diag 9`・`diag 10` は Excel を読むので作業フォルダを設定する。
