@@ -308,9 +308,13 @@ module.exports = ({test, assert, gas}) => {
     const root = gas.stubs.createFolder(rootId, {name: '架空共通'});
     const category = gas.stubs.createFolder('diag-corp-fake', {name: '法人', parentId: root.id});
     const customer = gas.stubs.createFolder('diag-customer-fake', {name: '架空 Ａ 顧客', parentId: category.id});
-    return {root, category, customer};
+    const year = gas.stubs.createFolder('diag-year-fake', {name: '2026年度', parentId: customer.id});
+    const accounting = gas.stubs.createFolder('diag-accounting-fake', {name: '経費', parentId: year.id});
+    const statement = gas.stubs.createFolder('diag-statement-fake', {name: 'クレカ明細', parentId: accounting.id});
+    return {root, category, customer, year, accounting, statement};
   }
-  const diagnose = (fragment = '架空A顧客', options) => plain(call('opsDiagnoseCustomerFolder', fragment, options));
+  const diagnose = (fragment = '架空A顧客', options) => plain(call('opsDiagnoseCustomerFolder', fragment,
+    {yearFolderId: 'diag-year-fake', ...options}));
   function addFile(folder, name, grid = rows(), id = 'diag-file-fake-' + folder.id + '-' + folder.fileIds.length) {
     gas.stubs.createFile(id, {name, bytes: Buffer.from(toCsv(grid), 'utf8')});
     folder.fileIds.push(id); return id;
@@ -328,8 +332,8 @@ module.exports = ({test, assert, gas}) => {
   });
 
   test('diag 2: normalized search fails closed on ambiguity and verifies folder selection', () => {
-    const {root, customer} = world();
-    addFile(customer, '架空.csv');
+    const {root, customer, statement} = world();
+    addFile(statement, '架空.csv');
     assert.equal(diagnose('存在しない架空名').stoppedBy, 'CUSTOMER_FOLDER_NOT_FOUND');
     const single = diagnose('架空　A 顧客');
     assert.equal(single.customerFolder.id, customer.id);
@@ -346,18 +350,19 @@ module.exports = ({test, assert, gas}) => {
   });
 
   test('diag 3: walks sorted folders and files through depth eight only', () => {
-    const {category, customer} = world();
+    const {category, statement} = world();
     const other = gas.stubs.createFolder('diag-unrelated-fake', {name: '架空別顧客', parentId: category.id});
     addFile(other, '漏らしてはいけない.csv');
-    let parent = customer;
-    const names = ['2026年度', '経費', 'クレカ明細', '架空カード', '架空五段', '架空六段', '架空七段', '架空八段', '架空九段'];
+    let parent = statement;
+    const names = ['2026年度', '経費', 'クレカ明細', '0架空カード', '架空二段', '架空三段',
+      '架空四段', '架空五段', '架空六段', '架空七段', '架空八段', '架空九段'];
     const chain = [];
-    names.forEach((name, i) => { parent = gas.stubs.createFolder('diag-depth-fake-' + i, {name, parentId: parent.id}); chain.push(parent); });
-    addFile(chain[3], 'B.CSV'); addFile(chain[3], 'A.csv');
-    addFile(chain[3], '架空.PDF'); addFile(chain[3], '架空メモ');
+    names.slice(3).forEach((name, i) => { parent = gas.stubs.createFolder('diag-depth-fake-' + i, {name, parentId: parent.id}); chain.push(parent); });
+    addFile(chain[0], 'B.CSV'); addFile(chain[0], 'A.csv');
+    addFile(chain[0], '架空.PDF'); addFile(chain[0], '架空メモ');
     addFile(chain[7], '八段.csv'); addFile(chain[8], '九段.csv');
-    const z = gas.stubs.createFolder('diag-sort-z-fake', {name: 'Z', parentId: customer.id});
-    const a = gas.stubs.createFolder('diag-sort-a-fake', {name: 'A', parentId: customer.id});
+    const z = gas.stubs.createFolder('diag-sort-z-fake', {name: 'Z', parentId: statement.id});
+    const a = gas.stubs.createFolder('diag-sort-a-fake', {name: 'A', parentId: statement.id});
     addFile(z, 'Z.csv'); addFile(a, 'A.csv');
     const result = diagnose();
     assert.deepEqual(allFiles(result).map(f => f.name), ['B.CSV', 'A.csv'].sort().concat(['八段.csv', 'A.csv', 'Z.csv']));
@@ -376,7 +381,7 @@ module.exports = ({test, assert, gas}) => {
       billingRule: {sources: []}, parserKind: 'generic', version: 1, revisionReason: 'FAKE_TEST'});
   }
   test('diag 4: resolved reports count blanks unreadable fields and exclusions', () => {
-    const {customer} = world(); installDiagnosticFormat();
+    const {statement: customer} = world(); installDiagnosticFormat();
     const grid = [['架空日付', '架空店名', '架空金額', '架空用途'],
       ['2025/11/30', 'FAKE_SECRET_SHOP', 1457, 'FAKE_SECRET_PURPOSE'],
       ['2025/11/29', 'FAKE_SECRET_SHOP', 1463, ''],
@@ -399,7 +404,7 @@ module.exports = ({test, assert, gas}) => {
   });
 
   test('diag 5: unknown shape and nearest expose headers but never transaction or name cells', () => {
-    const {customer} = world();
+    const {statement: customer} = world();
     const grid = [['架空見出し１２３', 'ABCDEFGHIJKLMNOPQRST'],
       ['架空氏名 様', 'FAKE_PRIVATE_NAME'],
       ['2025/11/30', 'FAKE_PRIVATE_SHOP', 876543, 'FAKE_PRIVATE_PURPOSE'],
@@ -427,7 +432,7 @@ module.exports = ({test, assert, gas}) => {
   });
 
   test('diag 6: a failed read records only code and continues', () => {
-    const {customer} = world();
+    const {statement: customer} = world();
     addFile(customer, 'A.csv', rows(), 'diag-broken-fake'); addFile(customer, 'B.csv', rows(), 'diag-good-fake');
     const original = gas.context.readFile;
     const report = mock({readFile(id, ...args) {
@@ -441,7 +446,7 @@ module.exports = ({test, assert, gas}) => {
   });
 
   test('diag 7: budget and skip resume at the exact next sorted target', () => {
-    const {customer} = world();
+    const {statement: customer} = world();
     for (const name of ['C.csv', 'A.csv', 'B.csv']) addFile(customer, name);
     const realDateNow = gas.context.Date.now, original = gas.context.readFile;
     let now = 1000;
@@ -461,7 +466,7 @@ module.exports = ({test, assert, gas}) => {
   });
 
   test('diag 8: diagnosis leaves all master sheets audit cells and Drive files unchanged', () => {
-    const {customer} = world(); addFile(customer, '架空.csv');
+    const {statement: customer} = world(); addFile(customer, '架空.csv');
     const before = snapshot(), beforeFile = plain(gas.stubs.getFile(customer.fileIds[0]));
     const properties = gas.stubs.getPropertyWrites().length;
     gas.stubs.resetRoundTrips(); gas.stubs.resetApiCallCounts();
@@ -502,7 +507,7 @@ module.exports = ({test, assert, gas}) => {
   });
 
   test('diag 9: Excel resolves its matching sheet using one definition load and leaves only temporary work', () => {
-    const {customer} = world(); installDiagnosticFormat();
+    const {statement: customer} = world(); installDiagnosticFormat();
     const id = 'diag-excel-fake';
     gas.stubs.createFile(id, {name: '架空.XLSX', bytes: Buffer.from('FAKE_XLSX'),
       xlsxSheets: [{name: 'FAKE_UNRELATED_SHEET', values: [['架空無関係']], maxRows: 1, maxColumns: 1},
@@ -545,7 +550,7 @@ module.exports = ({test, assert, gas}) => {
   });
 
   test('diag 10: multiple matching sheets keep ambiguity and use the largest shape with distinct candidates', () => {
-    const {customer} = world();
+    const {statement: customer} = world();
     const largest = rows(8).concat([['架空最後見出し']]);
     gas.stubs.createFile('diag-multisheet-fake', {name: '架空複数.xlsx', bytes: Buffer.from('FAKE_XLSX'),
       xlsxSheets: [{name: 'FAKE_SMALL_SHEET', values: rows(), maxRows: 3, maxColumns: 7},
@@ -559,7 +564,7 @@ module.exports = ({test, assert, gas}) => {
   });
 
   test('diag 11: malformed CSV and parse exceptions stay private and do not stop the next file', () => {
-    const {customer} = world(); installDiagnosticFormat();
+    const {statement: customer} = world(); installDiagnosticFormat();
     gas.stubs.createFile('diag-real-broken-fake', {name: 'A.csv', bytes: Buffer.from('"FAKE_PRIVATE_ERROR', 'utf8')});
     customer.fileIds.push('diag-real-broken-fake');
     const grid = [['架空日付', '架空店名', '架空金額', '架空用途'],
@@ -583,7 +588,7 @@ module.exports = ({test, assert, gas}) => {
   });
 
   test('diag 12: every ignored extension is a count including object property names', () => {
-    const {customer} = world();
+    const {statement: customer} = world();
     addFile(customer, 'FAKE.__proto__'); addFile(customer, 'FAKE.constructor');
     const report = diagnose();
     assert.equal(report.counts.examined, 0); assert.equal(report.counts.ignoredFiles, 2);
@@ -593,7 +598,7 @@ module.exports = ({test, assert, gas}) => {
   });
 
   test('diag 13: trailing blanks do not hide a header and never reveal a private row', () => {
-    const {customer} = world();
+    const {statement: customer} = world();
     // 行末のカンマを残す。`addFile` の変換は行末の空を落とすので生の文字で作る。
     const text = ['架空見出し１２３,架空見出し二,,', '架空氏名 様,FAKE_PRIVATE_NAME,,',
       '2025/11/30,FAKE_PRIVATE_SHOP,876543,', ',架空空欄混在,,', ',,,'].join('\r\n');
@@ -612,9 +617,9 @@ module.exports = ({test, assert, gas}) => {
   });
 
   test('diag 14: the report is plain data and sorting asks each entry for its name once', () => {
-    const {customer} = world();
+    const {statement: customer} = world();
     addFile(customer, 'A.csv');
-    const raw = call('opsDiagnoseCustomerFolder', '架空A顧客');
+    const raw = call('opsDiagnoseCustomerFolder', '架空A顧客', {yearFolderId: 'diag-year-fake'});
     assert.notEqual(Object.getPrototypeOf(raw.counts.byStatus), null);
     assert.notEqual(Object.getPrototypeOf(raw.folders[0].ignored), null);
     let asked = 0;
@@ -627,7 +632,7 @@ module.exports = ({test, assert, gas}) => {
   });
 
   test('diag 15: a name in any column stays hidden, zero is a readable amount, shared formats are not csv-only', () => {
-    const {customer} = world(); installDiagnosticFormat();
+    const {statement: customer} = world(); installDiagnosticFormat();
     addFile(customer, '架空不明.csv', [['架空見出し', '架空氏名 様', 'FAKE_PRIVATE_NAME']]);
     addFile(customer, '架空202512.csv', [['架空日付', '架空店名', '架空金額', '架空用途'],
       ['2025/11/27', 'FAKE_SECRET_SHOP', 0, 'FAKE_SECRET_PURPOSE']]);
@@ -641,6 +646,160 @@ module.exports = ({test, assert, gas}) => {
     const resolved = files.find((f) => f.name === '架空202512.csv');
     assert.equal(resolved.txCount, 1); assert.equal(resolved.amountUnreadable, 0);
     assert.deepEqual(report.csvOnlyFormats, ['smbc_family_csv']);
+  });
+
+  function observeDiagDrive(fn) {
+    const access = {files: [], folders: [], ids: []};
+    const getFolder = gas.context.DriveApp.getFolderById;
+    function wrap(folder) {
+      const id = folder.getId();
+      return {...folder,
+        getFiles() { access.files.push(id); return folder.getFiles(); },
+        getFolders() {
+          access.folders.push(id);
+          const iterator = folder.getFolders();
+          return {hasNext: () => iterator.hasNext(), next: () => wrap(iterator.next())};
+        }};
+    }
+    return mock({getFolderById(id) { access.ids.push(id); return wrap(getFolder(id)); }},
+      () => fn(access), gas.context.DriveApp);
+  }
+  function assertDiagStopped(options, stoppedBy, level, choices, folderIds) {
+    return observeDiagDrive(access => mock({
+      readFile() { assert.fail('folder selection must stop before file reads'); },
+      loadFormatDefinitions() { assert.fail('folder selection must stop before master reads'); }
+    }, () => {
+      const report = diagnose(undefined, options);
+      assert.equal(report.stoppedBy, stoppedBy);
+      assert.deepEqual(report.folderChoices, {level, choices});
+      assert.equal(report.customerFolder.id, 'diag-customer-fake');
+      assert.equal(report.statementFolder, null);
+      assert.deepEqual(report.counts, {folders: 0, examined: 0, ignoredFiles: 0, byStatus: {}, byFormat: {}});
+      assert.deepEqual(report.folders, []); assert.deepEqual(report.csvOnlyFormats, []);
+      assert.equal(report.nextSkip, null);
+      assert.deepEqual(access.files, []);
+      assert.deepEqual(access.folders, [rootId, 'diag-corp-fake', 'diag-customer-fake', ...folderIds]);
+      assert.deepEqual(access.ids, [rootId]);
+      assert.equal(gas.stubs.getLogs().at(-1), JSON.stringify(report));
+      return report;
+    }));
+  }
+
+  test('diag 16: reads only the selected statement subtree and lists no out-of-scope files', () => {
+    const {customer, year, accounting, statement} = world();
+    const past = gas.stubs.createFolder('diag-past-fake', {name: '架空過年度', parentId: customer.id});
+    const unrelated = gas.stubs.createFolder('diag-non-accounting-fake', {name: '架空資料', parentId: year.id});
+    const nonStatement = gas.stubs.createFolder('diag-non-statement-fake', {name: '架空帳票', parentId: accounting.id});
+    const outside = [customer, past, unrelated, nonStatement];
+    outside.forEach((folder, i) => addFile(folder, 'FAKE_OUTSIDE_FILE_' + i + '.csv', [['FAKE_OUTSIDE_CONTENT_' + i]]));
+    const cardB = gas.stubs.createFolder('diag-card-b-fake', {name: '架空カードB', parentId: statement.id});
+    const cardA = gas.stubs.createFolder('diag-card-a-fake', {name: '架空カードA', parentId: statement.id});
+    const a = addFile(cardA, 'A.csv'), b = addFile(cardB, 'B.csv');
+    const read = gas.context.readFile, reads = [];
+    observeDiagDrive(access => mock({readFile(id, ...args) { reads.push(id); return read(id, ...args); }}, () => {
+      const report = diagnose();
+      assert.equal(report.stoppedBy, null); assert.equal(report.folderChoices, null);
+      assert.deepEqual(report.statementFolder, {id: statement.id, path: [year.name, accounting.name, statement.name]});
+      assert.deepEqual(reads, [a, b]); assert.deepEqual(allFiles(report).map(f => f.name), ['A.csv', 'B.csv']);
+      assert.deepEqual(access.files, [statement.id, cardA.id, cardB.id]);
+      for (const folder of outside.slice(1)) assert.equal(access.folders.includes(folder.id), false);
+      assert.deepEqual(report.folders.map(f => f.path), [cardA, cardB].map(card =>
+        [year.name, accounting.name, statement.name, card.name]));
+      assert.equal(report.counts.examined, 2);
+      for (const secret of ['FAKE_OUTSIDE_FILE_', 'FAKE_OUTSIDE_CONTENT_', past.name, unrelated.name, nonStatement.name]) {
+        assert.equal(JSON.stringify(report).includes(secret), false);
+        assert.equal(gas.stubs.getLogs().at(-1).includes(secret), false);
+      }
+    }));
+  });
+
+  test('diag 17: year selection requires a direct child ID and returns names without reading descendants', () => {
+    const {customer, year, statement} = world();
+    const other = gas.stubs.createFolder('diag-year-other-fake', {name: '1025架空年度', parentId: customer.id});
+    const external = gas.stubs.createFolder('diag-year-outside-fake', {name: '架空外部年度'});
+    const externalAccounting = gas.stubs.createFolder('diag-year-outside-accounting-fake', {name: '経理', parentId: external.id});
+    const externalStatement = gas.stubs.createFolder('diag-year-outside-statement-fake', {name: 'クレカ', parentId: externalAccounting.id});
+    addFile(year, 'FAKE_PRIVATE_YEAR_FILE.csv'); addFile(statement, 'FAKE_PRIVATE_STATEMENT_FILE.csv');
+    addFile(other, 'FAKE_PRIVATE_OTHER_YEAR_FILE.csv'); addFile(externalStatement, 'FAKE_PRIVATE_EXTERNAL_FILE.csv');
+    const choices = [other, year].map(({id, name}) => ({id, name}));
+    for (const yearFolderId of [undefined, null, '', external.id, statement.id]) {
+      assertDiagStopped({yearFolderId}, 'YEAR_FOLDER_REQUIRED', 'year', choices, []);
+    }
+  });
+
+  test('diag 18: accounting and statement name variants normalize before matching', () => {
+    for (const [accountingName, statementName] of [
+      ['経費', 'クレカ明細'], ['経理部', 'クレジット明細'], ['架空経理', 'クレジットカード明細'],
+      ['経費資料', 'カード明細'], ['　経　費　', '　ｸﾚｶ　明細　']
+    ]) {
+      const {year, accounting, statement} = world();
+      accounting.name = accountingName; statement.name = statementName;
+      addFile(statement, '架空.csv');
+      const report = diagnose();
+      assert.equal(report.stoppedBy, null); assert.equal(report.counts.examined, 1);
+      assert.deepEqual(report.statementFolder, {id: statement.id, path: [year.name, accountingName, statementName]});
+    }
+  });
+
+  test('diag 19: unclear accounting or statement choices stop and explicit IDs stay within direct children', () => {
+    for (const level of ['accounting', 'statement']) {
+      for (const count of [0, 2]) {
+        const {year, accounting, statement} = world();
+        const parent = level === 'accounting' ? year : accounting;
+        const selected = level === 'accounting' ? accounting : statement;
+        if (count === 0) selected.name = '架空資料';
+        if (count === 2) gas.stubs.createFolder('diag-second-' + level + '-fake',
+          {name: level === 'accounting' ? '経理部' : 'カード明細', parentId: parent.id});
+        addFile(statement, 'FAKE_PRIVATE_CHOICE_FILE.csv');
+        const children = parent.subFolderIds.map(id => gas.context.DriveApp.getFolderById(id));
+        const choices = children.map(folder => ({id: folder.getId(), name: folder.getName()}))
+          .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : a.id.localeCompare(b.id));
+        const folderIds = level === 'accounting' ? [year.id] : [year.id, accounting.id];
+        assertDiagStopped({}, 'FOLDER_UNCLEAR', level, choices, folderIds);
+        const option = level === 'accounting' ? 'accountingFolderId' : 'statementFolderId';
+        const invalid = gas.stubs.createFolder('diag-external-choice-fake', {name: '架空外部'});
+        addFile(invalid, 'FAKE_PRIVATE_EXTERNAL_FILE.csv');
+        assertDiagStopped({[option]: invalid.id}, 'FOLDER_UNCLEAR', level, choices, folderIds);
+        const report = diagnose(undefined, {[option]: selected.id});
+        assert.equal(report.stoppedBy, null); assert.equal(report.statementFolder.id, statement.id);
+        assert.equal(report.counts.examined, 1);
+      }
+      const {year, accounting, statement} = world();
+      addFile(statement, '架空.csv');
+      const selected = level === 'accounting' ? accounting : statement;
+      const option = level === 'accounting' ? 'accountingFolderId' : 'statementFolderId';
+      const folderIds = level === 'accounting' ? [year.id] : [year.id, accounting.id];
+      // 自動なら一意でも、範囲外の明示 ID を無視して進むと選択の誤りを隠してしまう。
+      for (const explicit of [year.id, '']) {
+        assertDiagStopped({[option]: explicit}, 'FOLDER_UNCLEAR', level,
+          [{id: selected.id, name: selected.name}], folderIds);
+      }
+    }
+  });
+
+  test('diag 20: scoped traversal preserves sorted skip and nextSkip across cards', () => {
+    const {customer, statement} = world();
+    addFile(customer, 'FAKE_OUTSIDE_FILE.csv');
+    const cardB = gas.stubs.createFolder('diag-resume-b-fake', {name: 'B', parentId: statement.id});
+    const cardA = gas.stubs.createFolder('diag-resume-a-fake', {name: 'A', parentId: statement.id});
+    addFile(cardA, 'B.csv'); addFile(cardA, 'A.csv'); addFile(cardB, 'D.csv'); addFile(cardB, 'C.csv');
+    addFile(cardA, '架空.pdf');
+    const realDateNow = gas.context.Date.now, read = gas.context.readFile;
+    let now = 1000;
+    try {
+      gas.context.Date.now = () => now;
+      const first = mock({readFile(...args) { const result = read(...args); now += 10; return result; }},
+        () => diagnose(undefined, {timeBudgetMs: 20}));
+      assert.equal(first.stoppedBy, 'TIME_BUDGET'); assert.equal(first.nextSkip, 2);
+      assert.deepEqual(allFiles(first).map(f => f.name), ['A.csv', 'B.csv']);
+      const second = diagnose(undefined, {skip: first.nextSkip, timeBudgetMs: 20});
+      assert.equal(second.stoppedBy, null); assert.equal(second.nextSkip, null);
+      assert.deepEqual(allFiles(first).concat(allFiles(second)).map(f => f.name), ['A.csv', 'B.csv', 'C.csv', 'D.csv']);
+      assert.deepEqual(second.statementFolder, first.statementFolder);
+      const zero = diagnose(undefined, {skip: 3, timeBudgetMs: 0});
+      assert.equal(zero.stoppedBy, 'TIME_BUDGET'); assert.equal(zero.nextSkip, 3);
+      assert.equal(zero.counts.examined, 0);
+    } finally { gas.context.Date.now = realDateNow; }
   });
 
 };

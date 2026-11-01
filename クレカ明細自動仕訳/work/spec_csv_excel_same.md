@@ -1,6 +1,6 @@
 # CSV と Excel を同じものとして扱う 仕様書
 
-版：1.1（2026-11-01。監査の直し 3 つを反映）
+版：1.2（2026-11-01。診断の読む範囲を当事業年度の明細フォルダだけに絞る。§3.6）
 対象：`src/13_CardDetector.gs`・`src/24_Parser_Generic.gs`・`src/97_Ops.gs`（運用関数 2 つとその部品）。
 発端：2026-11-01、利用者の決定「CSV でも Excel でも同じものとして欲しい」。本番の明細はほとんど CSV で、最初の本番の顧客（以下「1 人目の顧客」）の明細を通す準備である。
 
@@ -143,6 +143,24 @@ function billingDateTextsCanonical_(subject) {
 
 `folders` には対象のファイルか `ignored` があるフォルダだけを入れる。`path` は顧客フォルダより下の名前。`Logger.log(JSON.stringify(report))` してから、素の物にして返す（`JSON.parse`）。件数の辞書は原型なしで作るので、そのまま返すと実行 API の戻り値に載らない恐れがある。Drive の項目の名前は並べ替えの前に 1 回だけ読む。
 
+### 3.6 診断の読む範囲（1.2 の変更。§3.5 の手順 3 を置き換える）
+
+発端：利用者の指示「読むのは当事業年度のみで、その配下にある経理フォルダ → クレカ明細（若干の名称違うことあり）フォルダ内のみ。過年度フォルダ等、当事業年度以外のフォルダは読まなくていい」。1.1 は顧客フォルダの下を全部読むので、明細以外のファイルの文字だけの行が報告に出る恐れがあった。
+
+**読むのは次の道の先だけ：**顧客フォルダ → 当事業年度フォルダ → 経理フォルダ → 明細フォルダ（この下の各カード）。顧客フォルダ直下のファイル、当事業年度以外のフォルダ、経理以外のフォルダ、明細フォルダ以外のフォルダは、ファイルの一覧も取らない。
+
+候補の選び方（どの段も「子フォルダの中から 1 つ」で、候補の外の ID は選べない）：
+
+1. **当事業年度：**名前の付け方が決まっていないので自動では選ばない。`options.yearFolderId` が顧客フォルダの子の ID と一致すれば進む。無い、または一致しなければ `stoppedBy: 'YEAR_FOLDER_REQUIRED'`、`folderChoices: {level: 'year', choices: [{id, name}]}` を返して止まる（名前の順。子フォルダの名前のほかは何も読まない）。
+2. **経理：**当事業年度の子のうち、名前（`diagNameKey_` を通す）が `経理` か `経費` を含むもの。ちょうど 1 つなら進む。`options.accountingFolderId` があれば、子の ID と一致するものを選び、名前の条件は見ない（一致しなければ止まる）。決まらなければ `stoppedBy: 'FOLDER_UNCLEAR'`、`folderChoices: {level: 'accounting', choices: [...]}`（子全部）。
+3. **明細：**経理の子のうち、名前が `クレカ` か `クレジット` か `カード` を含むもの。ちょうど 1 つなら進む。`options.statementFolderId` の扱いと止まり方は 2 と同じ（`level: 'statement'`）。
+
+止まるときはファイルを 1 本も読まず、`usable` の読込（マスターの読取）もしない。`counts` は 0 のまま、`customerFolder` は入れる。進むときは `report.statementFolder = {id, path}`（`path` は顧客フォルダより下の名前 3 つ）を入れ、明細フォルダから下を今までの `visit` でたどる。`folders[].path` は `statementFolder.path` の続きとする（§3.5 の例と同じく顧客フォルダより下の名前）。深さの数え方は明細フォルダを 0 段とする（8 段まで、9 段目は見ない）。
+
+`options.skip`・`options.timeBudgetMs`・`nextSkip`・`options.folderId` と、1 ファイルの調べ方は変えない。フォルダをたどる間の時間の確認は足さない（読む範囲がカードの数だけになるので要らない）。
+
+`stoppedBy` の値に `YEAR_FOLDER_REQUIRED`・`FOLDER_UNCLEAR` を足す。戻り値に `statementFolder: null`・`folderChoices: null` を足す。
+
 ## 4. テスト（`test/phase6-csv-excel-same.test.js`、新規）
 
 実在の店名・人名・ID・カード番号を書かない。実サンプルの値を写さない。`csvx 9` だけ `test/fixtures/samples/` を読む（手元専用。`phase6-real-samples.test.js` と同じ読み方）。
@@ -167,6 +185,13 @@ function billingDateTextsCanonical_(subject) {
 - **diag 6：**1 本が読めなくても（壊れた CSV）`READ_FAILED` で次へ進む。
 - **diag 7：**時間予算で `TIME_BUDGET`・`nextSkip`。`options.skip` で続きから調べ、2 回で全本を過不足なく調べる。
 - **diag 8：**書かない。実行の前後でマスターの全シートの値・監査ログが同じ。セルの書込回数 0。
+- **diag 16（読む範囲）：**顧客フォルダの直下・過年度フォルダ・当事業年度の経理以外のフォルダ・経理の明細以外のフォルダに CSV を置く。どれも読まれず（`readFile` の呼出しに出ない）、報告にも名前が出ない。明細フォルダの下の 2 カードの CSV だけ読む。
+- **diag 17（当事業年度）：**`yearFolderId` が無い・候補の外 → `YEAR_FOLDER_REQUIRED`、`folderChoices` に顧客フォルダの子の名前だけ。ファイルを読まず、子フォルダの中も見ない。
+- **diag 18（名前の揺れ）：**`経費`・`経理部`・`クレジットカード明細`・`カード明細`・全角半角の違いで進む。
+- **diag 19（決まらないとき）：**経理・明細の候補が 0 件または 2 件 → `FOLDER_UNCLEAR`・`level`・`choices`、ファイルを読まない。`accountingFolderId`・`statementFolderId` で 1 つ選べて、名前が条件に合わなくても進む。候補の外の ID では止まる。
+- **diag 20（続きから）：**範囲を絞っても `skip`・`nextSkip` が今までどおり効く。
+
+§3.6 に合わせ、既存の diag の Drive の世界は 当事業年度 → 経理 → クレカ明細 の形に直してよい。`assert` の意味は変えない。`diag 3` の深さは明細フォルダから数える。
 
 既存のテストで変えてよいのは次の 3 か所だけ：
 
@@ -174,7 +199,7 @@ function billingDateTextsCanonical_(subject) {
 2. `test/phase6-format-batch1.test.js` の `setup()` の `gas.call('installSmbcCsvFormat', []);` を消す。
 3. 同じファイルの `FAMILIES` の先頭の `expect: 'smbc_family_csv'` を `expect: 'smbc_family_x7'` にする（CSV は `smbc_family_x7` で読むようになった）。
 
-## 5. 変異（R1〜R20）
+## 5. 変異（R1〜R30）
 
 入れたら赤になること。
 
@@ -198,13 +223,23 @@ function billingDateTextsCanonical_(subject) {
 - R18：診断の見出しの条件を「`T` が 1 つでもあれば」に緩める（取引の店名が出る）
 - R19：`nextSkip` を 1 つずらす
 - R20：`READ_FAILED` で止まる（次へ進まない）
+- R21：`yearFolderId` が無いとき先頭の子を選ぶ
+- R22：`yearFolderId` が候補の外でも `getFolderById` で読む
+- R23：経理の候補が 2 件のとき先頭を選ぶ
+- R24：明細の候補が 2 件のとき先頭を選ぶ
+- R25：`経費` を候補から外す
+- R26：`クレジット` を候補から外す
+- R27：顧客フォルダの下を全部たどる（範囲を絞らない）
+- R28：止まるときにファイルを読む（`usable` を読む）
+- R29：`folderChoices` に子フォルダの中のファイル名を入れる
+- R30：`accountingFolderId` が候補の外でも進む
 
 ## 6. 本番での実行（私が行う。利用者の許可を得てから）
 
 1. push の前に `clasp pull` で実機と git の一致を確かめ、push 後にもう一度確かめる。
 2. push の直後に `opsRetireSmbcCsvFormat()`（読むだけ）→ 許可を得て `opsRetireSmbcCsvFormat(true)`。**この間は記帳しない**（三井住友系が `AMBIGUOUS` になる。誤読はしない）。
 3. 日付の読み方に触るので `releaseGateReport` を実機で流す。
-4. `opsDiagnoseCustomerFolder('<1 人目の顧客の名前>')` を読むだけで実行し、カードごとの結果を利用者に見せる。
+4. `opsDiagnoseCustomerFolder('<1 人目の顧客の名前>')` を読むだけで実行し、`folderChoices` のフォルダ名から当事業年度を確かめる。次に `{yearFolderId: '<当事業年度の ID>'}` を渡して実行し、カードごとの結果を利用者に見せる。
 5. 結果を見て、足りない読み方と本番の顧客の登録の入口を決める。
 
 ## 7. 受入
@@ -219,3 +254,4 @@ function billingDateTextsCanonical_(subject) {
 - 監査の直し 3 つ（診断だけ）：(1) 行末の空があると見出しを型でしか出さなかった。Excel の行は表の外まで空で埋まるので、形式不明のファイルほど手掛かりが消える（§3.5 の 6、`diag 10` の期待も改めた、`diag 13`）。(2) 戻り値が原型なしの辞書を含んでいた（`diag 14`）。(3) 並べ替えの比較のたびに Drive へ名前を聞いていた（`diag 14`）。
 - 変異を 25 個足して回し、すり抜けた 3 個（読めない金額に 0 円を数える・「様」を 1 列目だけ見る・`csvOnlyFormats` に兼用の形式を入れる）を `diag 15` で赤にした。終了時 1782/1782。
 - 請求月の 0 埋めの変異は `csvx 9`（手元の実サンプル）でだけ赤になる。
+- 1.2 の実装は Codex 1 回（1782 → 1787、R21〜R30 すべて赤）。`src` の差分は `opsDiagnoseCustomerFolder` と部品 `diagChooseChildFolder_` だけ。ID の空文字は「未指定」でなく「不一致」として止める（`null`・`undefined` は未指定）。監査で変異を 20 個足し、18 個は赤。すり抜けた 2 個のうち「空文字を未指定にする」は `diag 19` で赤にした。「同じ名前の子の ID の順を外す」は候補の表示順だけで選び方に効かないので残した。`diagSortedEntries_` を使い回さないのは、名前を 1 回だけ聞く決まりを保つため。
