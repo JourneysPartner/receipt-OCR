@@ -431,10 +431,13 @@ function loadFormatDefinitions(filter) {
     });
 }
 
-/** E列のJSON配列への包含（等値比較しない）。 */
+/**
+ * CSV と Excel は同じ明細の別の器なので、形式は種類で分けない（2026-11-01）。
+ * E列は記録として残す。読めない種類だけ落とす。
+ */
 function matchesFileType(formatRow, fileType) {
-  var types = formatRow && Array.isArray(formatRow.fileTypes) ? formatRow.fileTypes : [];
-  return types.indexOf(String(fileType || '').toLowerCase()) >= 0;
+  var kind = String(fileType || '').toLowerCase();
+  return kind === 'csv' || kind === 'xlsx';
 }
 
 /** 先頭maxRow行の正準化・正規化済み連結文字列（条件ごとにキャッシュ）。 */

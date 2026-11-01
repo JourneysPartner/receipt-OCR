@@ -1,0 +1,42 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）に、**CSV と Excel を同じものとして扱う変更**と、**顧客フォルダの明細を読むだけで調べる運用関数**を足す作業を受け取ります。
+
+作業ツリーは main の最新（コミット d37de69）で、`src/`・`test/` に未コミットの変更はありません（`work/` の仕様書と指示書だけ未コミットです）。あなたの変更は、ステージされていない差分として残してください ── **`git add` しないこと。**開始時の `node test/run-tests.js` の本数は、始める前に自分で数えて報告に書いてください（1753/1753 のはずです）。全テストは 3 分ほどかかります。
+
+開始時の src・test の写しを `work/.tmp-csvx-check/baseline/` に置いてあります。サンドボックスで親フォルダの `.git` が読めず `git diff` が使えない場合は、この写しとの比較で「変えたファイルの一覧」を報告してください。写しは消さなくてよい ── 私が後で消します。作業用のファイルを作るなら `work/.tmp-csvx-check/` の中に置いてください。
+
+## 仕様書
+
+`work/spec_csv_excel_same.md`（1.0）。**全部読んでから始めてください。**§3 のコードは下調べで動かしたものです。意味を変えないでください。
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。
+2. **`src/` で変えてよいのは 3 ファイルだけ：**`13_CardDetector.gs`（`matchesFileType` とそのコメントだけ）、`24_Parser_Generic.gs`（§3.2 の定数と追記、§3.3 の 2 行と部品だけ）、`97_Ops.gs`（新しい運用関数 2 つとその部品を足すだけ。既存の関数は 1 つも変えない）。`81_WebAppUi.html` も形式定義（`04`）も変えないこと。
+3. **`97_Ops.gs` は文字列の中に生の NUL バイトが 2 つあり、git はバイナリとして扱う**（`grep -a` で読む）。改行は LF（CR 0）。ファイル全体を書き直す道具で CRLF にしたり NUL を落としたりしないこと。終わったら NUL が 2 バイト・CR が 0 であることを確かめて報告すること。`13`・`24`・テストの新しいファイルも LF のままにすること。
+4. **既存のテストで変えてよいのは仕様書 §4 の末尾の 3 か所だけ。**それ以外の既存のテストの期待（assert）は 1 つも変えないこと。既存のテストが赤になったら、変えずに止めて理由を報告すること。`test/fixtures/`・`test/gas-harness.js` は変えない。`test/gas-stubs.js` は足すことだけ許す（足したものを報告すること）。
+5. **このリポジトリは公開です。**テスト・コード・コメントに実在の店名・地名・人名・ID・カード番号を書かないこと（架空の値だけ）。`test/fixtures/samples/` の実サンプルの値をテストへ書き写さないこと。`csvx 9` の失敗の文にも実サンプルの値を出さないこと。
+6. **テストを先に赤にしてから直すこと。**csvx と diag を書き、いまの実装で赤になることを確かめてから作る。
+7. **日本語は UTF-8 で書くこと。**以前、あなたの書いた日本語が `?` の羅列に化けた（97 で特に）。終わったら `grep -n '???' src/*.gs src/*.html test/*.js`（97 は `grep -an`）が空であること（始める前も空）を確かめて報告すること。U+FFFD も、既存の `phase1a`（わざと入れた文字）以外に 0 であること。コメントを足すなら、周りと同じ密度・語り口（「なぜ」を書く）で。
+8. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断をしたら全部報告すること。**安全側を外す判断を自分でしないこと。**迷ったら止めて報告すること。
+9. 診断の関数は**何も書かないこと**（マスター・監査ログ・顧客のファイル）。報告に取引の中身（店名・金額・用途・日付）を入れないこと。
+
+## 進め方
+
+1. 仕様書を読む。次を読む：`src/13_CardDetector.gs` の `aggregateSheetDetections`・`detectFormatWith`、`src/24_Parser_Generic.gs` の `interpretDateExpression`・`extractBillingYearMonth`・`parseFile`・`resolveCardName`、`src/19_FormatRegistration.gs` の `disableCardFormat_`・`formatGap_`・`formatNearest_`、`src/12_FileReader.gs` の `readFile`、`src/41_DuplicateChecker.gs`、`src/30_TransactionValidator.gs` の `verifyCountsAndTotals`、`src/97_Ops.gs`（`grep -a`）の `opsDisableAeonX8`・`opsExplainFormatMismatch`・`opsSetCustomerNamesFromFolders`・`customerNameInspectFolder_`。テストは `test/phase6-real-samples.test.js`（固定データの読み方）、`test/phase6-customer-name-from-folder.test.js`（Drive の世界の作り方）、`test/phase3-importflow.test.js`（取込の通し方）、`test/gas-stubs.js`
+2. csvx 1〜12・diag 1〜8 を書く → 赤を確かめる
+3. 作る
+4. `node test/run-tests.js` を全部緑にする（**終わったら必ず全テストを回して最後の行を報告すること**）
+5. 仕様書 §5 の R1〜R20 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら差分が変異を入れる前と同じか確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する
+6. 変えたファイルの一覧を確かめる
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 直す前に csvx・diag のどれが赤だったか
+- R1〜R20 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て（足したテストがあればその名前）
+- `csvx 11` で 2 本目がどの状態・どの要確認になったか（実際に見た値）
+- 仕様書が間違っていた・足りなかった箇所、自分で決めた箇所（全部）
+- 改行・97 の NUL、`???` と U+FFFD の結果
+- 変えたファイルの一覧（始める前と後）
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。

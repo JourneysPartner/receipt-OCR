@@ -24,14 +24,13 @@ module.exports = ({test, assert, gas}) => {
     gas.stubs.setActiveSpreadsheet('master');
     gas.call('setMasterSpreadsheetId', ['master']);
     gas.call('provisionMasterSheets', []);
-    gas.call('installSmbcCsvFormat', []);
     gas.call('installSmbcXlsxFormat', []);
     gas.call('installAnnotatedFormatsBatch1', []);
   }
 
   // samplesの実ファイル構造を圧縮したファミリー標本。
   const FAMILIES = [
-    {expect: 'smbc_family_csv', fileType: 'csv', fileName: '三井住友カード202602.csv', rows: [
+    {expect: 'smbc_family_x7', fileType: 'csv', fileName: '三井住友カード202602.csv', rows: [
       ['〇〇　〇〇　様', '4980-00**-****-****', '三井住友ゴールドＶＩＳＡ（ＮＬ）', '', '', '', ''],
       ['2025/12/16', 'ローソン', '10800', '1', '1', '10800', '仕入れ'],
       ['', '', '', '', '', '58100', '']

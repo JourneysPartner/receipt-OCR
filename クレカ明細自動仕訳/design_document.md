@@ -262,7 +262,7 @@ Ver.2.0のレビューは、この再構成が目的を達成したこと（擬�
 | B | 形式名 | 文字列 | 必須 | 表示用名称 |
 | C | ステータス | 文字列 | 必須 | `draft` / `active` / `retired` |
 | D | 有効 | 真偽値 | 必須 | TRUE＝現行バージョン。形式IDごとに1行のみTRUE |
-| E | ファイル種別 | 文字列 | 必須 | **JSON配列**。`["csv"]` / `["xlsx"]` / `["csv","xlsx"]`。判定は配列への包含で行い、等値比較しない |
+| E | ファイル種別 | 文字列 | 必須 | **JSON配列**。`["csv"]` / `["xlsx"]` / `["csv","xlsx"]`。**2026-11-01 から判定には使わない**（CSV と Excel は同じものとして扱う。`work/spec_csv_excel_same.md`）。記録として残す |
 | F | 判定キーワード | 文字列 | 必須 | JSON配列。スキーマと評価規則は2.1.2.2 |
 | G | ヘッダー行 | 数値 | 必須 | ヘッダー行番号 |
 | H | データ開始行 | 数値 | 必須 | 明細データ開始行番号 |
@@ -2337,7 +2337,7 @@ cols = min(SETTINGS.MAX_COLUMNS_PER_FILE, sheet.getMaxColumns())
 | `aggregateSheetDetections(detections, context)` | シートごとの判定結果、**判定文脈** | `{status, sheetName, formatId}` | 下表に従う |
 | `pinFormatVersion(formatId, version)` | 形式ID、バージョン | `FormatRow` | **当該バージョンの定義行を返す。処理中のファイルはこの戻り値を保持し、以後マスターを読み直さない**（INV-39） |
 | `assertPinnedVersionStillActive(formatId, version)` | 形式ID、バージョン | void | **継続トリガーの起動時と各バッチ境界で呼ぶ。当該形式の`有効=TRUE`が別バージョンへ移っていれば`FORMAT_VERSION_CHANGED_DURING_RUN`**（INV-39・B-M10） |
-| `matchesFileType(formatRow, fileType)` | 形式行、種別 | 真偽 | E列のJSON配列への**包含**で判定する。等値比較しない |
+| `matchesFileType(formatRow, fileType)` | 形式行、種別 | 真偽 | 種別が `csv`・`xlsx` なら形式によらず真（2026-11-01。E列は見ない） |
 | `matchesKeywords(sheet, formatRow)` | シート、形式行 | 真偽 | F列を2.1.2.2の評価規則で判定する |
 | `matchesColumnProfile(sheet, formatRow)` | シート、形式行 | 真偽 | N列を2.1.2.3の評価規則で判定する。N列が空なら判定ステップ3を適用しない |
 

@@ -1,5 +1,8 @@
 'use strict';
 
+var CSV_SERIAL_MIN_ = 36526; // 2000-01-01
+var CSV_SERIAL_MAX_ = 73050; // 2099-12-31
+
 /** @param {*} value @return {boolean} */
 function isParserBlank_(value) {
   if (value === null || value === undefined || value === '') return true;
@@ -179,6 +182,16 @@ function interpretDateExpression(value) {
   if (match) return checked(4, Number(match[1]), Number(match[2]), Number(match[3]));
   match = text.match(/^(\d{4})(\d{2})(\d{2})$/);
   if (match) return checked(4, Number(match[1]), Number(match[2]), Number(match[3]));
+  // CSV ではどのセルも文字で来る。数値セルの `YYMMDD`（イオン系）と同じに読む。
+  match = text.match(/^(\d{2})(\d{2})(\d{2})$/);
+  if (match) return checked(2, Number(match[1]), Number(match[2]), Number(match[3]));
+  // Excel の日付シリアルも文字で来る（JAL 系・オリコ）。数値セルと違い文字列は
+  // 日付以外の 5 桁もあり得るので、2000〜2099 年に当たる値だけを日付と読む。
+  if (/^\d{5}$/.test(text) && Number(text) >= CSV_SERIAL_MIN_ && Number(text) <= CSV_SERIAL_MAX_) {
+    var serial = interpretDateExpression(Number(text));
+    serial.rawText = rawText;
+    return serial;
+  }
   if (/^\d{4}-\d{2}-\d{2}T/.test(text) && /(Z|[+-]\d{2}:?\d{2})$/.test(text)) {
     var iso = new Date(text);
     if (isNaN(iso.getTime())) return failed;
@@ -353,6 +366,20 @@ function applyExclusionRules(row, rowNumber, cardFormat) {
 }
 
 /**
+ * 文字の中の年つきの日付を `yyyy-MM-dd` へ寄せる。請求月の正規表現は Excel の日付セルの
+ * 正準形を前提に書かれており、CSV では同じ日付が `2025/12/27` のまま来る。
+ */
+function billingDateTextsCanonical_(subject) {
+  return String(subject).normalize('NFKC').replace(
+    /\d{4}\s?(?:[-\/.]|年)\s?\d{1,2}\s?(?:[-\/.]|月)\s?\d{1,2}日?/g,
+    function(text) {
+      var parsed = interpretDateExpression(text.replace(/\s/g, ''));
+      if (!parsed.ok || parsed.yearDigits !== 4) return text;
+      return parsed.year + '-' + ('0' + parsed.month).slice(-2) + '-' + ('0' + parsed.day).slice(-2);
+    });
+}
+
+/**
  * 2.1.2.6 請求年月抽出規則の評価。締め年月（利用期間の終了年月）を返す。
  * `null`を返さない（M6）。
  * @param {!Object} sheet {name, rows}
@@ -395,7 +422,8 @@ function extractBillingYearMonth(sheet, fileName, cardFormat) {
 
     var matched;
     try {
-      matched = new RegExp(String(source.pattern)).exec(subject);
+      var compiled = new RegExp(String(source.pattern));
+      matched = compiled.exec(subject) || compiled.exec(billingDateTextsCanonical_(subject));
     } catch (error) {
       throw new FormatDefinitionError('Billing-month pattern is not a valid regular expression: ' + source.id);
     }

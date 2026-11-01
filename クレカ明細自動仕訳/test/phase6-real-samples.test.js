@@ -80,7 +80,6 @@ module.exports = ({test, assert, gas}) => {
     gas.stubs.setActiveSpreadsheet('master');
     gas.call('setMasterSpreadsheetId', ['master']);
     gas.call('provisionMasterSheets', []);
-    gas.call('installSmbcCsvFormat', []);
     gas.call('installSmbcXlsxFormat', []);
     gas.call('installAnnotatedFormatsBatch1', []);
     return gas.call('loadFormatDefinitions', [{status: 'active', enabled: true}]);
