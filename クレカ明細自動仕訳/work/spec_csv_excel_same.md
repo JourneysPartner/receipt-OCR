@@ -167,7 +167,8 @@ function billingDateTextsCanonical_(subject) {
 
 1. **資料共有の段：**顧客フォルダの子のうち、名前（`diagNameKey_` を通す）が `資料共有` を含むものがちょうど 1 つなら、そこへ 1 段下りてから §3.6 の 3 段を選ぶ。`statementFolder.path` と `folders[].path` の先頭にその名前が入る。0 件なら今までどおり。2 件以上なら下りず、顧客フォルダの子の中から当事業年度を選ぶ段で止まる（§3.6 の 1。下りる先を推測しない）。
 2. **Excel：**`SETTINGS.PARALLEL_WORK_FOLDER_ID` が空なら `xlsx` は読まない。`status: 'EXCEL_NOT_READ'`・名前・`fileType`・`size` だけを返し、次のファイルへ進む。設定されていれば今までどおり読む。
-3. **読まないファイルの種類：**本番の診断で、明細フォルダの 76 本のうち 75 本に拡張子が無いと分かった。`csv`・`xlsx` 以外のファイルについて、戻り値の `ignoredTypes` に MIME ごとの `{count, sampleName}` を入れる（`sampleName` は並べ替えで最初に出会った名前）。中身は読まない。
+3. **読まないファイルの種類：**本番の診断で、明細フォルダの 76 本のうち 75 本に拡張子が無いと分かった。`csv`・`xlsx` 以外のファイルについて、戻り値の `ignoredTypes` に MIME ごとの `{count, sampleName}` を入れる（`sampleName` は並べ替えで最初に出会った名前）。中身は読まない。ショートカットは指す先の種類も鍵に入れる（`<MIME> -> <指す先の MIME>`）。
+4. **Google スプレッドシート：**3 の結果、明細は Google スプレッドシート 53 本とショートカット 23 本で、CSV は 0 本だった。診断だけ、スプレッドシートを `SpreadsheetApp.openById` で直接読み、Excel と同じ形（`fileType` は判定へ `xlsx`、報告は `gsheet`）で判定と抽出まで調べる。一時ファイルを作らないので作業フォルダは要らない。取込の本体（`scanUnprocessedFiles`・`readFile`）は変えない。
 
 ## 4. テスト（`test/phase6-csv-excel-same.test.js`、新規）
 
@@ -201,7 +202,8 @@ function billingDateTextsCanonical_(subject) {
 - **diag 21（資料共有の段）：**資料共有の下に年度があるとき、年度が無ければ資料共有の子を候補に止まり、年度があれば明細の下だけ読む。顧客フォルダ・資料共有・過年度のファイルは読まない。
 - **diag 22（資料共有が 2 つ）：**下りずに `YEAR_FOLDER_REQUIRED` で止まり、ファイルを読まない。
 - **diag 23（Excel）：**作業フォルダが空なら `EXCEL_NOT_READ` で読まず、隣の CSV は読む。設定すれば読む。`diag 10` は Excel を読むので作業フォルダを設定する。
-- **diag 24（読まないファイルの種類）：**`ignoredTypes` に MIME ごとの本数と名前の例だけが入り、中身は出ず、`__proto__` のような MIME でも数えられる。
+- **diag 24（読まないファイルの種類）：**`ignoredTypes` に MIME ごとの本数と名前の例だけが入り、中身は出ず、`__proto__` のような MIME でも数えられる。ショートカットは指す先の種類も出る。
+- **diag 25（Google スプレッドシート）：**`readFile` も一時ファイルも使わず判定・抽出まで進む。開けないものは `READ_FAILED` で次へ進む。取引の中身は報告に出ない。
 
 §3.6 に合わせ、既存の diag の Drive の世界は 当事業年度 → 経理 → クレカ明細 の形に直してよい。`assert` の意味は変えない。`diag 3` の深さは明細フォルダから数える。
 
@@ -252,6 +254,9 @@ function billingDateTextsCanonical_(subject) {
 - R35：`EXCEL_NOT_READ` で次のファイルへ進まない
 - R36：`ignoredTypes` の本数を増やさない
 - R37：`ignoredTypes` の辞書を原型ありにする
+- R38：スプレッドシートを読まない
+- R39：スプレッドシートを `readFile` へ渡す
+- R40：ショートカットの指す先を出さない
 
 ## 6. 本番での実行（私が行う。利用者の許可を得てから）
 

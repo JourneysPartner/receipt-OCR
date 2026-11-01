@@ -861,18 +861,46 @@ module.exports = ({test, assert, gas}) => {
 
   test('diag 24: unread files report only their type counts and one sample name', () => {
     const {statement} = world();
-    const sheet = 'application/vnd.google-apps.spreadsheet';
-    [['架空二月', sheet], ['架空一月', sheet], ['架空領収書.pdf', 'application/pdf'], ['constructor', '__proto__']]
+    const shortcut = 'application/vnd.google-apps.shortcut', pointsAt = 'application/vnd.google-apps.spreadsheet';
+    [['架空二月', shortcut], ['架空一月', shortcut], ['架空領収書.pdf', 'application/pdf'], ['constructor', '__proto__']]
       .forEach(([name, contentType], i) => {
-        gas.stubs.createFile('diag-type-fake-' + i, {name, contentType, bytes: Buffer.from('FAKE_PRIVATE_CONTENT')});
+        gas.stubs.createFile('diag-type-fake-' + i, {name, contentType, targetMimeType: pointsAt,
+          bytes: Buffer.from('FAKE_PRIVATE_CONTENT')});
         statement.fileIds.push('diag-type-fake-' + i);
       });
     const report = mock({readFile() { assert.fail('unread types must not be read'); }}, () => diagnose());
-    assert.deepEqual(Object.keys(report.ignoredTypes).sort(), ['__proto__', 'application/pdf', sheet].sort());
-    assert.deepEqual(report.ignoredTypes[sheet], {count: 2, sampleName: '架空一月'});
+    const key = shortcut + ' -> ' + pointsAt;
+    assert.deepEqual(Object.keys(report.ignoredTypes).sort(), ['__proto__', 'application/pdf', key].sort());
+    assert.deepEqual(report.ignoredTypes[key], {count: 2, sampleName: '架空一月'});
     assert.deepEqual(report.ignoredTypes['application/pdf'], {count: 1, sampleName: '架空領収書.pdf'});
     assert.equal(report.counts.ignoredFiles, 4);
     assert.equal(JSON.stringify(report).includes('FAKE_PRIVATE_CONTENT'), false);
+  });
+
+  test('diag 25: a Google Sheet is read directly with no temporary file or work folder', () => {
+    const {statement} = world(); installDiagnosticFormat();
+    const mime = 'application/vnd.google-apps.spreadsheet', id = 'diag-gsheet-fake';
+    gas.stubs.createSpreadsheet(id, {sheets: [{name: 'FAKE_UNRELATED_SHEET', maxRows: 1, maxColumns: 1, values: [['架空無関係']]},
+      {name: 'FAKE_SHEET', maxRows: 2, maxColumns: 4,
+        values: [['架空日付', '架空店名', '架空金額', '架空用途'],
+        [new Date('2025-11-30T00:00:00Z'), 'FAKE_PRIVATE_SHOP', 1763, 'FAKE_PRIVATE_PURPOSE']]}]});
+    gas.stubs.createFile(id, {name: '架空三月分', contentType: mime});
+    gas.stubs.createFile('diag-gsheet-missing-fake', {name: '架空四月分', contentType: mime});
+    gas.stubs.createFile('diag-gsheet-after-fake', {name: '架空五月分.pdf', contentType: 'application/pdf'});
+    statement.fileIds.push(id, 'diag-gsheet-missing-fake', 'diag-gsheet-after-fake');
+    const ids = gas.stubs.getSpreadsheetIds().slice().sort();
+    const report = mock({
+      readFile() { assert.fail('a Google Sheet must not go through readFile'); },
+      convertXlsxToTemp() { assert.fail('a Google Sheet needs no temporary copy'); }
+    }, () => diagnose());
+    const [sheet, missing] = allFiles(report);
+    assert.equal(sheet.fileType, 'gsheet'); assert.equal(sheet.status, 'RESOLVED');
+    assert.equal(sheet.formatId, 'diag_format_fake'); assert.equal(sheet.txCount, 1);
+    assert.equal(missing.fileType, 'gsheet'); assert.equal(missing.status, 'READ_FAILED');
+    assert.equal(report.counts.examined, 2); assert.equal(report.counts.ignoredFiles, 1);
+    assert.deepEqual(Object.keys(report.ignoredTypes), ['application/pdf']);
+    assert.deepEqual(gas.stubs.getSpreadsheetIds().slice().sort(), ids);
+    for (const secret of ['FAKE_PRIVATE_SHOP', 'FAKE_PRIVATE_PURPOSE']) assert.equal(JSON.stringify(report).includes(secret), false);
   });
 
 };

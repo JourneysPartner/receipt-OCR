@@ -407,6 +407,7 @@ class MemoryDriveFile {
     // Drive.Files.copy の変換シミュレーション用。XLSXの中身をシート配列で
     // 持たせる（実DriveはバイナリをGoogleシートへ変換する）。
     this.xlsxSheets = options.xlsxSheets || null;
+    this.targetMimeType = options.targetMimeType || null;
     this.createdTime = options.createdTime ? new Date(options.createdTime) : this.lastUpdated;
     this.revisionId = options.revisionId || null;
   }
@@ -415,6 +416,7 @@ class MemoryDriveFile {
   setName(name) { if (!this.renameAllowed) throw new Error('Drive rename denied'); this.name = String(name); return this; }
   getBlob() { return this.utilities.newBlob(this.bytes, this.contentType, this.name); }
   getMimeType() { return this.contentType; }
+  getTargetMimeType() { return this.targetMimeType; }
   getSize() { return this.bytes.length; }
   getLastUpdated() { return new Date(this.lastUpdated.getTime()); }
 }
