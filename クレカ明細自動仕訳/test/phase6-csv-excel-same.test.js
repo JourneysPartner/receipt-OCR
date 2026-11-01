@@ -859,4 +859,20 @@ module.exports = ({test, assert, gas}) => {
     });
   });
 
+  test('diag 24: unread files report only their type counts and one sample name', () => {
+    const {statement} = world();
+    const sheet = 'application/vnd.google-apps.spreadsheet';
+    [['架空二月', sheet], ['架空一月', sheet], ['架空領収書.pdf', 'application/pdf'], ['constructor', '__proto__']]
+      .forEach(([name, contentType], i) => {
+        gas.stubs.createFile('diag-type-fake-' + i, {name, contentType, bytes: Buffer.from('FAKE_PRIVATE_CONTENT')});
+        statement.fileIds.push('diag-type-fake-' + i);
+      });
+    const report = mock({readFile() { assert.fail('unread types must not be read'); }}, () => diagnose());
+    assert.deepEqual(Object.keys(report.ignoredTypes).sort(), ['__proto__', 'application/pdf', sheet].sort());
+    assert.deepEqual(report.ignoredTypes[sheet], {count: 2, sampleName: '架空一月'});
+    assert.deepEqual(report.ignoredTypes['application/pdf'], {count: 1, sampleName: '架空領収書.pdf'});
+    assert.equal(report.counts.ignoredFiles, 4);
+    assert.equal(JSON.stringify(report).includes('FAKE_PRIVATE_CONTENT'), false);
+  });
+
 };
