@@ -558,6 +558,10 @@ function createGasStubs() {
   folderHandle = (folder) => ({
     getId: () => folder.id,
     getName: () => folder.name,
+    getParents: () => iteratorFor(Array.from(folders.values())
+      .filter((parent) => parent.readAllowed !== false &&
+        (parent.subFolderIds || []).map(String).includes(String(folder.id)))
+      .map((parent) => folderHandle(parent))),
     getFiles: () => iteratorFor((folder.fileIds || [])
       .map((id) => driveFileHandle(id)).filter(Boolean)),
     getFolders: () => iteratorFor((folder.subFolderIds || [])
