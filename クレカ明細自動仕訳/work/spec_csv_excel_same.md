@@ -1,6 +1,6 @@
 # CSV と Excel を同じものとして扱う 仕様書
 
-版：1.3（2026-11-02。実際の顧客フォルダに合わせて診断に「資料共有」の段を足し、作業フォルダが無いときは Excel を読まない。§3.7）
+版：1.4（2026-11-03。診断がショートカットの指す先まで読み、場所・二重・名前の金額を返す。用途の値と読めない行の型を求めに応じて返す。§3.8）
 対象：`src/13_CardDetector.gs`・`src/24_Parser_Generic.gs`・`src/97_Ops.gs`（運用関数 2 つとその部品）。
 発端：2026-11-01、利用者の決定「CSV でも Excel でも同じものとして欲しい」。本番の明細はほとんど CSV で、最初の本番の顧客（以下「1 人目の顧客」）の明細を通す準備である。
 
@@ -170,6 +170,25 @@ function billingDateTextsCanonical_(subject) {
 3. **読まないファイルの種類：**本番の診断で、明細フォルダの 76 本のうち 75 本に拡張子が無いと分かった。`csv`・`xlsx` 以外のファイルについて、戻り値の `ignoredTypes` に MIME ごとの `{count, sampleName}` を入れる（`sampleName` は並べ替えで最初に出会った名前）。中身は読まない。ショートカットは指す先の種類も鍵に入れる（`<MIME> -> <指す先の MIME>`）。
 4. **Google スプレッドシート：**3 の結果、明細は Google スプレッドシート 53 本とショートカット 23 本で、CSV は 0 本だった。診断だけ、スプレッドシートを `SpreadsheetApp.openById` で直接読み、Excel と同じ形（`fileType` は判定へ `xlsx`、報告は `gsheet`）で判定と抽出まで調べる。一時ファイルを作らないので作業フォルダは要らない。取込の本体（`scanUnprocessedFiles`・`readFile`）は変えない。
 
+### 3.8 ショートカットの指す先（1.4 の変更）
+
+発端：本番の診断で、明細フォルダの 76 本のうち 23 本がショートカットだった（指す先はスプレッドシート 21・PDF 1・フォルダ 1）。利用者の決定「ショートカットも読む」。取込の本体へ入れる前に、指す先の場所・形式・二重の有無を読むだけで確かめる。**取込の本体は変えない。**
+
+1. **対象：**MIME が `application/vnd.google-apps.shortcut` のファイルは `ignoredTypes` に数えず、調べる対象に入れる（名前の順・`skip`・`nextSkip`・時間予算は他のファイルと同じ）。`counts.shortcuts` に本数を数える（`counts.examined` にも入る）。名前が `.csv` で終わるショートカットもショートカットとして扱う。
+2. **指す先：**`getTargetId()`・`getTargetMimeType()`。どちらかが空か例外なら `status: 'SHORTCUT_TARGET_UNKNOWN'`。指す先がフォルダなら `DriveApp.getFolderById`、ほかは `DriveApp.getFileById` で開き、名前を読む。例外は `status: 'SHORTCUT_TARGET_UNREADABLE'`・`code`。
+3. **場所：**指す先から親を 1 つずつたどる（最大 16 段）。顧客フォルダに着いたら止める。指す先そのものかたどった親に明細フォルダがあれば `place: 'STATEMENT'`、当事業年度フォルダがあれば `'YEAR'`、顧客フォルダに着けば `'CUSTOMER'`、親が無くなれば `'OUTSIDE'`、16 段で着かないか親が読めなければ `'UNKNOWN'`。指す先が顧客フォルダそのものなら `'CUSTOMER'`。`path` は `STATEMENT`・`YEAR`・`CUSTOMER` のときだけ、顧客フォルダより下の親の名前（上から順、指す先の名前は入れない）。`OUTSIDE`・`UNKNOWN` は名前を出さない（`null`）。親が 2 つ以上ある段では先頭をたどり `multipleParents: true`。
+4. **読み方：**
+   - 指す先がスプレッドシートか、名前が `.csv`・`.xlsx` のファイル → 普通のファイルと同じ `diagExamineFile_` で調べる（Excel は作業フォルダが無ければ `EXCEL_NOT_READ`）。報告の `name` はショートカットの名前、`fileType`・`size` などは指す先のもの。場所によらず読む（顧客フォルダの外でも、当事業年度の外でも。ショートカットは利用者の明示の指示で読む）。
+   - フォルダ → `status: 'SHORTCUT_FOLDER'`。直下だけを名前の順に見て、スプレッドシート・`.csv`・`.xlsx` は `diagExamineFile_` で調べて `inner` に入れる。ほかは `innerIgnoredTypes`（`ignoredTypes` と同じ形）に数える。中のショートカットはたどらず `innerIgnoredTypes` に `<MIME> -> <指す先の MIME>` で数える。子フォルダは中を見ず `innerFolders` に数だけ。`inner` は `counts` に入れない。中のファイルの前ごとに時間予算を確かめ、超えたらこのショートカットを報告に入れず `TIME_BUDGET`、`nextSkip` はこのショートカットの番号（続きはこのフォルダの最初から）。一覧が例外なら `SHORTCUT_TARGET_UNREADABLE`。
+   - ほか（PDF など）→ `status: 'SHORTCUT_TARGET_NOT_READ'`。中身は読まない。
+5. **報告の形：**ショートカットの項目に `shortcut: {targetId, targetName, targetMimeType, place, path, multipleParents, alsoListed, sameTarget}` を足す。`alsoListed` は指す先の ID が、たどった範囲の普通のファイル（種類によらない）にもあるか。`sameTarget` は同じ指す先を持つショートカットの本数（自分を含む）。どちらも、`skip` で飛ばしたものを含めて一覧の段階で数え、範囲を最後までたどったときだけ値を入れる（`TIME_BUDGET` で止まったら `null`、指す先の ID が無ければ `null`）。
+6. **名前の金額：**`RESOLVED` で、名前を NFKC にして `(数字とカンマ)円` があれば、読めた金額（`amountBillingJpy` が `null` でないもの）の合計と比べて `nameTotal: 'MATCH'` か `'DIFFERENT'`。名前はショートカットの名前を先に、無ければ指す先（普通のファイルはそのファイル）の名前を見る。合計の値は出さない。金額が無ければ `nameTotal` を入れない。
+7. **`options.details === true` のときだけ（既定は出さない）、`RESOLVED` の項目に：**
+   - `purposeValues`：空でない用途の値ごとの件数、多い順（同数は値の順）に 10 件 `{value, count}`。値は NFKC、数字は `9`、16 文字まで。`様` か `さん` を含む値は `'(様)'`。`purposeDistinct` は値の種類の数。用途の列が本当に用途か、カード会社の備考かを見分けるため。
+   - `unreadableRows`：日付か金額が読めない取引の先頭 10 行 `{row, kinds, markers}`。`kinds` は型の並び（行末の空は除く）。`markers` は文字のセルに含まれる決まった語（`小計`・`合計`・`総計`・`計`・`繰越`・`調整`・`値引`・`割引`・`手数料`・`年会費`・`利息`・`入金`・`返金`・`取消`・`分割`・`リボ`・`家族`・`本人`・`様`）だけ。文字そのものは出さない。
+8. **`options.shortcutsOnly === true`：**ショートカットだけを調べる対象にする。普通のファイルは一覧して `alsoListed` に使うが、読まず、番号も付けない（`skip`・`nextSkip` はショートカットだけで数える）。
+9. **型の並びの直し：**`shape` と `unreadableRows` の型は、`number` のセルを日付より先に `N` とする。今までは数のセルが日付のシリアルとして読めるので、スプレッドシートと Excel の金額がすべて `D` と出ていた。日付のセルは `Date` で来るので `D` のまま。CSV（全部文字列）は変わらない。
+
 ## 4. テスト（`test/phase6-csv-excel-same.test.js`、新規）
 
 実在の店名・人名・ID・カード番号を書かない。実サンプルの値を写さない。`csvx 9` だけ `test/fixtures/samples/` を読む（手元専用。`phase6-real-samples.test.js` と同じ読み方）。
@@ -205,6 +224,13 @@ function billingDateTextsCanonical_(subject) {
 - **diag 24（読まないファイルの種類）：**`ignoredTypes` に MIME ごとの本数と名前の例だけが入り、中身は出ず、`__proto__` のような MIME でも数えられる。ショートカットは指す先の種類も出る。
 - **diag 25（Google スプレッドシート）：**`readFile` も一時ファイルも使わず判定・抽出まで進む。開けないものは `READ_FAILED` で次へ進む。取引の中身は報告に出ない。
 
+- **diag 26（ショートカット・場所）：**明細フォルダ・過年度・当事業年度の別フォルダ・顧客フォルダの外にある指す先を、どれも `readFile` を使わず読み `RESOLVED`。`place`・`path`・`alsoListed`・`sameTarget`（同じ指す先 2 本）。`ignoredTypes` に入らない。外の場所の名前と取引の中身は報告に出ない。マスター・ファイルに書かない。
+- **diag 27（読まない指す先）：**PDF は `SHORTCUT_TARGET_NOT_READ`（中身を読まない）、無い指す先は `SHORTCUT_TARGET_UNREADABLE`・`code`、ID が無いものは `SHORTCUT_TARGET_UNKNOWN`（`alsoListed`・`sameTarget` は `null`）。CSV の指す先は `readFile` で読み、Excel は作業フォルダが無ければ `EXCEL_NOT_READ`。親が 2 つ → `multipleParents`。17 段の深さ → `UNKNOWN`・`path: null`。どれのあとも次のショートカットへ進む。
+- **diag 28（フォルダの指す先）：**直下のスプレッドシートだけ `inner` に読む。PDF と中のショートカットは `innerIgnoredTypes`、子フォルダは `innerFolders` に数だけ（中を読まない）。`inner` は `counts` に入らない。中の途中で時間が尽きると報告に入れず `nextSkip` はそのショートカット、続きから全部読める。
+- **diag 29（名前の金額）：**全角・カンマ付きの金額、読めない金額を除いた合計、ショートカットの名前に無ければ指す先の名前。`MATCH`・`DIFFERENT`、金額が無ければ鍵なし。合計と行の金額は報告に出ない。
+- **diag 30（details）：**既定では鍵なし。`details: true` で `purposeValues`（数字を伏せる・「様」「さん」を伏せる・10 件まで・`purposeDistinct`）と `unreadableRows`（型と決まった語だけ・10 行まで）。氏名・店名・小計の文字・金額は出ない。
+- **diag 31（shortcutsOnly）：**普通のファイルを読まず、ショートカットだけを番号付きで調べる。`alsoListed` は読まないファイルでも効く。時間で止まると `alsoListed`・`sameTarget` は `null`、`skip` の続きでは飛ばした分も `sameTarget` に数える。
+- **diag 24 の変更：**ショートカットは `ignoredTypes` に入らず、調べる対象（指す先の ID が無いので `SHORTCUT_TARGET_UNKNOWN`）。`diag 15` の `counts` に `shortcuts: 0` が入る。
 §3.6 に合わせ、既存の diag の Drive の世界は 当事業年度 → 経理 → クレカ明細 の形に直してよい。`assert` の意味は変えない。`diag 3` の深さは明細フォルダから数える。
 
 既存のテストで変えてよいのは次の 3 か所だけ：
@@ -257,6 +283,37 @@ function billingDateTextsCanonical_(subject) {
 - R38：スプレッドシートを読まない
 - R39：スプレッドシートを `readFile` へ渡す
 - R40：ショートカットの指す先を出さない
+- R41：ショートカットを読まない
+- R42：STATEMENT と YEAR の順
+- R43：外でも path
+- R44：multipleParents を立てない
+- R45：段の上限を外す
+- R46：PDF も読む
+- R47：止まっても alsoListed
+- R48：skip 分を sameTarget に数えない
+- R49：子フォルダの中を読む
+- R50：中のショートカットをたどる
+- R51：中で尽きても途中を入れる
+- R52：名前の金額を指す先だけで
+- R52b：ショートカットの名前を先に見ない
+- R53：読めない金額を数える
+- R53b：NFKC を外す
+- R54：details が無くても出す
+- R55：用途の数字を伏せない
+- R56：様を伏せない
+- R56b：さんを伏せない
+- R56c：10 件を超えて出す
+- R56d：読めない行を 10 行で止めない
+- R56e：決まった語の代わりに文字を出す
+- R57：数を日付の後に
+- R58：shortcutsOnly でも読む
+- R59：普通のファイルを alsoListed に数えない
+- R60：顧客フォルダで止めない
+- R61：ショートカットの名前を指す先の名前に
+- R62：指す先が読めない例外を投げる
+- R63：counts.shortcuts を数えない
+- R65：フォルダの指す先を getFileById で開く
+- R66：details をショートカットへ渡さない
 
 ## 6. 本番での実行（私が行う。利用者の許可を得てから）
 
@@ -280,3 +337,4 @@ function billingDateTextsCanonical_(subject) {
 - 請求月の 0 埋めの変異は `csvx 9`（手元の実サンプル）でだけ赤になる。
 - 1.2 の実装は Codex 1 回（1782 → 1787、R21〜R30 すべて赤）。`src` の差分は `opsDiagnoseCustomerFolder` と部品 `diagChooseChildFolder_` だけ。ID の空文字は「未指定」でなく「不一致」として止める（`null`・`undefined` は未指定）。監査で変異を 20 個足し、18 個は赤。すり抜けた 2 個のうち「空文字を未指定にする」は `diag 19` で赤にした。「同じ名前の子の ID の順を外す」は候補の表示順だけで選び方に効かないので残した。`diagSortedEntries_` を使い回さないのは、名前を 1 回だけ聞く決まりを保つため。
 - 1.3 の実装は小さな直しなので Claude Code が直接行った（1787 → 1790、R31〜R35 と追加の変異 4 つすべて赤）。資料共有の有無を見るので顧客フォルダの子を 2 回一覧する（`diag 17`・`diag 19` の期待に足した。読むフォルダの範囲は変わらない）。`diag 9`・`diag 10` は Excel を読むので作業フォルダを設定する。
+- 1.4 の実装も Claude Code が直接行った（1792 → 1798）。変異 R41〜R66 の 31 個のうち 29 個が赤、すり抜けた 2 個（R52b 名前の金額の優先順・R66 `details` を指す先へ渡す）は `diag 29`・`diag 30` に足して赤にした。数のセルが `D` と出ていた件（§3.8 の 9）はテストを書く途中で見つけた。1.3 までの本番の診断で、スプレッドシートの金額の列が `D` と出ていたのはこのため。

@@ -408,6 +408,7 @@ class MemoryDriveFile {
     // 持たせる（実DriveはバイナリをGoogleシートへ変換する）。
     this.xlsxSheets = options.xlsxSheets || null;
     this.targetMimeType = options.targetMimeType || null;
+    this.targetId = options.targetId || null;
     this.createdTime = options.createdTime ? new Date(options.createdTime) : this.lastUpdated;
     this.revisionId = options.revisionId || null;
   }
@@ -417,6 +418,7 @@ class MemoryDriveFile {
   getBlob() { return this.utilities.newBlob(this.bytes, this.contentType, this.name); }
   getMimeType() { return this.contentType; }
   getTargetMimeType() { return this.targetMimeType; }
+  getTargetId() { return this.targetId; }
   getSize() { return this.bytes.length; }
   getLastUpdated() { return new Date(this.lastUpdated.getTime()); }
 }

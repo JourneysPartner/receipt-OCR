@@ -678,7 +678,7 @@ module.exports = ({test, assert, gas}) => {
       assert.deepEqual(report.folderChoices, {level, choices});
       assert.equal(report.customerFolder.id, 'diag-customer-fake');
       assert.equal(report.statementFolder, null);
-      assert.deepEqual(report.counts, {folders: 0, examined: 0, ignoredFiles: 0, byStatus: {}, byFormat: {}});
+      assert.deepEqual(report.counts, {folders: 0, examined: 0, shortcuts: 0, ignoredFiles: 0, byStatus: {}, byFormat: {}});
       assert.deepEqual(report.folders, []); assert.deepEqual(report.csvOnlyFormats, []);
       assert.equal(report.nextSkip, null);
       assert.deepEqual(access.files, []);
@@ -869,11 +869,12 @@ module.exports = ({test, assert, gas}) => {
         statement.fileIds.push('diag-type-fake-' + i);
       });
     const report = mock({readFile() { assert.fail('unread types must not be read'); }}, () => diagnose());
-    const key = shortcut + ' -> ' + pointsAt;
-    assert.deepEqual(Object.keys(report.ignoredTypes).sort(), ['__proto__', 'application/pdf', key].sort());
-    assert.deepEqual(report.ignoredTypes[key], {count: 2, sampleName: '架空一月'});
+    // ショートカットは 1.4 から読む対象になり、種類の数には入らない（diag 26 以降）。
+    assert.deepEqual(Object.keys(report.ignoredTypes).sort(), ['__proto__', 'application/pdf'].sort());
     assert.deepEqual(report.ignoredTypes['application/pdf'], {count: 1, sampleName: '架空領収書.pdf'});
-    assert.equal(report.counts.ignoredFiles, 4);
+    assert.equal(report.counts.ignoredFiles, 2); assert.equal(report.counts.shortcuts, 2);
+    assert.deepEqual(allFiles(report).map(f => [f.name, f.status]),
+      [['架空一月', 'SHORTCUT_TARGET_UNKNOWN'], ['架空二月', 'SHORTCUT_TARGET_UNKNOWN']]);
     assert.equal(JSON.stringify(report).includes('FAKE_PRIVATE_CONTENT'), false);
   });
 
@@ -903,4 +904,258 @@ module.exports = ({test, assert, gas}) => {
     for (const secret of ['FAKE_PRIVATE_SHOP', 'FAKE_PRIVATE_PURPOSE']) assert.equal(JSON.stringify(report).includes(secret), false);
   });
 
+
+  const SHORTCUT_MIME = 'application/vnd.google-apps.shortcut', SHEET_MIME = 'application/vnd.google-apps.spreadsheet',
+    FOLDER_MIME = 'application/vnd.google-apps.folder';
+  function sheetGrid(amounts, purposes = []) {
+    return [['架空日付', '架空店名', '架空金額', '架空用途']].concat(amounts.map((amount, i) =>
+      [i < 28 ? new Date(Date.UTC(2025, 10, 28 - i)) : '2025/10/01', 'FAKE_PRIVATE_SHOP', amount,
+        purposes[i] === undefined ? 'FAKE_PRIVATE_PURPOSE' : purposes[i]]));
+  }
+  function addSheet(folder, id, name, grid = sheetGrid([1801])) {
+    gas.stubs.createSpreadsheet(id, {sheets: [{name: 'FAKE_SHEET', maxRows: grid.length, maxColumns: grid[0].length,
+      values: grid}]});
+    gas.stubs.createFile(id, {name, contentType: SHEET_MIME});
+    if (folder) folder.fileIds.push(id);
+    return id;
+  }
+  function addShortcut(folder, id, name, targetId, targetMimeType = SHEET_MIME) {
+    gas.stubs.createFile(id, {name, contentType: SHORTCUT_MIME, targetId, targetMimeType});
+    folder.fileIds.push(id);
+    return id;
+  }
+  const byName = (report, name) => allFiles(report).find(f => f.name === name);
+  function pastStatement(customer) {
+    const year = gas.stubs.createFolder('diag-past-year-fake', {name: '2025年度', parentId: customer.id});
+    const accounting = gas.stubs.createFolder('diag-past-accounting-fake', {name: '経費', parentId: year.id});
+    const statement = gas.stubs.createFolder('diag-past-statement-fake', {name: 'クレカ明細', parentId: accounting.id});
+    return gas.stubs.createFolder('diag-past-card-fake', {name: 'カードA', parentId: statement.id});
+  }
+
+  test('diag 26: shortcuts read their sheet target and report where it lives without writing', () => {
+    const {customer, year, statement} = world(); installDiagnosticFormat();
+    const card = gas.stubs.createFolder('diag-card-fake', {name: 'カードA', parentId: statement.id});
+    const pastCard = pastStatement(customer);
+    const otherDocs = gas.stubs.createFolder('diag-other-docs-fake', {name: 'FAKE_OTHER_DOCS', parentId: year.id});
+    const outside = gas.stubs.createFolder('diag-outside-place-fake', {name: 'FAKE_OUTSIDE_PLACE'});
+    addSheet(card, 'diag-target-in-fake', '架空明細一月');
+    addSheet(pastCard, 'diag-target-past-fake', '架空明細前年');
+    addSheet(otherDocs, 'diag-target-year-fake', '架空明細年度内');
+    addSheet(outside, 'diag-target-out-fake', '架空明細外');
+    addShortcut(card, 'diag-sc-in-fake', '【済】架空一月', 'diag-target-in-fake');
+    addShortcut(statement, 'diag-sc-same-fake', '架空同じ先', 'diag-target-in-fake');
+    addShortcut(card, 'diag-sc-past-fake', '架空前年', 'diag-target-past-fake');
+    addShortcut(card, 'diag-sc-year-fake', '架空年度内', 'diag-target-year-fake');
+    addShortcut(card, 'diag-sc-out-fake', '架空外', 'diag-target-out-fake');
+    const before = snapshot(), files = ['diag-sc-in-fake', 'diag-target-in-fake'].map(id => plain(gas.stubs.getFile(id)));
+    gas.stubs.resetRoundTrips(); gas.stubs.resetApiCallCounts();
+    const report = mock({readFile() { assert.fail('sheet targets need no readFile'); }}, () => diagnose());
+    assert.equal(gas.stubs.roundTrips().rangeWrites, 0); assert.equal(gas.stubs.getApiCallCounts().cellsWritten, 0);
+    assert.deepEqual(snapshot(), before);
+    assert.deepEqual(['diag-sc-in-fake', 'diag-target-in-fake'].map(id => plain(gas.stubs.getFile(id))), files);
+    assert.equal(report.stoppedBy, null);
+    assert.equal(report.counts.examined, 6); assert.equal(report.counts.shortcuts, 5);
+    assert.deepEqual(report.counts.byStatus, {RESOLVED: 6}); assert.deepEqual(report.counts.byFormat, {diag_format_fake: 6});
+    assert.deepEqual(Object.keys(report.ignoredTypes), []); assert.equal(report.counts.ignoredFiles, 0);
+    assert.deepEqual(report.folders.map(f => [f.path.join('/'), f.files.map(i => i.name)]), [
+      ['2026年度/経費/クレカ明細', ['架空同じ先']],
+      ['2026年度/経費/クレカ明細/カードA', ['【済】架空一月', '架空前年', '架空外', '架空年度内', '架空明細一月']]]);
+    const inScope = byName(report, '【済】架空一月');
+    assert.equal(inScope.fileType, 'gsheet'); assert.equal(inScope.status, 'RESOLVED'); assert.equal(inScope.txCount, 1);
+    assert.deepEqual(inScope.shortcut, {targetId: 'diag-target-in-fake', targetName: '架空明細一月',
+      targetMimeType: SHEET_MIME, place: 'STATEMENT', path: ['2026年度', '経費', 'クレカ明細', 'カードA'],
+      multipleParents: false, alsoListed: true, sameTarget: 2});
+    assert.deepEqual(byName(report, '架空同じ先').shortcut.sameTarget, 2);
+    assert.equal(Object.hasOwn(byName(report, '架空明細一月'), 'shortcut'), false);
+    const past = byName(report, '架空前年').shortcut;
+    assert.deepEqual([past.place, past.path, past.alsoListed, past.sameTarget],
+      ['CUSTOMER', ['2025年度', '経費', 'クレカ明細', 'カードA'], false, 1]);
+    const inYear = byName(report, '架空年度内').shortcut;
+    assert.deepEqual([inYear.place, inYear.path, inYear.alsoListed], ['YEAR', ['2026年度', 'FAKE_OTHER_DOCS'], false]);
+    const out = byName(report, '架空外');
+    assert.equal(out.status, 'RESOLVED');
+    assert.deepEqual([out.shortcut.place, out.shortcut.path, out.shortcut.alsoListed], ['OUTSIDE', null, false]);
+    const text = JSON.stringify(report);
+    for (const secret of ['FAKE_OUTSIDE_PLACE', 'FAKE_PRIVATE_SHOP', 'FAKE_PRIVATE_PURPOSE', '1801']) {
+      assert.equal(text.includes(secret), false, 'shortcut report discloses ' + secret);
+    }
+    assert.equal(gas.stubs.getLogs().at(-1), text);
+  });
+
+  test('diag 27: other targets stop safely and the next shortcut is still read', () => {
+    const {customer, year, statement} = world(); installDiagnosticFormat();
+    const docs = gas.stubs.createFolder('diag-docs-fake', {name: 'FAKE_DOCS', parentId: year.id});
+    gas.stubs.createFile('diag-pdf-target-fake', {name: '架空領収書.pdf', contentType: 'application/pdf',
+      bytes: Buffer.from('FAKE_PRIVATE_CONTENT')});
+    docs.fileIds.push('diag-pdf-target-fake');
+    const csvId = addFile(docs, '架空明細.csv', [['架空日付', '架空店名', '架空金額', '架空用途'],
+      ['2025/11/30', 'FAKE_PRIVATE_SHOP', 1811, 'FAKE_PRIVATE_PURPOSE']], 'diag-csv-target-fake');
+    gas.stubs.createFile('diag-xlsx-target-fake', {name: '架空明細.xlsx', bytes: Buffer.from('FAKE_XLSX'),
+      contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    docs.fileIds.push('diag-xlsx-target-fake');
+    const shared = gas.stubs.createFolder('diag-second-parent-fake', {name: 'FAKE_SECOND_PARENT'});
+    addSheet(docs, 'diag-multi-target-fake', '架空二つの親');
+    shared.fileIds.push('diag-multi-target-fake');
+    let deep = customer;
+    for (let i = 0; i < 17; i += 1) deep = gas.stubs.createFolder('diag-deep-fake-' + i, {name: 'D' + i, parentId: deep.id});
+    addSheet(deep, 'diag-deep-target-fake', '架空深い');
+    addShortcut(statement, 'diag-sc-1', 'A架空PDF', 'diag-pdf-target-fake', 'application/pdf');
+    addShortcut(statement, 'diag-sc-2', 'B架空無い先', 'diag-missing-target-fake');
+    addShortcut(statement, 'diag-sc-3', 'C架空先不明', null);
+    addShortcut(statement, 'diag-sc-4', 'D架空CSV', csvId, 'text/csv');
+    addShortcut(statement, 'diag-sc-5', 'E架空Excel', 'diag-xlsx-target-fake',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    addShortcut(statement, 'diag-sc-6', 'F架空二つの親', 'diag-multi-target-fake');
+    addShortcut(statement, 'diag-sc-7', 'G架空深い', 'diag-deep-target-fake');
+    const reads = [];
+    const original = gas.context.readFile;
+    const report = mock({readFile(id, ...rest) { reads.push(id); return original(id, ...rest); }}, () => diagnose());
+    assert.deepEqual(reads, [csvId]);
+    assert.equal(report.counts.examined, 7); assert.equal(report.counts.shortcuts, 7);
+    assert.deepEqual(allFiles(report).map(f => [f.name, f.fileType, f.status]), [
+      ['A架空PDF', 'shortcut', 'SHORTCUT_TARGET_NOT_READ'], ['B架空無い先', 'shortcut', 'SHORTCUT_TARGET_UNREADABLE'],
+      ['C架空先不明', 'shortcut', 'SHORTCUT_TARGET_UNKNOWN'], ['D架空CSV', 'csv', 'RESOLVED'],
+      ['E架空Excel', 'xlsx', 'EXCEL_NOT_READ'], ['F架空二つの親', 'gsheet', 'RESOLVED'], ['G架空深い', 'gsheet', 'RESOLVED']]);
+    const pdf = byName(report, 'A架空PDF').shortcut;
+    assert.deepEqual([pdf.targetName, pdf.place, pdf.path, pdf.alsoListed], ['架空領収書.pdf', 'YEAR', ['2026年度', 'FAKE_DOCS'], false]);
+    const missing = byName(report, 'B架空無い先');
+    assert.equal(missing.code, 'Error');
+    assert.deepEqual([missing.shortcut.targetName, missing.shortcut.place, missing.shortcut.alsoListed, missing.shortcut.sameTarget],
+      [null, null, false, 1]);
+    const unknown = byName(report, 'C架空先不明').shortcut;
+    assert.deepEqual([unknown.targetId, unknown.alsoListed, unknown.sameTarget], [null, null, null]);
+    assert.equal(byName(report, 'D架空CSV').txCount, 1);
+    assert.equal(byName(report, 'D架空CSV').shortcut.place, 'YEAR');
+    const multi = byName(report, 'F架空二つの親').shortcut;
+    assert.deepEqual([multi.multipleParents, multi.place], [true, 'YEAR']);
+    const tooDeep = byName(report, 'G架空深い').shortcut;
+    assert.deepEqual([tooDeep.place, tooDeep.path], ['UNKNOWN', null]);
+    const text = JSON.stringify(report);
+    for (const secret of ['FAKE_PRIVATE_CONTENT', 'FAKE_SECOND_PARENT', 'FAKE_PRIVATE_SHOP', '1811', 'D16']) {
+      assert.equal(text.includes(secret), false, 'report discloses ' + secret);
+    }
+  });
+
+  test('diag 28: a folder target reads only its own sheets and resumes at the shortcut when time runs out', () => {
+    const {customer, statement} = world(); installDiagnosticFormat();
+    const year = gas.stubs.createFolder('diag-past-year-fake', {name: '2025年度', parentId: customer.id});
+    const target = gas.stubs.createFolder('diag-folder-target-fake', {name: '【済】架空フォルダ', parentId: year.id});
+    const child = gas.stubs.createFolder('diag-folder-child-fake', {name: 'FAKE_CHILD', parentId: target.id});
+    addSheet(child, 'diag-child-sheet-fake', '架空子の明細');
+    addSheet(null, 'diag-nested-target-fake', '架空入れ子の先');
+    addSheet(target, 'diag-inner-b-fake', 'B架空中の明細');
+    addSheet(target, 'diag-inner-a-fake', 'A架空中の明細');
+    gas.stubs.createFile('diag-inner-pdf-fake', {name: '架空中.pdf', contentType: 'application/pdf'});
+    target.fileIds.push('diag-inner-pdf-fake');
+    addShortcut(target, 'diag-inner-sc-fake', '架空入れ子', 'diag-nested-target-fake');
+    addShortcut(statement, 'diag-sc-folder-fake', 'A架空フォルダ', target.id, FOLDER_MIME);
+    addShortcut(statement, 'diag-sc-after-fake', 'B架空後', 'diag-inner-a-fake');
+    const read = gas.context.diagReadGoogleSheet_, opened = [];
+    const report = mock({diagReadGoogleSheet_(id) { opened.push(id); return read(id); }}, () => diagnose());
+    assert.deepEqual(opened, ['diag-inner-a-fake', 'diag-inner-b-fake', 'diag-inner-a-fake']);
+    const folder = byName(report, 'A架空フォルダ');
+    assert.equal(folder.status, 'SHORTCUT_FOLDER'); assert.equal(folder.fileType, 'shortcut');
+    assert.deepEqual([folder.shortcut.targetName, folder.shortcut.place, folder.shortcut.path, folder.shortcut.alsoListed],
+      ['【済】架空フォルダ', 'CUSTOMER', ['2025年度'], false]);
+    assert.deepEqual(folder.inner.map(f => [f.name, f.status, f.formatId]),
+      [['A架空中の明細', 'RESOLVED', 'diag_format_fake'], ['B架空中の明細', 'RESOLVED', 'diag_format_fake']]);
+    assert.deepEqual(folder.innerIgnoredTypes, {'application/pdf': {count: 1, sampleName: '架空中.pdf'},
+      [SHORTCUT_MIME + ' -> ' + SHEET_MIME]: {count: 1, sampleName: '架空入れ子'}});
+    assert.equal(folder.innerFolders, 1);
+    assert.equal(report.counts.examined, 2); assert.equal(report.counts.shortcuts, 2);
+    assert.deepEqual(report.counts.byStatus, {SHORTCUT_FOLDER: 1, RESOLVED: 1});
+    assert.deepEqual(report.counts.byFormat, {diag_format_fake: 1});
+    assert.equal(byName(report, 'B架空後').shortcut.alsoListed, false);
+    assert.equal(JSON.stringify(report).includes('FAKE_CHILD'), false);
+
+    const realDateNow = gas.context.Date.now;
+    let now = 1000;
+    try {
+      gas.context.Date.now = () => now;
+      const first = mock({diagReadGoogleSheet_(id) { const result = read(id); now += 25; return result; }},
+        () => diagnose(undefined, {timeBudgetMs: 20}));
+      assert.equal(first.stoppedBy, 'TIME_BUDGET'); assert.equal(first.nextSkip, 0);
+      assert.deepEqual(allFiles(first), []); assert.equal(first.counts.examined, 0);
+      const second = diagnose(undefined, {skip: first.nextSkip});
+      assert.equal(second.stoppedBy, null); assert.equal(byName(second, 'A架空フォルダ').inner.length, 2);
+    } finally { gas.context.Date.now = realDateNow; }
+  });
+
+  test('diag 29: an amount in the name is compared with the readable total without revealing it', () => {
+    const {statement} = world(); installDiagnosticFormat();
+    const grid = sheetGrid([1237, 263, '架空金額不明']);
+    addSheet(statement, 'diag-total-target-fake', '架空明細', grid);
+    addSheet(statement, 'diag-total-named-fake', '架空２,０００円分', sheetGrid([2000]));
+    addSheet(statement, 'diag-total-wrong-fake', '架空3000円分', sheetGrid([2999]));
+    addShortcut(statement, 'diag-total-sc-1', '【済】１,５００円架空', 'diag-total-target-fake');
+    addShortcut(statement, 'diag-total-sc-2', '【済】1499円架空', 'diag-total-target-fake');
+    addShortcut(statement, 'diag-total-sc-3', '架空名前なし', 'diag-total-named-fake');
+    addShortcut(statement, 'diag-total-sc-4', '架空２,９９９円の先', 'diag-total-wrong-fake');
+    const report = diagnose();
+    // 両方の名前に金額があれば、スタッフが付けたショートカットの名前を先に見る。
+    assert.equal(byName(report, '架空２,９９９円の先').nameTotal, 'MATCH');
+    assert.equal(byName(report, '【済】１,５００円架空').nameTotal, 'MATCH');
+    assert.equal(byName(report, '【済】1499円架空').nameTotal, 'DIFFERENT');
+    assert.equal(byName(report, '架空名前なし').nameTotal, 'MATCH');
+    assert.equal(byName(report, '架空3000円分').nameTotal, 'DIFFERENT');
+    assert.equal(byName(report, '架空２,０００円分').nameTotal, 'MATCH');
+    assert.equal(Object.hasOwn(byName(report, '架空明細'), 'nameTotal'), false);
+    const text = JSON.stringify(report);
+    for (const secret of ['1500', '1237', '263', '2999']) assert.equal(text.includes(secret), false, 'report discloses ' + secret);
+  });
+
+  test('diag 30: details show masked purpose values and unreadable row shapes only when asked', () => {
+    const {statement} = world(); installDiagnosticFormat();
+    const grid = sheetGrid([1, 2, 3, 4, 5, 6, 7], ['仕入', '仕入', '仕入れ123', '田中様', '鈴木さん接待', '', '仕入']);
+    grid.push(['架空小計', '', -1500, ''], [new Date(Date.UTC(2025, 9, 1)), 'FAKE_PRIVATE_SHOP', '架空金額不明', '仕入れ']);
+    addSheet(statement, 'diag-details-fake', 'A架空明細', grid);
+    const wide = sheetGrid(Array.from({length: 12}, (_, i) => 'FAKE_BAD_' + i), Array.from({length: 12}, (_, i) => 'P' + String.fromCharCode(76 - i)));
+    addSheet(statement, 'diag-details-wide-fake', 'B架空明細', wide);
+    addShortcut(statement, 'diag-details-sc-fake', 'C架空先', 'diag-details-fake');
+    const plainReport = diagnose();
+    assert.equal(Object.hasOwn(byName(plainReport, 'C架空先'), 'purposeValues'), false);
+    for (const key of ['purposeValues', 'purposeDistinct', 'unreadableRows']) {
+      assert.equal(Object.hasOwn(byName(plainReport, 'A架空明細'), key), false);
+    }
+    const report = diagnose(undefined, {details: true}), item = byName(report, 'A架空明細');
+    assert.equal(item.purposeDistinct, 4);
+    assert.deepEqual(item.purposeValues, [{value: '仕入', count: 3}, {value: '(様)', count: 2},
+      {value: '仕入れ', count: 1}, {value: '仕入れ999', count: 1}]);
+    assert.deepEqual(item.unreadableRows, [{row: 9, kinds: 'T||N', markers: ['小計', '計']},
+      {row: 10, kinds: 'D|T|T|T', markers: []}]);
+    assert.deepEqual(byName(report, 'C架空先').purposeValues, item.purposeValues);
+    assert.deepEqual(byName(report, 'C架空先').unreadableRows, item.unreadableRows);
+    const wideItem = byName(report, 'B架空明細');
+    assert.equal(wideItem.purposeDistinct, 12); assert.equal(wideItem.purposeValues.length, 10);
+    assert.deepEqual(wideItem.purposeValues[0], {value: 'PA', count: 1});
+    assert.equal(wideItem.unreadableRows.length, 10); assert.deepEqual(wideItem.unreadableRows[0].row, 2);
+    const text = JSON.stringify(report);
+    for (const secret of ['田中', '鈴木', '架空小計', '123', 'FAKE_PRIVATE_SHOP', 'FAKE_BAD_', '1500']) {
+      assert.equal(text.includes(secret), false, 'details disclose ' + secret);
+    }
+  });
+
+  test('diag 31: shortcutsOnly reads only shortcuts and links are reported only after a full walk', () => {
+    const {statement} = world(); installDiagnosticFormat();
+    addSheet(statement, 'diag-only-target-fake', '架空明細');
+    addFile(statement, '架空.csv');
+    addShortcut(statement, 'diag-only-sc-a', 'A架空', 'diag-only-target-fake');
+    addShortcut(statement, 'diag-only-sc-b', 'B架空', 'diag-only-target-fake');
+    const report = mock({readFile() { assert.fail('shortcutsOnly must not read regular files'); }},
+      () => diagnose(undefined, {shortcutsOnly: true}));
+    assert.deepEqual(allFiles(report).map(f => f.name), ['A架空', 'B架空']);
+    assert.equal(report.counts.examined, 2); assert.equal(report.counts.ignoredFiles, 0);
+    assert.deepEqual(allFiles(report).map(f => [f.shortcut.alsoListed, f.shortcut.sameTarget]), [[true, 2], [true, 2]]);
+    const read = gas.context.diagReadGoogleSheet_, realDateNow = gas.context.Date.now;
+    let now = 1000;
+    try {
+      gas.context.Date.now = () => now;
+      const first = mock({diagReadGoogleSheet_(id) { const result = read(id); now += 25; return result; }},
+        () => diagnose(undefined, {shortcutsOnly: true, timeBudgetMs: 20}));
+      assert.equal(first.stoppedBy, 'TIME_BUDGET'); assert.equal(first.nextSkip, 1);
+      assert.deepEqual(allFiles(first).map(f => [f.name, f.shortcut.alsoListed, f.shortcut.sameTarget]), [['A架空', null, null]]);
+      const second = diagnose(undefined, {shortcutsOnly: true, skip: 1});
+      assert.deepEqual(allFiles(second).map(f => [f.name, f.shortcut.alsoListed, f.shortcut.sameTarget]), [['B架空', true, 2]]);
+    } finally { gas.context.Date.now = realDateNow; }
+  });
 };
