@@ -1,5 +1,17 @@
 'use strict';
 
+var GOOGLE_SHEETS_MIME_ = 'application/vnd.google-apps.spreadsheet';
+var DRIVE_SHORTCUT_MIME_ = 'application/vnd.google-apps.shortcut';
+
+/** Google の別種類は、拡張子が付いていてもバイト列の明細として読めない。 */
+function isImportableDriveFile(name, mimeType) {
+  var mime = String(mimeType || '');
+  if (mime === DRIVE_SHORTCUT_MIME_ || mime === DRIVE_FOLDER_MIME_) return false;
+  if (mime === GOOGLE_SHEETS_MIME_) return true;
+  if (mime.indexOf('application/vnd.google-apps.') === 0) return false;
+  return /\.(csv|xlsx)$/i.test(String(name || ''));
+}
+
 /** @param {string} code @param {string} message @return {!Error} */
 function fileReaderError_(code, message) {
   var error = new Error(message);
@@ -284,8 +296,79 @@ function disposeTemp(tempFileId) {
   }
 }
 
+/** Excel と同じ範囲・上限で読み、物理行番号の対応を保つ。 */
+function readSpreadsheetSheets_(fileId, spreadsheet) {
+  var sheetObjects = spreadsheet.getSheets();
+  checkInputLimits(fileId, null, sheetObjects.length, null);
+  return sheetObjects.map(function(sheet) {
+    // M29：1行目・1列目から固定長で読み、配列インデックス＋1＝物理行番号
+    // を保つ。要求範囲はグリッドを超えない。
+    var rowCount = Math.min(SETTINGS.MAX_ROWS_PER_FILE, sheet.getMaxRows());
+    var columnCount = Math.min(SETTINGS.MAX_COLUMNS_PER_FILE, sheet.getMaxColumns());
+    var values = sheet.getRange(1, 1, rowCount, columnCount).getValues();
+    checkInputLimits(fileId, null, null, values.length);
+    return {name: sheet.getName(), rows: values, recordStarts: null};
+  });
+}
+
 /**
- * CSV／XLSXを論理レコードの配列として読む（4.10）。
+ * 番人でも同じ道で最新の値を読む。SpreadsheetApp の控えや PDF の書出しは
+ * 変更を見逃すため、計算後の値と型に影響する表示形式だけを API から取る。
+ */
+function googleSheetContentHash_(fileId) {
+  var response = sheetsReadWithRetry_(function() {
+    paceSheetsRead_();
+    apiReadCount_ += 1;
+    return Sheets.Spreadsheets.get(fileId, {
+      includeGridData: true,
+      fields: 'sheets(properties(title,index),data(rowData(values(effectiveValue,effectiveFormat/numberFormat/type))))'
+    });
+  });
+  var sheets = (response.sheets || []).slice().sort(function(a, b) {
+    return a.properties.index - b.properties.index;
+  });
+  var material = ['GOOGLE_SHEET_CONTENT_V1', sheets.length];
+  sheets.forEach(function(sheet) {
+    var rows = [];
+    (sheet.data || []).forEach(function(data) {
+      (data.rowData || []).forEach(function(row) {
+        var cells = (row.values || []).map(function(cell) {
+          var value = cell.effectiveValue || {};
+          if (value.numberValue !== undefined) {
+            var format = cell.effectiveFormat && cell.effectiveFormat.numberFormat;
+            return ['N', value.numberValue, format && format.type || ''];
+          }
+          if (value.stringValue !== undefined) return ['S', value.stringValue];
+          if (value.boolValue !== undefined) return ['B', value.boolValue ? '1' : '0'];
+          if (value.errorValue !== undefined) return ['X', value.errorValue.type || ''];
+          return ['E'];
+        });
+        while (cells.length && cells[cells.length - 1][0] === 'E') cells.pop();
+        rows.push(cells);
+      });
+    });
+    // グリッドを広げただけでは変更にしない。中ほどの空行は取引 ID の行位置なので残す。
+    while (rows.length && rows[rows.length - 1].length === 0) rows.pop();
+    material.push(sheet.properties.title, rows.length);
+    rows.forEach(function(cells) {
+      material.push(cells.length);
+      cells.forEach(function(cell) {
+        Array.prototype.push.apply(material, cell);
+      });
+    });
+  });
+  return sha256Hex(utf8Bytes(serializeDeterministic(material)));
+}
+
+/** 取込時と番人・再走査で、同じ種類のハッシュを比較する。 */
+function currentFileBinaryHash(fileId) {
+  var file = DriveApp.getFileById(fileId);
+  return file.getMimeType() === GOOGLE_SHEETS_MIME_ ? googleSheetContentHash_(fileId) :
+    sha256Hex(file.getBlob().getBytes());
+}
+
+/**
+ * CSV／XLSX／Google スプレッドシートを論理レコードの配列として読む（4.10）。
  *
  * バイト列の生成は1回に限り、戻り値の`bytes`をハッシュ計算・サイズ検査と
  * 共有する。ファイルバイナリハッシュは**BOMを含む元のバイト列**が対象
@@ -296,20 +379,36 @@ function disposeTemp(tempFileId) {
  * @param {!Object=} options {expectedKeywords: 5.2 判定3用のF列キーワード和集合}
  * @return {{sheets:!Array<{name:?string, rows:!Array<!Array<*>>,
  *   recordStarts:?Array<number>}>, encoding:?string, bomRemoved:boolean,
- *   fileType:string, bytes:!Array<number>}}
+ *   fileType:string, bytes:?Array<number>, binaryHash:string, sourceKind:string}}
  */
 function readFile(fileId, fileName, options) {
   var opts = options || {};
+  var file = DriveApp.getFileById(fileId);
+  var mimeType = file.getMimeType();
+  stepAt_ = Date.now();
+  if (mimeType === GOOGLE_SHEETS_MIME_) {
+    // 値を先に読むと、その間の編集後のハッシュと古い値が組になり、番人を素通りする。
+    var contentHash = googleSheetContentHash_(fileId);
+    step_('read:hash');
+    var nativeSheets = readSpreadsheetSheets_(fileId, SpreadsheetApp.openById(fileId));
+    step_('read:sheets');
+    return {sheets: nativeSheets, encoding: null, bomRemoved: false,
+      fileType: 'xlsx', bytes: null, binaryHash: contentHash, sourceKind: 'GOOGLE_SHEET'};
+  }
+  if (mimeType === DRIVE_SHORTCUT_MIME_) {
+    throw new TypeError('readFile does not support Drive shortcuts: ' + fileName);
+  }
   var lower = String(fileName || '').toLowerCase();
   var fileType = /\.csv$/.test(lower) ? 'csv' : (/\.xlsx$/.test(lower) ? 'xlsx' : null);
   if (!fileType) {
     throw new TypeError('readFile supports only .csv/.xlsx: ' + fileName);
   }
 
-  stepAt_ = Date.now();
-  var bytes = DriveApp.getFileById(fileId).getBlob().getBytes();
+  var bytes = file.getBlob().getBytes();
   step_('read:blob');
   checkInputLimits(fileId, bytes.length, null, null);
+  var binaryHash = sha256Hex(bytes);
+  step_('read:hash');
 
   if (fileType === 'csv') {
     var detection = detectEncoding(bytes, opts.expectedKeywords || []);
@@ -321,31 +420,25 @@ function readFile(fileId, fileName, options) {
       encoding: detection.encoding,
       bomRemoved: detection.bomRemoved,
       fileType: 'csv',
-      bytes: bytes
+      bytes: bytes,
+      binaryHash: binaryHash,
+      sourceKind: 'FILE'
     };
   }
 
   var temp = convertXlsxToTemp(fileId);
   step_('read:convert');
   try {
-    var sheetObjects = temp.spreadsheet.getSheets();
-    checkInputLimits(fileId, null, sheetObjects.length, null);
-    var sheets = sheetObjects.map(function(sheet) {
-      // M29：1行目・1列目から固定長で読み、配列インデックス＋1＝物理行番号
-      // を保つ。要求範囲はグリッドを超えない。
-      var rowCount = Math.min(SETTINGS.MAX_ROWS_PER_FILE, sheet.getMaxRows());
-      var columnCount = Math.min(SETTINGS.MAX_COLUMNS_PER_FILE, sheet.getMaxColumns());
-      var values = sheet.getRange(1, 1, rowCount, columnCount).getValues();
-      checkInputLimits(fileId, null, null, values.length);
-      return {name: sheet.getName(), rows: values, recordStarts: null};
-    });
+    var sheets = readSpreadsheetSheets_(fileId, temp.spreadsheet);
     step_('read:sheets');
     return {
       sheets: sheets,
       encoding: null,
       bomRemoved: false,
       fileType: 'xlsx',
-      bytes: bytes
+      bytes: bytes,
+      binaryHash: binaryHash,
+      sourceKind: 'FILE'
     };
   } finally {
     disposeTemp(temp.tempFileId);

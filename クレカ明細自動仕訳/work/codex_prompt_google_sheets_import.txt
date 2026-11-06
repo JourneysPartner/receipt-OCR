@@ -1,0 +1,42 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）で、明細フォルダに置かれた Google スプレッドシートを Excel と同じに取り込めるようにする作業を受け取ります。
+
+作業ツリーは main の最新（コミット 3408102）です。`work/spec_google_sheets_import.md` と `work/codex_prompt_google_sheets_import.txt` は私が書いた未コミットのファイルで、触らないでください。`.codex/config.toml` と `AGENTS.md` も触らないでください。あなたの変更はステージされていない差分として残してください ── **`git add` しないこと。**開始時の `node test/run-tests.js` の最後の行を報告してください（1798/1798 のはずです）。全テストは 10 分を超えることがあります。端末が重いと画面のテスト（子プロセスを使うもの）が時間切れで落ちることがあり、その場合は再実行で通ります（再実行したら報告すること）。
+
+作業用のファイルを作るなら `work/.tmp-gsheet/` の中に置いてください。
+
+## 仕様書
+
+`work/spec_google_sheets_import.md` の全部。**全部読んでから始めてください。**§3 の決定 3〜5（中身ハッシュ・順・番人）が安全の要です。
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。
+2. **`src/` で変えてよいのは仕様書 §4 に挙げた箇所だけ。**ほかの関数は 1 つも変えない。`81_WebAppUi.html` も形式定義も変えないこと。ショートカットを読む処理は作らないこと（第 2 段）。
+3. **`97_Ops.gs` は文字列の中に生の NUL バイトが 2 つあり、git はバイナリとして扱う**（`grep -a` で読む）。改行は LF（CR 0）。ファイル全体を書き直す道具で CRLF にしたり NUL を落としたりしないこと。終わったら NUL が 2 バイト・CR が 0 であることを確かめて報告すること。ほかの `src/` のファイルも改行を変えないこと。
+4. **テスト：**新しいテストは `test/phase6-google-sheets-import.test.js` に書く。既存のテストで直してよいのは、Google スプレッドシートを「読まない・拾わない」前提で書いたものだけ（`diag 25` は仕様書 gs 13 のとおり）。`assert` の意味を弱めないこと。`test/gas-stubs.js` は足すことだけ許す（`Spreadsheets.get` の `includeGridData` など。足したものを報告すること）。
+5. **このリポジトリは公開です。**テスト・コード・コメントに実在の店名・地名・人名・ID・カード番号を書かないこと（架空の値だけ）。
+6. **テストを先に赤にしてから直すこと。**
+7. **日本語は UTF-8 で書くこと。**終わったら `grep -n '???' src/*.gs src/*.html test/*.js`（97 は `grep -an`）が空であることを確かめて報告すること。コメントを足すなら、周りと同じ密度・語り口（「なぜ」を書く）で。
+8. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断をしたら全部報告すること。**安全側を外す判断を自分でしないこと。**迷ったら止めて報告すること。特に、中身ハッシュを SpreadsheetApp の値から作る・番人を SpreadsheetApp で読み直す・`readFile` で値を先に読む、のどれも仕様に反する。
+9. Sheets API の読取は必ず枠の口（`paceSheetsRead_`・`apiReadCount_`、再試行は `sheetsReadWithRetry_`）を通すこと。数えない読取を足さないこと。
+
+## 進め方
+
+1. 仕様書を読み、`src/12_FileReader.gs`・`src/10_DriveScanner.gs`・`src/71_RunOrchestrator.gs`（`processDiscoveredFile_`）・`src/19_FormatRegistration.gs`（`formatHashRow_` とその呼出し）・`src/80_WebApp.gs`（`webAppFolderFile_`）・`src/97_Ops.gs`（`grep -a` で `diagExamineFile_`・`diagReadGoogleSheet_`）・`src/01_DataAccessCore.gs`（`paceSheetsRead_`・`sheetsReadWithRetry_`・`apiSheetRowCount_`）と、`test/phase6-csv-excel-same.test.js`（`csvx 10`・`csvx 11`・`diag 25`）・`test/gas-stubs.js` の `Sheets` を読む
+2. gs 1〜14 を書く → 赤を確かめる
+3. 作る
+4. `node test/run-tests.js` を全部緑にする（**終わったら必ず全テストを回して最後の行を報告すること**）
+5. gs 12 の「変更前と同じ値」は、作る前のコードで求めた値を直書きすること（求め方を報告すること）
+6. 仕様書 §6 の S1〜S20 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら差分が変異を入れる前と同じか確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 作る前に gs のどれが赤だったか
+- S1〜S20 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て
+- 仕様書が間違っていた・足りなかった箇所、自分で決めた箇所（全部）
+- 直した既存のテスト（テストごとに 1 行）と、`gas-stubs.js` に足したもの
+- 改行・97 の NUL、`???` の結果
+- 変えたファイルの一覧
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。

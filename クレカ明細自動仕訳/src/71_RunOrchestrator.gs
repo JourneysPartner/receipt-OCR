@@ -615,7 +615,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
       }
     }
     phase('read');
-    var binaryHash = read ? sha256Hex(read.bytes) : '';
+    var binaryHash = read ? read.binaryHash : '';
     phase('binaryHash');
 
     // 処理ログ・恒久ファイルインデックスへ登録し、`VALIDATING`にする。
@@ -888,7 +888,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
         binaryHash: registered.process.values[PROCESS_FIELD_COLUMNS_.binaryHash - 1]
       },
       fetchFileRecord: function(id) {
-        return {binaryHash: sha256Hex(DriveApp.getFileById(id).getBlob().getBytes())};
+        return {binaryHash: currentFileBinaryHash(id)};
       },
       beforeWriteBlock: function() {
         transitionFileState(fileId, FILE_STATE.VALIDATING, FILE_STATE.WRITING, runId);

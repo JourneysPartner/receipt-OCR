@@ -1533,7 +1533,7 @@ function webAppFolderFile_(file, stateByFileId, nowMs) {
   var fileName = String(file.getName() || '');
   var updated = file.getLastUpdated();
   var updatedMs = updated instanceof Date ? updated.getTime() : new Date(updated).getTime();
-  var supported = /\.(csv|xlsx)$/i.test(fileName);
+  var supported = isImportableDriveFile(fileName, file.getMimeType());
   var minutes = webAppStableWaitMinutes_(updatedMs, nowMs);
   var stable = minutes === 0;
   var registered = Object.prototype.hasOwnProperty.call(stateByFileId, fileId);

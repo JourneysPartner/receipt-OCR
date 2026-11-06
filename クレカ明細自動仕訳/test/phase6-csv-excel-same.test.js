@@ -890,8 +890,9 @@ module.exports = ({test, assert, gas}) => {
     gas.stubs.createFile('diag-gsheet-after-fake', {name: '架空五月分.pdf', contentType: 'application/pdf'});
     statement.fileIds.push(id, 'diag-gsheet-missing-fake', 'diag-gsheet-after-fake');
     const ids = gas.stubs.getSpreadsheetIds().slice().sort();
+    const read = gas.context.readFile, reads = [];
     const report = mock({
-      readFile() { assert.fail('a Google Sheet must not go through readFile'); },
+      readFile(id, ...args) { reads.push(id); return read(id, ...args); },
       convertXlsxToTemp() { assert.fail('a Google Sheet needs no temporary copy'); }
     }, () => diagnose());
     const [sheet, missing] = allFiles(report);
@@ -901,6 +902,7 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(report.counts.examined, 2); assert.equal(report.counts.ignoredFiles, 1);
     assert.deepEqual(Object.keys(report.ignoredTypes), ['application/pdf']);
     assert.deepEqual(gas.stubs.getSpreadsheetIds().slice().sort(), ids);
+    assert.deepEqual(reads, [id, 'diag-gsheet-missing-fake']);
     for (const secret of ['FAKE_PRIVATE_SHOP', 'FAKE_PRIVATE_PURPOSE']) assert.equal(JSON.stringify(report).includes(secret), false);
   });
 
@@ -949,7 +951,13 @@ module.exports = ({test, assert, gas}) => {
     addShortcut(card, 'diag-sc-out-fake', '架空外', 'diag-target-out-fake');
     const before = snapshot(), files = ['diag-sc-in-fake', 'diag-target-in-fake'].map(id => plain(gas.stubs.getFile(id)));
     gas.stubs.resetRoundTrips(); gas.stubs.resetApiCallCounts();
-    const report = mock({readFile() { assert.fail('sheet targets need no readFile'); }}, () => diagnose());
+    const read = gas.context.readFile;
+    let reads = 0;
+    const report = mock({readFile(id, ...args) {
+      assert.equal(gas.stubs.getFile(id).getMimeType(), SHEET_MIME);
+      reads += 1; return read(id, ...args);
+    }}, () => diagnose());
+    assert.equal(reads, 6);
     assert.equal(gas.stubs.roundTrips().rangeWrites, 0); assert.equal(gas.stubs.getApiCallCounts().cellsWritten, 0);
     assert.deepEqual(snapshot(), before);
     assert.deepEqual(['diag-sc-in-fake', 'diag-target-in-fake'].map(id => plain(gas.stubs.getFile(id))), files);
@@ -1010,7 +1018,7 @@ module.exports = ({test, assert, gas}) => {
     const reads = [];
     const original = gas.context.readFile;
     const report = mock({readFile(id, ...rest) { reads.push(id); return original(id, ...rest); }}, () => diagnose());
-    assert.deepEqual(reads, [csvId]);
+    assert.deepEqual(reads, [csvId, 'diag-multi-target-fake', 'diag-deep-target-fake']);
     assert.equal(report.counts.examined, 7); assert.equal(report.counts.shortcuts, 7);
     assert.deepEqual(allFiles(report).map(f => [f.name, f.fileType, f.status]), [
       ['A架空PDF', 'shortcut', 'SHORTCUT_TARGET_NOT_READ'], ['B架空無い先', 'shortcut', 'SHORTCUT_TARGET_UNREADABLE'],
@@ -1050,8 +1058,8 @@ module.exports = ({test, assert, gas}) => {
     addShortcut(target, 'diag-inner-sc-fake', '架空入れ子', 'diag-nested-target-fake');
     addShortcut(statement, 'diag-sc-folder-fake', 'A架空フォルダ', target.id, FOLDER_MIME);
     addShortcut(statement, 'diag-sc-after-fake', 'B架空後', 'diag-inner-a-fake');
-    const read = gas.context.diagReadGoogleSheet_, opened = [];
-    const report = mock({diagReadGoogleSheet_(id) { opened.push(id); return read(id); }}, () => diagnose());
+    const read = gas.context.readFile, opened = [];
+    const report = mock({readFile(id, ...args) { opened.push(id); return read(id, ...args); }}, () => diagnose());
     assert.deepEqual(opened, ['diag-inner-a-fake', 'diag-inner-b-fake', 'diag-inner-a-fake']);
     const folder = byName(report, 'A架空フォルダ');
     assert.equal(folder.status, 'SHORTCUT_FOLDER'); assert.equal(folder.fileType, 'shortcut');
@@ -1072,7 +1080,7 @@ module.exports = ({test, assert, gas}) => {
     let now = 1000;
     try {
       gas.context.Date.now = () => now;
-      const first = mock({diagReadGoogleSheet_(id) { const result = read(id); now += 25; return result; }},
+      const first = mock({readFile(id, ...args) { const result = read(id, ...args); now += 25; return result; }},
         () => diagnose(undefined, {timeBudgetMs: 20}));
       assert.equal(first.stoppedBy, 'TIME_BUDGET'); assert.equal(first.nextSkip, 0);
       assert.deepEqual(allFiles(first), []); assert.equal(first.counts.examined, 0);
@@ -1141,16 +1149,20 @@ module.exports = ({test, assert, gas}) => {
     addFile(statement, '架空.csv');
     addShortcut(statement, 'diag-only-sc-a', 'A架空', 'diag-only-target-fake');
     addShortcut(statement, 'diag-only-sc-b', 'B架空', 'diag-only-target-fake');
-    const report = mock({readFile() { assert.fail('shortcutsOnly must not read regular files'); }},
+    const read = gas.context.readFile;
+    const report = mock({readFile(id, ...args) {
+      assert.equal(id, 'diag-only-target-fake', 'shortcutsOnly must not read regular files');
+      return read(id, ...args);
+    }},
       () => diagnose(undefined, {shortcutsOnly: true}));
     assert.deepEqual(allFiles(report).map(f => f.name), ['A架空', 'B架空']);
     assert.equal(report.counts.examined, 2); assert.equal(report.counts.ignoredFiles, 0);
     assert.deepEqual(allFiles(report).map(f => [f.shortcut.alsoListed, f.shortcut.sameTarget]), [[true, 2], [true, 2]]);
-    const read = gas.context.diagReadGoogleSheet_, realDateNow = gas.context.Date.now;
+    const realDateNow = gas.context.Date.now;
     let now = 1000;
     try {
       gas.context.Date.now = () => now;
-      const first = mock({diagReadGoogleSheet_(id) { const result = read(id); now += 25; return result; }},
+      const first = mock({readFile(id, ...args) { const result = read(id, ...args); now += 25; return result; }},
         () => diagnose(undefined, {shortcutsOnly: true, timeBudgetMs: 20}));
       assert.equal(first.stoppedBy, 'TIME_BUDGET'); assert.equal(first.nextSkip, 1);
       assert.deepEqual(allFiles(first).map(f => [f.name, f.shortcut.alsoListed, f.shortcut.sameTarget]), [['A架空', null, null]]);

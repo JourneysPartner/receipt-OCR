@@ -411,6 +411,8 @@ class MemoryDriveFile {
     this.targetId = options.targetId || null;
     this.createdTime = options.createdTime ? new Date(options.createdTime) : this.lastUpdated;
     this.revisionId = options.revisionId || null;
+    // 一覧の File 代用品を展開しても、種類で判定するための口を引き継ぐ。
+    this.getMimeType = this.getMimeType.bind(this);
   }
   getId() { return this.id; }
   getName() { return this.name; }
@@ -662,6 +664,27 @@ function createGasStubs() {
           const error = new Error(failure.message || `Sheets failure ${failure.code || failure}`);
           error.code = Number(failure.code || failure); throw error;
         }
+        if (request.includeGridData) {
+          // 中身ハッシュは SpreadsheetApp の控えを読まない。日付は時刻も含む
+          // シリアル値と DATE にして、値の型が変わる表示形式も検査できるようにする。
+          return {sheets: openSpreadsheet(spreadsheetId).getSheets().map((sheet, index) => ({
+            properties: {title: sheet.getName(), index},
+            data: [{rowData: sheet.values.map((row, r) => ({values: row.map((value, c) => {
+              if (value === '' || value === null || value === undefined) return {};
+              if (value instanceof Date) {
+                const p = zonedParts(value, 'Asia/Tokyo');
+                const serial = (Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day),
+                  Number(p.hour), Number(p.minute), Number(p.second), value.getUTCMilliseconds()) -
+                  Date.UTC(1899, 11, 30)) / 86400000;
+                return {effectiveValue: {numberValue: serial}, effectiveFormat: {numberFormat: {type: 'DATE'}}};
+              }
+              if (typeof value === 'number') return {effectiveValue: {numberValue: value},
+                effectiveFormat: {numberFormat: {type: /[yd]/i.test(sheet._format(r + 1, c + 1)) ? 'DATE' : 'NUMBER'}}};
+              if (typeof value === 'boolean') return {effectiveValue: {boolValue: value}};
+              return {effectiveValue: {stringValue: String(value)}};
+            })}))}]
+          }))};
+        }
         const names = (request.ranges || []).map(name => String(name).replace(/^'|'$/g, '').replace(/''/g, "'"));
         return {sheets: openSpreadsheet(spreadsheetId).getSheets()
           .filter(sheet => !names.length || names.includes(sheet.getName()))
@@ -812,6 +835,10 @@ function createGasStubs() {
       const items = []
         .concat((folder.subFolderIds || []).map((id) => ({id, name: (folders.get(String(id)) || {}).name || id, mimeType: 'application/vnd.google-apps.folder'})))
         .concat(folder.fileIds.map((id) => files.get(id)).filter(Boolean).map(driveFileMeta));
+      // Google のファイルにはバイナリの headRevisionId がない。
+      items.forEach(item => {
+        if (item.mimeType === 'application/vnd.google-apps.spreadsheet') delete item.headRevisionId;
+      });
       const pageSize = Number(request.pageSize || 100);
       const start = Number(request.pageToken || 0);
       const page = items.slice(start, start + pageSize);

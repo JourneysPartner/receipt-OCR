@@ -480,7 +480,7 @@ function formatDerivedSpec_(context, read, sheet, answers, base, proposal, purpo
       base.foreignAmountColumn || base.exchangeRateColumn))};
 }
 
-function formatHashRow_(row, fileId, bytes, acknowledgements) {
+function formatHashRow_(row, fileId, binaryHash, acknowledgements) {
   var copy = row.slice();
   [19, 21, 33].forEach(function(index) { copy[index] = ''; });
   if (copy[27]) {
@@ -489,7 +489,7 @@ function formatHashRow_(row, fileId, bytes, acknowledgements) {
     copy[27] = JSON.stringify(answers);
   }
   return sha256Hex(utf8Bytes(serializeDeterministic(copy.concat([
-    fileId, sha256Hex(bytes),
+    fileId, binaryHash,
     acknowledgements.customerSide === true, acknowledgements.amountChoice === true
   ]))));
 }
@@ -705,7 +705,7 @@ function formatPreview_(context, answers) {
     return {column: candidate.column, header: candidate.header, total: total,
       differsRows: differsRows};
   });
-  var previewHash = formatHashRow_(row, context.fileId, read.bytes,
+  var previewHash = formatHashRow_(row, context.fileId, read.binaryHash,
     spec.answers.acknowledgements);
   spec.answers.previewHash = previewHash;
   var response = {ok: true, blocking: blocking, warnings: warnings,

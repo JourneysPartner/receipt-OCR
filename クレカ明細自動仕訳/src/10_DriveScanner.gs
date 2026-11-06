@@ -3,7 +3,8 @@
 /**
  * 4.8 ファイル検索。
  *
- * モード1（未処理検索）とモード2（処理済み変更の再走査）の**Drive側**を担う。
+ * モード1（CSV・Excel・Google スプレッドシートの未処理検索）と
+ * モード2（処理済み変更の再走査）の**Drive側**を担う。
  * モード2の判定そのもの（絞込・変更検出・要確認起票）は`10_RescanManager`で
  * あり、本モジュールはメタ情報の一括取得とハッシュ計算だけを供給する。
  *
@@ -112,7 +113,7 @@ function permanentIndexRowFromValues_(values, rowNumber) {
 /**
  * モード1：未処理ファイル検索。
  *
- * フィルタ（4.8の表）：拡張子が.csv/.xlsx、内部状態が`DISCOVERED`または
+ * フィルタ（4.8の表）：取込可能な種類、内部状態が`DISCOVERED`または
  * 未登録、最終更新から10分以上経過。整列は仕様6.2
  * （`createdTime`昇順→ファイル名→ファイルID）。
  *
@@ -133,8 +134,7 @@ function scanUnprocessedFiles(customerId, options) {
 
   var candidates = listFilesRecursively_(customer.sourceFolderId)
     .filter(function(file) {
-      var lower = String(file.name || '').toLowerCase();
-      if (!/\.(csv|xlsx)$/.test(lower)) return false;
+      if (!isImportableDriveFile(file.name, file.mimeType)) return false;
       var state = stateByFileId[String(file.id)];
       if (state !== undefined && state !== FILE_STATE.DISCOVERED) return false;
       var modified = file.modifiedTime ? new Date(file.modifiedTime).getTime() : 0;
@@ -234,7 +234,7 @@ function scanProcessedFilesForChange(customerId, options) {
     {folderIds: [customer.sourceFolderId]}
   );
   var probes = detectRescanChanges(selection.targets, metaById, function(fileId) {
-    return sha256Hex(DriveApp.getFileById(fileId).getBlob().getBytes());
+    return currentFileBinaryHash(fileId);
   });
   return {
     probes: probes,
