@@ -409,6 +409,7 @@ class MemoryDriveFile {
     this.xlsxSheets = options.xlsxSheets || null;
     this.targetMimeType = options.targetMimeType || null;
     this.targetId = options.targetId || null;
+    this.trashed = options.trashed === true;
     this.createdTime = options.createdTime ? new Date(options.createdTime) : this.lastUpdated;
     this.revisionId = options.revisionId || null;
     // 一覧の File 代用品を展開しても、種類で判定するための口を引き継ぐ。
@@ -421,6 +422,7 @@ class MemoryDriveFile {
   getMimeType() { return this.contentType; }
   getTargetMimeType() { return this.targetMimeType; }
   getTargetId() { return this.targetId; }
+  isTrashed() { return this.trashed; }
   getSize() { return this.bytes.length; }
   getLastUpdated() { return new Date(this.lastUpdated.getTime()); }
 }
@@ -838,12 +840,26 @@ function createGasStubs() {
       // Google のファイルにはバイナリの headRevisionId がない。
       items.forEach(item => {
         if (item.mimeType === 'application/vnd.google-apps.spreadsheet') delete item.headRevisionId;
+        const file = files.get(String(item.id));
+        if (file && item.mimeType === 'application/vnd.google-apps.shortcut') {
+          item.shortcutDetails = {targetId: file.targetId, targetMimeType: file.targetMimeType};
+        }
       });
       const pageSize = Number(request.pageSize || 100);
       const start = Number(request.pageToken || 0);
       const page = items.slice(start, start + pageSize);
       const nextStart = start + pageSize;
       return {files: page, nextPageToken: nextStart < items.length ? String(nextStart) : undefined};
+    },
+    get(fileId) {
+      const file = files.get(String(fileId));
+      if (!file) { const error = new Error('Fake file not found'); error.code = 404; throw error; }
+      const meta = Object.assign(driveFileMeta(file), {trashed: file.isTrashed()});
+      if (file.contentType === 'application/vnd.google-apps.spreadsheet') delete meta.headRevisionId;
+      if (file.contentType === 'application/vnd.google-apps.shortcut') {
+        meta.shortcutDetails = {targetId: file.targetId, targetMimeType: file.targetMimeType};
+      }
+      return meta;
     },
     copy(resource, fileId) {
       const file = files.get(String(fileId));

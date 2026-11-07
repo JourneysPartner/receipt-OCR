@@ -47,6 +47,7 @@ function runPreValidationBlock(input) {
   // 担当者が承認しても再検証で同じ要因が再検出され、`REVIEW_WAIT`へ戻る
   // 無限ループになる。
   var validation = Object.assign({}, input.validation || {});
+  var excludedTransactions = input.excludedTransactions || [];
   if (validation.validationApprovals === undefined) {
     validation.validationApprovals = getCategory2Approvals(input.file.id);
   }
@@ -61,7 +62,7 @@ function runPreValidationBlock(input) {
   }
   if (validation.inputLimit === undefined && input.runId) {
     validation.inputLimit =
-      checkRunTransactionLimit(input.runId, (input.transactions || []).length);
+      checkRunTransactionLimit(input.runId, (input.transactions || []).length + excludedTransactions.length);
   }
   markPhase(input, 'pre:validate');
   var classification = classifyValidationResult(validation);
@@ -106,9 +107,27 @@ function runPreValidationBlock(input) {
   var parsedIds = (input.transactions || []).map(function(tx) {
     return String(tx.fullTxId || tx.transactionId || '');
   }).filter(function(id) { return id !== ''; });
+  if (excludedTransactions.length) {
+    parsedIds = parsedIds.concat(excludedTransactions.map(function(tx) {
+      return String(tx.fullTxId || tx.transactionId || '');
+    }).filter(function(id) { return id !== ''; }));
+  }
   var existingById = parsedIds.length ?
     activeTransactionRecordsByIds_(parsedIds) : Object.create(null);
   markPhase(input, 'pre:existing');
+  // 年度を変えた再合流で、既にある取引を黙って転記・取消ししない。
+  excludedTransactions.forEach(function(tx) {
+    var existing = existingById[String(tx.fullTxId || tx.transactionId || '')];
+    if (existing && existing.transactionStatus !== TX_STATUS.CANCELED) {
+      throw new IntegrityError('PRIOR_YEAR_EXCLUSION_CONFLICT', 'fileId=' + input.file.id);
+    }
+  });
+  (input.transactions || []).forEach(function(tx) {
+    var existing = existingById[String(tx.fullTxId || tx.transactionId || '')];
+    if (existing && existing.plannedFinalStatus === TX_STATUS.CANCELED) {
+      throw new IntegrityError('PRIOR_YEAR_EXCLUSION_CONFLICT', 'fileId=' + input.file.id);
+    }
+  });
   // **1 ファイルの取引を 2 つの転記先へ割らない**（§15-4）。中断したファイルを
   // 後始末で発見へ戻し、Web アプリの新しいセッション（別の複製）で取り込み直すと、
   // 既に書いた取引は前の複製に、まだの取引は新しい複製に書かれる。書くものが
@@ -235,7 +254,13 @@ function runPreValidationBlock(input) {
   // 加算を永続化しないと、継続トリガーで再開したときに0から数え直し、
   // 上限がいくらでも超えられる（4.31）。
   markPhase(input, 'pre:plannedStatus');
-  if (transactions.length) {
+  var registrationTransactions = transactions;
+  if (excludedTransactions.length) {
+    registrationTransactions = transactions.concat(excludedTransactions.map(function(tx) {
+      return Object.assign({}, tx, {priorYearExcluded: true, plannedFinalStatus: TX_STATUS.CANCELED});
+    }));
+  }
+  if (registrationTransactions.length) {
     var registerOptions;
     // 承認済みの要因を再び止めると、承認しても進めない（INV-28）。
     if (validation.purposeRevision && validation.contentHash && validation.hashVersion &&
@@ -246,7 +271,7 @@ function runPreValidationBlock(input) {
         contentHash: validation.contentHash, hashVersion: validation.hashVersion
       }};
     }
-    var registered = registerPrepared(transactions, input.runId, existingById, registerOptions);
+    var registered = registerPrepared(registrationTransactions, input.runId, existingById, registerOptions);
     markPhase(input, 'pre:register');
     if (registered && registered.purposeRevision && registered.purposeRevision.candidate) {
       validation.purposeRevision = registered.purposeRevision;
@@ -257,7 +282,7 @@ function runPreValidationBlock(input) {
       return preValidationResult_(2, reclassified.code, [], reclassified.reviewEntries,
         {classification: reclassified, purposeRevisionInLock: true});
     }
-    if (input.runId) incrementRunTransactionCount(input.runId, transactions.length);
+    if (input.runId) incrementRunTransactionCount(input.runId, registrationTransactions.length);
     markPhase(input, 'pre:runCount');
   }
 

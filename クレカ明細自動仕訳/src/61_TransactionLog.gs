@@ -186,7 +186,7 @@ function makeTransactionRow_(tx, runId, now) {
   row[0] = id; row[1] = String(txInput_(tx, ['displayTxId'], id.slice(0, SETTINGS.DISPLAY_ID_LENGTH)));
   row[2] = String(runId); row[3] = String(tx.customerId); row[4] = String(tx.fileId); row[5] = txInput_(tx, ['sourceSheetName', 'sheetName'], '');
   row[6] = Number(txInput_(tx, ['sourceRow', 'sourceRowNumber', 'startPhysicalRow'], 0)); row[7] = Number(txInput_(tx, ['generation', 'reimportGeneration'], 0));
-  row[8] = String(txInput_(tx, ['formatId', 'cardFormatId'], '')); row[9] = TX_STATUS.PREPARED; row[10] = finalStatus;
+  row[8] = String(txInput_(tx, ['formatId', 'cardFormatId'], '')); row[9] = tx.priorYearExcluded === true ? TX_STATUS.CANCELED : TX_STATUS.PREPARED; row[10] = finalStatus;
   row[11] = String(txInput_(tx, ['partnerResolutionStatus'], PARTNER_STATUS.UNRESOLVED)); row[12] = String(txInput_(tx, ['freeeStatus'], FREEE_IMPORT_STATUS.NOT_IMPORTED));
   row[13] = txInput_(tx, ['batchId'], ''); row[14] = txInput_(tx, ['originalDate', 'dateHashKey'], '');
   row[15] = txInput_(tx, ['originalMerchant', 'merchantOriginal'], ''); row[16] = txInput_(tx, ['originalAmount', 'amountBillingJpy'], '');

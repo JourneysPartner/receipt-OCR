@@ -728,14 +728,22 @@
 
     function customerFixNoticeLines(fileResults) {
       if (!Array.isArray(fileResults)) return [];
-      return fileResults.filter(function(file) {
-        return file && file.nextState === 'CUSTOMER_FIX_REQUIRED';
-      }).map(function(file) {
-        var fixReason = file.customerFix ?
-          Object.assign({source: 'IMPORT'}, file.customerFix) : null;
-        return '【要修正】' + (file.fileName || file.fileId || '') + '：' +
-          customerFixReasonLines(fixReason).join('／');
+      var lines = [];
+      fileResults.forEach(function(file) {
+        if (!file) return;
+        if (file.nextState === 'CUSTOMER_FIX_REQUIRED') {
+          var fixReason = file.customerFix ?
+            Object.assign({source: 'IMPORT'}, file.customerFix) : null;
+          lines.push('【要修正】' + (file.fileName || file.fileId || '') + '：' +
+            customerFixReasonLines(fixReason).join('／'));
+        }
+        if (file.priorYearExcluded && file.priorYearExcluded.count > 0) {
+          lines.push('【前年分を除外】' + (file.fileName || file.fileId || '') + '：' +
+            (file.priorYearExcluded.fiscalYear - 1) + ' 年以前の利用 ' +
+            file.priorYearExcluded.count + ' 件は転記していません');
+        }
       });
+      return lines;
     }
 
     function progressText(done, total, elapsedMs) {

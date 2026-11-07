@@ -615,6 +615,8 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
       }
     }
     phase('read');
+    var shortcutRead = read && read.sourceKind === 'SHORTCUT';
+    if (shortcutRead) outcome.priorYearExcluded = {count: 0, fiscalYear: customer.fiscalYear};
     var binaryHash = read ? read.binaryHash : '';
     phase('binaryHash');
 
@@ -633,9 +635,14 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
     stateNow = FILE_STATE.VALIDATING;
     updateFilePrefix(fileId, registered);
     phase('register');
+    if (shortcutRead && (!Number.isInteger(customer.fiscalYear) ||
+        customer.fiscalYear < 2000 || customer.fiscalYear > 2999)) {
+      throw makeCatalogError_('SHORTCUT_FISCAL_YEAR_REQUIRED', 'fileId=' + fileId);
+    }
 
     var validation = {};
     var transactions = [];
+    var excludedTransactions = [];
     var cardFormat = null;
     var parsed = null;
     var resolvedSheet = null;
@@ -734,13 +741,29 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
         validation.countsTotals = verifyCountsAndTotals(
           reconcilable, cardFormat, resolvedSheet, registered.process);
 
+        // 照合と内容ハッシュは明細全体を表す。除外しても提出時点の内容を変えない。
+        var allTransactions = transactions;
+        if (shortcutRead) {
+          var blankDateIds = blankedDateTransactionIds(yearInference, validation.dateTriage);
+          transactions = transactions.filter(function(tx) {
+            var excluded = tx.date && blankDateIds.indexOf(String(tx.transactionId)) < 0 &&
+              Number(toTokyoDateString_(tx.date).slice(0, 4)) < customer.fiscalYear;
+            if (excluded) excludedTransactions.push(tx);
+            return !excluded;
+          });
+          validation.purposeResolution.unresolvedCount = transactions.filter(function(tx) {
+            return tx.purpose === null || tx.purpose === undefined || tx.purpose === '';
+          }).length;
+          outcome.priorYearExcluded.count = excludedTransactions.length;
+        }
+
         // 8-6'：前年利用日（INDIVIDUALのみ。空欄化対象を除外する。INV-40）。
         validation.priorYear = checkPriorYearUsage(transactions, customer,
           blankedDateTransactionIds(yearInference, validation.dateTriage));
 
         phase('enrich');
         // 8-8：重複・修正版候補。
-        var contentHash = generateContentHash(transactions,
+        var contentHash = generateContentHash(allTransactions,
           resolvedSheet.name === null ? '' : String(resolvedSheet.name));
         // **INV-28：承認を判定する材料を渡す。**区分2の承認は、承認した時点の
         // 内容ハッシュと版に結び付けて保存される（`approveAndRevalidate_`）。
@@ -764,6 +787,22 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
           return Object.assign({}, tx, {
             identityHash: generateIdentityHash(tx),
             contentHash: contentHash
+          });
+        });
+        excludedTransactions = excludedTransactions.map(function(tx) {
+          return Object.assign({}, tx, {
+            identityHash: generateIdentityHash(tx),
+            contentHash: contentHash,
+            partnerResolutionStatus: PARTNER_STATUS.RESOLVED_WITHOUT_PARTNER,
+            planned: {
+              b: tx.date ? toTokyoDateString_(tx.date) : '', f: '',
+              i: composeMemoTags(tx.purpose, memoTagsForTransaction(tx, customer)),
+              k: tx.merchantOriginal || '', m: tx.amountBillingJpy
+            },
+            originalDate: tx.dateRawText,
+            originalMerchant: tx.merchantOriginal,
+            originalAmount: tx.amountBillingJpy,
+            originalPurpose: tx.purpose
           });
         });
         try {
@@ -863,7 +902,7 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
     }
 
     // 8-11以降は70へ。9-1（VALIDATING→WRITING）はフックで遷移させる。
-    var result = processFile({
+    var processInput = {
       customer: customer,
       file: {id: fileId, name: fileName, originalFileName: fileName},
       runId: runId,
@@ -894,7 +933,9 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
         transitionFileState(fileId, FILE_STATE.VALIDATING, FILE_STATE.WRITING, runId);
         stateNow = FILE_STATE.WRITING;
       }
-    });
+    };
+    if (excludedTransactions.length) processInput.excludedTransactions = excludedTransactions;
+    var result = processFile(processInput);
 
     phase('processFile');
     if (result.preValidation.category === 1) {

@@ -67,7 +67,7 @@ module.exports = function registerPhase0Tests({test, assert, gas}) {
     }
   });
 
-  test('ERROR_CATALOG contains all 54 design codes with the required shape', () => {
+  test('ERROR_CATALOG contains all 57 design codes with the required shape', () => {
     const errorCodes = [
       'UNKNOWN_CARD_FORMAT', 'AMBIGUOUS_CARD_FORMAT', 'MULTI_SHEET_AMBIGUOUS',
       'CARD_FORMAT_DEFINITION_INVALID', 'FORMAT_SAMPLE_ROUNDTRIP_FAILED',
@@ -85,6 +85,8 @@ module.exports = function registerPhase0Tests({test, assert, gas}) {
       'BILLING_MONTH_NOT_FOUND', 'BILLING_MONTH_CONFLICT', 'DATE_NOT_EXISTENT',
       'DATE_OUT_OF_EXPECTED_RANGE', 'DESTINATION_MISMATCH', 'DESTINATION_SCHEMA_MISMATCH',
       'DESTINATION_TEMPLATE_ROW_NOT_EMPTY', 'SOURCE_REQUIRES_CUSTOMER_FIX',
+      'SHORTCUT_FISCAL_YEAR_REQUIRED', 'SHORTCUT_TARGET_TRASHED',
+      'PRIOR_YEAR_EXCLUSION_CONFLICT',
       'TRANSACTION_ID_COLLISION', 'DESTINATION_VALUE_MISMATCH',
       'TRANSACTION_LOG_AMBIGUOUS', 'LEASE_CONFLICT',
       'FILE_RENAME_RETRY_EXHAUSTED', 'FILE_NOT_FOUND',
@@ -94,7 +96,7 @@ module.exports = function registerPhase0Tests({test, assert, gas}) {
       'TRANSIENT_DRIVE_ERROR', 'TRANSIENT_SHEETS_ERROR',
       'REQUIRED_LOG_WRITE_FAILED', 'PARTNER_NAME_RETIRED', 'PARTNER_NAME_VARIANT'
     ];
-    assert.equal(errorCodes.length, 54);
+    assert.equal(errorCodes.length, 57);
     assert.deepEqual(gas.json('Object.keys(ERROR_CATALOG).sort()'), errorCodes.sort());
     assert.equal(
       gas.evaluate('Object.values(ERROR_CATALOG).every(function(e) { return typeof e.message === "string" && typeof e.retryable === "boolean" && Object.prototype.hasOwnProperty.call(e, "handler") && Object.prototype.hasOwnProperty.call(e, "reviewType") && typeof e.guidance === "string"; })'),

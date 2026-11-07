@@ -4,9 +4,10 @@ var GOOGLE_SHEETS_MIME_ = 'application/vnd.google-apps.spreadsheet';
 var DRIVE_SHORTCUT_MIME_ = 'application/vnd.google-apps.shortcut';
 
 /** Google の別種類は、拡張子が付いていてもバイト列の明細として読めない。 */
-function isImportableDriveFile(name, mimeType) {
+function isImportableDriveFile(name, mimeType, targetMimeType) {
   var mime = String(mimeType || '');
-  if (mime === DRIVE_SHORTCUT_MIME_ || mime === DRIVE_FOLDER_MIME_) return false;
+  if (mime === DRIVE_SHORTCUT_MIME_) return targetMimeType === GOOGLE_SHEETS_MIME_;
+  if (mime === DRIVE_FOLDER_MIME_) return false;
   if (mime === GOOGLE_SHEETS_MIME_) return true;
   if (mime.indexOf('application/vnd.google-apps.') === 0) return false;
   return /\.(csv|xlsx)$/i.test(String(name || ''));
@@ -363,8 +364,25 @@ function googleSheetContentHash_(fileId) {
 /** 取込時と番人・再走査で、同じ種類のハッシュを比較する。 */
 function currentFileBinaryHash(fileId) {
   var file = DriveApp.getFileById(fileId);
-  return file.getMimeType() === GOOGLE_SHEETS_MIME_ ? googleSheetContentHash_(fileId) :
+  var mimeType = file.getMimeType();
+  if (mimeType === DRIVE_SHORTCUT_MIME_) {
+    return googleSheetContentHash_(shortcutTarget_(file).targetId);
+  }
+  return mimeType === GOOGLE_SHEETS_MIME_ ? googleSheetContentHash_(fileId) :
     sha256Hex(file.getBlob().getBytes());
+}
+
+/** 指す先は読取にだけ使い、名前と処理状態はショートカットに持たせる。 */
+function shortcutTarget_(file) {
+  var targetId = file.getTargetId();
+  if (file.getTargetMimeType() !== GOOGLE_SHEETS_MIME_) {
+    throw new TypeError('Shortcut target must be a Google spreadsheet');
+  }
+  var target = DriveApp.getFileById(targetId);
+  if (target.isTrashed()) {
+    throw makeCatalogError_('SHORTCUT_TARGET_TRASHED', 'fileId=' + file.getId());
+  }
+  return {targetId: targetId, file: target};
 }
 
 /**
@@ -396,7 +414,14 @@ function readFile(fileId, fileName, options) {
       fileType: 'xlsx', bytes: null, binaryHash: contentHash, sourceKind: 'GOOGLE_SHEET'};
   }
   if (mimeType === DRIVE_SHORTCUT_MIME_) {
-    throw new TypeError('readFile does not support Drive shortcuts: ' + fileName);
+    var target = shortcutTarget_(file);
+    // 指す先でもハッシュを先に取り、間の編集を番人が検出できるようにする。
+    var targetHash = googleSheetContentHash_(target.targetId);
+    step_('read:hash');
+    var targetSheets = readSpreadsheetSheets_(target.targetId, SpreadsheetApp.openById(target.targetId));
+    step_('read:sheets');
+    return {sheets: targetSheets, encoding: null, bomRemoved: false,
+      fileType: 'xlsx', bytes: null, binaryHash: targetHash, sourceKind: 'SHORTCUT', targetId: target.targetId};
   }
   var lower = String(fileName || '').toLowerCase();
   var fileType = /\.csv$/.test(lower) ? 'csv' : (/\.xlsx$/.test(lower) ? 'xlsx' : null);

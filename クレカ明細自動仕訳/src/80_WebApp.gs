@@ -1533,7 +1533,15 @@ function webAppFolderFile_(file, stateByFileId, nowMs) {
   var fileName = String(file.getName() || '');
   var updated = file.getLastUpdated();
   var updatedMs = updated instanceof Date ? updated.getTime() : new Date(updated).getTime();
-  var supported = isImportableDriveFile(fileName, file.getMimeType());
+  var mime = file.getMimeType();
+  if (mime === DRIVE_SHORTCUT_MIME_) {
+    try {
+      updated = DriveApp.getFileById(file.getTargetId()).getLastUpdated();
+      updatedMs = updated instanceof Date ? updated.getTime() : new Date(updated).getTime();
+    } catch (error) { /* 指す先が読めなければ、走査と同じく自身の日時で待つ */ }
+  }
+  var supported = mime === DRIVE_SHORTCUT_MIME_ ?
+    isImportableDriveFile(fileName, mime, file.getTargetMimeType()) : isImportableDriveFile(fileName, mime);
   var minutes = webAppStableWaitMinutes_(updatedMs, nowMs);
   var stable = minutes === 0;
   var registered = Object.prototype.hasOwnProperty.call(stateByFileId, fileId);

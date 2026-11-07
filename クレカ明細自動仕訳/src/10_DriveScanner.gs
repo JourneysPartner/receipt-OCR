@@ -3,7 +3,7 @@
 /**
  * 4.8 ファイル検索。
  *
- * モード1（CSV・Excel・Google スプレッドシートの未処理検索）と
+ * モード1（CSV・Excel・Google スプレッドシートと、それを指すショートカットの未処理検索）と
  * モード2（処理済み変更の再走査）の**Drive側**を担う。
  * モード2の判定そのもの（絞込・変更検出・要確認起票）は`10_RescanManager`で
  * あり、本モジュールはメタ情報の一括取得とハッシュ計算だけを供給する。
@@ -36,7 +36,7 @@ function driveListPage_(query, pageToken) {
         q: query,
         pageSize: 100,
         pageToken: pageToken || undefined,
-        fields: 'nextPageToken, files(id, name, mimeType, createdTime, modifiedTime, size, headRevisionId)',
+        fields: 'nextPageToken, files(id, name, mimeType, createdTime, modifiedTime, size, headRevisionId, shortcutDetails(targetId,targetMimeType))',
         supportsAllDrives: true,
         includeItemsFromAllDrives: true,
         corpora: 'allDrives'
@@ -49,6 +49,27 @@ function driveListPage_(query, pageToken) {
   }
   throw makeCatalogError_('TRANSIENT_DRIVE_ERROR',
     'Drive list failed after retries: ' + (lastError && lastError.message));
+}
+
+/** 指す先の編集はショートカットの変更日時に現れないため、別に取得する。 */
+function driveShortcutTargetMetadata_(targetId, includeTrashed) {
+  var lastError = null;
+  for (var attempt = 0; attempt <= 3; attempt += 1) {
+    if (attempt > 0) Utilities.sleep(computeBackoffMs(attempt));
+    try {
+      driveScannerCallCount_ += 1;
+      return Drive.Files.get(targetId, {
+        fields: 'id,modifiedTime,headRevisionId' + (includeTrashed ? ',trashed' : ''),
+        supportsAllDrives: true
+      });
+    } catch (error) {
+      var code = Number(error && (error.code || (error.details && error.details.code)));
+      if (code !== 429 && code !== 500 && code !== 503) throw error;
+      lastError = error;
+    }
+  }
+  throw makeCatalogError_('TRANSIENT_DRIVE_ERROR',
+    'Drive target metadata failed after retries: ' + (lastError && lastError.message));
 }
 
 /**
@@ -113,7 +134,7 @@ function permanentIndexRowFromValues_(values, rowNumber) {
 /**
  * モード1：未処理ファイル検索。
  *
- * フィルタ（4.8の表）：取込可能な種類、内部状態が`DISCOVERED`または
+ * フィルタ（4.8の表）：取込可能な種類（ショートカットは指す先が Sheets）、内部状態が`DISCOVERED`または
  * 未登録、最終更新から10分以上経過。整列は仕様6.2
  * （`createdTime`昇順→ファイル名→ファイルID）。
  *
@@ -134,9 +155,22 @@ function scanUnprocessedFiles(customerId, options) {
 
   var candidates = listFilesRecursively_(customer.sourceFolderId)
     .filter(function(file) {
-      if (!isImportableDriveFile(file.name, file.mimeType)) return false;
+      var importable = file.mimeType === DRIVE_SHORTCUT_MIME_ ?
+        isImportableDriveFile(file.name, file.mimeType,
+          file.shortcutDetails && file.shortcutDetails.targetMimeType) :
+        isImportableDriveFile(file.name, file.mimeType);
+      if (!importable) return false;
       var state = stateByFileId[String(file.id)];
       if (state !== undefined && state !== FILE_STATE.DISCOVERED) return false;
+      if (file.mimeType === DRIVE_SHORTCUT_MIME_) {
+        try {
+          var target = driveShortcutTargetMetadata_(file.shortcutDetails.targetId, false);
+          file.modifiedTime = target.modifiedTime || null;
+          file.headRevisionId = target.headRevisionId || null;
+        } catch (error) {
+          // 読めないものも候補に残し、読取で FAILED として利用者へ返す。
+        }
+      }
       var modified = file.modifiedTime ? new Date(file.modifiedTime).getTime() : 0;
       return modified <= stableBefore;
     })
@@ -145,6 +179,7 @@ function scanUnprocessedFiles(customerId, options) {
         fileId: String(file.id),
         name: String(file.name || ''),
         mimeType: String(file.mimeType || ''),
+        targetId: file.mimeType === DRIVE_SHORTCUT_MIME_ ? file.shortcutDetails.targetId : null,
         createdTime: file.createdTime || null,
         modifiedTime: file.modifiedTime || null,
         size: file.size === undefined ? null : Number(file.size),
@@ -193,6 +228,17 @@ function getFileMetadataBatch(fileIds, options) {
   options.folderIds.forEach(function(folderId) {
     listFilesRecursively_(folderId).forEach(function(file) {
       if (!wanted[String(file.id)]) return;
+      if (file.mimeType === DRIVE_SHORTCUT_MIME_) {
+        try {
+          var target = driveShortcutTargetMetadata_(file.shortcutDetails && file.shortcutDetails.targetId, true);
+          if (target.trashed) return;
+          file.modifiedTime = target.modifiedTime || null;
+          file.headRevisionId = target.headRevisionId || null;
+        } catch (error) {
+          // 再走査では「ファイルが無い」として扱い、ハッシュ読取で全体を止めない。
+          return;
+        }
+      }
       metaById[String(file.id)] = {
         id: String(file.id),
         name: String(file.name || ''),

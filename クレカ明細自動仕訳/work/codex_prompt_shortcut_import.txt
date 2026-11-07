@@ -1,0 +1,42 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）で、明細フォルダに置かれた「Google スプレッドシートを指すショートカット」を取り込めるようにし、ショートカットから読んだ明細の前年の利用日を除外する作業を受け取ります。
+
+作業ツリーは main の最新（コミット 06ce677）です。`work/spec_shortcut_import.md` と `work/codex_prompt_shortcut_import.txt` は私が書いた未コミットのファイルで、触らないでください。`work/spec_google_sheets_import.md` の未コミットの追記、`.codex/config.toml`、`AGENTS.md`、`work/.tmp-audit/`、`work/.tmp-gsheet/` も触らないでください。あなたの変更はステージされていない差分として残してください ── **`git add` しないこと。**開始時の `node test/run-tests.js` の最後の行を報告してください（1830/1830 のはずです）。全テストは 10 分を超えることがあります。端末が重いと画面のテスト（子プロセスを使うもの）が時間切れで落ちることがあり、その場合は再実行で通ります（再実行したら報告すること）。
+
+作業用のファイルを作るなら `work/.tmp-shortcut/` の中に置いてください。対象のテストだけ回す道具は `work/.tmp-gsheet/run-targeted.js <test files>` にあります（読むだけ・使うだけ。変えないこと）。
+
+## 仕様書
+
+`work/spec_shortcut_import.md` の全部。**全部読んでから始めてください。**安全の要は §3 の決定 1（指す先に何も書かない）・決定 4〜5（指す先の中身ハッシュが先・番人）・決定 7（除外の順番、件数照合と内容ハッシュは除外の前の全取引、除外した取引は `CANCELED` で取引ログへ、食い違いは止める、AK が無ければ止める）です。前提の第 1 段は `work/spec_google_sheets_import.md`（読むだけ）。
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。
+2. **`src/` で変えてよいのは仕様書 §4 に挙げた箇所だけ。**ほかの関数は 1 つも変えない。`97_Ops.gs`・`19_FormatRegistration.gs`・形式定義は変えないこと。Excel・CSV を指すショートカットやフォルダのショートカットを読む処理は作らないこと。
+3. 普通のファイル（CSV・Excel・Google スプレッドシート）の取込は、値も呼び方も順番も今と同じに保つこと（除外が空のときに、今と違う関数の呼び方・違う引数を渡さない）。既存のテストが全部そのまま通ることがその確かめになります。
+4. **改行を変えないこと。**`src/` のファイルは LF です。`97_Ops.gs` は変えないので、終わったら差分に出ないことを確かめて報告すること。`81_WebAppUi.html` も改行と文字コードを変えないこと。
+5. **テスト：**新しいテストは `test/phase6-shortcut-import.test.js` に書く。既存のテストで直してよいのは、「ショートカットは名前によらず拾わない・読まない」前提で Google スプレッドシートを指すショートカットを置いているものだけ（直したものは全部報告する）。`assert` の意味を弱めないこと。`test/gas-stubs.js` は足すことだけ許す（仕様書 §5 の冒頭。足したものを報告すること）。
+6. **このリポジトリは公開です。**テスト・コード・コメントに実在の店名・地名・人名・ID・カード番号を書かないこと（架空の値だけ）。
+7. **テストを先に赤にしてから直すこと。**
+8. **日本語は UTF-8 で書くこと。**終わったら `grep -n '???' src/*.gs src/*.html test/*.js`（97 は `grep -an`）が空であることを確かめて報告すること。コメントを足すなら、周りと同じ密度・語り口（「なぜ」を書く）で。
+9. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断をしたら全部報告すること。**安全側を外す判断を自分でしないこと。**迷ったら止めて報告すること。特に、指す先の `setName` などの変更系を呼ぶ・除外した取引を取引ログに残さない・除外した取引を `PREPARED` で登録する・件数照合や内容ハッシュを除外の後で行う・AK が無いのに通す・食い違いを黙って直す、のどれも仕様に反する。
+10. Sheets API の読取は必ず枠の口（`paceSheetsRead_`・`apiReadCount_`、再試行は `sheetsReadWithRetry_`）を通すこと。Drive の呼出しは `driveScannerCallCount_` に数えること（`10` の中）。数えない呼出しを足さないこと。
+
+## 進め方
+
+1. 仕様書を読み、`src/12_FileReader.gs`・`src/10_DriveScanner.gs`・`src/10_RescanManager.gs`（読むだけ）・`src/71_RunOrchestrator.gs`（`processDiscoveredFile_`）・`src/70_ImportFlow.gs`（`runPreValidationBlock`・`runWriteBlock` の冒頭・`processFile`）・`src/61_TransactionLog.gs`（`makeTransactionRow_`・`registerPrepared`）・`src/30_TransactionValidator.gs`（`checkPriorYearUsage`・`blankedDateTransactionIds`・`verifyCountsAndTotals`、読むだけ）・`src/31_PurposeResolver.gs`（`resolvePurposes`、読むだけ）・`src/50_ReviewStore.gs`（`isFileFullyResolved`、読むだけ）・`src/80_WebApp.gs`（`webAppFolderFile_`・`webAppRunImport`・`finalReviewReconcile_`）・`src/81_WebAppUi.html`（`customerFixNoticeLines` とその呼出し）・`src/06_ErrorCatalog.gs` と、`test/phase6-google-sheets-import.test.js`・`test/gas-stubs.js` の Drive・ショートカットの代用品を読む
+2. sc 1〜18 を書く → 赤を確かめる
+3. 作る
+4. `node test/run-tests.js` を全部緑にする（**終わったら必ず全テストを回して最後の行を報告すること**）
+5. 仕様書 §6 の P1〜P24 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら差分が変異を入れる前と同じか確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 作る前に sc のどれが赤だったか
+- P1〜P24 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て
+- 仕様書が間違っていた・足りなかった箇所、自分で決めた箇所（全部）
+- 直した既存のテスト（テストごとに 1 行）と、`gas-stubs.js` に足したもの
+- 改行・`97_Ops.gs` が差分に出ないこと、`???` の結果
+- 変えたファイルの一覧
+
+**レビューはあなたが行いません。**終わったら上を書いて止めてください。
