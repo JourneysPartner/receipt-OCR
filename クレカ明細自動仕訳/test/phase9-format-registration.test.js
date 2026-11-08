@@ -3421,6 +3421,204 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(cells[1].textContent, literal + ' 件（うち要確認 2 件）');
   });
 
+  function collWorld(columns = {date: 'B', merchant: 'C', amount: 'E', purpose: 'I'},
+    dates = ['2026/12/10', '2026/12/11', '2026/12/12', '2026/12/13', '2026/12/14'],
+    fileName = '架空明細.xlsx') {
+    const {card} = webWorld();
+    const index = (column) => gas.call('detectorColumnIndex_', [column]);
+    const header = Array(9).fill('補助');
+    for (const [role, label] of Object.entries({date: '利用日', merchant: '店名',
+      amount: '利用金額', purpose: '使用用途'})) header[index(columns[role])] = label;
+    const rows = [Object.assign(Array(9).fill(''), {0: '架空 太郎 様'}), header,
+      ...dates.map((date, i) => {
+        const row = Array(9).fill('架空補助');
+        row[index(columns.date)] = date; row[index(columns.merchant)] = '架空店舗' + i;
+        row[index(columns.amount)] = (i + 1) * 100; row[index(columns.purpose)] = '架空経費';
+        return row;
+      })];
+    gas.stubs.createFile('coll_target', {name: fileName, bytes: Buffer.from('synthetic-coll'),
+      xlsxSheets: [{name: '架空明細', values: rows}],
+      lastUpdated: new Date(Date.now() - 3600000)});
+    card.fileIds.push('coll_target');
+    gas.call('registerReview', [{reviewType: 'FORMAT_UNKNOWN', customerId: 'C001',
+      customerName: '顧客一', fileId: 'coll_target', fileNameOriginal: fileName}]);
+    const answers = {baseFormatId: 'smbc_family_x9', formatId: 'synthetic_layout_x9',
+      formatName: '架空形式（9列）', sheetName: '架空明細', headerRow: 2, dataStartRow: 3,
+      columns: {...columns, amountFallback: null},
+      acknowledgements: {customerSide: true, amountChoice: true}};
+    const preview = () => gas.call('webAppPreviewFormat', ['C001', 'card', 'coll_target', answers]);
+    const save = (hash) => gas.call('webAppSaveFormat',
+      ['C001', 'card', 'coll_target', answers, hash]);
+    return {answers, preview, save, sheet: {name: '架空明細', rows}, fileName};
+  }
+  const collPlain = (value) => JSON.parse(JSON.stringify(value));
+  const collStatic = (result) => result.blocking.some((item) =>
+    item.code === 'STATIC_COLLISION' && item.detail === 'smbc_family_x9');
+  const collSimilar = (result) => result.warnings.some((item) =>
+    item.code === 'SIMILAR_FORMAT_LAYOUT_DIFFERS' && item.detail === 'smbc_family_x9');
+
+  test('coll 1: different layout warns and saves as the only resolved format', () => {
+    const world = collWorld(), result = world.preview();
+    assert.equal(collStatic(result), false);
+    assert.equal(collSimilar(result), true);
+    assert.deepEqual(collPlain(result.blocking), []);
+    assert.equal(result.extraction.count, 5);
+    const saved = world.save(result.previewHash);
+    assert.equal(saved.saved, true); assert.equal(saved.readback, 'OK');
+    const detected = gas.call('detectFormatWith', [defs(), world.sheet, 'xlsx', world.fileName]);
+    assert.deepEqual(collPlain(detected.map((item) => item.formatId)), [world.answers.formatId]);
+    const verdict = detect({fileType: 'xlsx', fileName: world.fileName, sheets: [world.sheet]});
+    assert.equal(verdict.status, 'RESOLVED'); assert.equal(verdict.formatId, world.answers.formatId);
+    const loaded = gas.call('loadFormatDefinitions', [{formatId: world.answers.formatId}])[0];
+    assert.equal(JSON.stringify(loaded.answers).includes('droppedRules'), false);
+  });
+
+  test('coll 2: same layout with unreadable dates remains a static collision', () => {
+    const world = collWorld({date: 'A', merchant: 'B', amount: 'C', purpose: 'I'},
+      Array(5).fill('abc'));
+    for (const date of ['A', 'a']) {
+      world.answers.columns.date = date;
+      const result = world.preview();
+      assert.equal(collStatic(result), true); assert.equal(collSimilar(result), false);
+      const saved = world.save(result.previewHash);
+      assert.equal(saved.saved, false); assert.equal(collStatic(saved), true);
+    }
+  });
+
+  test('coll 2b: matching an active format still blocks preview and save', () => {
+    const world = collWorld({date: 'A', merchant: 'B', amount: 'C', purpose: 'I'});
+    world.answers.baseFormatId = null;
+    const result = world.preview();
+    assert.ok(result.blocking.some((item) => item.code === 'TARGET_AMBIGUOUS' &&
+      item.detail.includes('smbc_family_x9')));
+    const saved = world.save(result.previewHash);
+    assert.equal(saved.saved, false);
+    assert.ok(saved.blocking.some((item) => item.code === 'TARGET_AMBIGUOUS'));
+  });
+
+  test('coll 3: changing only the date or only the amount column warns', () => {
+    for (const columns of [{date: 'A', merchant: 'B', amount: 'E', purpose: 'I'},
+      {date: 'B', merchant: 'D', amount: 'C', purpose: 'I'}]) {
+      const result = collWorld(columns).preview();
+      assert.equal(collStatic(result), false, JSON.stringify(columns));
+      assert.equal(collSimilar(result), true, JSON.stringify(columns));
+      assert.deepEqual(collPlain(result.blocking), []);
+    }
+  });
+
+  test('coll 4: missing answer columns keep the static collision', () => {
+    for (const role of ['date', 'amount']) {
+      for (const empty of ['', null, undefined, '?']) {
+        const world = collWorld(); world.answers.columns[role] = empty;
+        const result = world.preview();
+        assert.equal(collStatic(result), true, role + ':' + empty);
+        assert.equal(collSimilar(result), false);
+      }
+    }
+  });
+
+  test('coll 4b: missing active format columns keep the static collision', () => {
+    const world = collWorld(), original = gas.context.formatActiveDefinitions_;
+    try {
+      for (const role of ['dateColumn', 'amountColumn']) {
+        for (const empty of [undefined, null, '', '?']) {
+          gas.context.formatActiveDefinitions_ = () => original().map((item) => {
+            if (item.formatId !== 'smbc_family_x9') return item;
+            const copy = {...item};
+            if (empty === undefined) delete copy[role]; else copy[role] = empty;
+            return copy;
+          });
+          const result = world.preview();
+          assert.equal(collStatic(result), true, role + ':' + empty);
+          assert.equal(collSimilar(result), false);
+        }
+      }
+    } finally { gas.context.formatActiveDefinitions_ = original; }
+  });
+
+  test('coll 5: dropped rules return explicit fields and null for absent fields', () => {
+    const world = collWorld(), result = world.preview();
+    const dropped = result.warnings.find((item) => item.code === 'RULES_NOT_INHERITED');
+    assert.deepEqual(collPlain(dropped.detail), [{id: 'deposit', target: 'cell', column: 'B',
+      match: 'contains', value: 'ご入金'}]);
+    const context = {customerId: 'C001', fileId: 'coll_target', fileName: world.fileName};
+    const derived = gas.call('formatDerivedSpec_', [context, {fileType: 'xlsx'}, world.sheet,
+      world.answers, {exclusionRule: {rules: [{}]}}, {amountCandidates: []}, null]);
+    assert.deepEqual(collPlain(derived.droppedRules),
+      [{id: null, target: null, column: null, match: null, value: null}]);
+  });
+
+  test('coll 5b: rule warning explains cell rules and accepts legacy IDs', () => {
+    const detail = [{id: 'deposit', target: 'cell', column: 'B', match: 'contains', value: 'ご入金'},
+      {id: 'other', target: 'cell', column: 'C', match: 'equals', value: '架空'}];
+    assert.equal(clientEval(`formatWarningMessage('RULES_NOT_INHERITED',${JSON.stringify(detail)})`),
+      '土台の形式の決まり（B 列に「ご入金」を含む行を除く、other の規則）は、列の位置で決めているので、この形式には引き継いでいません。この明細にそういう行があれば、取引として読みます。');
+    assert.equal(clientEval("formatWarningMessage('RULES_NOT_INHERITED',['deposit'])"),
+      '土台の形式の決まり（deposit の規則）は、列の位置で決めているので、この形式には引き継いでいません。この明細にそういう行があれば、取引として読みます。');
+  });
+
+  test('coll 6: full-year dates do not warn about unresolved billing month', () => {
+    const result = collWorld().preview();
+    assert.equal(result.extraction.year.yearless, 0);
+    assert.notEqual(result.extraction.billing.status, 'RESOLVED');
+    assert.equal(result.warnings.some((item) => item.code === 'BILLING_MONTH_UNRESOLVED'), false);
+  });
+
+  test('coll 6b: unresolved billing month warns with the yearless date count', () => {
+    const result = collWorld(undefined, ['12/10', '2026/12/11', '12/12']).preview();
+    assert.equal(result.extraction.year.yearless, 2);
+    const warning = result.warnings.find((item) => item.code === 'BILLING_MONTH_UNRESOLVED');
+    assert.ok(warning); assert.equal(warning.detail, 2);
+    assert.equal(clientEval(`formatWarningMessage('BILLING_MONTH_UNRESOLVED',${warning.detail})`),
+      '請求年月が読めないので、年の書かれていない利用日（2 行）の年を決められません。');
+  });
+
+  test('coll 6c: resolved or absent billing rules do not produce billing warnings', () => {
+    const resolved = collWorld(undefined, ['12/10', '12/11'], '架空明細202612.xlsx').preview();
+    assert.equal(resolved.extraction.year.yearless, 2);
+    assert.equal(resolved.extraction.billing.status, 'RESOLVED');
+    assert.equal(resolved.warnings.some((item) => item.code === 'BILLING_MONTH_UNRESOLVED'), false);
+    const world = collWorld(undefined, ['12/10', '12/11']); world.answers.baseFormatId = null;
+    const absent = world.preview();
+    assert.equal(absent.extraction.year.yearless, 2);
+    assert.equal(absent.warnings.some((item) => item.code === 'BILLING_MONTH_UNRESOLVED'), false);
+  });
+
+  test('coll 7: layout warning uses the preview format name and known warning text', () => {
+    const result = collWorld().preview();
+    const named = result.formatNames.find((item) => item.formatId === 'smbc_family_x9');
+    const message = clientEval(`(state.formatPreview=${JSON.stringify(result)},
+      formatWarningMessage('SIMILAR_FORMAT_LAYOUT_DIFFERS','smbc_family_x9'))`);
+    assert.equal(message, '登録済みの形式「' + named.formatName + '」と見出し・列数は似ていますが、日付・金額の列の位置が違うので、別の形式として登録します。');
+    assert.equal(message.includes('smbc_family_x9'), false);
+    for (const code of ['PURPOSE_EMPTY_ROWS', 'CATEGORY_2', 'REVIEW_ROWS',
+      'BILLING_MONTH_UNRESOLVED', 'EXCLUDED_ROWS', 'RULES_NOT_INHERITED',
+      'FOREIGN_NOT_INHERITED', 'PURPOSE_HEADER_NOT_STANDARD', 'REFERENCE_UNREADABLE',
+      'SIMILAR_FORMAT_LAYOUT_DIFFERS']) {
+      const detail = code === 'RULES_NOT_INHERITED' ? ['deposit'] : 2;
+      const text = clientEval(`formatWarningMessage(${JSON.stringify(code)},${JSON.stringify(detail)})`);
+      assert.ok(!text.includes('確認してください：'), code); assert.ok(!text.includes('undefined'), code);
+    }
+  });
+
+  test('coll 7b: warning names and rule values render literally through textContent', () => {
+    const world = mountedFormatWorld(), state = world.ui.state;
+    for (const property of ['innerHTML', 'outerHTML', 'innerText'])
+      Object.defineProperty(world.Node.prototype, property, {set() { assert.fail('textContent を使う'); }});
+    const literal = '<img src=x onerror="coll_probe()">架空の文字';
+    state.formatPreview.formatNames = [{formatId: 'synthetic_active', formatName: literal}];
+    state.formatPreview.warnings = [{code: 'SIMILAR_FORMAT_LAYOUT_DIFFERS', detail: 'synthetic_active'},
+      {code: 'RULES_NOT_INHERITED', detail: [{id: 'synthetic_rule', target: 'cell', column: 'B',
+        match: 'contains', value: literal}]}];
+    world.ui.renderFormatPanel();
+    const body = world.ids['format-body'];
+    assert.equal(body.querySelectorAll('img').length, 0);
+    assert.ok(body.textContent.includes('登録済みの形式「' + literal + '」'));
+    assert.ok(body.textContent.includes('B 列に「' + literal + '」を含む行を除く'));
+    assert.ok(body.textContent.includes('請求年月 読めません。年のない日付 0 行のうち'));
+  });
+
+
 };
 
 if (require.main === module && process.argv[2] === '--browser-case') {

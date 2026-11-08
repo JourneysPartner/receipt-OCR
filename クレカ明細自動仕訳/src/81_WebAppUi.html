@@ -2973,6 +2973,13 @@
 
     function formatWarningMessage(code, detail) {
       var n = detail == null ? 0 : detail;
+      var rules = (Array.isArray(detail) ? detail : detail == null ? [] : [detail])
+        .map(function(rule) {
+          if (typeof rule === 'string') return rule + ' の規則';
+          if (rule && rule.target === 'cell' && rule.match === 'contains')
+            return rule.column + ' 列に「' + rule.value + '」を含む行を除く';
+          return (rule && rule.id) + ' の規則';
+        }).join('、');
       var reason = {
         UNKNOWN_CARD_FORMAT: '形式が分からない', AMBIGUOUS_CARD_FORMAT: '形式が複数に当たる',
         MULTI_SHEET_AMBIGUOUS: '対象のシートが複数ある',
@@ -2990,9 +2997,10 @@
         PURPOSE_EMPTY_ROWS: '使用用途が空の行が ' + n + ' 行あります。このまま取り込むと【要修正】になります。',
         CATEGORY_2: 'このまま取り込むと「' + reason + '」で止まる見込みです。',
         REVIEW_ROWS: '取り込んだ後に要確認になる行が ' + n + ' 行ある見込みです。',
-        BILLING_MONTH_UNRESOLVED: '請求年月が読めません。年の補完が効きません。',
+        BILLING_MONTH_UNRESOLVED: '請求年月が読めないので、年の書かれていない利用日（' + n + ' 行）の年を決められません。',
         EXCLUDED_ROWS: '取引ではないとして除いた行が ' + n + ' 行あります。下の表で確かめてください。',
-        RULES_NOT_INHERITED: '土台の形式の規則のうち、列の位置に依るもの（' + (Array.isArray(detail) ? detail.join('、') : detail || '') + '）は引き継ぎませんでした。',
+        RULES_NOT_INHERITED: '土台の形式の決まり（' + rules + '）は、列の位置で決めているので、この形式には引き継いでいません。この明細にそういう行があれば、取引として読みます。',
+        SIMILAR_FORMAT_LAYOUT_DIFFERS: '登録済みの形式「' + formatNameForId(detail) + '」と見出し・列数は似ていますが、日付・金額の列の位置が違うので、別の形式として登録します。',
         FOREIGN_NOT_INHERITED: 'この形式では外貨の補足（通貨・現地額・レート）を取りません。',
         PURPOSE_HEADER_NOT_STANDARD: '使用用途として読む列の見出しが「' + (detail || '') + '」です。',
         REFERENCE_UNREADABLE: '参照ファイル「' + (detail || '') + '」が読めなかったので、列の対応は見出しから推しました。'

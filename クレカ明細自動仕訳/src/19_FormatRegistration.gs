@@ -430,7 +430,13 @@ function formatDerivedSpec_(context, read, sheet, answers, base, proposal, purpo
   var oldRules = base && base.exclusionRule && base.exclusionRule.rules || [];
   var retainedRules = oldRules.filter(function(rule) { return rule.target === 'row'; });
   var droppedRules = oldRules.filter(function(rule) { return rule.target !== 'row'; })
-    .map(function(rule) { return rule.id || rule.target; });
+    .map(function(rule) {
+      return {id: rule.id == null ? null : rule.id,
+        target: rule.target == null ? null : rule.target,
+        column: rule.column == null ? null : rule.column,
+        match: rule.match == null ? null : rule.match,
+        value: rule.value == null ? null : rule.value};
+    });
   var countTotal = base && base.countTotalRule &&
     base.countTotalRule.count && base.countTotalRule.total &&
     base.countTotalRule.count.source === 'none' &&
@@ -667,7 +673,18 @@ function formatPreview_(context, answers) {
     var profile = item.columnProfile;
     if (profile && gap.keywords.ok && gap.width.actual >= profile.minColumns &&
         (profile.maxColumns === undefined || gap.width.actual <= profile.maxColumns) &&
-        gap.stage === 'COLUMNS') block('STATIC_COLLISION', item.formatId);
+        gap.stage === 'COLUMNS') {
+      var dateIndex = detectorColumnIndex_(columns.date);
+      var amountIndex = detectorColumnIndex_(columns.amount);
+      var existingDateIndex = detectorColumnIndex_(item.dateColumn);
+      var existingAmountIndex = detectorColumnIndex_(item.amountColumn);
+      // 列が欠けると並びの違いを確かめられないので、従来どおり止める。
+      var layoutKnown = dateIndex >= 0 && amountIndex >= 0 &&
+        existingDateIndex >= 0 && existingAmountIndex >= 0;
+      if (layoutKnown && (dateIndex !== existingDateIndex || amountIndex !== existingAmountIndex))
+        warn('SIMILAR_FORMAT_LAYOUT_DIFFERS', item.formatId);
+      else block('STATIC_COLLISION', item.formatId);
+    }
   });
   if (referenceSheet && def.valid &&
       detectFormatWith([def], referenceSheet, read.fileType, reference.fileName).length) {
@@ -688,8 +705,9 @@ function formatPreview_(context, answers) {
       warn('REVIEW_ROWS', extracted.reviewEntries.length);
     if (extracted.extraction.excluded.length)
       warn('EXCLUDED_ROWS', extracted.extraction.excluded.length);
-    if (def.billingRule && extracted.extraction.billing.status !== 'RESOLVED')
-      warn('BILLING_MONTH_UNRESOLVED');
+    if (def.billingRule && extracted.extraction.billing.status !== 'RESOLVED' &&
+        extracted.extraction.year.yearless >= 1)
+      warn('BILLING_MONTH_UNRESOLVED', extracted.extraction.year.yearless);
   }
   var amountComparison = proposal.amountCandidates.map(function(candidate) {
     var index = detectorColumnIndex_(candidate.column);

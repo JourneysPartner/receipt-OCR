@@ -1,0 +1,39 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の Web アプリで、形式不明カードの画面登録の検査 `STATIC_COLLISION` を列の並びで見分け、警告 2 つの文を分かりやすくする作業を受け取ります。
+
+作業ツリーは main の最新（コミット 2ac0898）です。`work/spec_format_collision_layout.md` と `work/codex_prompt_format_collision_layout.txt` は私が書いた未コミットのファイルで、触らないでください。`.codex/config.toml`、`AGENTS.md`、`work/.tmp-audit/`、`work/.tmp-gsheet/`、`work/.tmp-shortcut/`、`work/.tmp-grid/`、`work/.tmp-compact/` も触らないでください。あなたの変更はステージされていない差分として残してください ── **`git add` しないこと。**開始時の `node test/run-tests.js` の最後の行を報告してください（1892/1892 のはずです）。全テストは 10 分を超えることがあります。端末が重いと画面のテスト（子プロセスを使うもの）が時間切れで落ちることがあり、その場合は再実行で通ります（再実行したら報告すること）。
+
+作業用のファイルを作るなら `work/.tmp-coll/` の中に置いてください。対象のテストだけ回す道具は `work/.tmp-gsheet/run-targeted.js <test files>` にあります（読むだけ・使うだけ。変えないこと。環境変数 `GS_TEST_FILTER` でテスト名の一部を絞れます）。
+
+## 仕様書
+
+`work/spec_format_collision_layout.md` の全部。**全部読んでから始めてください。**前提は `work/spec_format_registration.md` の §6.1・§6.2（読むだけ）。
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。
+2. **変えてよいのは `src/19_FormatRegistration.gs`（登録の検査と `droppedRules` の形）と `src/81_WebAppUi.html`（知らせの文）だけ。**取込・判定・抽出・形式の定義（`04`・`13`・`24`・`30`・`70`・`71` ほか）は 1 つも変えないこと（仕様書 §4 の S3）。
+3. **安全の不変条件 S1〜S4（仕様書 §4）を守ること。**止める側から外すのは「X の日付の列と金額の列がどちらも回答と同じ位置でない」ときだけ。回答の列が空・X が列を持たないときは止める。迷ったら止める側に倒し、報告すること。
+4. **改行と文字コードを変えないこと。**`src/` は LF・UTF-8 です。終わったら変わったファイルが `src/19_FormatRegistration.gs`・`src/81_WebAppUi.html`・`test/phase9-format-registration.test.js` だけであることを確かめて報告すること。
+5. **テスト：**新しいテストは `test/phase9-format-registration.test.js` に coll 1〜7 として書く（仕様書 §5）。**実在の明細の固定データ（`test/fixtures/`）を新しいテストで使わないこと**（テストの中で架空の表を作る）。既存のテストは直さないこと。既存のテストが落ちたら、テストを直さずに止めて報告すること。
+6. **このリポジトリは公開です。**テスト・コード・コメントに実在の店名・人名・ID・カード番号を書かないこと（架空の値だけ）。
+7. **テストを先に赤にしてから直すこと。**
+8. **日本語は UTF-8 で書くこと。**終わったら `???` が `src/19_FormatRegistration.gs`・`src/81_WebAppUi.html`・`test/phase9-format-registration.test.js` に無いことを確かめて報告すること。コメントを足すなら、周りと同じ密度・語り口（「なぜ」を書く）で。
+9. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断をしたら全部報告すること。迷ったら止めて報告すること。
+10. 知らせの文は `textContent` で出すこと（`innerHTML` などの HTML を書き込む口を足さないこと）。規則の値（`value`）を文に入れるときも同じ。
+
+## 進め方
+
+1. 仕様書を読み、`src/19_FormatRegistration.gs` の回答からの導出（`droppedRules` を作るところ）と検査（`STATIC_COLLISION`・`RULES_NOT_INHERITED`・`BILLING_MONTH_UNRESOLVED` を出すところ、`formatNames` を返すところ）、`src/81_WebAppUi.html` の `formatBlockingMessage`・`formatWarningMessage`・`formatNameForId`、`src/04_Provisioning.gs` の `installSmbcXlsxFormat`（読むだけ）、`test/phase9-format-registration.test.js` の `setup`・fmt 25・fmt 71 と、試し読み・保存を呼ぶ既存テストの書き方を読む
+2. coll 1〜7 を書く → 赤を確かめる
+3. 作る
+4. `node test/run-tests.js` を全部緑にする（**終わったら必ず全テストを回して最後の行を報告すること**）
+5. 仕様書 §6 の C1〜C10 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら差分が変異を入れる前と同じか確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 作る前に coll のどれが赤だったか
+- C1〜C10 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て
+- `droppedRules` を使っていたところと、形を変えた影響（保存の記録などに入るか）
+- 仕様書が間違っていた・足りなかった箇所、自分で決めた箇所（全部）
+- 変えたファイルの一覧と `???` の結果
