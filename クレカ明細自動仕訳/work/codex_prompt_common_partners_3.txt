@@ -1,0 +1,13 @@
+続きです。止まった判断は正しかったです。ありがとうございます。
+
+`test/phase9-format-registration.test.js` の kw2 24（`partner exclusion removes only its selection and inputs on success`）で、「該当なし」の行の `colSpan` を確かめている 1 か所（`assert.equal(world.ids['review-table'].querySelector('td').colSpan, 9);`）だけ、期待値を 9 から 10 へ変えることを許します。仕様書 §3.4 で列を 1 つ足したことによる当然の変化です。このテストのほかの行と、ほかの既存テストは直さないでください。
+
+このファイル（`work/codex_prompt_common_partners_3.txt`）も私が書いた未コミットのファイルで、触らないでください。前の指示（`work/codex_prompt_common_partners_2.txt`）の「絶対に守ること」はすべてそのまま有効です。
+
+続けてやってほしいこと：
+
+1. 上の 1 か所を直し、`node test/run-tests.js` を全部緑にする（最後の行を報告）。
+2. 仕様書 §6 の M1〜M16 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら差分が変異を入れる前と同じか確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する。
+3. 終わったら、もう一度全テストを回して最後の行を報告する。
+
+報告：前の指示の「報告してほしいこと」の全部（読取回数の表、仕様外の判断、変えたファイル、`???`、NUL の数を含む）。`51_ReviewResolution.gs` を CRLF のまま保ったことは了解しました。`work/.tmp-common/report.txt` も最新にしてください。

@@ -123,7 +123,8 @@ function buildDictionaryIndex(customerId, source) {
   }
   var partnerNameIndex = null;
   if (Array.isArray(source.partnerList)) {
-    partnerNameIndex = buildPartnerNameIndex_(customerPartnerRecords_(source.partnerList), customerId);
+    partnerNameIndex = buildPartnerNameIndex_(customerPartnerRecords_(source.partnerList), customerId,
+      source.commonPartners);
   }
   return {
     customer: source.customer.filter(function(rule) {
@@ -220,7 +221,7 @@ function matchPartner(tx, customerId, dictIndex) {
   }
 
   if (!selected.length && dictIndex.partnerNameIndex) {
-    var partnerMatches = dictIndex.partnerNameIndex.activeByKey[normalized] || [];
+    var partnerMatches = dictIndex.partnerNameIndex.activeByKey[partnerNameKey_(original)] || [];
     var distinctPartnerNames = [];
     partnerMatches.forEach(function(record) {
       if (distinctPartnerNames.indexOf(record.partnerName) < 0) {

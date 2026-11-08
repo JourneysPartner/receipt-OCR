@@ -519,6 +519,7 @@
       partnerNames: null,
       // 表を描き直しても入力と選択を保つため、表示位置でなく要確認 ID を鍵にする。
       partnerInputs: new Map(),
+      customerOnlyInputs: new Map(),
       selectedReviewIds: new Set(),
       lastSelectedReviewId: null,
       reviewFilter: '',
@@ -1329,7 +1330,11 @@
 
     // サーバーの `normalizeMerchant` と同じでなければならない（テスト pm 28 が見る）。
     function partnerNameKey(value) {
-      return formatNormalizeHeader(value);
+      return formatNormalizeHeader(value).replace(/[\u3041-\u3096]/g, function(character) {
+        return String.fromCharCode(character.charCodeAt(0) + 0x60);
+      }).replace(/[ァィゥェォッャュョヮヵヶ]/g, function(character) {
+        return 'アイウエオツヤユヨワカケ'.charAt('ァィゥェォッャュョヮヵヶ'.indexOf(character));
+      });
     }
 
     function classifyPartnerNameClient(name) {
@@ -1537,7 +1542,7 @@
         selectAll.addEventListener('change', onSelectAllVisibleChanged);
         selectAllCell.appendChild(selectAll);
         headRow.appendChild(selectAllCell);
-        ['利用日', '金額', '摘要（元店名）', '推測候補', '取引先', '元ファイル', '行', '操作']
+        ['利用日', '金額', '摘要（元店名）', '推測候補', '取引先', '顧客別に入れる', '元ファイル', '行', '操作']
           .forEach(function(label) {
             var th = document.createElement('th');
             th.textContent = label;
@@ -1589,6 +1594,18 @@
           });
           inputCell.appendChild(input);
           row.appendChild(inputCell);
+          var customerOnlyCell = document.createElement('td');
+          var customerOnly = document.createElement('input');
+          customerOnly.type = 'checkbox';
+          customerOnly.className = 'partner-customer-only';
+          customerOnly.checked = state.customerOnlyInputs.get(reviewId) === true;
+          customerOnly.disabled = isMutationBusy();
+          customerOnly.setAttribute('aria-label', String(review.merchantOriginal) + 'を顧客別に入れる');
+          customerOnly.addEventListener('change', function() {
+            state.customerOnlyInputs.set(reviewId, customerOnly.checked);
+          });
+          customerOnlyCell.appendChild(customerOnly);
+          row.appendChild(customerOnlyCell);
           var fileCell = document.createElement('td');
           fileCell.className = 'review-file';
           appendReviewFileCell(fileCell, review);
@@ -1613,7 +1630,7 @@
         if (!visibleReviews.length) {
           var noMatchRow = document.createElement('tr');
           var noMatchCell = document.createElement('td');
-          noMatchCell.colSpan = 9;
+          noMatchCell.colSpan = 10;
           noMatchCell.textContent = TEXT.noFilteredReviews;
           noMatchRow.appendChild(noMatchCell);
           tbody.appendChild(noMatchRow);
@@ -1712,6 +1729,7 @@
       state.files = [];
       state.reviews = [];
       state.partnerInputs.clear();
+      state.customerOnlyInputs.clear();
       state.otherReviews = [];
       state.otherTotal = 0;
       state.unsupportedCounts = {integrity: 0, fileChanged: 0};
@@ -2254,6 +2272,7 @@
           reviewId: reviewId,
           fileId: String(review.fileId),
           partnerName: String(state.partnerInputs.get(reviewId) || '').trim(),
+          customerOnly: state.customerOnlyInputs.get(reviewId) === true,
           sameMerchantConflict: false,
           conflictReason: null
         };
@@ -2295,7 +2314,7 @@
       if (item.review.learnBlockedBy === 'EMPTY_MERCHANT') return TEXT.learnEmpty;
       if (item.review.learnBlockedBy === 'CARD_NAME_PURPOSE') return TEXT.learnCard;
       if (item.conflictReason === 'DUPLICATE_PARTNER') return TEXT.learnDuplicate;
-      return TEXT.learnYes;
+      return item.customerOnly ? 'この顧客の辞書に登録します' : '共通の辞書に登録します';
     }
 
     function confirmationGroups(items) {
@@ -2349,6 +2368,7 @@
           return {
             reviewId: item.reviewId,
             partnerName: item.partnerName,
+            scope: item.customerOnly ? 'CUSTOMER' : 'COMMON',
             sameMerchantConflict: item.sameMerchantConflict
           };
         })
@@ -2559,6 +2579,7 @@
           var id = String(review.reviewId);
           state.selectedReviewIds.delete(id);
           state.partnerInputs.delete(id);
+          state.customerOnlyInputs.delete(id);
           if (state.lastSelectedReviewId === id) state.lastSelectedReviewId = null;
         });
     }
@@ -3617,7 +3638,7 @@
       state.formatBusy = busy;
       renderFiles();
       renderFolders();
-      document.querySelectorAll('.review-select, .partner-input').forEach(function(node) {
+      document.querySelectorAll('.review-select, .partner-input, .partner-customer-only').forEach(function(node) {
         node.disabled = isMutationBusy();
       });
       el['review-prev'].disabled = state.loadingReviews || isMutationBusy() || state.reviewOffset <= 0;

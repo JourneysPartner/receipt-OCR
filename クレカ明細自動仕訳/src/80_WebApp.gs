@@ -678,7 +678,8 @@ function webAppPartnerNames(customerId) {
   return webAppInvoke_(function() {
     webAppAuthorizeCustomer_(customerId, 'WEBAPP:取引先名');
     var wantedCustomerId = String(customerId);
-    var records = customerPartnerRecords_(readCustomerPartnerRows_()).filter(function(record) {
+    var masters = readPartnerResolutionMasters_(['partnerListRows', 'commonPartnerRows']);
+    var records = customerPartnerRecords_(masters.partnerListRows).filter(function(record) {
       return record.customerId === wantedCustomerId;
     });
     var activeByName = Object.create(null);
@@ -690,13 +691,17 @@ function webAppPartnerNames(customerId) {
         retiredByName[record.partnerName] = record;
       }
     });
+    commonPartnerRowsFromRecords_(masters.commonPartnerRows).forEach(function(record) {
+      var name = String(record.partnerName || '').trim();
+      if (name) activeByName[name] = record;
+    });
     Object.keys(retiredByName).forEach(function(name) { delete activeByName[name]; });
     var active = Object.keys(activeByName).sort(function(left, right) {
       return left.localeCompare(right, 'ja');
-    }).map(function(name) { return {name: name, key: normalizeMerchant(name)}; });
+    }).map(function(name) { return {name: name, key: partnerNameKey_(name)}; });
     var retired = Object.keys(retiredByName).sort(function(left, right) {
       return left.localeCompare(right, 'ja');
-    }).map(function(name) { return {name: name, key: normalizeMerchant(name),
+    }).map(function(name) { return {name: name, key: partnerNameKey_(name),
       canonical: retiredByName[name].canonicalName || ''}; });
     return {active: active, retired: retired};
   });
@@ -1073,7 +1078,8 @@ function webAppResolveReviews(customerId, decisions, options) {
     authorize(ROLE.REVIEWER, String(customerId), {operation: operation});
     var wantedCustomerId = String(customerId);
     var customer = getCustomerById(wantedCustomerId);
-    var partnerListRows = readCustomerPartnerRows_();
+    var partnerMasters = readPartnerResolutionMasters_(['partnerListRows', 'commonPartnerRows', 'commonDictionaryRows']);
+    var partnerListRows = partnerMasters.partnerListRows;
     var reviewsById = Object.create(null);
     allReviewRecords_().forEach(function(review) {
       if (!Object.prototype.hasOwnProperty.call(reviewsById, String(review.reviewId))) {
@@ -1156,6 +1162,9 @@ function webAppResolveReviews(customerId, decisions, options) {
       filesById[fileId].items.push(item);
     });
 
+    var commonNamesForClick = prepared.filter(function(item) {
+      return item.code === 'ADOPT_EXISTING_PARTNER' && item.decision.scope === 'COMMON';
+    }).map(function(item) { return item.partnerName; });
     var attemptedCount = 0;
     if (fileGroups.length) {
       try {
@@ -1247,14 +1256,15 @@ function webAppResolveReviews(customerId, decisions, options) {
             !isCardNamePartnerPurpose(customer, tx && tx.planned ? tx.planned.i : '') &&
             !Boolean(item.decision.sameMerchantConflict);
           return {reviewId: item.reviewId, operation: item.code,
-            partnerName: item.partnerName, learn: learn};
+            partnerName: item.partnerName, learn: learn, scope: item.decision.scope};
         });
 
         var componentResult;
         try {
           componentResult = resolvePartnerReviewsBatch(wantedCustomerId, fileId, batchDecisions,
             {actor: sentItems[0].auth.userEmail, customer: customer,
-              partnerListRows: partnerListRows});
+              partnerListRows: partnerListRows, commonPartnerRows: partnerMasters.commonPartnerRows,
+              commonDictionaryRows: partnerMasters.commonDictionaryRows, commonNamesForClick: commonNamesForClick});
         } catch (componentError) {
           followUpKnown = false;
           var componentCode = componentError && componentError.code || 'RESOLVE_FAILED';

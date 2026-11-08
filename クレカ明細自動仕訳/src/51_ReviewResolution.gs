@@ -127,8 +127,13 @@ function adoptExistingPartner_(review, input, actor) {
     throw new TypeError('ADOPT_EXISTING_PARTNER requires a partner name');
   }
   assertNotPartnerUnknownLabel_(input.partnerName);
+  var commonScope = input.scope === 'COMMON';
+  var masterKeys = ['partnerListRows', 'commonPartnerRows'];
+  if (commonScope && input.learn !== false) masterKeys.push('commonDictionaryRows');
+  var masters = readPartnerResolutionMasters_(masterKeys);
   var partnerNameIndex = buildPartnerNameIndex_(
-    customerPartnerRecords_(readCustomerPartnerRows_()), review.customerId);
+    customerPartnerRecords_(masters.partnerListRows), review.customerId,
+    commonPartnerRowsFromRecords_(masters.commonPartnerRows));
   var partnerNameClassification = classifyPartnerName_(partnerNameIndex, input.partnerName);
   if (partnerNameClassification.kind === 'RETIRED' ||
       partnerNameClassification.kind === 'VARIANT') {
@@ -136,6 +141,12 @@ function adoptExistingPartner_(review, input, actor) {
       'PARTNER_NAME_RETIRED' : 'PARTNER_NAME_VARIANT';
     throw new CatalogError(partnerNameErrorCode,
       partnerNameIssueMessage_(input.partnerName, partnerNameClassification));
+  }
+  if (commonScope && input.learn !== false) {
+    var different = commonDictionaryDifferentPartners_(masters.commonDictionaryRows.map(dictionaryRow_),
+      review.merchantOriginal, review.merchantNormalized, String(input.partnerName));
+    if (different.length) throw new CatalogError('COMMON_DICTIONARY_DIFFERENT_PARTNER',
+      commonDictionaryDifferentPartnerMessage_(review.merchantOriginal, different, input.partnerName));
   }
   var customer = reviewWriteCustomer_(review);
   var leaseId = acquireLease(review.customerId, review.fileId, input.runId || null,
@@ -160,10 +171,20 @@ function adoptExistingPartner_(review, input, actor) {
     updatePartnerResolution(tx.fullTxId, PARTNER_STATUS.RESOLVED_WITH_PARTNER);
 
     if (input.learn !== false) {
-      learnFromResolution(review.customerId, review.merchantOriginal,
-        review.merchantNormalized, String(input.partnerName), actor);
+      if (commonScope) {
+        learnCommonFromResolutionBatch([{original: review.merchantOriginal,
+          normalized: review.merchantNormalized, partnerName: String(input.partnerName)}], actor);
+      } else {
+        learnFromResolution(review.customerId, review.merchantOriginal,
+          review.merchantNormalized, String(input.partnerName), actor);
+      }
     }
-    if (partnerNameClassification.kind === 'NEW') {
+    if (commonScope) {
+      var commonNames = commonPartnerRowsFromRecords_(masters.commonPartnerRows);
+      if (!commonNames.some(function(record) { return record.partnerName === String(input.partnerName).trim(); })) {
+        registerCommonPartnerNames_([input.partnerName], actor, 'RESOLUTION');
+      }
+    } else if (partnerNameClassification.kind === 'NEW') {
       registerCustomerPartnerNames_(review.customerId, [input.partnerName], actor, 'RESOLUTION');
     }
     return settle_(review, 'ADOPT_EXISTING_PARTNER', actor,

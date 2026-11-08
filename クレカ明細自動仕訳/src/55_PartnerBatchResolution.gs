@@ -53,6 +53,7 @@ function partnerBatchMessage_(code) {
     INVALID_PARTNER_NAME: '取引先名を確認してください。',
     PARTNER_NAME_RETIRED: '使わない取引先名です。',
     PARTNER_NAME_VARIANT: '登録済みの取引先名と表記だけが違います。',
+    COMMON_DICTIONARY_DIFFERENT_PARTNER: '共通の辞書と取引先名が異なります。顧客別に入れるか確認してください。',
     PARTNER_LIST_FAILED: '取引先名の一覧への登録に失敗しました。もう一度確定してください。',
     LEARN_PRECONDITION: '取引先を学習できないため、確定できません。',
     TX_NOT_FOUND: '取引情報が見つかりません。',
@@ -231,11 +232,36 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
     return item.decision.operation === 'ADOPT_EXISTING_PARTNER';
   });
   var partnerListRows = options.partnerListRows;
-  if (partnerListRows === undefined && hasAdoption) {
-    partnerListRows = readCustomerPartnerRows_();
+  var commonPartnerRows = options.commonPartnerRows;
+  var commonDictionaryRows = options.commonDictionaryRows;
+  var missingMasters = [];
+  var localNameIndex = buildPartnerNameIndex_(customerPartnerRecords_(partnerListRows || []), customerId);
+  if (hasAdoption && partnerListRows === undefined) missingMasters.push('partnerListRows');
+  // 注入済みの顧客一覧だけでKNOWNまたは完全一致の廃止が分かる場合、共通は判定を変えない。
+  var needsCommonNames = hasAdoption && (partnerListRows === undefined || selected.some(function(item) {
+    var name = String(item.decision.partnerName || '').trim();
+    return item.decision.operation === 'ADOPT_EXISTING_PARTNER' &&
+      !localNameIndex.activeExact[name] &&
+      !Object.prototype.hasOwnProperty.call(localNameIndex.retiredExact, name);
+  }));
+  if (commonPartnerRows === undefined && needsCommonNames) missingMasters.push('commonPartnerRows');
+  var needsCommonDictionary = selected.some(function(item) {
+    return item.decision.operation === 'ADOPT_EXISTING_PARTNER' &&
+      item.decision.scope === 'COMMON' && item.decision.learn === true;
+  });
+  if (commonDictionaryRows === undefined && needsCommonDictionary) missingMasters.push('commonDictionaryRows');
+  if (missingMasters.length) {
+    var masters = readPartnerResolutionMasters_(missingMasters);
+    if (masters.partnerListRows) partnerListRows = masters.partnerListRows;
+    if (masters.commonPartnerRows) commonPartnerRows = masters.commonPartnerRows;
+    if (masters.commonDictionaryRows) commonDictionaryRows = masters.commonDictionaryRows;
   }
+  commonPartnerRows = commonPartnerRows || [];
+  commonDictionaryRows = commonDictionaryRows || [];
   var partnerNameIndex = hasAdoption ? buildPartnerNameIndex_(
-    customerPartnerRecords_(partnerListRows || []), customerId) : null;
+    customerPartnerRecords_(partnerListRows || []), customerId,
+    commonPartnerRowsFromRecords_(commonPartnerRows)) : null;
+  var proposedCommonRules = commonDictionaryRows.map(dictionaryRow_);
   var eligible = [];
   selected.forEach(function(item) {
     var review = reviewsById[item.reviewId];
@@ -258,10 +284,23 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
           normalizeMerchant(review.merchantOriginal) !== String(review.merchantNormalized))) {
         code = 'LEARN_PRECONDITION';
       }
+      if (!code && decision.scope === 'COMMON' && decision.learn === true) {
+        var different = commonDictionaryDifferentPartners_(proposedCommonRules,
+          review.merchantOriginal, review.merchantNormalized, decision.partnerName);
+        if (different.length) {
+          code = 'COMMON_DICTIONARY_DIFFERENT_PARTNER';
+          item.commonDictionaryMessage = commonDictionaryDifferentPartnerMessage_(
+            review.merchantOriginal, different, decision.partnerName);
+        } else {
+          // 同じまとまりの後の件にも番人を効かせ、リースの前に止める。
+          proposedCommonRules.push({active: true, original: String(review.merchantOriginal),
+            normalized: String(review.merchantNormalized), partnerName: String(decision.partnerName)});
+        }
+      }
     }
     if (code) {
       var issueMessage = code === 'PARTNER_NAME_RETIRED' || code === 'PARTNER_NAME_VARIANT' ?
-        partnerNameIssueMessage_(decision.partnerName, item.partnerNameClassification) : undefined;
+        partnerNameIssueMessage_(decision.partnerName, item.partnerNameClassification) : item.commonDictionaryMessage;
       partnerBatchFail_(result, item, code, issueMessage);
       return;
     }
@@ -447,36 +486,66 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
     var learningItems = ready.filter(function(item) {
       return item.decision.operation === 'ADOPT_EXISTING_PARTNER' && item.decision.learn === true;
     });
-    if (learningItems.length) {
+    [true, false].forEach(function(commonScope) {
+      var scopedItems = learningItems.filter(function(item) {
+        return (item.decision.scope === 'COMMON') === commonScope;
+      });
+      if (!scopedItems.length) return;
       try {
-        var learned = learnFromResolutionBatch(customerId, learningItems.map(function(item) {
+        var entries = scopedItems.map(function(item) {
           return {original: item.review.merchantOriginal,
             normalized: item.review.merchantNormalized,
             partnerName: item.decision.partnerName};
-        }), options.actor);
+        });
+        var learned = commonScope ? learnCommonFromResolutionBatch(entries, options.actor) :
+          learnFromResolutionBatch(customerId, entries, options.actor);
         (learned.addedDictIds || []).forEach(function(dictId) {
           if (result.learnedDictIds.indexOf(dictId) < 0) result.learnedDictIds.push(dictId);
         });
+        if (commonScope) entries.forEach(function(entry, index) {
+          if (commonDictionaryRows.some(function(row) { return String(row.values[0]) === learned[index]; })) return;
+          var row = resolutionDictionarySpec_('', entry.original, entry.normalized,
+            entry.partnerName, options.actor).row(learned[index], nowIso_());
+          row[11] = options.actor;
+          commonDictionaryRows.push({rowNumber: commonDictionaryRows.length + 2, values: row});
+        });
       } catch (error) {
-        learningItems.forEach(function(item) { partnerBatchFail_(result, item, 'LEARN_FAILED'); });
+        scopedItems.forEach(function(item) { partnerBatchFail_(result, item, 'LEARN_FAILED'); });
       }
-    }
+    });
 
     ready = ready.filter(function(item) { return !item.failed; });
-    var newPartnerItems = ready.filter(function(item) {
-      return item.decision.operation === 'ADOPT_EXISTING_PARTNER' &&
-        item.partnerNameClassification && item.partnerNameClassification.kind === 'NEW';
+    var commonNames = commonPartnerRowsFromRecords_(commonPartnerRows).map(function(record) { return record.partnerName; });
+    var commonRequestedNames = (options.commonNamesForClick || []).slice();
+    ready.forEach(function(item) {
+      if (item.decision.operation === 'ADOPT_EXISTING_PARTNER' && item.decision.scope === 'COMMON') {
+        commonRequestedNames.push(String(item.decision.partnerName).trim());
+      }
     });
-    if (newPartnerItems.length) {
+    [true, false].forEach(function(commonScope) {
+      var newPartnerItems = ready.filter(function(item) {
+        if (item.decision.operation !== 'ADOPT_EXISTING_PARTNER' ||
+            (item.decision.scope === 'COMMON') !== commonScope) return false;
+        var name = String(item.decision.partnerName).trim();
+        return commonScope ? commonNames.indexOf(name) < 0 :
+          item.partnerNameClassification && item.partnerNameClassification.kind === 'NEW' &&
+          commonRequestedNames.indexOf(name) < 0;
+      });
+      if (!newPartnerItems.length) return;
       var namesToRegister = [];
       newPartnerItems.forEach(function(item) {
         var name = String(item.decision.partnerName).trim();
         if (namesToRegister.indexOf(name) < 0) namesToRegister.push(name);
       });
       try {
-        var registeredNames = registerCustomerPartnerNames_(customerId, namesToRegister,
-          options.actor, 'RESOLUTION');
-        if (Array.isArray(partnerListRows)) {
+        var registeredNames = commonScope ? registerCommonPartnerNames_(namesToRegister, options.actor, 'RESOLUTION') :
+          registerCustomerPartnerNames_(customerId, namesToRegister, options.actor, 'RESOLUTION');
+        if (commonScope) {
+          (registeredNames || []).forEach(function(record) {
+            commonPartnerRows.push({rowNumber: commonPartnerRows.length + 2,
+              values: [record.partnerId, record.partnerName, '', options.actor, options.actor, 1]});
+          });
+        } else if (Array.isArray(partnerListRows)) {
           // 後続のまとまりでも同じ一覧スナップショットを使えるよう、その場で反映する。
           var knownNames = Object.create(null);
           customerPartnerRecords_(partnerListRows).forEach(function(record) {
@@ -499,7 +568,7 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
           partnerBatchFail_(result, item, 'PARTNER_LIST_FAILED');
         });
       }
-    }
+    });
     ready = ready.filter(function(item) { return !item.failed; });
     // 要確認・監査・確定は 1 つのロックの中で、この順に書く。確定の判定は
     // ロックの中で読んだ要確認を材料にする ── 同じ取引に `DATE` などの別の

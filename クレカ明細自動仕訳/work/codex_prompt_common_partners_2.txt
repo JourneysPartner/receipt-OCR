@@ -1,0 +1,43 @@
+【2 回目】1 回目の実行は、仕様 1.0 の「運用シートからの確定は共通へ」が既存テスト pm 20 とぶつかることを見つけ、実装の前に正しく止まりました。ありがとうございます。仕様書を 1.1 に直しました（冒頭の「1.1 の変更」・§3.3・cp 13）：運用シートからの確定（opsApplyPartnerDecisions）は今のまま顧客別で、変えるのは番人が共通の名前を知っている名前として扱うことだけです。pm 20 を含む既存テストは直さないでください。work/.tmp-common/ にある 1 回目の作業用ファイルは使っても消してもかまいません。`work/codex_prompt_common_partners_2.txt` も私が書いた未コミットのファイルで、触らないでください。
+
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）で、取引先名と店名の辞書を全顧客で共通にする作業を受け取ります。共通取引先一覧を照合・画面・確定の番人につなぐ、確定で覚えるものを原則共通へ入れる（画面の「顧客別に入れる」で顧客別へ）、名前一致で小さい字・ひらがなを同じとみなす、顧客別の中身を共通へ写す運用関数を作る、の 4 つです。
+
+作業ツリーは main の最新（コミット 8c2f215）です。`work/spec_common_partners.md` と `work/codex_prompt_common_partners.txt` は私が書いた未コミットのファイルで、触らないでください。`../.codex/config.toml`、`../AGENTS.md`、`work/.tmp-audit/`、`work/.tmp-coll/`、`work/.tmp-compact/`、`work/.tmp-grid/`、`work/.tmp-gsheet/`、`work/.tmp-shortcut/` も触らないでください。あなたの変更はステージされていない差分として残してください ── **`git add` しないこと。**開始時の `node test/run-tests.js` の最後の行を報告してください（1905/1905 のはずです）。全テストは 10 分を超えることがあります。端末が重いと画面のテスト（子プロセスを使うもの）が時間切れで落ちることがあり、その場合は再実行で通ります（再実行したら報告すること）。
+
+作業用のファイルを作るなら `work/.tmp-common/` の中に置いてください。対象のテストだけ回す道具は `work/.tmp-gsheet/run-targeted.js <test files>` にあります（読むだけ・使うだけ。変えないこと。環境変数 `GS_TEST_FILTER` でテスト名の一部を絞れます）。
+
+## 仕様書
+
+`work/spec_common_partners.md` の全部。**全部読んでから始めてください。**前提は `work/spec_partner_master.md`（読むだけ）と `design_document.md` の 2.1.4・2.1.5・2.1.6a・5.7（読むだけ）。
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。
+2. **変えてよいのは仕様書 §2 の `src` のファイル（`06`・`33`・`34`・`37`・`51`・`55`・`80`・`81`・`97`）だけ。**取込の流れ（`70`・`71`）、`32_MerchantNormalizer.gs`（`normalizeMerchant`）、辞書の照合の段と順番は変えないこと。
+3. **安全の不変条件 S1〜S8（仕様書 §4）を守ること。**特に、`scope` が `'CUSTOMER'` の件や見るだけの写す関数で、共通のシートにも監査ログにも書かないこと。共通の辞書に「同じ正規化表記で別の取引先名」の有効な行を作らないこと。迷ったら書かない側・止める側に倒し、報告すること。
+4. **読取の回数を増やさないこと（仕様書 §3.3 の最後）。**既存の読取回数のテストが落ちたら、テストを直さずに止めて報告すること。
+5. **改行と文字コードを変えないこと。**`src/` は LF・UTF-8 です。終わったら、変わったファイルが仕様書 §2 の `src` のファイルと `test/phase6-common-partners.test.js`（新規）・`test/phase8-webapp.test.js`・`test/phase0.test.js`（と、§5 で許した既存テストの直しのあるファイル）だけであることを確かめて報告すること。
+6. **テスト：**cp 1〜20 を仕様書 §5 のとおりに書く。**実在の明細の固定データ（`test/fixtures/`）を新しいテストで使わないこと**（テストの中で架空の値を作る）。既存のテストは、仕様書 §5 で許した 2 つの直し以外は直さないこと。ほかの既存のテストが落ちたら、テストを直さずに止めて報告すること。
+7. **このリポジトリは公開です。**テスト・コード・コメントに実在の店名・人名・ID・カード番号を書かないこと（架空の値だけ）。
+8. **テストを先に赤にしてから直すこと。**
+9. **日本語は UTF-8 で書くこと。**終わったら、変わったファイルに `???` が無いことを確かめて報告すること。`97_Ops.gs` には文字列の中に生の NUL バイトが 2 つあります。消したり増やしたりしないこと（終わったら数が 2 のままか確かめて報告すること）。コメントを足すなら、周りと同じ密度・語り口（「なぜ」を書く）で。
+10. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断をしたら全部報告すること。迷ったら止めて報告すること。
+11. 画面の文は `textContent` で出すこと（`innerHTML` などの HTML を書き込む口を足さないこと）。サーバーから来た文（取引先名・店名を含む）も同じ。
+
+## 進め方
+
+1. 仕様書を読み、次を読む：`37` の全部、`33` の `buildDictionaryIndex`・`matchPartner`、`34` の `learnFromResolution`・`learnFromResolutionBatch`・`promoteToCommon`、`51` の `adoptExistingPartner_`、`55` の番人の段・学びの段・名前の登録の段と `partnerBatchMessage_`、`71` の `commonPartnersForRun_`・`readCommonPartners_`・`prefetchMatchingMasters_`、`80` の `webAppPartnerNames`・`webAppResolveReviews`、`81` の `partnerNameKey`・`buildPartnerNamesClient`・`classifyPartnerNameClient`・`renderReviews`・`collectSelectedReviews`・`dictionaryMessage`・`openConfirmation`、`97` の `knownPartnerNames_`・`opsBuildCustomerPartnerList`・`opsApplyPartnerDecisions`・`partnerListCandidateName_`、`99_Test.gs` の照合の固定データ（`commonPartners` が文字列の並び）。テストは `test/phase1b-partner-duplicate.test.js`・`test/phase6-partner-decisions.test.js`・`test/phase8-webapp.test.js` の取引先まわり（pm・webapp・bulk・fc）の書き方と、読取回数の数え方を読む
+2. cp 1〜20 を書く → 赤を確かめる
+3. 作る
+4. `node test/run-tests.js` を全部緑にする（**終わったら必ず全テストを回して最後の行を報告すること**）
+5. 仕様書 §6 の M1〜M16 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら差分が変異を入れる前と同じか確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 作る前に cp のどれが赤だったか
+- M1〜M16 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て
+- 押下（`webAppResolveReviews`）・`webAppPartnerNames`・`resolvePartnerReviewsBatch` の読取の回数が、変更の前後でどうなったか（数えたテストの名前と数）
+- 仕様書 §5 で許した既存テストの直しをしたなら、そのテストの名前と直した中身
+- 仕様書が間違っていた・足りなかった箇所、自分で決めた箇所（全部）
+- 変えたファイルの一覧、`???` の結果、`97_Ops.gs` の NUL の数

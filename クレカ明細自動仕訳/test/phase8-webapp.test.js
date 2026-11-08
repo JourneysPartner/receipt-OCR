@@ -8287,4 +8287,84 @@ module.exports = ({test, assert, gas}) => {
     }
     assert.throws(() => gas.call('webAppListDestinations', [other.customerId, other.cardId]), (error) => error.name === 'AuthorizationError');
   });
+
+  test('cp 18: 画面とサーバーの名前の鍵は小さい字とひらがなも一致する', () => {
+    const values = ['Ａｌｐｈａ', 'ﾃｽﾄ ｹｰﾀｲ', 'ﾃｽﾄ‐ｽﾄｱ', 'A\u3000  B',
+      'A\t\tB', 'x\u0001Y', 'abc\u2011def', 'カタカナｰ長音', 'x\u00ady', 'ＰＱＲ−ＳＴ',
+      'テストディオン', 'テストデイオン', 'あおぞらストア', 'アオゾラストア', 'ﾐﾆﾁｭｱｼｮｯﾌﾟ',
+      'ァィゥェォッャュョヮヵヶ', 'ぁぃぅぇぉっゃゅょゎゕゖ'];
+    assert.deepEqual(plain(clientEval(`(${JSON.stringify(values)}).map(partnerNameKey)`)),
+      values.map((value) => gas.call('partnerNameKey_', [value])));
+    assert.equal(clientEval("partnerNameKey('テストディオン')"), clientEval("partnerNameKey('テストデイオン')"));
+  });
+
+  function cpClientDocument() {
+    const fake = fakeClientDocument();
+    const create = fake.document.createElement;
+    fake.document.createElement = function(tag) {
+      const node = create(tag); node.tagName = tag; node.dataset = {}; node.listeners = {};
+      node.addEventListener = (name, handler) => { node.listeners[name] = handler; };
+      return node;
+    };
+    return fake;
+  }
+
+  test('cp 19: 顧客別チェックは既定で外れ再描画で残り決定のscopeに届く', () => {
+    const fake = cpClientDocument();
+    const result = plain(clientEval(`(() => {
+      renderOtherReviews = function() {}; renderOtherReviewList = function() {};
+      renderBulkPartnerOptions = function() {}; updateActionButtons = function() {};
+      state.selectedCustomerId = 'CP001';
+      state.partnerNames = buildPartnerNamesClient('CP001', {active:[{name:'架空先甲'}, {name:'架空先乙'}]});
+      state.reviews = [1,2].map(function(n) { return {reviewId:'CP_R'+n, fileId:'CP_F',
+        merchantOriginal:'架空店'+n, merchantNormalized:'架空店'+n, sourceRow:n+1}; });
+      state.reviews.forEach(function(item, i) { state.selectedReviewIds.add(item.reviewId);
+        state.partnerInputs.set(item.reviewId, i ? '架空先乙' : '架空先甲'); });
+      function walk(node) { return [node].concat(...(node.children || []).map(walk)); }
+      renderReviews();
+      const initial = walk(el['review-table']).filter(function(node) { return node.className === 'partner-customer-only'; });
+      const defaults = initial.map(function(node) { return Boolean(node.checked); });
+      if (initial[1]) { initial[1].checked = true; initial[1].listeners.change(); }
+      renderReviews();
+      const all = walk(el['review-table']);
+      const checks = all.filter(function(node) { return node.className === 'partner-customer-only'; }).slice(-2);
+      openConfirmation();
+      const decisions = state.confirmPayload.decisions;
+      const selected = collectSelectedReviews().map(function(item) { return item.customerOnly; });
+      state.resolveBusy = true; renderReviews();
+      const busy = walk(el['review-table']).filter(function(node) { return node.className === 'partner-customer-only'; }).slice(-2);
+      return {defaults:defaults, checked:checks.map(function(node) { return Boolean(node.checked); }),
+        labels:checks.map(function(node) { return node.attributes['aria-label']; }), selected:selected,
+        scopes:decisions.map(function(item) { return item.scope; }),
+        header:all.some(function(node) { return node.tagName === 'th' && node.textContent === '顧客別に入れる'; }),
+        disabled:busy.map(function(node) { return node.disabled; }),
+        wrapped:all.some(function(node) { return node.tagName === 'label'; })};
+    })()`, {document: fake.document}));
+    assert.deepEqual(result.defaults, [false, false]); assert.deepEqual(result.checked, [false, true]);
+    assert.deepEqual(result.scopes, ['COMMON', 'CUSTOMER']); assert.deepEqual(result.selected, [false, true]);
+    assert.deepEqual(result.labels, ['架空店1を顧客別に入れる', '架空店2を顧客別に入れる']);
+    assert.equal(result.header, true); assert.equal(result.wrapped, false); assert.deepEqual(result.disabled, [true, true]);
+  });
+
+  test('cp 20: 確認には辞書の行き先を出し共通の食い違いの文を件の失敗としてそのまま表示する', () => {
+    const fake = fakeClientDocument();
+    const message = '共通の辞書では「架空<店>」は「架空先甲」です。この顧客だけ「架空先乙」にするなら「顧客別に入れる」にチェックしてください。';
+    const result = plain(clientEval(`(() => {
+      state.selectedCustomerId = 'CP001';
+      state.reviews = [1,2].map(function(n) { return {reviewId:'CP_R'+n,fileId:'CP_F',
+        merchantOriginal:'架空店'+n,merchantNormalized:'架空店'+n,sourceRow:n+1}; });
+      state.reviews.forEach(function(item) { state.selectedReviewIds.add(item.reviewId);
+        state.partnerInputs.set(item.reviewId,'架空先甲'); });
+      if (state.customerOnlyInputs) state.customerOnlyInputs.set('CP_R2',true);
+      openConfirmation();
+      const lines = el['confirm-list'].children.map(function(node) { return node.textContent; });
+      const error = {reviewId:'CP_R1',code:'COMMON_DICTIONARY_DIFFERENT_PARTNER',message:${JSON.stringify(message)}};
+      showNotice('確定できなかった件があります。','warning',[returnedErrorMessage(error)]);
+      return {lines:lines, error:el.notice.children[1].children[0].textContent};
+    })()`, {document: fake.document}));
+    assert.ok(result.lines[0].includes('共通の辞書に登録します'));
+    assert.ok(result.lines[1].includes('この顧客の辞書に登録します'));
+    assert.equal(result.error, message);
+    assert.ok(WEBAPP_UI_SOURCE.includes('resultErrors.map(returnedErrorMessage)'));
+  });
 };

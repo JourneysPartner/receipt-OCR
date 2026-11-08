@@ -143,6 +143,67 @@ function learnFromResolutionBatch(customerId, entries, actor) {
   });
 }
 
+function commonDictionaryDifferentPartners_(rows, original, normalized, partnerName) {
+  var names = [];
+  (rows || []).forEach(function(row) {
+    if (row.active && (row.normalized === String(normalized) || row.original === String(original)) &&
+        row.partnerName !== String(partnerName) && names.indexOf(row.partnerName) < 0) names.push(row.partnerName);
+  });
+  return names;
+}
+
+function commonDictionaryDifferentPartnerMessage_(original, names, partnerName) {
+  return '共通の辞書では「' + original + '」は「' + names.join('、') + '」です。この顧客だけ「' +
+    partnerName + '」にするなら「顧客別に入れる」にチェックしてください。';
+}
+
+/** ロック内で重複と食い違いを再検査し、他の顧客の自動確定を壊さない。 */
+function learnCommonFromResolutionBatch(entries, actor) {
+  if (!Array.isArray(entries)) throw new TypeError('entries must be an array');
+  var prepared = entries.map(function(entry) {
+    var expected = normalizeMerchant(entry.original);
+    if (String(entry.normalized) !== expected) {
+      throw new MasterDataError('Normalized merchant must equal normalizeMerchant(original)');
+    }
+    return {entry: entry, spec: resolutionDictionarySpec_('', entry.original, expected, entry.partnerName, actor)};
+  });
+  if (!prepared.length) return [];
+  return withScriptLock_(function() {
+    // ロックを待つ間に別の確定が書くため、番人の前の読み覚えでは再検査しない。
+    dictionaryRowsCache_.common = null;
+    var rows = readDictionary_(true);
+    var idsByKey = Object.create(null);
+    var newRows = [];
+    var auditEntries = [];
+    var addedIds = [];
+    var now = nowIso_();
+    prepared.forEach(function(item) {
+      var entry = item.entry;
+      var different = commonDictionaryDifferentPartners_(rows, entry.original, entry.normalized, entry.partnerName);
+      // 番人の後で他の確定が先行した場合も、共通に食い違う行は追加しない。
+      if (different.length) throw new MasterDataError(
+        commonDictionaryDifferentPartnerMessage_(entry.original, different, entry.partnerName));
+      var spec = item.spec;
+      var equivalent = rows.filter(spec.matches).sort(function(left, right) { return left._rowNumber - right._rowNumber; });
+      if (equivalent.length) { idsByKey[spec.key] = equivalent[0].dictId; return; }
+      if (Object.prototype.hasOwnProperty.call(idsByKey, spec.key)) return;
+      var dictId = generateId('DICT');
+      var row = spec.row(dictId, now); row[11] = String(actor);
+      idsByKey[spec.key] = dictId; newRows.push(row); addedIds.push(dictId);
+      rows.push(dictionaryRow_({rowNumber: rows.length + 2, values: row}));
+      var audit = spec.audit(dictId); audit.type = 'APPROVE'; audit.after.scope = 'COMMON';
+      auditEntries.push(audit);
+    });
+    if (newRows.length) {
+      appendRowsBatched_(dictionaryWriteSheet_(true), newRows, DICTIONARY_WIDTH_, 'common-resolution-batch');
+      appendAuditRowsUnlocked_(auditEntries);
+    }
+    var result = prepared.map(function(item) { return idsByKey[item.spec.key]; });
+    Object.defineProperty(result, 'addedDictIds', {value: addedIds, enumerable: false});
+    return result;
+  });
+}
+
 /**
  * 前方一致・部分一致の辞書規則を登録する（5.7 STEP5）。
  *

@@ -3058,7 +3058,7 @@ module.exports = ({test, assert, gas}) => {
       assert.equal(world.ui.state.partnerInputs.get('p2'), 'p2');
       assert.equal(world.ui.state.lastSelectedReviewId, success ? null : 'p1');
       world.ui.state.reviewFilter = '該当しない店'; world.ui.renderSelection();
-      assert.equal(world.ids['review-table'].querySelector('td').colSpan, 9);
+      assert.equal(world.ids['review-table'].querySelector('td').colSpan, 10);
       kw2RefreshCheck(world);
     }
   });
