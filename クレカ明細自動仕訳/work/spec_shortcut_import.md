@@ -162,7 +162,7 @@
 
 1. 全テスト → コミット（第 1 段の §10 の追記も含める）→ push 前の pull 比較（本番＝`gas-push-134` のはず）→ `clasp push` → push 後の比較 → タグ `gas-push-135` → GitHub。
 2. **影響：**本番の顧客は TEST01 だけ。TEST01 は法人で AK が空なので、カードフォルダに Google スプレッドシートを指すショートカットがあれば、次の［記帳を実行］で `FAILED`（`SHORTCUT_FISCAL_YEAR_REQUIRED`）になる。今 TEST01 のフォルダにショートカットがあるかは push の前に読むだけで確かめる。
-3. 受入の前に、TEST01 の AK に 2026 を入れる（`setCustomerFiscalYear`、本番マスターへの書込なので利用者の許可を得てから）。法人の AK は今どこからも読まれていない（読むのは個人の前年分の検査だけ）ので、ほかの動きは変わらない。
+3. 受入の前に、TEST01 の AK に 2026 を入れる（`setCustomerFiscalYear`、本番マスターへの書込なので利用者の許可を得てから）。法人の AK は今どこからも読まれていない（読むのは個人の前年分の検査だけ）ので、ほかの動きは変わらない。**2026-11-08 実施（利用者の許可を得て私が run-function で実行）：**`before: null`・`after: 2026`・`changed: true`、監査 `AUDIT_3ca46847-50d1-49e5-93d3-efb9eff1a83d`。読み直して `fiscalYear: 2026`・`customerCategory: CORPORATE`。
 
 ## 8. 受入
 

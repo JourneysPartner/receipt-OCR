@@ -493,6 +493,273 @@ module.exports = ({test, assert, gas}) => {
     field.fire('change');
     return field;
   }
+  function gridControl(world, label) {
+    const select = world.ids['format-body'].querySelectorAll('select')
+      .find((node) => node.getAttribute('aria-label') === label);
+    assert.ok(select, label);
+    return select;
+  }
+  function gridChange(world, label, value) {
+    const select = gridControl(world, label);
+    select.value = value; select.fire('change');
+    return select;
+  }
+  test('grid 1: column and row roles have fixed accessible choices and separate storage', () => {
+    const world = mountedFormatWorld();
+    const columns = ['A', 'B', 'C', 'D', 'E'].map((letter) => gridControl(world, letter + ' 列の役割'));
+    const rows = [1, 2, 3].map((number) => gridControl(world, number + ' 行目の役'));
+    assert.deepEqual(columns.map((select) => select.value), ['date', 'merchant', 'amount', 'purpose', '']);
+    assert.deepEqual(rows.map((select) => select.value), ['header', 'start', '']);
+    for (const select of columns) {
+      assert.deepEqual(select.children.map((option) => [option.value, option.textContent]),
+        [['', '—'], ['date', '利用日'], ['merchant', '店名'], ['amount', '金額'],
+          ['purpose', '使用用途'], ['amountFallback', '予備金額']]);
+      assert.equal(select.closest('label'), null);
+      assert.equal(select.parentNode.tagName, 'TH');
+    }
+    columns.forEach((select, index) => assert.equal(select.parentNode.children
+      .filter((node) => node !== select).map((node) => node.textContent).join(''), 'ABCDE'[index]));
+    rows.forEach((select, index) => {
+      assert.equal(select.closest('label'), null);
+      assert.equal(select.parentNode.tagName, 'TD');
+      assert.equal(select.parentNode.children.filter((node) => node !== select)
+        .map((node) => node.textContent).join(''), String(index + 1));
+      assert.deepEqual(select.children.map((option) => [option.value, option.textContent]),
+        [['', '—'], ['header', '見出し行'], ['start', '明細の開始行']]);
+    });
+    assert.deepEqual(Array.from(world.ui.state.formatGridColumnSelects), columns);
+    assert.deepEqual(Array.from(world.ui.state.formatGridRowSelects), rows);
+    assert.equal(world.ui.state.formatColumnSelects.length, 4);
+    assert.ok(world.ui.state.formatColumnSelects.every((select) => !columns.includes(select)));
+    world.ui.state.formatAnswers.columns.merchant = 'A';
+    world.ui.state.formatAnswers.dataStartRow = 1;
+    world.ui.renderFormatPanel();
+    assert.equal(gridControl(world, 'A 列の役割').value, 'date');
+    assert.equal(gridControl(world, '1 行目の役').value, 'header');
+  });
+  test('grid 2: table column edits synchronize controls and invalidate preview in place', () => {
+    const world = mountedFormatWorld();
+    const {state} = world.ui;
+    const table = world.ids['format-body'].querySelector('table');
+    const date = control(world, 'label', '利用日').querySelector('select');
+    const selects = world.ids['format-body'].querySelectorAll('select');
+    gridChange(world, 'E 列の役割', 'date');
+    assert.equal(state.formatAnswers.columns.date, 'E');
+    assert.equal(date.value, 'E');
+    assert.ok(date.parentNode.textContent.startsWith('利用日（手で選択）'));
+    assert.equal(state.formatManualColumns.date, true);
+    assert.equal(gridControl(world, 'A 列の役割').value, '');
+    assert.equal(state.formatPreview, null);
+    assert.equal(state.formatHash, null);
+    assert.equal(state.formatPreviewHost.textContent, '');
+    assert.equal(state.formatSaveButton.disabled, true);
+    assert.equal(world.ids['format-body'].querySelector('table'), table);
+    assert.equal(control(world, 'label', '利用日').querySelector('select'), date);
+    assert.deepEqual(world.ids['format-body'].querySelectorAll('select'), selects);
+    assert.equal(gridControl(world, 'E 列の役割').parentNode, table.children[0].children[5]);
+  });
+  test('grid 3: table assignments and clearing remove every conflicting role and update provenance', () => {
+    const world = mountedFormatWorld();
+    const {state} = world.ui;
+    gridChange(world, 'A 列の役割', 'merchant');
+    assert.equal(state.formatAnswers.columns.merchant, 'A');
+    assert.equal(state.formatAnswers.columns.date, null);
+    assert.equal(gridControl(world, 'B 列の役割').value, '');
+    assert.equal(control(world, 'label', '利用日').querySelector('select').value, '');
+    assert.ok(control(world, 'label', '利用日').textContent.startsWith('利用日（手で選択）'));
+    assert.equal(state.formatManualColumns.date, true);
+    gridChange(world, 'A 列の役割', '');
+    assert.equal(state.formatAnswers.columns.merchant, null);
+    assert.equal(state.formatManualColumns.merchant, true);
+    state.formatAnswers.columns.date = 'B';
+    state.formatAnswers.columns.merchant = 'B';
+    state.formatAnswers.columns.amountFallback = 'B';
+    world.ui.renderFormatPanel();
+    gridChange(world, 'B 列の役割', '');
+    for (const role of ['date', 'merchant', 'amountFallback']) {
+      assert.equal(state.formatAnswers.columns[role], null);
+      assert.equal(state.formatManualColumns[role], true);
+    }
+    assert.ok(control(world, 'label', '予備金額').textContent.startsWith('予備金額（なし）'));
+  });
+  test('grid 4: dropdown assignment clears conflicts and none clears only its own role', () => {
+    const world = mountedFormatWorld();
+    const {state} = world.ui;
+    change(world, '利用日', 'select', 'B');
+    assert.equal(state.formatAnswers.columns.date, 'B');
+    assert.equal(state.formatAnswers.columns.merchant, null);
+    assert.equal(gridControl(world, 'B 列の役割').value, 'date');
+    assert.equal(gridControl(world, 'A 列の役割').value, '');
+    assert.equal(control(world, 'label', '店名（').querySelector('select').value, '');
+    assert.ok(control(world, 'label', '店名（').textContent.startsWith('店名（手で選択）'));
+    assert.equal(state.formatManualColumns.merchant, true);
+    const before = JSON.parse(JSON.stringify(state.formatAnswers.columns));
+    change(world, '利用日', 'select', '');
+    assert.deepEqual(JSON.parse(JSON.stringify(state.formatAnswers.columns)), {...before, date: null});
+  });
+  test('grid 5: row picks synchronize numbers highlights and headings without replacing nodes', () => {
+    const world = mountedFormatWorld();
+    const {state} = world.ui;
+    const table = world.ids['format-body'].querySelector('table');
+    const header = control(world, 'label', '見出し行').querySelector('input');
+    const start = control(world, 'label', '明細の開始行').querySelector('input');
+    const date = control(world, 'label', '利用日').querySelector('select');
+    const rowPicks = [1, 2, 3].map((n) => gridControl(world, n + ' 行目の役'));
+    gridChange(world, '3 行目の役', 'header');
+    assert.equal(state.formatAnswers.headerRow, 3);
+    assert.equal(state.formatAnswers.dataStartRow, 4);
+    assert.equal(String(header.value), '3'); assert.equal(String(start.value), '4');
+    assert.equal(table.children[3].className, 'format-header');
+    assert.equal(table.children[1].className, '');
+    assert.ok(date.children[1].textContent.startsWith('A「2025/2/2」'));
+    assert.deepEqual(rowPicks.map((select) => select.value), ['', '', 'header']);
+    gridChange(world, '1 行目の役', 'start');
+    assert.equal(state.formatAnswers.dataStartRow, 1);
+    assert.equal(state.formatAnswers.headerRow, 3);
+    assert.equal(table.children[1].className, 'format-start');
+    change(world, '見出し行', 'input', '1');
+    change(world, '明細の開始行', 'input', '3');
+    gridChange(world, '2 行目の役', 'header');
+    assert.equal(state.formatAnswers.headerRow, 2);
+    assert.equal(state.formatAnswers.dataStartRow, 3);
+    // 開始行がちょうど次の行だと、常に寄せる実装も通るので離れた行でも確かめる。
+    change(world, '見出し行', 'input', '1');
+    change(world, '明細の開始行', 'input', '4');
+    gridChange(world, '2 行目の役', 'header');
+    assert.equal(state.formatAnswers.headerRow, 2);
+    assert.equal(state.formatAnswers.dataStartRow, 4);
+    assert.equal(world.ids['format-body'].querySelector('table'), table);
+    assert.equal(control(world, 'label', '見出し行').querySelector('input'), header);
+    assert.equal(control(world, 'label', '明細の開始行').querySelector('input'), start);
+    assert.deepEqual([1, 2, 3].map((n) => gridControl(world, n + ' 行目の役')), rowPicks);
+  });
+  test('grid 6: choosing no row role preserves answers and restores the current selection', () => {
+    const world = mountedFormatWorld();
+    const {state} = world.ui;
+    const before = JSON.stringify(state.formatAnswers);
+    const preview = state.formatPreview;
+    assert.equal(gridChange(world, '1 行目の役', '').value, 'header');
+    assert.equal(JSON.stringify(state.formatAnswers), before);
+    assert.equal(gridChange(world, '3 行目の役', '').value, '');
+    assert.equal(JSON.stringify(state.formatAnswers), before);
+    assert.equal(gridChange(world, '2 行目の役', '').value, 'start');
+    assert.equal(JSON.stringify(state.formatAnswers), before);
+    // 答えが変わらないので、試し読みの結果は残り、保存もできるまま。
+    assert.equal(state.formatPreview, preview);
+    assert.equal(state.formatHash, 'hash');
+  });
+  test('grid 7: amount candidates constrain table choices and synchronize radios including reference columns', () => {
+    const world = mountedFormatWorld();
+    const {state, renderFormatPanel} = world.ui;
+    const amountOption = (letter) => gridControl(world, letter + ' 列の役割').children
+      .find((option) => option.value === 'amount');
+    assert.deepEqual(['A', 'B', 'C', 'D', 'E'].map((letter) => amountOption(letter).disabled),
+      [true, true, false, true, false]);
+    const radios = world.ids['format-body'].querySelectorAll('input').filter((input) => input.type === 'radio');
+    gridChange(world, 'E 列の役割', 'amount');
+    assert.equal(state.formatAnswers.columns.amount, 'E');
+    assert.deepEqual(radios.map((radio) => [radio.value, radio.checked]), [['C', false], ['E', true]]);
+    assert.equal(gridControl(world, 'C 列の役割').value, '');
+    radios[0].checked = true; radios[0].fire('change');
+    assert.equal(gridControl(world, 'C 列の役割').value, 'amount');
+    assert.equal(gridControl(world, 'E 列の役割').value, '');
+    assert.deepEqual(radios.map((radio) => radio.checked), [true, false]);
+    for (const candidates of [[{column: 'C', header: '金額'}], []]) {
+      state.formatDiagnosis.proposal.amountCandidates = candidates;
+      renderFormatPanel();
+      assert.ok(['A', 'B', 'C', 'D', 'E'].every((letter) => !amountOption(letter).disabled));
+      gridChange(world, 'B 列の役割', 'amount');
+      assert.equal(state.formatAnswers.columns.amount, 'B');
+      const amountLabel = world.ids['format-body'].querySelectorAll('label')
+        .find((node) => node.textContent.startsWith('金額（'));
+      assert.equal(amountLabel.querySelector('select').value, 'B');
+      assert.equal(state.formatAnswers.columns.merchant, null);
+    }
+    state.formatDiagnosis.proposal.amountCandidates = [{column: 'C', header: '金額'}, {column: 'E', header: '予備'}];
+    state.formatDiagnosis.proposal.columns.amount = {column: 'B', source: 'REFERENCE'};
+    renderFormatPanel();
+    assert.equal(amountOption('B').disabled, false);
+    gridChange(world, 'C 列の役割', 'amount');
+    gridChange(world, 'B 列の役割', 'amount');
+    const referenceRadios = world.ids['format-body'].querySelectorAll('input').filter((input) => input.type === 'radio');
+    assert.deepEqual(referenceRadios.map((radio) => [radio.value, radio.checked]),
+      [['B', true], ['C', false], ['E', false]]);
+  });
+  test('grid 8: table purpose edits use the same warning and acknowledgement as dropdown edits', () => {
+    const world = mountedFormatWorld();
+    const dropdownWorld = mountedFormatWorld();
+    assert.equal(control(world, 'label', '入力ミスを様式として登録することを理解した'), undefined);
+    gridChange(world, 'E 列の役割', 'purpose');
+    change(dropdownWorld, '使用用途（', 'select', 'E');
+    assert.equal(world.ui.state.formatAnswers.columns.purpose, 'E');
+    assert.ok(world.ui.state.formatAcknowledgementHost.textContent.includes('E列（見出し「予備」）'));
+    assert.equal(control(world, 'label', '入力ミスを様式として登録することを理解した')
+      .querySelector('input').type, 'checkbox');
+    assert.equal(world.ui.state.formatAcknowledgementHost.textContent,
+      dropdownWorld.ui.state.formatAcknowledgementHost.textContent);
+    assert.equal(JSON.stringify(world.ui.state.formatAnswers.acknowledgements),
+      JSON.stringify(dropdownWorld.ui.state.formatAnswers.acknowledgements));
+  });
+  test('grid 9: busy and saved table controls are disabled and forged changes cannot alter answers', () => {
+    for (const mode of ['busy', 'saved']) {
+      const world = mountedFormatWorld();
+      const {state, renderFormatPanel} = world.ui;
+      if (mode === 'busy') state.importBusy = true;
+      else state.formatSaved = {saved: true, formatId: 'example_grid', readback: 'OK',
+        after: {count: 1, total: 100}, siblings: []};
+      renderFormatPanel();
+      const selects = ['A', 'B', 'C', 'D', 'E'].map((letter) => gridControl(world, letter + ' 列の役割'))
+        .concat([1, 2, 3].map((number) => gridControl(world, number + ' 行目の役')));
+      assert.ok(selects.every((select) => select.disabled), mode);
+      const before = JSON.stringify(state.formatAnswers);
+      const hash = state.formatHash, preview = state.formatPreview;
+      for (const select of selects) {
+        select.disabled = false;
+        select.value = select.getAttribute('aria-label').includes('列') ? 'merchant' : 'header';
+        select.fire('change');
+        assert.equal(JSON.stringify(state.formatAnswers), before, mode + ' ' + select.getAttribute('aria-label'));
+        assert.equal(state.formatHash, hash); assert.equal(state.formatPreview, preview);
+      }
+    }
+  });
+  test('grid 10: numeric edits preserve an empty or equivalent value and synchronize row picks', () => {
+    const world = mountedFormatWorld();
+    const header = control(world, 'label', '見出し行').querySelector('input');
+    const start = control(world, 'label', '明細の開始行').querySelector('input');
+    header.value = ''; header.fire('input');
+    assert.equal(world.ui.state.formatAnswers.headerRow, 0);
+    assert.equal(header.value, '');
+    header.value = '2'; header.fire('input');
+    assert.equal(gridControl(world, '2 行目の役').value, 'header');
+    assert.equal(gridControl(world, '1 行目の役').value, '');
+    header.value = '02'; header.fire('input'); assert.equal(header.value, '02');
+    start.value = ''; start.fire('input'); assert.equal(start.value, '');
+    start.value = '3'; start.fire('change');
+    assert.equal(gridControl(world, '3 行目の役').value, 'start');
+  });
+  test('grid 11: picking the current start row as header moves the start to the next row', () => {
+    const world = mountedFormatWorld();
+    const {state} = world.ui;
+    gridChange(world, '2 行目の役', 'header');
+    assert.equal(state.formatAnswers.headerRow, 2);
+    assert.equal(state.formatAnswers.dataStartRow, 3);
+    assert.equal(gridControl(world, '2 行目の役').value, 'header');
+    assert.equal(gridControl(world, '3 行目の役').value, 'start');
+  });
+  test('grid 12: an amount radio takes its column from the role that held it', () => {
+    const world = mountedFormatWorld();
+    const {state} = world.ui;
+    change(world, '予備金額', 'select', 'E');
+    assert.equal(state.formatAnswers.columns.amountFallback, 'E');
+    const radios = world.ids['format-body'].querySelectorAll('input').filter((input) => input.type === 'radio');
+    const radio = radios.find((input) => input.value === 'E');
+    radio.checked = true; radio.fire('change');
+    assert.equal(state.formatAnswers.columns.amount, 'E');
+    assert.equal(state.formatAnswers.columns.amountFallback, null);
+    assert.equal(gridControl(world, 'E 列の役割').value, 'amount');
+    assert.equal(control(world, 'label', '予備金額').querySelector('select').value, '');
+    assert.ok(control(world, 'label', '予備金額').textContent.startsWith('予備金額（なし）'));
+  });
   function webWorld() {
     setup();
     gas.stubs.setSpreadsheetOwner('master', 'owner@example.com');
@@ -1737,7 +2004,7 @@ module.exports = ({test, assert, gas}) => {
 
   test('fmt 94: changing a column invalidates the preview without an exception', () => {
     const world = mountedFormatWorld();
-    const selects = world.ids['format-body'].querySelectorAll('select');
+    const selects = [control(world, 'label', '利用日').querySelector('select')];
     assert.ok(selects.length >= 1);
     assert.equal(JSON.stringify(world.ui.state.formatColumnSelects.map((select) => select.children.length)),
       '[6,6,6,6]');
@@ -1901,7 +2168,7 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(table.children[3].className, 'format-start');
     assert.ok(select.children[1].textContent.includes('2025/2/2'));
     change(world, '利用日', 'select', 'E');
-    assert.ok(table.children[0].textContent.includes('E 利用日'));
+    assert.equal(gridControl(world, 'E 列の役割').value, 'date');
     assert.ok(!world.ids['format-body'].textContent.includes('合計 ¥'));
   });
 

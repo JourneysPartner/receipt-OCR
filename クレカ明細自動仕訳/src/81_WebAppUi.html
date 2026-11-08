@@ -140,6 +140,8 @@
     .format-message.blocking { color: #a12622; background: #ffebea; }
     tr.format-header td { background: #fff1d6; }
     tr.format-start td { background: #eef5ff; }
+    .format-grid-select { display: block; width: auto; max-width: 110px;
+      margin-top: 3px; padding: 2px 4px; font-size: 12px; }
     tr.format-warning td { background: #fff1d6; }
     .subheading { margin: 15px 0 7px; font-size: 13px; }
     .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
@@ -3142,25 +3144,101 @@
       formatRefreshVisuals();
     }
 
+    function formatColumnRoles() {
+      return ['date', 'merchant', 'amount', 'purpose', 'amountFallback'];
+    }
+
+    function formatClearColumn(letter, keepRole) {
+      formatColumnRoles().forEach(function(role) {
+        if (role !== keepRole && state.formatAnswers.columns[role] === letter) {
+          state.formatAnswers.columns[role] = null;
+          state.formatManualColumns[role] = true;
+        }
+      });
+    }
+
+    function formatAssignColumn(role, letter) {
+      if (letter) formatClearColumn(letter, role);
+      state.formatAnswers.columns[role] = letter || null;
+      state.formatManualColumns[role] = true;
+    }
+
+    function formatColumnProvenance(role, proposal) {
+      var current = state.formatAnswers.columns[role];
+      var source = state.formatManualColumns && state.formatManualColumns[role] ?
+        'MANUAL' : proposal.columns[role].source;
+      return role === 'amountFallback' && !current ? 'なし' :
+        source === 'REFERENCE' ? '参照ファイル' : source === 'HEADER' ? '見出し' :
+        source === 'MANUAL' ? '手で選択' : '要選択';
+    }
+
+    function formatGridAmountColumns(diagnosis) {
+      return diagnosis.proposal.amountCandidates.length >= 2 ?
+        formatAmountChoices(diagnosis.proposal, state.formatAnswers, diagnosis.grid)
+          .map(function(candidate) { return candidate.column; }) : null;
+    }
+
+    function formatSyncGridColumn(select, letter, amountColumns) {
+      select.value = formatColumnRoles().filter(function(role) {
+        return state.formatAnswers.columns[role] === letter;
+      })[0] || '';
+      Array.from(select.children).forEach(function(option) {
+        if (option.value === 'amount')
+          option.disabled = Boolean(amountColumns && amountColumns.indexOf(letter) < 0);
+      });
+    }
+
+    function formatGridRowRole(number) {
+      var answers = state.formatAnswers;
+      return number === Number(answers.headerRow) ? 'header' :
+        number === Number(answers.dataStartRow) ? 'start' : '';
+    }
+
+    function formatGridChoice(label, choices, onChange, currentWhenEmpty) {
+      var select = formatNode('select', null, 'format-grid-select');
+      select.setAttribute('aria-label', label);
+      select.disabled = isMutationBusy() || Boolean(state.formatSaved);
+      choices.forEach(function(choice) {
+        var option = formatNode('option', choice[1]); option.value = choice[0];
+        select.appendChild(option);
+      });
+      select.addEventListener('change', function() {
+        // 見出し行と開始行は外せない。「—」は答えが変わらないので、試し読みの
+        // 結果も消さずに表示だけ戻す。
+        if (currentWhenEmpty && !select.value) { select.value = currentWhenEmpty(); return; }
+        formatUpdateAnswer(function() { onChange(select.value); });
+      });
+      return select;
+    }
+
     function formatRefreshVisuals() {
       var d = state.formatDiagnosis, a = state.formatAnswers;
       if (!d || !a || !d.grid) return;
       var grid = d.grid;
       if (state.formatGridTable) {
         var rows = state.formatGridTable.children;
-        grid.columnLetters.forEach(function(letter, index) {
-          var roles = Object.keys(a.columns).filter(function(role) {
-            return a.columns[role] === letter;
-          });
-          rows[0].children[index + 1].textContent = letter +
-            (roles.length ? ' ' + roles.map(formatRoleName).join('/') : '');
-        });
         grid.rowNumbers.forEach(function(number, index) {
           rows[index + 1].className = number === Number(a.headerRow) ? 'format-header' :
             number === Number(a.dataStartRow) ? 'format-start' : '';
         });
       }
+      var amountColumns = formatGridAmountColumns(d);
+      (state.formatGridColumnSelects || []).forEach(function(select, index) {
+        formatSyncGridColumn(select, grid.columnLetters[index], amountColumns);
+      });
+      (state.formatGridRowSelects || []).forEach(function(select, index) {
+        select.value = formatGridRowRole(grid.rowNumbers[index]);
+      });
+      ['headerRow', 'dataStartRow'].forEach(function(field) {
+        var input = state.formatRowInputs && state.formatRowInputs[field];
+        // 空欄を数にすると 0 になるので、同じ答えなら入力途中の文字を残す。
+        if (input && Number(input.value) !== a[field]) input.value = a[field];
+      });
       (state.formatColumnSelects || []).forEach(function(select) {
+        var role = select.dataset.role;
+        select.value = a.columns[role] || '';
+        select.parentNode.firstChild.textContent = formatRoleName(role) + '（' +
+          formatColumnProvenance(role, d.proposal) + '） ';
         grid.columnLetters.forEach(function(letter, index) {
           var headerIndex = grid.rowNumbers.indexOf(Number(a.headerRow));
           var firstIndex = grid.rowNumbers.indexOf(Number(a.dataStartRow));
@@ -3170,6 +3248,7 @@
         });
       });
       (state.formatAmountLabels || []).forEach(function(entry) {
+        entry.radio.checked = a.columns.amount === entry.column;
         var column = grid.columnLetters.indexOf(entry.column);
         var headerIndex = grid.rowNumbers.indexOf(Number(a.headerRow));
         var firstIndex = grid.rowNumbers.indexOf(Number(a.dataStartRow));
@@ -3183,22 +3262,44 @@
     function renderFormatGrid(parent, diagnosis) {
       var grid = diagnosis.grid;
       if (!grid) return;
+      state.formatGridColumnSelects = [];
+      state.formatGridRowSelects = [];
       parent.appendChild(formatNode('h3', '見本の表', 'subheading'));
       var wrap = formatNode('div', null, 'table-wrap');
       var table = formatNode('table');
       var head = formatNode('tr'); head.appendChild(formatNode('th', '行'));
+      var amountColumns = formatGridAmountColumns(diagnosis);
       grid.columnLetters.forEach(function(letter) {
-        var roles = Object.keys(state.formatAnswers.columns).filter(function(role) {
-          return state.formatAnswers.columns[role] === letter;
+        var th = formatNode('th', letter);
+        var choices = [['', '—']].concat(formatColumnRoles().map(function(role) {
+          return [role, formatRoleName(role)];
+        }));
+        var select = formatGridChoice(letter + ' 列の役割', choices, function(role) {
+          if (role) formatAssignColumn(role, letter);
+          else formatClearColumn(letter);
         });
-        head.appendChild(formatNode('th', letter + (roles.length ? ' ' + roles.map(formatRoleName).join('/') : '')));
+        formatSyncGridColumn(select, letter, amountColumns);
+        state.formatGridColumnSelects.push(select);
+        th.appendChild(select); head.appendChild(th);
       });
       table.appendChild(head);
       grid.cells.forEach(function(cells, index) {
         var tr = formatNode('tr');
         if (grid.rowNumbers[index] === Number(state.formatAnswers.headerRow)) tr.className = 'format-header';
         else if (grid.rowNumbers[index] === Number(state.formatAnswers.dataStartRow)) tr.className = 'format-start';
-        tr.appendChild(formatNode('td', grid.rowNumbers[index]));
+        var number = grid.rowNumbers[index];
+        var rowCell = formatNode('td', number);
+        var select = formatGridChoice(number + ' 行目の役',
+          [['', '—'], ['header', '見出し行'], ['start', '明細の開始行']], function(role) {
+            var answers = state.formatAnswers;
+            if (role === 'header') {
+              answers.headerRow = number;
+              if (answers.dataStartRow <= number) answers.dataStartRow = number + 1;
+            } else if (role === 'start') answers.dataStartRow = number;
+          }, function() { return formatGridRowRole(number); });
+        select.value = formatGridRowRole(number);
+        state.formatGridRowSelects.push(select);
+        rowCell.appendChild(select); tr.appendChild(rowCell);
         cells.forEach(function(cell) { tr.appendChild(formatNode('td', cell)); });
         table.appendChild(tr);
       });
@@ -3213,17 +3314,14 @@
       input.addEventListener('input', function() { onChange(input.value); });
       input.addEventListener('change', function() { onChange(input.value); });
       wrap.appendChild(input); parent.appendChild(wrap);
+      return input;
     }
 
     function formatColumnChoice(parent, role, title, proposal) {
       var diagnosis = state.formatDiagnosis;
       var current = state.formatAnswers.columns[role];
-      var source = state.formatManualColumns && state.formatManualColumns[role] ?
-        'MANUAL' : proposal.columns[role].source;
       var wrap = formatNode('label', title + '（' +
-        (role === 'amountFallback' && !current ? 'なし' :
-          source === 'REFERENCE' ? '参照ファイル' : source === 'HEADER' ? '見出し' :
-          source === 'MANUAL' ? '手で選択' : '要選択') + '） ');
+        formatColumnProvenance(role, proposal) + '） ');
       var select = formatNode('select'); select.disabled = isMutationBusy() || Boolean(state.formatSaved);
       var none = formatNode('option', 'なし'); none.value = ''; select.appendChild(none);
       diagnosis.grid.columnLetters.forEach(function(letter, index) {
@@ -3235,13 +3333,11 @@
         option.value = letter; select.appendChild(option);
       });
       select.value = current || '';
+      select.dataset.role = role;
       state.formatColumnSelects.push(select);
       select.addEventListener('change', function() {
         formatUpdateAnswer(function() {
-          state.formatAnswers.columns[role] = select.value || null;
-          state.formatManualColumns[role] = true;
-          wrap.firstChild.textContent = title + '（' +
-            (role === 'amountFallback' && !select.value ? 'なし' : '手で選択') + '） ';
+          formatAssignColumn(role, select.value);
         });
       });
       wrap.appendChild(select); parent.appendChild(wrap);
@@ -3252,16 +3348,17 @@
       var proposal = diagnosis.proposal;
       state.formatColumnSelects = [];
       state.formatAmountLabels = [];
+      state.formatRowInputs = {};
       var ackHost = formatNode('div');
       state.formatAcknowledgementHost = ackHost;
       renderFormatAcknowledgements(ackHost);
       parent.appendChild(ackHost);
       parent.appendChild(formatNode('h3', '列と形式の指定', 'subheading'));
       var fields = formatNode('div', null, 'action-row');
-      formatField(fields, '見出し行', answers.headerRow, function(value) {
+      state.formatRowInputs.headerRow = formatField(fields, '見出し行', answers.headerRow, function(value) {
         formatUpdateAnswer(function() { answers.headerRow = Number(value); });
       }, 'number');
-      formatField(fields, '明細の開始行', answers.dataStartRow, function(value) {
+      state.formatRowInputs.dataStartRow = formatField(fields, '明細の開始行', answers.dataStartRow, function(value) {
         formatUpdateAnswer(function() { answers.dataStartRow = Number(value); });
       }, 'number');
       formatField(fields, '形式 ID', answers.formatId, function(value) {
@@ -3288,8 +3385,7 @@
           radio.disabled = isMutationBusy() || Boolean(state.formatSaved);
           radio.addEventListener('change', function() {
             formatUpdateAnswer(function() {
-              answers.columns.amount = candidate.column;
-              state.formatManualColumns.amount = true;
+              formatAssignColumn('amount', candidate.column);
             });
           });
           label.appendChild(radio);
@@ -3308,7 +3404,7 @@
             (first || '') + (compared ? ' 合計 ' + formatAmount(compared.total) +
               ' 相違 ' + compared.differsRows + ' 行' : ''));
           label.appendChild(amountSpan);
-          state.formatAmountLabels.push({column: candidate.column, span: amountSpan});
+          state.formatAmountLabels.push({column: candidate.column, span: amountSpan, radio: radio});
           list.appendChild(label); list.appendChild(formatNode('br'));
         });
         parent.appendChild(list);
