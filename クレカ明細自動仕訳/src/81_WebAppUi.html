@@ -3163,15 +3163,6 @@
       state.formatManualColumns[role] = true;
     }
 
-    function formatColumnProvenance(role, proposal) {
-      var current = state.formatAnswers.columns[role];
-      var source = state.formatManualColumns && state.formatManualColumns[role] ?
-        'MANUAL' : proposal.columns[role].source;
-      return role === 'amountFallback' && !current ? 'なし' :
-        source === 'REFERENCE' ? '参照ファイル' : source === 'HEADER' ? '見出し' :
-        source === 'MANUAL' ? '手で選択' : '要選択';
-    }
-
     function formatGridAmountColumns(diagnosis) {
       return diagnosis.proposal.amountCandidates.length >= 2 ?
         formatAmountChoices(diagnosis.proposal, state.formatAnswers, diagnosis.grid)
@@ -3228,33 +3219,6 @@
       });
       (state.formatGridRowSelects || []).forEach(function(select, index) {
         select.value = formatGridRowRole(grid.rowNumbers[index]);
-      });
-      ['headerRow', 'dataStartRow'].forEach(function(field) {
-        var input = state.formatRowInputs && state.formatRowInputs[field];
-        // 空欄を数にすると 0 になるので、同じ答えなら入力途中の文字を残す。
-        if (input && Number(input.value) !== a[field]) input.value = a[field];
-      });
-      (state.formatColumnSelects || []).forEach(function(select) {
-        var role = select.dataset.role;
-        select.value = a.columns[role] || '';
-        select.parentNode.firstChild.textContent = formatRoleName(role) + '（' +
-          formatColumnProvenance(role, d.proposal) + '） ';
-        grid.columnLetters.forEach(function(letter, index) {
-          var headerIndex = grid.rowNumbers.indexOf(Number(a.headerRow));
-          var firstIndex = grid.rowNumbers.indexOf(Number(a.dataStartRow));
-          select.children[index + 1].textContent = letter + '「' +
-            ((grid.cells[headerIndex] || [])[index] || '') + '」 ' +
-            ((grid.cells[firstIndex] || [])[index] || '');
-        });
-      });
-      (state.formatAmountLabels || []).forEach(function(entry) {
-        entry.radio.checked = a.columns.amount === entry.column;
-        var column = grid.columnLetters.indexOf(entry.column);
-        var headerIndex = grid.rowNumbers.indexOf(Number(a.headerRow));
-        var firstIndex = grid.rowNumbers.indexOf(Number(a.dataStartRow));
-        entry.span.textContent = entry.column + '「' +
-          ((grid.cells[headerIndex] || [])[column] || '') + '」 ' +
-          ((grid.cells[firstIndex] || [])[column] || '');
       });
       if (state.formatMessageHost) state.formatMessageHost.textContent = '';
     }
@@ -3317,50 +3281,9 @@
       return input;
     }
 
-    function formatColumnChoice(parent, role, title, proposal) {
-      var diagnosis = state.formatDiagnosis;
-      var current = state.formatAnswers.columns[role];
-      var wrap = formatNode('label', title + '（' +
-        formatColumnProvenance(role, proposal) + '） ');
-      var select = formatNode('select'); select.disabled = isMutationBusy() || Boolean(state.formatSaved);
-      var none = formatNode('option', 'なし'); none.value = ''; select.appendChild(none);
-      diagnosis.grid.columnLetters.forEach(function(letter, index) {
-        var headerRowIndex = diagnosis.grid.rowNumbers.indexOf(Number(state.formatAnswers.headerRow));
-        var header = (diagnosis.grid.cells[headerRowIndex] || [])[index] || '';
-        var firstRow = diagnosis.grid.rowNumbers.indexOf(Number(state.formatAnswers.dataStartRow));
-        var first = (diagnosis.grid.cells[firstRow] || [])[index] || '';
-        var option = formatNode('option', letter + '「' + header + '」 ' + first);
-        option.value = letter; select.appendChild(option);
-      });
-      select.value = current || '';
-      select.dataset.role = role;
-      state.formatColumnSelects.push(select);
-      select.addEventListener('change', function() {
-        formatUpdateAnswer(function() {
-          formatAssignColumn(role, select.value);
-        });
-      });
-      wrap.appendChild(select); parent.appendChild(wrap);
-    }
-
-    function renderFormatInputs(parent, diagnosis) {
+    function renderFormatInputs(parent) {
       var answers = state.formatAnswers;
-      var proposal = diagnosis.proposal;
-      state.formatColumnSelects = [];
-      state.formatAmountLabels = [];
-      state.formatRowInputs = {};
-      var ackHost = formatNode('div');
-      state.formatAcknowledgementHost = ackHost;
-      renderFormatAcknowledgements(ackHost);
-      parent.appendChild(ackHost);
-      parent.appendChild(formatNode('h3', '列と形式の指定', 'subheading'));
       var fields = formatNode('div', null, 'action-row');
-      state.formatRowInputs.headerRow = formatField(fields, '見出し行', answers.headerRow, function(value) {
-        formatUpdateAnswer(function() { answers.headerRow = Number(value); });
-      }, 'number');
-      state.formatRowInputs.dataStartRow = formatField(fields, '明細の開始行', answers.dataStartRow, function(value) {
-        formatUpdateAnswer(function() { answers.dataStartRow = Number(value); });
-      }, 'number');
       formatField(fields, '形式 ID', answers.formatId, function(value) {
         formatUpdateAnswer(function() { answers.formatId = value; });
       });
@@ -3368,59 +3291,6 @@
         formatUpdateAnswer(function() { answers.formatName = value; });
       });
       parent.appendChild(fields);
-      var columnFields = formatNode('div', null, 'action-row');
-      formatColumnChoice(columnFields, 'date', '利用日', proposal);
-      formatColumnChoice(columnFields, 'merchant', '店名', proposal);
-      formatColumnChoice(columnFields, 'purpose', '使用用途', proposal);
-      formatColumnChoice(columnFields, 'amountFallback', '予備金額', proposal);
-      parent.appendChild(columnFields);
-      parent.appendChild(formatNode('h3', '金額の列', 'subheading'));
-      if (proposal.amountCandidates.length >= 2) {
-        var list = formatNode('div');
-        var candidates = formatAmountChoices(proposal, answers, diagnosis.grid);
-        candidates.forEach(function(candidate) {
-          var label = formatNode('label');
-          var radio = formatNode('input'); radio.type = 'radio'; radio.name = 'format-amount';
-          radio.value = candidate.column; radio.checked = answers.columns.amount === candidate.column;
-          radio.disabled = isMutationBusy() || Boolean(state.formatSaved);
-          radio.addEventListener('change', function() {
-            formatUpdateAnswer(function() {
-              formatAssignColumn('amount', candidate.column);
-            });
-          });
-          label.appendChild(radio);
-          var comparison = state.formatPreview && state.formatPreview.extraction &&
-            state.formatPreview.amountComparison || [];
-          var compared = comparison.filter(function(item) {
-            return item.column === candidate.column;
-          })[0];
-          if (!compared && state.formatPreview && state.formatPreview.extraction &&
-              candidate.column === answers.columns.amount)
-            compared = {total: state.formatPreview.extraction.total, differsRows: 0};
-          var first = (diagnosis.grid.cells[diagnosis.grid.rowNumbers.indexOf(
-            Number(answers.dataStartRow))] || [])[ 
-            diagnosis.grid.columnLetters.indexOf(candidate.column)];
-          var amountSpan = formatNode('span', candidate.column + '「' + candidate.header + '」 ' +
-            (first || '') + (compared ? ' 合計 ' + formatAmount(compared.total) +
-              ' 相違 ' + compared.differsRows + ' 行' : ''));
-          label.appendChild(amountSpan);
-          state.formatAmountLabels.push({column: candidate.column, span: amountSpan, radio: radio});
-          list.appendChild(label); list.appendChild(formatNode('br'));
-        });
-        parent.appendChild(list);
-      } else {
-        formatColumnChoice(parent, 'amount', '金額', proposal);
-      }
-      var ack = answers.acknowledgements;
-      var actions = formatNode('div', null, 'action-row');
-      var previewButton = formatButton('試し読み', previewFormat, true);
-      previewButton.disabled = isMutationBusy() || Boolean(state.formatSaved);
-      actions.appendChild(previewButton);
-      var save = formatButton('保存して有効にする', saveFormat, true);
-      save.disabled = isMutationBusy() || Boolean(state.formatSaved) || !formatCanSave(state.formatPreview,
-        state.formatHash, ack);
-      state.formatSaveButton = save;
-      actions.appendChild(save); parent.appendChild(actions);
     }
 
     function renderFormatAcknowledgements(parent) {
@@ -3481,6 +3351,23 @@
         var extraction = result.extraction;
         formatAppendLine(parent, extraction.count + ' 件、合計 ' + formatAmount(extraction.total) +
           ' 円、区分の見込み ' + (extraction.category.category || 'なし'));
+        var diagnosis = state.formatDiagnosis, answers = state.formatAnswers;
+        if (diagnosis.proposal.amountCandidates.length >= 2) {
+          parent.appendChild(formatNode('h4', '金額の候補'));
+          formatAmountChoices(diagnosis.proposal, answers, diagnosis.grid).forEach(function(candidate) {
+            var compared = (result.amountComparison || []).filter(function(item) {
+              return item.column === candidate.column;
+            })[0];
+            if (!compared && candidate.column === answers.columns.amount)
+              compared = {total: extraction.total, differsRows: 0};
+            var first = (diagnosis.grid.cells[diagnosis.grid.rowNumbers.indexOf(
+              Number(answers.dataStartRow))] || [])[diagnosis.grid.columnLetters.indexOf(candidate.column)];
+            formatAppendLine(parent, candidate.column + '「' + candidate.header + '」 ' +
+              (first || '') + (compared ? ' 合計 ' + formatAmount(compared.total) +
+                ' 相違 ' + compared.differsRows + ' 行' : '') +
+              (candidate.column === answers.columns.amount ? '（選択中）' : ''));
+          });
+        }
         if (extraction.category.category === 1)
           formatAppendLine(parent, 'このまま取り込むと【要修正】になります。', 'format-message warning');
         var wrap = formatNode('div', null, 'table-wrap'); var table = formatNode('table');
@@ -3696,8 +3583,21 @@
         body.appendChild(selector);
       }
       if (d.customerSide && !state.formatRegistrationOpen) return;
+      renderFormatInputs(body);
       renderFormatGrid(body, d);
-      renderFormatInputs(body, d);
+      var ackHost = formatNode('div');
+      state.formatAcknowledgementHost = ackHost;
+      renderFormatAcknowledgements(ackHost);
+      body.appendChild(ackHost);
+      var actions = formatNode('div', null, 'action-row');
+      var previewButton = formatButton('試し読み', previewFormat, true);
+      previewButton.disabled = isMutationBusy() || Boolean(state.formatSaved);
+      actions.appendChild(previewButton);
+      var save = formatButton('保存して有効にする', saveFormat, true);
+      save.disabled = isMutationBusy() || Boolean(state.formatSaved) || !formatCanSave(state.formatPreview,
+        state.formatHash, state.formatAnswers.acknowledgements);
+      state.formatSaveButton = save;
+      actions.appendChild(save); body.appendChild(actions);
       var previewHost = formatNode('div');
       state.formatPreviewHost = previewHost;
       renderFormatPreview(previewHost);

@@ -1,0 +1,39 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の Web アプリで、形式不明カードの登録画面（形式の確認パネル）から下の「列と形式の指定」の欄をなくし、形式 ID・形式名の欄を上へ移す作業を受け取ります。
+
+作業ツリーは main の最新（コミット 940027d）です。`work/spec_format_panel_compact.md` と `work/codex_prompt_format_panel_compact.txt` は私が書いた未コミットのファイルで、触らないでください。`.codex/config.toml`、`AGENTS.md`、`work/.tmp-audit/`、`work/.tmp-gsheet/`、`work/.tmp-shortcut/`、`work/.tmp-grid/` も触らないでください。あなたの変更はステージされていない差分として残してください ── **`git add` しないこと。**開始時の `node test/run-tests.js` の最後の行を報告してください（1886/1886 のはずです）。全テストは 10 分を超えることがあります。端末が重いと画面のテスト（子プロセスを使うもの）が時間切れで落ちることがあり、その場合は再実行で通ります（再実行したら報告すること）。
+
+作業用のファイルを作るなら `work/.tmp-compact/` の中に置いてください。対象のテストだけ回す道具は `work/.tmp-gsheet/run-targeted.js <test files>` にあります（読むだけ・使うだけ。変えないこと。非同期のテストは待たないので、`browserAsyncTest` のものは全テストか `node test/phase9-format-registration.test.js --browser-case <名前>` で確かめること）。
+
+## 仕様書
+
+`work/spec_format_panel_compact.md` の全部。**全部読んでから始めてください。**前提は `work/spec_format_grid_pick.md`（読むだけ）。
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。
+2. **変えてよいのは `src/81_WebAppUi.html` だけ**（仕様書 §3 の関数と、使われなくなった関数・状態を消すこと）。`src/*.gs` は 1 つも変えないこと。回答（`answers`）の形・試し読み・保存・確認のチェックの条件を変えないこと。
+3. **パネルや表を作り直さないこと**（仕様書 決定 3・6）。表をそろえるのは、今ある要素の値・`disabled`・`className` を書き換えて行う。形式 ID・形式名の欄に打っている途中の値を書き換えないこと。
+4. **改行と文字コードを変えないこと。**`81_WebAppUi.html` は LF・UTF-8 です。終わったら `git diff --stat` に `src/81_WebAppUi.html` と `test/phase9-format-registration.test.js` しか出ないことを確かめて報告すること。
+5. **テスト：**新しいテストは `test/phase9-format-registration.test.js` に compact 1〜6 として書く（仕様書 §4）。既存のテストは仕様書 §4 の「既存のテストの扱い」のとおりにだけ直すこと（消した確かめ・書き直したテストはテストごとに 1 行で報告）。それ以外の理由で既存テストが落ちたら、テストを直さずに止めて報告すること。テストの中の仮の DOM（`browserWorld` の `Node`）に足してよいのは、足すことだけ（足したものを報告すること）。
+6. **このリポジトリは公開です。**テスト・コード・コメントに実在の店名・人名・ID・カード番号を書かないこと（架空の値だけ）。
+7. **テストを先に赤にしてから直すこと。**
+8. **日本語は UTF-8 で書くこと。**終わったら `grep -n '???' src/81_WebAppUi.html test/phase9-format-registration.test.js` が空であることを確かめて報告すること。コメントを足すなら、周りと同じ密度・語り口（「なぜ」を書く）で。
+9. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断をしたら全部報告すること。迷ったら止めて報告すること。
+10. 選択欄の選択肢の文字は決まった語だけにし、セルの値や見出しは今と同じく `textContent` で出すこと（`innerHTML` などの HTML を書き込む口を足さないこと）。
+
+## 進め方
+
+1. 仕様書を読み、`src/81_WebAppUi.html` の形式の確認パネル（`renderFormatPanel`・`renderFormatGrid`・`renderFormatInputs`・`formatColumnChoice`・`formatUpdateAnswer`・`formatRefreshVisuals`・`formatAmountChoices`・`renderFormatAcknowledgements`・`formatAcknowledgementSignature`）と、`test/phase9-format-registration.test.js` の `browserWorld`・`mountedFormatWorld`・`control`・`change` と、今ある grid 1〜12・fmt 82・fmt 91・fmt 93〜fmt 95・fmt 103・fmt 105・fmt 106 を読む
+2. compact 1〜6 を書く → 赤を確かめる
+3. 作る
+4. `node test/run-tests.js` を全部緑にする（**終わったら必ず全テストを回して最後の行を報告すること**）
+5. 仕様書 §5 の H1〜H10 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら差分が変異を入れる前と同じか確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 作る前に compact のどれが赤だったか
+- H1〜H10 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て
+- 仕様書が間違っていた・足りなかった箇所、自分で決めた箇所（全部）
+- 直した既存のテスト（テストごとに 1 行）と、仮の DOM に足したもの
+- `git diff --stat` と `???` の結果
