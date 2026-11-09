@@ -1,0 +1,36 @@
+あなたは「クレジットカード明細 自動仕訳システム」（Google Apps Script）の Web アプリで、「このカードの転記シート（Excel）」の一覧（`#destination-list`）を、真ん中の「Drive フォルダ」欄から右の「要確認」欄のいちばん下へ移す作業を受け取ります。
+
+作業ツリーは main の最新（コミット 0e9e021）です。`work/spec_destination_list_move.md` と `work/codex_prompt_destination_list_move.txt` は私が書いた未コミットのファイルで、触らないでください。`work/spec_common_partners.md`（未コミットの追記あり）、`.codex/config.toml`、`AGENTS.md`、`work/.tmp-audit/`、`work/.tmp-gsheet/`、`work/.tmp-shortcut/`、`work/.tmp-grid/`、`work/.tmp-compact/`、`work/.tmp-coll/`、`work/.tmp-common/` も触らないでください。あなたの変更はステージされていない差分として残してください ── **`git add` しないこと。**開始時の `node test/run-tests.js` の最後の行を報告してください（1930/1930 のはずです）。全テストは 10 分を超えることがあります。端末が重いと画面のテスト（子プロセスを使うもの）が時間切れで落ちることがあり、その場合は再実行で通ります（再実行したら報告すること）。
+
+作業用のファイルを作るなら `work/.tmp-dlmove/` の中に置いてください。対象のテストだけ回す道具は `work/.tmp-gsheet/run-targeted.js <test files>` にあります（読むだけ・使うだけ。変えないこと。非同期のテストは待たないので、`browserAsyncTest` のものは全テストか `node test/phase9-format-registration.test.js --browser-case <名前>` で確かめること）。
+
+## 仕様書
+
+`work/spec_destination_list_move.md` の全部。**全部読んでから始めてください。**
+
+## 絶対に守ること
+
+1. **`clasp` のどのコマンドも実行しないこと。git を操作しないこと**（commit・stash・reset・checkout・clean・add・restore）。
+2. **変えてよいのは `src/81_WebAppUi.html` の置き場所と CSS だけ**（仕様書 §3）。`renderDestinations`・`loadDestinations`・`chooseDestination` など、一覧の中身・出す条件・文言・ボタンの動きを変えないこと。`src/*.gs` は 1 つも変えないこと。
+3. **改行と文字コードを変えないこと。**`81_WebAppUi.html` は LF・UTF-8 です。終わったら `git diff --stat` に `src/81_WebAppUi.html` と `test/phase9-format-registration.test.js` しか出ないことを確かめて報告すること。
+4. **テスト：**新しいテストは `test/phase9-format-registration.test.js` の dl のテストの近くに move 1〜3 として書く（仕様書 §4）。既存のテストは直さないこと。既存テストが落ちたら、テストを直さずに止めて報告すること。
+5. **このリポジトリは公開です。**テスト・コード・コメントに実在の店名・人名・ID・カード番号を書かないこと。
+6. **テストを先に赤にしてから直すこと。**
+7. **日本語は UTF-8 で書くこと。**終わったら `grep -n '???' src/81_WebAppUi.html test/phase9-format-registration.test.js` が空であることを確かめて報告すること。コメントを足すなら、周りと同じ密度・語り口（「なぜ」を書く）で。
+8. 仕様書を変えないこと（間違いを見つけたら報告する）。仕様書に無い判断をしたら全部報告すること。迷ったら止めて報告すること。
+
+## 進め方
+
+1. 仕様書を読み、`src/81_WebAppUi.html` の `<main class="workspace">` の中（真ん中の `panel drive` と右の `panel reviews`）、CSS の `.other-review-section` と `@media` の部分、`renderDestinations`、`test/phase9-format-registration.test.js` の dl のテストを読む
+2. move 1〜3 を書く → move 1・move 2 が赤であることを確かめる（move 3 は今も緑のはず）
+3. 移す
+4. `node test/run-tests.js` を全部緑にする（**終わったら必ず全テストを回して最後の行を報告すること**）
+5. 仕様書 §5 の D1〜D5 を 1 つずつ入れて回し、赤になるテストを記録して戻す（戻したら差分が変異を入れる前と同じか確かめる）。赤にならない変異があれば、テストを足して赤にできるか試し、足したものを報告する
+
+## 報告してほしいこと
+
+- 開始時と終了時の `node test/run-tests.js` の最後の行
+- 作る前に move のどれが赤だったか
+- D1〜D5 それぞれで赤になったテストの名前。赤にならなかった変異と、その理由の見立て
+- 仕様書が間違っていた・足りなかった箇所、自分で決めた箇所（全部）。余白をどう付けたか
+- `git diff --stat` と `???` の結果

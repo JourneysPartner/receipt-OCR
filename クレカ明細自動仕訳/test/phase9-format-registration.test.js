@@ -3256,6 +3256,52 @@ module.exports = ({test, assert, gas}) => {
       assert.equal(world.ids[id].querySelectorAll('img').length, 0);
     }
   });
+  function dlMoveHtml() {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', '81_WebAppUi.html'), 'utf8');
+    const body = /<body>([\s\S]*?)<script>/.exec(source);
+    assert.ok(body);
+    return body[1];
+  }
+  test('move 1: destinations follow review content as the last child of the review panel body', () => {
+    const reviews = /<section class="panel reviews"[\s\S]*?(?=<section class="panel|<\/main>)/.exec(dlMoveHtml());
+    assert.ok(reviews);
+    const panel = reviews[0];
+    const destination = panel.indexOf('<div id="destination-list" hidden></div>');
+    assert.ok(destination >= 0, 'destinations belong in the review panel');
+    const other = panel.indexOf('id="other-review-section"');
+    assert.ok(other >= 0);
+    const otherEnd = panel.indexOf('</section>', other);
+    assert.ok(otherEnd >= 0);
+    assert.ok(destination > otherEnd, 'destinations follow the other reviews');
+    const content = panel.indexOf('<div id="review-content"');
+    assert.ok(content >= 0);
+    let depth = 0, contentEnd = -1;
+    for (const tag of panel.slice(content).matchAll(/<\/?div\b[^>]*>/g)) {
+      depth += tag[0].startsWith('</') ? -1 : 1;
+      if (depth === 0) {
+        contentEnd = content + tag.index + tag[0].length;
+        break;
+      }
+    }
+    assert.ok(contentEnd >= 0);
+    assert.ok(destination >= contentEnd, 'destinations stay outside review-content');
+    assert.match(panel.slice(destination), /^<div id="destination-list" hidden><\/div>\s*<\/div>\s*<\/section>\s*$/);
+  });
+  test('move 2: exactly one destination list exists outside the drive panel', () => {
+    const html = dlMoveHtml();
+    const drive = /<section class="panel drive"[\s\S]*?(?=<section class="panel|<\/main>)/.exec(html);
+    assert.ok(drive);
+    assert.equal((html.match(/id="destination-list"/g) || []).length, 1);
+    assert.doesNotMatch(drive[0], /id="destination-list"/);
+  });
+  test('move 3: drive folders files progress and import keep their order', () => {
+    const drive = /<section class="panel drive"[\s\S]*?(?=<section class="panel|<\/main>)/.exec(dlMoveHtml());
+    assert.ok(drive);
+    const positions = ['folder-list', 'file-list', 'import-progress', 'import-button']
+      .map((id) => drive[0].indexOf('id="' + id + '"'));
+    assert.ok(positions.every((position) => position >= 0));
+    for (let i = 1; i < positions.length; i++) assert.ok(positions[i - 1] < positions[i]);
+  });
   const dlPlain = (value) => JSON.parse(JSON.stringify(value));
   function dlItem(id = 'dl_destination') {
     return {destinationSpreadsheetId: id, name: '架空顧客_20260102-0930', createdLabel: '2026/01/02 09:30',
@@ -3409,7 +3455,7 @@ module.exports = ({test, assert, gas}) => {
     assert.ok(body, 'renderDestinations が必要');
     assert.doesNotMatch(body[0], /innerHTML|outerHTML|insertAdjacentHTML|document\.write|createContextualFragment|DOMParser|innerText|nodeValue/);
     assert.match(body[0], /\.textContent\s*=/); assert.match(body[0], /\.title\s*=\s*destination\.name/);
-    assert.match(source, /<div id="file-list"><\/div>\s*<div id="destination-list"[^>]*><\/div>/);
+    assert.match(source, /<section id="other-review-section"[^>]*>[\s\S]*?<\/section>\s*<\/div>\s*<div id="destination-list" hidden><\/div>/);
     const world = dlBrowser(), state = world.ui.state;
     for (const property of ['innerHTML', 'outerHTML', 'innerText']) Object.defineProperty(world.Node.prototype, property, {set() { assert.fail('文字の代入は textContent を使う'); }});
     const literal = '<img src=x onerror="dl_probe()">架空の文字';
