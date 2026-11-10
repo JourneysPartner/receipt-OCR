@@ -276,7 +276,7 @@ module.exports = ({test, assert, gas}) => {
     execFileSync(process.execPath, ['-e', code], {cwd: __dirname, encoding: 'utf8', timeout: 30000});
   });
   test('inc 10: master reads AQ validates overlap bounds and excluded income', () => {
-    setup(); assert.equal(gas.evaluate('CUSTOMER_MASTER_COLUMNS_'), 43);
+    setup(); assert.equal(gas.evaluate('CUSTOMER_MASTER_COLUMNS_'), 45);
     assert.equal(call('getCustomerById', ['INC_FAKE']).columnMapping.L, 12);
     for (const value of [2, 6, 9, 11, 13, 30, 7, 0, -1, 31, 12.5, 'bad']) {
       master('顧客マスター').getRange(2, 43).setValue(value);
@@ -316,7 +316,7 @@ module.exports = ({test, assert, gas}) => {
       return write(row, column, values, isFormula);
     };
     cm.insertColumnsAfter = (after, count) => {
-      assert.equal(after, 42); assert.equal(count, 1); events.push('widen');
+      assert.equal(after, 42); assert.equal(count, 3); events.push('widen');
       return insert(after, count);
     };
     const audit = gas.context.appendAuditUnlocked_;
@@ -329,9 +329,9 @@ module.exports = ({test, assert, gas}) => {
       assert.equal(cm.getMaxColumns(), 42); assert.equal(JSON.stringify(cm.values), before);
       assert.equal(JSON.stringify(cm.formulas), formulas); assert.deepEqual(events, []);
       const applied = call('opsSetIncomeColumn', ['INC_FAKE', 12, true]);
-      assert.equal(applied.applied, true); assert.equal(applied.masterSheetMaxColumns, 43);
+      assert.equal(applied.applied, true); assert.equal(applied.masterSheetMaxColumns, 45);
     });
-    assert.equal(cm.getMaxColumns(), 43); assert.deepEqual(events, ['audit', 'widen', 'AQ', 'header']);
+    assert.equal(cm.getMaxColumns(), 45); assert.deepEqual(events, ['audit', 'widen', 'AQ', 'header']);
     assert.equal(cm.getRange(2, 43).getValue(), 12); assert.equal(cm.getRange(1, 43).getValue(), '入金の転記先列');
     assert.equal(JSON.stringify(cm.values.map(row => row.slice(0, 42))), before);
     assert.equal(JSON.stringify(cm.formulas.map(row => row.slice(0, 42))), formulas);

@@ -19,7 +19,7 @@
  * 実装時に確定する。
  */
 var MASTER_SHEET_SPECS_ = Object.freeze([
-  {key: 'CUSTOMER_MASTER', width: 43, label: '顧客ID'},
+  {key: 'CUSTOMER_MASTER', width: 45, label: '顧客ID'},
   {key: 'COMMON_PARTNER_LIST', width: 6, label: '取引先ID'},
   {key: 'COMMON_PARTNER_DICT', width: 18, label: '辞書ID'},
   {key: 'CUSTOMER_PARTNER_DICT', width: 18, label: '辞書ID'},
@@ -27,7 +27,7 @@ var MASTER_SHEET_SPECS_ = Object.freeze([
   {key: 'PURPOSE_COMPLEMENT', width: 10, label: 'ルールID'},        // ※
   {key: 'CARD_FORMAT_MASTER', width: 37, label: '形式ID'},          // ※
   {key: 'PROCESS_LOG', width: 40, label: '実行ID'},
-  {key: 'TRANSACTION_LOG', width: 47, label: '取引ID完全値'},
+  {key: 'TRANSACTION_LOG', width: 49, label: '取引ID完全値'},
   {key: 'AUDIT_LOG', width: 15, label: '監査ID'},
   {key: 'REVIEW', width: 32, label: '要確認ID'},
   {key: 'PROCESS_LEASE', width: 10, label: 'リースID'},
@@ -39,7 +39,9 @@ var MASTER_SHEET_SPECS_ = Object.freeze([
   {key: 'FREEE_IMPORT', width: 12, label: 'バッチID'},              // ※
   {key: 'LOG_ARCHIVE_INDEX', width: 12, label: 'アーカイブID'},     // ※
   {key: 'CAPACITY_PROBE', width: 4, label: 'プローブ'},
-  {key: 'SNAPSHOT_INDEX', width: 12, label: 'スナップショットID'}   // ※
+  {key: 'SNAPSHOT_INDEX', width: 12, label: 'スナップショットID'},   // ※
+  {key: 'ACCOUNT_LIST', width: 5, label: '科目コード'},
+  {key: 'USAGE_ACCOUNT_DICT', width: 9, label: '言葉'}
 ]);
 
 /** グリッドの列数を仕様幅まで広げる。値・数式には触れない。 */
@@ -234,11 +236,18 @@ function registerTestCustomer(config) {
   // AP列：相手税区分の転記先列（任意）。未設定なら税区分を一切書かない。
   row[41] = Number.isInteger(config.columns.G) ? config.columns.G : '';
   row[42] = config.columns.L === undefined || config.columns.L === null ? '' : config.columns.L;
+  // AR・AS列：相手科目コードの転記先列と、転記シートの科目一覧の範囲。
+  // 未指定なら空（C を書かない顧客）である。
+  row[43] = config.columns.C === undefined || config.columns.C === null ? '' : config.columns.C;
+  row[44] = config.accountListRange === undefined || config.accountListRange === null ?
+    '' : String(config.accountListRange);
 
   var masterSheet = requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.CUSTOMER_MASTER);
   ensureSheetWidth_(masterSheet, CUSTOMER_MASTER_COLUMNS_);
   var existing = findRowsByColumnValue_(masterSheet, 1, config.customerId, CUSTOMER_MASTER_COLUMNS_);
   if (config.columns.L === undefined && existing.length) row[42] = existing[0].values[42] || '';
+  if (config.columns.C === undefined && existing.length) row[43] = existing[0].values[43] || '';
+  if (config.accountListRange === undefined && existing.length) row[44] = existing[0].values[44] || '';
   var rowNumber = existing.length ? existing[0].rowNumber : masterSheet.getLastRow() + 1;
   ensureRowExists_(masterSheet, rowNumber);
   masterSheet.getRange(rowNumber, 1, 1, CUSTOMER_MASTER_COLUMNS_).setValues([row]);

@@ -40,7 +40,9 @@ const CONFIG = Object.freeze({
     SNAPSHOT_INDEX: '復元用スナップショット台帳',
     FORMAT_SAMPLE_INDEX: '形式サンプル台帳',
     FORMAT_SAMPLE_EXPECTED: '形式サンプル期待値',
-    APPROVAL_REQUEST: '承認申請'
+    APPROVAL_REQUEST: '承認申請',
+    ACCOUNT_LIST: '勘定科目一覧',
+    USAGE_ACCOUNT_DICT: '用途科目辞書'
   }),
 
   TX_INDEX_SHEET_PREFIX: 'TXIDX_',

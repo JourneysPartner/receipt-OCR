@@ -55,7 +55,8 @@ function checkLogCapacityForRun_() {
  * 直しても、その押下は始めた時点の値で最後まで通る。ファイルごとに
  * 違う規則で処理されるよりそのほうが筋が通る。
  */
-var runScopedMasters_ = {purposeRules: null, commonPartners: null};
+var runScopedMasters_ = {purposeRules: null, commonPartners: null, accountMasters: null,
+  accountListValues: null, accountWordValues: null, accountSheetLists: Object.create(null)};
 
 /**
  * 転記先シートの**形**（列の並び・ヘッダー）の確認結果。顧客ごとに1回。
@@ -135,10 +136,18 @@ function commonPartnerRowsFromRecords_(rows) {
 }
 
 /** 8-10の読取区間だけ、欠けている材料を一度のbatchGetで補う。 */
-function prefetchMatchingMasters_() {
+function prefetchMatchingMasters_(customer) {
+  var wantsAccounts = Boolean(customer && customer.columnMapping &&
+    customer.columnMapping.C);
   if (!runScopedReads_) {
-    return {customer: readDictionary_(false), common: readDictionary_(true),
+    var direct = {customer: readDictionary_(false), common: readDictionary_(true),
       commonPartners: commonPartnersForRun_(), partnerList: readCustomerPartnerRows_()};
+    if (wantsAccounts) {
+      var directMasters = accountMastersForRun_();
+      direct.accounts = directMasters.accounts;
+      direct.words = directMasters.words;
+    }
+    return direct;
   }
   var customerSheet = dictionarySheet_(false);
   var commonSheet = dictionarySheet_(true);
@@ -153,6 +162,15 @@ function prefetchMatchingMasters_() {
     range: quoteSheetName_(commonPartnerSheet.getName()) + '!A2:F', width: 6});
   if (customerPartnerListCache_.rows === null) missing.push({key: 'partnerList',
     range: quoteSheetName_(partnerListSheet.getName()) + '!A2:J', width: CUSTOMER_PARTNER_LIST_WIDTH_});
+  if (wantsAccounts && runScopedMasters_.accountMasters === null) {
+    // C を書く顧客だけが読む。シートが無ければ、転記先に書く前に止める（§14-9）。
+    var accountSheet = requireAccountSheet_(CONFIG.SHEET_NAMES.ACCOUNT_LIST);
+    var wordSheet = requireAccountSheet_(CONFIG.SHEET_NAMES.USAGE_ACCOUNT_DICT);
+    missing.push({key: 'accountList',
+      range: quoteSheetName_(accountSheet.getName()) + '!A2:E', width: 5});
+    missing.push({key: 'accountWords',
+      range: quoteSheetName_(wordSheet.getName()) + '!A2:I', width: 9});
+  }
   if (missing.length) {
     var values = sheetsReadRanges_(customerSheet, missing.map(function(item) { return item.range; }));
     missing.forEach(function(item, index) {
@@ -161,11 +179,26 @@ function prefetchMatchingMasters_() {
       else if (item.key === 'common') dictionaryRowsCache_.common = rows;
       else if (item.key === 'commonPartners') {
         runScopedMasters_.commonPartners = commonPartnerRowsFromRecords_(rows);
+      } else if (item.key === 'accountList') {
+        runScopedMasters_.accountListValues = rows.map(function(row) { return row.values; });
+      } else if (item.key === 'accountWords') {
+        runScopedMasters_.accountWordValues = rows.map(function(row) { return row.values; });
       } else customerPartnerListCache_.rows = rows;
     });
   }
-  return {customer: readDictionary_(false), common: readDictionary_(true),
+  if (wantsAccounts && runScopedMasters_.accountMasters === null &&
+      runScopedMasters_.accountListValues && runScopedMasters_.accountWordValues) {
+    runScopedMasters_.accountMasters = accountMastersFromValues_(
+      runScopedMasters_.accountListValues, runScopedMasters_.accountWordValues);
+  }
+  var result = {customer: readDictionary_(false), common: readDictionary_(true),
     commonPartners: commonPartnersForRun_(), partnerList: readCustomerPartnerRows_()};
+  if (wantsAccounts) {
+    var masters = accountMastersForRun_();
+    result.accounts = masters.accounts;
+    result.words = masters.words;
+  }
+  return result;
 }
 
 /** 有効な形式定義のF列キーワードの和集合（5.2 判定3の材料）。 */
@@ -844,8 +877,14 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
         phase('destinationIndex');
 
         // 8-10：店名正規化・取引先判定（メモリ上のみ。登録は9-8）。
-        var matchingMasters = prefetchMatchingMasters_();
+        var matchingMasters = prefetchMatchingMasters_(customer);
         var dictionary = buildDictionaryIndex(customer.customerId, matchingMasters);
+        // C を書く顧客だけ、決まったコードを入れる材料を用意する。一覧は
+        // 同じ実行の同じ転記先で 1 回だけ読む（§16）。
+        var accountMasters = customer.columnMapping.C ?
+          {accounts: matchingMasters.accounts, words: matchingMasters.words} : null;
+        var accountSheetList = customer.columnMapping.C ?
+          destinationAccountListForRun_(customer) : null;
         phase('dictionary');
         // 年会費のように、明細の店名にカード会社が現れない取引がある
         // （実装差戻し#31）。そのファイルがどのカードのものかは形式が知って
@@ -881,7 +920,17 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
             k: tx.merchantOriginal || '',
             m: tx.amountBillingJpy
           };
-          return Object.assign({}, tx, {
+          var accountResolution = null;
+          if (accountMasters) {
+            // 引くのはメモタグを付けた後の I 列ではなく、取引の使用用途である（§7）。
+            accountResolution = resolveAccountCode_(tx.purpose, customer,
+              accountMasters, accountSheetList);
+            // 決まった行だけ C に数を入れる。決まらない行の列には触らない
+            // ── `undefined` は「書かない」であり、空文字とは違う。
+            planned.c = accountResolution.status === ACCOUNT_RESOLUTION_STATUS_.MATCHED ?
+              accountResolution.code : undefined;
+          }
+          var matchedTx = Object.assign({}, tx, {
             partnerResolutionStatus: exempt ? PARTNER_STATUS.RESOLVED_WITHOUT_PARTNER :
               (resolved ? PARTNER_STATUS.RESOLVED_WITH_PARTNER : PARTNER_STATUS.UNRESOLVED),
             partnerMatch: match,
@@ -896,6 +945,8 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
             originalAmount: tx.amountBillingJpy,
             originalPurpose: tx.purpose
           });
+          if (accountResolution) matchedTx.accountResolution = accountResolution;
+          return matchedTx;
         });
         phase('match');
       }
@@ -987,6 +1038,23 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
     outcome.category = result.preValidation.category;
     outcome.code = result.preValidation.code;
     outcome.written = result.write ? result.write.written.length : 0;
+    // C を書かなかった行の件数。用途・店名・金額は出さない（§11・§14-12）。
+    if (customer.columnMapping.C && result.write && result.write.written.length) {
+      var writtenIds = Object.create(null);
+      result.write.written.forEach(function(id) { writtenIds[String(id)] = true; });
+      var accountCode = {missing: 0, noMatch: 0, ambiguous: 0,
+        invalidEntry: 0, notInSheetList: 0};
+      transactions.forEach(function(tx) {
+        var status = tx.accountResolution && tx.accountResolution.status;
+        if (!writtenIds[String(tx.fullTxId)] || status === ACCOUNT_RESOLUTION_STATUS_.MATCHED) return;
+        accountCode.missing += 1;
+        if (status === ACCOUNT_RESOLUTION_STATUS_.NO_MATCH) accountCode.noMatch += 1;
+        else if (status === ACCOUNT_RESOLUTION_STATUS_.AMBIGUOUS) accountCode.ambiguous += 1;
+        else if (status === ACCOUNT_RESOLUTION_STATUS_.INVALID_ENTRY) accountCode.invalidEntry += 1;
+        else if (status === ACCOUNT_RESOLUTION_STATUS_.NOT_IN_SHEET_LIST) accountCode.notInSheetList += 1;
+      });
+      if (accountCode.missing > 0) outcome.accountCode = accountCode;
+    }
     outcome.reviews = (result.reviewsRegistered || (result.write && result.write.reviewsRegistered) || []).length;
     return outcome;
   } catch (error) {

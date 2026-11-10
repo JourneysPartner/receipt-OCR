@@ -19,7 +19,7 @@ module.exports = ({test, assert, gas}) => {
   test('10.4: provisioning creates every sheet that check 2 requires', () => {
     setup();
     const result = plain(gas.call('provisionMasterSheets', []));
-    assert.equal(result.created.length, 21);
+    assert.equal(result.created.length, 23);
 
     const context = {
       sheetNames: gas.evaluate(
@@ -42,7 +42,7 @@ module.exports = ({test, assert, gas}) => {
     const sheet = gas.stubs.getSpreadsheet('master').getSheetByName(name);
     assert.ok(sheet);
     assert.equal(sheet.getMaxColumns() >= 10, true);
-    assert.equal(result.created.length, 21);
+    assert.equal(result.created.length, 23);
   });
 
   test('10.4: provisioning widens every sheet to the width its reader expects', () => {
@@ -81,7 +81,7 @@ module.exports = ({test, assert, gas}) => {
 
     const second = plain(gas.call('provisionMasterSheets', []));
     assert.equal(second.created.length, 0);
-    assert.equal(second.existing.length, 21);
+    assert.equal(second.existing.length, 23);
     assert.equal(sheet.getRange(2, 1).getValue(), 'TX_EXISTING',
       're-running the installer must never be able to destroy data');
   });

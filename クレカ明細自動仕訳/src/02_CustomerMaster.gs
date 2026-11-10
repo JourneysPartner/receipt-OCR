@@ -1,6 +1,6 @@
 'use strict';
 
-const CUSTOMER_MASTER_COLUMNS_ = 43;
+const CUSTOMER_MASTER_COLUMNS_ = 45;
 
 function parseCustomerJson_(raw, label, allowEmpty) {
   if ((raw === '' || raw === null || raw === undefined) && allowEmpty) return {};
@@ -24,7 +24,9 @@ function customerFromRow_(values, rowNumber) {
     // AP列（税区分の転記先列）は任意。未設定なら相手税区分を一切書かない。
     columnMapping: {B: Number(values[9]), F: Number(values[10]), I: Number(values[11]), K: Number(values[12]), M: Number(values[13]), txId: Number(values[14]),
       G: values[41] === '' || values[41] === null || values[41] === undefined ? null : Number(values[41]),
-      L: values[42] === '' || values[42] === null || values[42] === undefined ? null : Number(values[42])},
+      L: values[42] === '' || values[42] === null || values[42] === undefined ? null : Number(values[42]),
+      // AR列：相手科目コード（C）の転記先列。未設定なら C を一切書かない。
+      C: values[43] === '' || values[43] === null || values[43] === undefined ? null : Number(values[43])},
     schemaVersion: String(values[15] || ''), reviewers: csvEmails_(values[16]), admins: csvEmails_(values[17]),
     reviewCount: Number(values[18] || 0), reviewSummarySheetName: String(values[20] || CONFIG.REVIEW_SUMMARY.DEFAULT_SHEET_NAME),
     parallelState: String(values[21] || ''), parallelStartedOn: values[22] || null,
@@ -34,6 +36,9 @@ function customerFromRow_(values, rowNumber) {
     requiredFormulas: parseCustomerJson_(values[31], 'AF', true), expectedProtections: parseCustomerJson_(values[32], 'AG', true),
     rowScanLastColumn: Number(values[33]), parallelReferenceSheetName: String(values[34] || values[8] || ''),
     customerCategory: category, fiscalYear: fiscal,
+    // AS列：転記シートの科目一覧（例 Q5:R49）。空なら C を書かない。
+    accountListRange: values[44] === '' || values[44] === null || values[44] === undefined ?
+      null : String(values[44]),
     // AL列：空き行判定から除外する列番号（実装差戻し#16）。freeeテンプレは
     // 未入力行にも税計算区分の既定値と残高数式が入っており、除外しないと
     // 空き行が1行も見つからない。
@@ -139,6 +144,33 @@ function validateCustomerValues_(customer) {
       throw new MasterDataError('AQ must be a distinct column within the scan range: CUSTOMER_MASTER_INVALID');
     }
     systemColumns.push(incomeColumn);
+  }
+  // AR・AS列：相手科目コードの転記先列と、転記シートの科目一覧の範囲。
+  // 片方だけの設定は、C を書くのに一覧を確かめられない（またはその逆）ので許さない。
+  var accountColumn = customer.columnMapping.C;
+  var accountListRange = customer.accountListRange;
+  if ((accountColumn === null || accountColumn === undefined) !==
+      (accountListRange === null || accountListRange === undefined)) {
+    throw new MasterDataError('AR and AS must both be set or both be empty: CUSTOMER_MASTER_INVALID');
+  }
+  if (accountColumn !== null && accountColumn !== undefined) {
+    if (!Number.isInteger(accountColumn) || accountColumn < 1 ||
+        accountColumn > customer.rowScanLastColumn ||
+        systemColumns.concat([customer.columnMapping.G]).indexOf(accountColumn) >= 0) {
+      throw new MasterDataError('AR must be a distinct column within the scan range: CUSTOMER_MASTER_INVALID');
+    }
+    systemColumns.push(accountColumn);
+  }
+  if (accountListRange !== null && accountListRange !== undefined) {
+    var parsedRange = /^([A-Z]{1,3})([1-9][0-9]*):([A-Z]{1,3})([1-9][0-9]*)$/.exec(String(accountListRange));
+    if (!parsedRange) throw new MasterDataError('AS must be a range like Q5:R49: CUSTOMER_MASTER_INVALID');
+    var firstColumn = columnNumber_(parsedRange[1]);
+    var lastColumn = columnNumber_(parsedRange[3]);
+    var firstRow = Number(parsedRange[2]);
+    var lastRow = Number(parsedRange[4]);
+    if (lastColumn - firstColumn !== 1 || firstRow > lastRow || lastRow - firstRow + 1 > 200) {
+      throw new MasterDataError('AS must span exactly two columns and at most 200 rows: CUSTOMER_MASTER_INVALID');
+    }
   }
   customer.rowScanExcludedColumns.forEach(function(column) {
     if (!Number.isInteger(column) || column < 1) {

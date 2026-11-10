@@ -140,6 +140,7 @@ function expandTemplateRows(customer, sheet, shortage, templateSourceRow, contex
     customer.columnMapping.I, customer.columnMapping.K,
     customer.columnMapping.M, customer.columnMapping.txId];
   if (customer.columnMapping.L) ownedColumns.push(customer.columnMapping.L);
+  if (customer.columnMapping.C) ownedColumns.push(customer.columnMapping.C);
   added.forEach(function(rowNumber) {
     ownedColumns.forEach(function(column) {
       sheet.getRange(rowNumber, column).clearContent();
@@ -159,6 +160,7 @@ function systemOwnedColumnsAreEmpty_(customer, values) {
   var columns = [customer.columnMapping.B, customer.columnMapping.F, customer.columnMapping.I,
     customer.columnMapping.K, customer.columnMapping.M, customer.columnMapping.txId];
   if (customer.columnMapping.L) columns.push(customer.columnMapping.L);
+  if (customer.columnMapping.C) columns.push(customer.columnMapping.C);
   return columns.every(function(column) {
       var value = values[column - 1];
       return value === '' || value === null || value === undefined;
@@ -181,7 +183,8 @@ function writeColumnNumber_(customer, key) {
   var mapping = customer.columnMapping || {};
   var map = {
     b: mapping.B, f: mapping.F, i: mapping.I,
-    k: mapping.K, m: mapping.M, txId: mapping.txId, g: mapping.G, l: mapping.L
+    k: mapping.K, m: mapping.M, txId: mapping.txId, g: mapping.G, l: mapping.L,
+    c: mapping.C
   };
   var column = Number(map[key]);
   if (!Number.isInteger(column) || column < 1) {
@@ -212,7 +215,7 @@ function writeTransactionRows(customer, rowWrites, leaseId, fileId) {
     assertLeaseHeldForWrite(fileId, leaseId);
 
     var groups = [
-      {option: 'RAW', keys: ['txId', 'f', 'i', 'k', 'g']},
+      {option: 'RAW', keys: ['txId', 'f', 'i', 'k', 'g', 'c']},
       {option: 'USER_ENTERED', keys: ['b', 'm', 'l']}
     ];
     var sheetName = customer.destinationSheetName;
@@ -274,6 +277,7 @@ function clearTransactionRows(customer, rowNumbers, leaseId, fileId) {
     rowNumbers.forEach(function(rowNumber) {
       var keys = ['txId', 'b', 'f', 'i', 'k', 'm'];
       if (customer.columnMapping.L) keys.push('l');
+      if (customer.columnMapping.C) keys.push('c');
       keys.forEach(function(key) {
         data.push({
           range: a1Range_(customer.destinationSheetName, rowNumber, writeColumnNumber_(customer, key), writeColumnNumber_(customer, key)),
@@ -350,7 +354,7 @@ function verifyWrittenValues(customer, rowWrites, index) {
   return rowWrites.map(function(write) {
     var current = rows[write.rowNumber];
     var mismatches = [];
-    ['b', 'f', 'i', 'k', 'm', 'g'].forEach(function(key) {
+    ['b', 'f', 'i', 'k', 'm', 'g', 'c'].forEach(function(key) {
       var planned = (write.values || {})[key];
       if (planned === undefined) return;
       if (!canonicalReadValuesEqual(key, planned, current[key])) {
@@ -426,13 +430,33 @@ function sheetMoneyWriteValues_(customer, values) {
   return result;
 }
 
+/**
+ * 相手科目コードの予定値を、書ける数だけに限る。
+ * 数ならそのまま、数字だけの文字なら数にする。それ以外は書かずに止める
+ * ── 小数・負・文字の `"712"` を送ると VLOOKUP が外れる（§8）。
+ */
+function plannedAccountCodeNumber_(value) {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value === 'number') {
+    if (Number.isInteger(value) && value > 0) return value;
+    throw new TypeError('Account code must be a positive integer');
+  }
+  if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
+    var number = Number(value.trim());
+    if (Number.isInteger(number) && number > 0) return number;
+  }
+  throw new TypeError('Account code must be a positive integer');
+}
+
 function buildRowWrite(rowNumber, txLog) {
   var all = {
     b: txLog.planned.b, f: txLog.planned.f, i: txLog.planned.i,
     k: txLog.planned.k, m: txLog.planned.m,
     // 相手税区分は持つ行だけが書く。空文字を書くと転記先テンプレートの
     // 既定値や数式を消してしまう ── 書かないことと空を書くことは違う。
-    g: txLog.planned.g
+    g: txLog.planned.g,
+    // 相手科目コードも持つ行だけが書く。値は必ず数にしてから渡す。
+    c: plannedAccountCodeNumber_(txLog.planned.c)
   };
   var values = all;
   if (Array.isArray(txLog.columns) && txLog.columns.length) {
@@ -461,6 +485,11 @@ function readDestinationRows_(customer, rowNumbers, index) {
     var fromIndex = {};
     unique.forEach(function(rowNumber) {
       fromIndex[rowNumber] = getValuesByRow(index, rowNumber);
+      if (customer.columnMapping.C && fromIndex[rowNumber]) {
+        var allValues = getAllValuesByRow(index, rowNumber);
+        var accountCode = allValues ? allValues[customer.columnMapping.C - 1] : '';
+        fromIndex[rowNumber].c = accountCode === undefined || accountCode === null ? '' : accountCode;
+      }
     });
     return fromIndex;
   }
@@ -469,6 +498,8 @@ function readDestinationRows_(customer, rowNumbers, index) {
     i: customer.columnMapping.I, k: customer.columnMapping.K, m: customer.columnMapping.M};
   // 相手税区分の列は任意設定。未設定の顧客では読まない。
   if (customer.columnMapping.G) columns.g = customer.columnMapping.G;
+  // 相手科目コードの列も任意設定。未設定の顧客では読まない。
+  if (customer.columnMapping.C) columns.c = customer.columnMapping.C;
   var ranges = unique.map(function(rowNumber) {
     return a1Range_(customer.destinationSheetName, rowNumber, 1, customer.rowScanLastColumn);
   });

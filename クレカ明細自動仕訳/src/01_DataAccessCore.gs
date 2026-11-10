@@ -48,7 +48,8 @@ function masterSpreadsheet_() {
 var runScopedReads_ = false;
 
 function forgetRunScopedReads_() {
-  runScopedMasters_ = {purposeRules: null, commonPartners: null};
+  runScopedMasters_ = {purposeRules: null, commonPartners: null, accountMasters: null,
+    accountListValues: null, accountWordValues: null, accountSheetLists: Object.create(null)};
   forgetFormatDefinitions_();
   forgetDictionaryCache_();
   forgetCustomerPartnerListCache_();

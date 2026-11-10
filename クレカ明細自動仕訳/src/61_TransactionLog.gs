@@ -1,8 +1,9 @@
 'use strict';
 
-// 46・47列目は相手税区分の予定値・読取確認値。**末尾に足す** ── 予定値の
-// ブロック(19〜23)の途中へ挿すと、以降20列分の意味がずれて既存行が壊れる。
-const TRANSACTION_LOG_WIDTH_ = 47;
+// 46・47列目は相手税区分、48・49列目は相手科目コードの予定値・読取確認値。
+// **末尾に足す** ── 予定値のブロック(19〜23)の途中へ挿すと、以降20列分の
+// 意味がずれて既存行が壊れる。
+const TRANSACTION_LOG_WIDTH_ = 49;
 const TX_INDEX_WIDTH_ = 11;
 
 function transactionLogSheet_() { return requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.TRANSACTION_LOG); }
@@ -55,9 +56,11 @@ function txLogFromRecord_(record) {
     plannedFinalStatus: String(v[10]), partnerResolutionStatus: String(v[11]), freeeStatus: String(v[12]), batchId: v[13] || null,
     originalDate: v[14], originalMerchant: v[15], originalAmount: v[16], originalPurpose: v[17],
     planned: {b: v[18], f: v[19], i: v[20], k: v[21], m: v[22],
-      g: v[45] === '' || v[45] === undefined ? undefined : v[45]},
+      g: v[45] === '' || v[45] === undefined ? undefined : v[45],
+      c: v[47] === '' || v[47] === undefined ? undefined : v[47]},
     verified: {b: v[23], f: v[24], i: v[25], k: v[26], m: v[27],
-      g: v[46] === '' || v[46] === undefined ? undefined : v[46]},
+      g: v[46] === '' || v[46] === undefined ? undefined : v[46],
+      c: v[48] === '' || v[48] === undefined ? undefined : v[48]},
     destinationSpreadsheetId: v[28], destinationSheetName: v[29], destinationRow: v[30], currency: v[31], amountOriginal: v[32], exchangeRate: v[33],
     dateInferenceSource: v[34], dateInferenceBase: v[35], purposeInferred: toBool(v[36]), purposeRuleId: v[37], identityHash: v[38],
     transactionIdVersion: String(v[39]), hashVersion: String(v[40]), active: toBool(v[41]), invalidationReason: v[42],
@@ -195,6 +198,7 @@ function makeTransactionRow_(tx, runId, now) {
   row[20] = txInput_(planned, ['i', 'I'], txInput_(tx, ['plannedI'], '')); row[21] = txInput_(planned, ['k', 'K'], txInput_(tx, ['plannedK'], row[15]));
   row[22] = txInput_(planned, ['m', 'M'], txInput_(tx, ['plannedM'], row[16]));
   row[45] = planned.g === undefined || planned.g === null ? '' : planned.g;
+  row[47] = planned.c === undefined || planned.c === null ? '' : planned.c;
   row[28] = txInput_(tx, ['destinationSpreadsheetId'], ''); row[29] = txInput_(tx, ['destinationSheetName'], ''); row[30] = txInput_(tx, ['destinationRow'], '');
   row[31] = txInput_(tx, ['currencyOriginal', 'currency', 'currencyCode'], ''); row[32] = txInput_(tx, ['amountOriginal'], ''); row[33] = txInput_(tx, ['exchangeRate'], '');
   row[34] = txInput_(tx, ['dateInferenceSource'], ''); row[35] = txInput_(tx, ['dateInferenceBase'], '');
@@ -305,7 +309,7 @@ function registerPrepared(txs, runId, existingByIdHint, options) {
             }
           });
         }
-        [23, 24, 25, 26, 27, 46].forEach(function(column) { // 読取確認値 b/f/i/k/m/g
+        [23, 24, 25, 26, 27, 46, 48].forEach(function(column) { // 読取確認値 b/f/i/k/m/g/c
           if (carried[column] !== undefined) updatedRow[column] = carried[column];
         });
         if (purposeRevision) updates.push({rowNumber: current._rowNumber, row: updatedRow});
@@ -470,6 +474,12 @@ function taxCategoryCell_(object) {
   return value === undefined || value === null ? '' : value;
 }
 
+/** 相手科目コードのセル値。持たない取引は空欄で残す。 */
+function accountCodeCell_(object) {
+  var value = object && object.c;
+  return value === undefined || value === null ? '' : value;
+}
+
 function plannedVerifiedArray_(object) {
   object = object || {};
   return [valueOr_(object, ['b', 'B'], ''), valueOr_(object, ['f', 'F'], ''), valueOr_(object, ['i', 'I'], ''),
@@ -481,8 +491,9 @@ function updateWrittenValues(fullTxId, planned, verified) {
     var row = getTransaction(fullTxId); if (!row) throw new IntegrityError(null, 'Transaction not found');
     transactionLogSheet_().getRange(row._rowNumber, 19, 1, 10).setValues([[].concat(plannedVerifiedArray_(planned), plannedVerifiedArray_(verified))]);
     transactionLogSheet_().getRange(row._rowNumber, 45).setValue(nowIso_());
-    transactionLogSheet_().getRange(row._rowNumber, 46, 1, 2)
-      .setValues([[taxCategoryCell_(planned), taxCategoryCell_(verified)]]);
+    transactionLogSheet_().getRange(row._rowNumber, 46, 1, 4)
+      .setValues([[taxCategoryCell_(planned), taxCategoryCell_(verified),
+        accountCodeCell_(planned), accountCodeCell_(verified)]]);
   });
 }
 
@@ -560,8 +571,9 @@ function settleWrittenTransactions(entries) {
         String(entry.destinationSpreadsheetId), String(entry.destinationSheetName), entry.destinationRow
       ]]});
       data.push({range: a1Range_(name, update.rowNumber, 45, 45), values: [[now]]});
-      data.push({range: a1Range_(name, update.rowNumber, 46, 47), values: [
-        [taxCategoryCell_(entry.planned), taxCategoryCell_(entry.verified)]]});
+      data.push({range: a1Range_(name, update.rowNumber, 46, 49), values: [
+        [taxCategoryCell_(entry.planned), taxCategoryCell_(entry.verified),
+          accountCodeCell_(entry.planned), accountCodeCell_(entry.verified)]]});
     });
     for (var start = 0; start < data.length; start += SETTLE_BATCH_RANGES_) {
       Sheets.Spreadsheets.Values.batchUpdate(

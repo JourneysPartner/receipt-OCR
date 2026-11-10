@@ -7678,7 +7678,7 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(result.resolved, 6);
     assert.equal(reads.fromWeb, 0);
     assert.deepEqual(reads.byFile, Object.fromEntries(seeded.fileIds.map((fileId) => [fileId, 2])));
-    assert.deepEqual(reads.multi, [[5, seeded.fileIds, 47]]);
+    assert.deepEqual(reads.multi, [[5, seeded.fileIds, 49]]);
   });
 
   test('fc 3: 複数ファイルでも空店名・カード名用途・競合を学ばず通常行だけ学ぶ', () => {

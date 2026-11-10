@@ -745,6 +745,16 @@
             (file.priorYearExcluded.fiscalYear - 1) + ' 年以前の利用 ' +
             file.priorYearExcluded.count + ' 件は転記していません');
         }
+        if (file.accountCode && file.accountCode.missing > 0) {
+          var accountParts = [];
+          if (file.accountCode.noMatch > 0) accountParts.push('辞書に無い用途 ' + file.accountCode.noMatch + ' 行');
+          if (file.accountCode.ambiguous > 0) accountParts.push('候補が割れた ' + file.accountCode.ambiguous + ' 行');
+          if (file.accountCode.invalidEntry > 0) accountParts.push('辞書の誤り ' + file.accountCode.invalidEntry + ' 行');
+          if (file.accountCode.notInSheetList > 0) accountParts.push('転記シートの一覧に無い ' + file.accountCode.notInSheetList + ' 行');
+          lines.push('【科目コード】' + (file.fileName || file.fileId || '') + '：' +
+            file.accountCode.missing + ' 行は相手科目コードを入れていません（' +
+            accountParts.join('・') + '）。C 列に手で入れてください');
+        }
       });
       return lines;
     }

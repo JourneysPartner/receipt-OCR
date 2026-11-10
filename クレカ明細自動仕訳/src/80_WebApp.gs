@@ -1673,6 +1673,7 @@ function webAppCloneDestination_(customer, now) {
   // 47・56 行目。雛形に初期の取込のキャッシュバック行が残っていた）。
   var owned = ['B', 'F', 'I', 'K', 'M', 'txId'];
   if (customer.columnMapping.L) owned.push('L');
+  if (customer.columnMapping.C) owned.push('C');
   var taxColumn = Number(customer.columnMapping.G);
   if (Number.isInteger(taxColumn) && taxColumn >= 1 &&
       (customer.rowScanExcludedColumns || []).map(Number).indexOf(taxColumn) < 0) {

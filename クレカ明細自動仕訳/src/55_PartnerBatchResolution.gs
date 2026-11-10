@@ -465,8 +465,9 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
           if (item.rowWrite) {
             partnerBatchAppendRanges_(data, sheet.getName(), rowNumber, 19, 28,
               plannedVerifiedArray_(item.planned).concat(plannedVerifiedArray_(item.verified)));
-            partnerBatchAppendRanges_(data, sheet.getName(), rowNumber, 46, 47,
-              [taxCategoryCell_(item.planned), taxCategoryCell_(item.verified)]);
+            partnerBatchAppendRanges_(data, sheet.getName(), rowNumber, 46, 49,
+              [taxCategoryCell_(item.planned), taxCategoryCell_(item.verified),
+                accountCodeCell_(item.planned), accountCodeCell_(item.verified)]);
           }
           partnerBatchAppendRanges_(data, sheet.getName(), rowNumber, 12, 12, [update.status]);
           partnerBatchAppendRanges_(data, sheet.getName(), rowNumber, 45, 45, [now]);
