@@ -193,6 +193,7 @@
     .pager[hidden] { display: none; }
     .pager-controls { display: flex; gap: 6px; }
     .excel-status { color: var(--ok); font-size: 12px; }
+    #final-area { margin-top: 12px; }
     .final-wrap { padding: 0 22px 24px; }
     .final-verdict { margin-bottom: 12px; padding: 10px 12px; border-radius: 8px; font-weight: 700; }
     .final-verdict.ok { color: #0f5132; background: #e8f5ee; }
@@ -333,11 +334,7 @@
           </div>
           <div class="action-row">
             <button id="resolve-button" type="button" class="button primary" disabled>選択した要確認を確定</button>
-            <button id="final-button" type="button" class="button" disabled>最終確認を表示</button>
-            <button id="excel-button" type="button" class="button" disabled>Excel ダウンロード</button>
-            <span id="excel-status" class="excel-status"></span>
           </div>
-          <div id="final-summary" class="final-summary" role="status" aria-live="polite" hidden></div>
           <section id="other-review-section" class="other-review-section" aria-labelledby="other-review-heading" hidden>
             <h3 id="other-review-heading" class="subheading">その他の要確認 <span id="other-review-total">0</span> 件</h3>
             <div id="other-review-list" class="review-table-wrap"></div>
@@ -345,6 +342,14 @@
           </section>
         </div>
         <div id="destination-list" hidden></div>
+        <div id="final-area" hidden>
+          <div id="final-summary" class="final-summary" role="status" aria-live="polite" hidden></div>
+          <div class="action-row">
+            <button id="final-button" type="button" class="button" disabled>最終確認を表示</button>
+            <button id="excel-button" type="button" class="button" disabled>Excel ダウンロード</button>
+            <span id="excel-status" class="excel-status"></span>
+          </div>
+        </div>
       </div>
     </section>
   </main>
@@ -581,7 +586,7 @@
       'select-clear', 'review-pager',
       'review-more', 'review-prev', 'review-next', 'resolve-progress', 'resolve-progress-label',
       'resolve-progress-arrows', 'resolve-progress-value', 'resolve-progress-hint', 'resolve-button',
-      'excel-button', 'excel-status', 'final-button', 'final-panel', 'final-sheet',
+      'excel-button', 'excel-status', 'final-button', 'final-area', 'final-panel', 'final-sheet',
       'final-verdict', 'final-summary', 'final-files', 'final-problems', 'final-row-count', 'final-rows',
       'confirm-dialog', 'confirm-title', 'confirm-intro', 'confirm-new-partners',
       'confirm-new-partners-intro', 'confirm-new-partners-list', 'confirm-summary',
@@ -1682,6 +1687,7 @@
       el['drive-content'].hidden = !hasCustomer;
       el['review-empty'].hidden = hasCustomer;
       el['review-content'].hidden = !hasCustomer;
+      el['final-area'].hidden = !hasCustomer;
       if (hasCustomer && !customer.canImport) {
         el['import-disabled-reason'].textContent = TEXT.notAssignee;
       } else {

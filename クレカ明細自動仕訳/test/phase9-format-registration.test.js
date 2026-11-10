@@ -3262,7 +3262,7 @@ module.exports = ({test, assert, gas}) => {
     assert.ok(body);
     return body[1];
   }
-  test('move 1: destinations follow review content as the last child of the review panel body', () => {
+  test('move 1: destinations follow review content and the final actions close the review panel body', () => {
     const reviews = /<section class="panel reviews"[\s\S]*?(?=<section class="panel|<\/main>)/.exec(dlMoveHtml());
     assert.ok(reviews);
     const panel = reviews[0];
@@ -3285,7 +3285,10 @@ module.exports = ({test, assert, gas}) => {
     }
     assert.ok(contentEnd >= 0);
     assert.ok(destination >= contentEnd, 'destinations stay outside review-content');
-    assert.match(panel.slice(destination), /^<div id="destination-list" hidden><\/div>\s*<\/div>\s*<\/section>\s*$/);
+    const finalArea = panel.indexOf('<div id="final-area" hidden>');
+    assert.ok(finalArea > destination, 'final actions follow the destinations');
+    assert.match(panel.slice(destination, finalArea), /^<div id="destination-list" hidden><\/div>\s*$/);
+    assert.match(panel.slice(finalArea), /^<div id="final-area" hidden>[\s\S]*<\/div>\s*<\/div>\s*<\/section>\s*$/);
   });
   test('move 2: exactly one destination list exists outside the drive panel', () => {
     const html = dlMoveHtml();
@@ -3465,6 +3468,83 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(cells[0].textContent, literal); assert.equal(cells[0].title, literal);
     assert.equal(cells[0].children.length, 1); assert.equal(cells[0].firstChild.tagName, '#TEXT');
     assert.equal(cells[1].textContent, literal + ' 件（うち要確認 2 件）');
+  });
+
+  test('fa 1: final actions follow the destinations below the review table', () => {
+    const html = dlMoveHtml();
+    const reviews = /<section class="panel reviews"[\s\S]*?(?=<section class="panel|<\/main>)/.exec(html);
+    assert.ok(reviews);
+    const panel = reviews[0];
+    const body = panel.indexOf('<div class="panel-body">');
+    assert.ok(body >= 0, 'the review panel body exists');
+    const content = panel.indexOf('<div id="review-content"');
+    assert.ok(content > body);
+    let depth = 0, contentEnd = -1;
+    for (const tag of panel.slice(content).matchAll(/<\/?div\b[^>]*>/g)) {
+      depth += tag[0].startsWith('</') ? -1 : 1;
+      if (depth === 0) {
+        contentEnd = content + tag.index + tag[0].length;
+        break;
+      }
+    }
+    assert.ok(contentEnd >= 0, 'review-content closes');
+    const destination = panel.indexOf('<div id="destination-list" hidden></div>');
+    const finalArea = panel.indexOf('<div id="final-area" hidden>');
+    assert.ok(destination >= 0 && finalArea >= 0);
+    assert.ok(destination >= contentEnd, 'destinations follow the closed review content');
+    assert.match(panel.slice(contentEnd, destination), /^\s*$/, 'nothing sits between the review content and the destinations');
+    assert.ok(finalArea > destination, 'final area follows the destinations');
+    assert.match(panel.slice(destination, finalArea), /^<div id="destination-list" hidden><\/div>\s*$/);
+    assert.match(panel.slice(finalArea), /^<div id="final-area" hidden>[\s\S]*<\/div>\s*<\/div>\s*<\/section>\s*$/,
+      'final area is the last child of the review panel body');
+    const area = panel.slice(finalArea);
+    const order = ['final-summary', 'final-button', 'excel-button', 'excel-status']
+      .map((id) => area.indexOf('id="' + id + '"'));
+    assert.ok(order.every((position) => position >= 0), 'all four final elements exist');
+    for (let i = 1; i < order.length; i++) assert.ok(order[i - 1] < order[i], 'final area order');
+    const resolve = panel.indexOf('id="resolve-button"');
+    assert.ok(resolve > content && resolve < contentEnd, 'resolve button stays in the review content');
+    const contentHtml = panel.slice(content, contentEnd);
+    assert.match(contentHtml, /<div class="action-row">\s*<button id="resolve-button"[^>]*>[^<]*<\/button>\s*<\/div>/,
+      'resolve button is alone in its action row');
+    assert.doesNotMatch(contentHtml, /id="final-button"|id="excel-button"|id="excel-status"|id="final-summary"/);
+    for (const id of ['final-area', 'final-summary', 'final-button', 'excel-button', 'excel-status',
+      'resolve-button', 'destination-list'])
+      assert.equal((html.match(new RegExp('id="' + id + '"', 'g')) || []).length, 1, id);
+  });
+  browserAsyncTest('fa 2: final area follows the selected customer while the summary waits for a result', async () => {
+    const world = browserWorld({webAppListFolder: {kind: 'FILES', files: []},
+      webAppListReviews: {reviews: [], otherReviews: []}});
+    world.ui.state.customers = [{customerId: 'fa_customer', customerName: '架空顧客', canImport: true}];
+    world.ui.renderSelection();
+    assert.equal(world.ids['final-area'].hidden, true);
+    assert.equal(world.ids['review-content'].hidden, true);
+    await world.ui.chooseCustomer('fa_customer');
+    assert.equal(world.ui.state.selectedCustomerId, 'fa_customer');
+    assert.equal(world.ids['final-area'].hidden, false);
+    assert.equal(world.ids['review-content'].hidden, false);
+    assert.equal(world.ids['final-summary'].hidden, true);
+  });
+  browserAsyncTest('fa 3: final actions keep their enable rules and calls', async () => {
+    const world = browserWorld({webAppFinalReview: {destinationSpreadsheetId: 'dest',
+      reconciliation: {files: [], totals: {balanced: true}, problems: []}, rows: [], headers: []}});
+    const {state} = world.ui;
+    state.selectedCustomerId = 'fa_customer';
+    world.ui.renderSelection();
+    assert.equal(world.ids['final-button'].disabled, true);
+    assert.equal(world.ids['excel-button'].disabled, true);
+    world.ids['final-button'].fire('click');
+    assert.equal(world.calls.filter((call) => call.name === 'webAppFinalReview').length, 0);
+    state.lastCompletedDestinationSpreadsheetId = 'dest';
+    world.ui.updateActionButtons();
+    assert.equal(world.ids['final-button'].disabled, false);
+    assert.equal(world.ids['excel-button'].disabled, true);
+    const pending = world.ids['final-button'].fire('click')[0];
+    await pending;
+    assert.equal(world.calls.filter((call) => call.name === 'webAppFinalReview').length, 1);
+    assert.equal(world.ids['excel-button'].disabled, false);
+    world.ids['excel-button'].fire('click');
+    assert.match(world.ids['excel-status'].textContent, /^Excel作成済み /);
   });
 
   function collWorld(columns = {date: 'B', merchant: 'C', amount: 'E', purpose: 'I'},
