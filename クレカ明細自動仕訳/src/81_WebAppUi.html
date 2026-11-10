@@ -189,6 +189,11 @@
     .review-table-wrap th { position: sticky; top: 0; z-index: 2; background: #f8fafc; }
     .review-table-wrap th:first-child, .review-table-wrap td:first-child { width: 34px; text-align: center; }
     .other-reviews { margin: 8px 0; padding: 8px 10px; border-radius: 7px; color: #5e4800; background: #fff7d6; }
+    .other-bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
+    .other-bulk[hidden] { display: none; }
+    .other-bulk select { border: 1px solid #adb9ca; border-radius: 6px; padding: 7px 8px; }
+    .other-bulk .status-line { margin: 0; }
+    .other-bulk .muted { flex-basis: 100%; }
     .pager { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
     .pager[hidden] { display: none; }
     .pager-controls { display: flex; gap: 6px; }
@@ -337,6 +342,14 @@
           </div>
           <section id="other-review-section" class="other-review-section" aria-labelledby="other-review-heading" hidden>
             <h3 id="other-review-heading" class="subheading">その他の要確認 <span id="other-review-total">0</span> 件</h3>
+            <div id="other-bulk" class="other-bulk" hidden>
+              <span id="other-bulk-count"></span>
+              <select id="other-bulk-op"></select>
+              <button id="other-bulk-button" type="button" class="button primary" disabled>選んだ行をまとめて確定…</button>
+              <button id="other-bulk-stop" type="button" class="button" hidden>中止</button>
+              <span id="other-bulk-progress" class="status-line" aria-live="polite"></span>
+              <div id="other-bulk-hint" class="muted"></div>
+            </div>
             <div id="other-review-list" class="review-table-wrap"></div>
             <div id="other-review-more" class="muted"></div>
           </section>
@@ -534,6 +547,11 @@
       otherTotal: 0,
       unsupportedCounts: {integrity: 0, fileChanged: 0},
       otherInputs: new Map(),
+      // まとめて確定する行（要確認 ID の文字列）と、帯で選んだ操作。
+      otherSelectedIds: new Set(),
+      otherBulkCode: '',
+      // 実行中だけ入る。無ければ null。{canceled: boolean}。
+      otherBulkRun: null,
       reviewOffset: 0,
       reviewLimit: 0,
       viewGeneration: 0,
@@ -582,6 +600,8 @@
       'import-progress-value', 'import-progress-hint', 'import-disabled-reason', 'import-button', 'review-total',
       'review-window', 'review-empty', 'review-content', 'other-reviews', 'review-table',
       'other-review-section', 'other-review-total', 'other-review-list', 'other-review-more',
+      'other-bulk', 'other-bulk-count', 'other-bulk-op', 'other-bulk-button', 'other-bulk-stop',
+      'other-bulk-progress', 'other-bulk-hint',
       'review-filter', 'review-count', 'bulk-partner', 'bulk-partner-options', 'partner-name-options', 'bulk-apply',
       'select-clear', 'review-pager',
       'review-more', 'review-prev', 'review-next', 'resolve-progress', 'resolve-progress-label',
@@ -1181,6 +1201,116 @@
       el['other-reviews'].appendChild(box);
     }
 
+    /** まとめて確定できる操作だけを、この順で扱う。 */
+    var OTHER_BULK_CODES = ['POST_PRIOR_YEAR', 'EXCLUDE_PRIOR_YEAR', 'POST_ZERO_AMOUNT', 'EXCLUDE'];
+
+    function otherBulkOption(review, code) {
+      var options = review && Array.isArray(review.options) ? review.options : [];
+      return options.filter(function(option) {
+        return option && option.code === code && option.enabled;
+      })[0] || null;
+    }
+
+    /** 選べる行：取引単位で、問題が無く、まとめ操作が 1 つ以上押せる行。 */
+    function otherSelectable(review) {
+      if (!review || review.scope !== 'TRANSACTION' || review.problem) return false;
+      return OTHER_BULK_CODES.some(function(code) { return Boolean(otherBulkOption(review, code)); });
+    }
+
+    function selectableOtherReviews() {
+      return state.otherReviews.filter(otherSelectable);
+    }
+
+    function selectedOtherReviews() {
+      return state.otherReviews.filter(function(review) {
+        return otherSelectable(review) && state.otherSelectedIds.has(String(review.reviewId));
+      });
+    }
+
+    /** 選んだすべての行で押せるまとめ操作。選ぶ順でなく §2 の順に返す。 */
+    function otherCommonCodes(reviews) {
+      var targets = reviews || selectedOtherReviews();
+      if (!targets.length) return [];
+      return OTHER_BULK_CODES.filter(function(code) {
+        return targets.every(function(review) { return Boolean(otherBulkOption(review, code)); });
+      });
+    }
+
+    function renderOtherBulk() {
+      var selectable = selectableOtherReviews();
+      var selected = selectedOtherReviews();
+      var common = otherCommonCodes(selected);
+      el['other-bulk'].hidden = selectable.length === 0;
+      el['other-bulk-count'].textContent = '選択 ' + selected.length + ' 件';
+      if (state.otherBulkCode && common.indexOf(state.otherBulkCode) < 0) state.otherBulkCode = '';
+      var op = el['other-bulk-op'];
+      op.textContent = '';
+      var placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = '操作を選ぶ';
+      op.appendChild(placeholder);
+      common.forEach(function(code) {
+        var option = document.createElement('option');
+        var first = otherBulkOption(selected[0], code);
+        option.value = code;
+        option.textContent = first ? first.label : code;
+        op.appendChild(option);
+      });
+      op.value = state.otherBulkCode;
+      op.disabled = isMutationBusy();
+      el['other-bulk-hint'].textContent = selected.length > 0 && !common.length ?
+        '選んだ行に共通の操作がありません。同じ種類の行だけを選んでください。' : '';
+      el['other-bulk-button'].disabled = isMutationBusy() || selected.length === 0 || !state.otherBulkCode;
+      var run = state.otherBulkRun;
+      el['other-bulk-stop'].hidden = !run;
+      el['other-bulk-stop'].disabled = !run || run.canceled;
+      if (!run) el['other-bulk-progress'].textContent = '';
+    }
+
+    function syncOtherSelectionView() {
+      var table = el['other-review-list'];
+      var boxes = table && typeof table.querySelectorAll === 'function' ?
+        table.querySelectorAll('.other-select') : [];
+      Array.prototype.forEach.call(boxes, function(box) {
+        var row = box.closest('tr');
+        if (row) box.checked = state.otherSelectedIds.has(String(row.dataset.reviewId));
+      });
+      var selectable = selectableOtherReviews();
+      var chosen = selectable.filter(function(review) {
+        return state.otherSelectedIds.has(String(review.reviewId));
+      }).length;
+      var all = table && typeof table.querySelector === 'function' ?
+        table.querySelector('.other-select-all') : null;
+      if (all) {
+        all.checked = selectable.length > 0 && chosen === selectable.length;
+        all.disabled = isMutationBusy() || !selectable.length;
+      }
+      renderOtherBulk();
+    }
+
+    function onOtherSelectAllChanged(event) {
+      if (isMutationBusy()) return;
+      var target = event && (event.currentTarget || event.target);
+      var checked = Boolean(target && target.checked);
+      selectableOtherReviews().forEach(function(review) {
+        var id = String(review.reviewId);
+        if (checked) state.otherSelectedIds.add(id);
+        else state.otherSelectedIds.delete(id);
+      });
+      syncOtherSelectionView();
+    }
+
+    function onOtherSelectionChanged(event) {
+      if (isMutationBusy()) return;
+      var target = event && (event.currentTarget || event.target);
+      var row = target && target.closest('tr');
+      if (!row || !row.dataset) return;
+      var id = String(row.dataset.reviewId);
+      if (target.checked) state.otherSelectedIds.add(id);
+      else state.otherSelectedIds.delete(id);
+      syncOtherSelectionView();
+    }
+
     /** 描き直しても操作と訂正値を保てるよう、入力は要確認ごとの状態から戻す。 */
     function renderOtherReviewList() {
       el['other-review-section'].hidden = state.otherTotal === 0;
@@ -1188,11 +1318,25 @@
       el['other-review-list'].textContent = '';
       el['other-review-more'].textContent = state.otherTotal > state.otherReviews.length ?
         '他 ' + (state.otherTotal - state.otherReviews.length) + ' 件（表示分を片付けると出てきます）' : '';
-      if (!state.otherTotal) return;
+      if (!state.otherTotal) { renderOtherBulk(); return; }
       var table = document.createElement('table');
       table.className = 'review-table other-review-table';
       var head = document.createElement('thead');
       var header = document.createElement('tr');
+      var selectable = selectableOtherReviews();
+      var chosen = selectable.filter(function(review) {
+        return state.otherSelectedIds.has(String(review.reviewId));
+      }).length;
+      var selectAllCell = document.createElement('th');
+      var selectAll = document.createElement('input');
+      selectAll.type = 'checkbox';
+      selectAll.className = 'other-select-all';
+      selectAll.setAttribute('aria-label', '選べる行をすべて選ぶ');
+      selectAll.checked = selectable.length > 0 && chosen === selectable.length;
+      selectAll.disabled = isMutationBusy() || !selectable.length;
+      selectAll.addEventListener('change', onOtherSelectAllChanged);
+      selectAllCell.appendChild(selectAll);
+      header.appendChild(selectAllCell);
       ['種類', '内容', '元ファイル', '行', '操作'].forEach(function(label) {
         var cell = document.createElement('th');
         cell.textContent = label;
@@ -1205,6 +1349,18 @@
         var id = String(review.reviewId);
         var row = document.createElement('tr');
         row.dataset.reviewId = id;
+        var selectCell = document.createElement('td');
+        if (otherSelectable(review)) {
+          var box = document.createElement('input');
+          box.type = 'checkbox';
+          box.className = 'other-select';
+          box.setAttribute('aria-label', 'この行を選ぶ');
+          box.checked = state.otherSelectedIds.has(id);
+          box.disabled = isMutationBusy();
+          box.addEventListener('change', onOtherSelectionChanged);
+          selectCell.appendChild(box);
+        }
+        row.appendChild(selectCell);
         var type = document.createElement('td');
         type.textContent = review.typeLabel;
         row.appendChild(type);
@@ -1293,6 +1449,7 @@
       });
       table.appendChild(body);
       el['other-review-list'].appendChild(table);
+      renderOtherBulk();
     }
 
     function candidateNames(review) {
@@ -1757,6 +1914,11 @@
       state.otherTotal = 0;
       state.unsupportedCounts = {integrity: 0, fileChanged: 0};
       state.otherInputs.clear();
+      state.otherSelectedIds.clear();
+      state.otherBulkCode = '';
+      // 実行中の印を切替の先に残さない（実行中の繰返しは控えた印と 3 条件で抜ける）。
+      state.otherBulkRun = null;
+      el['other-bulk-progress'].textContent = '';
       state.selectedReviewIds.clear();
       state.lastSelectedReviewId = null;
       state.reviewFilter = '';
@@ -1923,6 +2085,12 @@
         state.unsupportedCounts = result.unsupportedCounts || {integrity: 0, fileChanged: 0};
         var otherIds = new Set(state.otherReviews.map(function(review) { return String(review.reviewId); }));
         state.otherInputs.forEach(function(value, id) { if (!otherIds.has(id)) state.otherInputs.delete(id); });
+        var selectableIds = new Set(state.otherReviews.filter(otherSelectable).map(function(review) {
+          return String(review.reviewId);
+        }));
+        state.otherSelectedIds.forEach(function(id) {
+          if (!selectableIds.has(id)) state.otherSelectedIds.delete(id);
+        });
         state.reviewOffset = Number(result.offset || 0);
         state.reviewLimit = Number(result.limit || 0);
       } catch (error) {
@@ -2640,8 +2808,133 @@
       }
     }
 
-    /** 確定後の後処理だけが失敗した場合も、済んだ操作と残った問題を分けて伝える。 */
-    function showOtherReviewResult(result) {
+    function otherBulkIsCurrent(token, generation, customerId) {
+      return token === state.resolveRun && generation === state.viewGeneration &&
+        String(customerId) === String(state.selectedCustomerId);
+    }
+
+    function otherBulkTypeSummary(reviews) {
+      var order = [], counts = {};
+      reviews.forEach(function(review) {
+        var label = String(review.typeLabel || '');
+        if (!Object.prototype.hasOwnProperty.call(counts, label)) {
+          counts[label] = 0;
+          order.push(label);
+        }
+        counts[label] += 1;
+      });
+      return order.map(function(label) { return label + ' ' + counts[label] + ' 件'; }).join('、');
+    }
+
+    function otherBulkConfirmMessage(code, reviews) {
+      return '「その他の要確認」の ' + reviews.length + ' 件（' + otherBulkTypeSummary(reviews) +
+        '）にまとめて行います。' + TEXT.otherEffect(code, {}) +
+        ' 1 件ずつ順に確定します（件数が多いと時間がかかります。1 分に 2〜3 件が目安です）。' +
+        '途中で［中止］を押すと、そこで止まります（済んだ分は戻りません）。';
+    }
+
+    function otherBulkTargetLabel(review) {
+      var label = review.fileName || '（ファイル名不明）';
+      if (review.sourceRow) label += ' ' + review.sourceRow + ' 行目';
+      return label;
+    }
+
+    function otherBulkReason(text) {
+      var value = String(text || '');
+      return value.charAt(value.length - 1) === '。' ? value : value + '。';
+    }
+
+    /**
+     * 選んだ行を、表に並んでいる順に 1 件ずつ確定する。
+     *
+     * これは取り消せない操作（転記行を空にする・取引を対象外にする）をまとめて
+     * 行うので、押した時点の選択と顧客を控え、応答のたびに画面が変わっていないか
+     * 確かめてから次を呼ぶ。途中で止めた分は選んだまま残す。
+     */
+    async function runOtherBulk() {
+      if (isMutationBusy()) return;
+      var code = state.otherBulkCode;
+      var targets = selectedOtherReviews();
+      if (!code || !targets.length || otherCommonCodes(targets).indexOf(code) < 0) return;
+      var label = (otherBulkOption(targets[0], code) || {}).label || code;
+      if (!await formatConfirm(label, otherBulkConfirmMessage(code, targets))) return;
+
+      var token = ++state.resolveRun;
+      var generation = state.viewGeneration;
+      var customerId = state.selectedCustomerId;
+      var run = {canceled: false};
+      state.otherBulkRun = run;
+      state.resolveBusy = true;
+      clearNotice();
+      renderSelection();
+
+      var done = 0, already = 0, stopped = null, canceled = false, changed = false;
+      try {
+        for (var index = 0; index < targets.length; index++) {
+          if (!otherBulkIsCurrent(token, generation, customerId)) { changed = true; break; }
+          if (run.canceled) { canceled = true; break; }
+          var review = targets[index];
+          el['other-bulk-progress'].textContent =
+            'まとめて確定中… ' + (index + 1) + ' / ' + targets.length + ' 件';
+          var result;
+          try {
+            result = await gasCall('webAppResolveOtherReview', [customerId, review.reviewId, code, {}]);
+          } catch (error) {
+            if (!otherBulkIsCurrent(token, generation, customerId)) { changed = true; break; }
+            stopped = {review: review, text: failureMessage(error), details: []};
+            break;
+          }
+          if (!otherBulkIsCurrent(token, generation, customerId)) { changed = true; break; }
+          var id = String(review.reviewId);
+          if (result.ok === true && result.resolved === 1) {
+            done += 1;
+            state.otherSelectedIds.delete(id);
+            state.otherInputs.delete(id);
+            if ((result.errors || []).length) {
+              var doneNotice = otherResultNotice(result);
+              stopped = {review: review, text: doneNotice.message, details: doneNotice.details};
+              break;
+            }
+          } else if (result.ok === false &&
+              (result.code === 'ALREADY_SETTLED' || result.code === 'REVIEW_NOT_FOUND')) {
+            already += 1;
+            state.otherSelectedIds.delete(id);
+            state.otherInputs.delete(id);
+          } else {
+            var failed = otherResultNotice(result);
+            stopped = {review: review, text: failed.message, details: failed.details};
+            break;
+          }
+        }
+      } finally {
+        if (token === state.resolveRun && generation === state.viewGeneration) {
+          state.resolveBusy = false;
+          state.otherBulkRun = null;
+          el['other-bulk-progress'].textContent = '';
+          markFinalReviewStale();
+          renderSelection();
+          loadReviews(customerId, state.reviewOffset, generation);
+          if (state.selectedFolderId) loadFiles(customerId, state.selectedFolderId, generation);
+          if (!changed && !canceled && !stopped) state.otherBulkCode = '';
+        }
+      }
+      if (changed) return;
+      var remaining = targets.length - done - already;
+      if (canceled) {
+        showNotice('中止しました。' + done + ' 件を確定しました（' + label + '）。残り ' +
+          remaining + ' 件は選んだままです。', 'warning');
+      } else if (stopped) {
+        showNotice(done + ' 件を確定したところで止まりました（' + label + '）。' +
+          otherBulkTargetLabel(stopped.review) + '：' + otherBulkReason(stopped.text) +
+          '残り ' + remaining + ' 件は選んだままです。', 'warning', stopped.details);
+      } else {
+        showNotice('「その他の要確認」 ' + done + ' 件をまとめて確定しました（' + label + '）。' +
+          (already ? already + ' 件は既に片付いていました。' : ''), 'success');
+      }
+    }
+
+    /** 確定結果から、1 件ずつのお知らせと同じ文・種類・詳細を作る。 */
+    function otherResultNotice(result) {
       if (result.ok === false) {
         var messages = {
           REVIEW_NOT_FOUND: TEXT.reviewMissing, ALREADY_SETTLED: TEXT.alreadySettled,
@@ -2654,16 +2947,15 @@
           INVALID_DATE: '利用日の形が正しくありません（例: 2026-01-05。2000 年以降、今日から 1 年先まで）。',
           INVALID_AMOUNT: '金額は整数で入力してください（1 億円未満）。'
         };
-        showNotice(messages[result.code] || TEXT.unknownFailure, 'warning');
-        return;
+        return {message: messages[result.code] || TEXT.unknownFailure, kind: 'warning', details: []};
       }
       var errors = (result.errors || []).map(function(error) {
         return error.message;
       });
       if (result.resolved !== 1) {
-        showNotice(errors.length ? 'この要確認は確定できませんでした。' : result.notAttempted > 0 ?
-          '時間が足りず確定しませんでした。もう一度押してください。' : TEXT.unknownFailure, 'warning', errors);
-        return;
+        return {message: errors.length ? 'この要確認は確定できませんでした。' : result.notAttempted > 0 ?
+          '時間が足りず確定しませんでした。もう一度押してください。' : TEXT.unknownFailure,
+          kind: 'warning', details: errors};
       }
       var message = '「' + result.typeLabel + '」の要確認を確定しました（' + result.label + '）。';
       var code = result.code, fileName = result.fileName;
@@ -2681,7 +2973,13 @@
       (result.completedFiles || []).forEach(function(completed) {
         message += 'ファイル「' + fileName + '」の要確認がすべて片付きました（' + completed.stateLabel + '）。';
       });
-      showNotice(message, errors.length ? 'warning' : 'success', errors);
+      return {message: message, kind: errors.length ? 'warning' : 'success', details: errors};
+    }
+
+    /** 確定後の後処理だけが失敗した場合も、済んだ操作と残った問題を分けて伝える。 */
+    function showOtherReviewResult(result) {
+      var notice = otherResultNotice(result);
+      showNotice(notice.message, notice.kind, notice.details);
     }
 
     function finalReviewIsCurrent() {
@@ -3996,6 +4294,17 @@
     });
     el['import-button'].addEventListener('click', startImport);
     el['resolve-button'].addEventListener('click', openConfirmation);
+    el['other-bulk-op'].addEventListener('change', function() {
+      if (isMutationBusy()) return;
+      state.otherBulkCode = el['other-bulk-op'].value;
+      renderOtherBulk();
+    });
+    el['other-bulk-button'].addEventListener('click', runOtherBulk);
+    el['other-bulk-stop'].addEventListener('click', function() {
+      if (!state.otherBulkRun) return;
+      state.otherBulkRun.canceled = true;
+      renderOtherBulk();
+    });
     el['review-prev'].addEventListener('click', function() {
       if (state.loadingReviews || isMutationBusy()) return;
       loadReviews(state.selectedCustomerId, Math.max(0, state.reviewOffset - state.reviewLimit), state.viewGeneration);
