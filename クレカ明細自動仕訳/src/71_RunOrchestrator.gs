@@ -585,6 +585,8 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
   var outcome = {fileId: fileId, fileName: fileName, outcome: null, nextState: null, reads: 0};
   var leaseId = null;
   var stateNow = null;
+  // 転記シートの科目一覧へ書き足した行（§23.5）。足したときだけ outcome に出す。
+  var accountListAdded = [];
 
   // 段階ごとの所要時間。**6分に当たったとき、どの段階で溶けたのかを知る
   // 材料がこれしかない。**合計だけでは「件数に比例しない定数がある」ことは
@@ -949,6 +951,42 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
           return matchedTx;
         });
         phase('match');
+        // 8-10 の後・取引ログへ登録する前に、転記シートの一覧へ書き足す
+        // （§23.4）。足せたコードの取引だけ C を書き、足せなかったコードの
+        // 取引は C を書かない（`NOT_IN_SHEET_LIST`）。
+        if (accountMasters && accountSheetList) {
+          var listEntries = [];
+          transactions.forEach(function(tx) {
+            var resolution = tx.accountResolution;
+            if (!resolution ||
+                resolution.status !== ACCOUNT_RESOLUTION_STATUS_.NEEDS_LIST_ENTRY) return;
+            if (listEntries.some(function(entry) { return entry.code === resolution.code; })) return;
+            listEntries.push({code: resolution.code, name: resolution.name});
+          });
+          if (listEntries.length) {
+            var appended = appendAccountListEntries_(customer, fileId, leaseId, listEntries);
+            accountListAdded = appended.added.map(function(item) {
+              return {code: item.code, name: item.name};
+            });
+            var addedCodes = Object.create(null);
+            appended.added.forEach(function(item) { addedCodes[String(item.code)] = true; });
+            appended.matched.forEach(function(code) { addedCodes[String(code)] = true; });
+            transactions.forEach(function(tx) {
+              var resolution = tx.accountResolution;
+              if (!resolution ||
+                  resolution.status !== ACCOUNT_RESOLUTION_STATUS_.NEEDS_LIST_ENTRY) return;
+              var code = resolution.code;
+              if (addedCodes[String(code)]) {
+                tx.accountResolution = {status: ACCOUNT_RESOLUTION_STATUS_.MATCHED,
+                  code: code, word: resolution.word};
+                tx.planned.c = code;
+              } else {
+                tx.accountResolution = {status: ACCOUNT_RESOLUTION_STATUS_.NOT_IN_SHEET_LIST,
+                  code: null, word: null};
+              }
+            });
+          }
+        }
       }
     }
 
@@ -1038,22 +1076,27 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
     outcome.category = result.preValidation.category;
     outcome.code = result.preValidation.code;
     outcome.written = result.write ? result.write.written.length : 0;
-    // C を書かなかった行の件数。用途・店名・金額は出さない（§11・§14-12）。
-    if (customer.columnMapping.C && result.write && result.write.written.length) {
-      var writtenIds = Object.create(null);
-      result.write.written.forEach(function(id) { writtenIds[String(id)] = true; });
+    // C を書かなかった行の件数と、一覧へ書き足した行（§11・§23.5）。
+    // 用途・店名・金額は出さない（§14-12）。足した科目名は取引の値ではない。
+    if (customer.columnMapping.C) {
       var accountCode = {missing: 0, noMatch: 0, ambiguous: 0,
         invalidEntry: 0, notInSheetList: 0};
-      transactions.forEach(function(tx) {
-        var status = tx.accountResolution && tx.accountResolution.status;
-        if (!writtenIds[String(tx.fullTxId)] || status === ACCOUNT_RESOLUTION_STATUS_.MATCHED) return;
-        accountCode.missing += 1;
-        if (status === ACCOUNT_RESOLUTION_STATUS_.NO_MATCH) accountCode.noMatch += 1;
-        else if (status === ACCOUNT_RESOLUTION_STATUS_.AMBIGUOUS) accountCode.ambiguous += 1;
-        else if (status === ACCOUNT_RESOLUTION_STATUS_.INVALID_ENTRY) accountCode.invalidEntry += 1;
-        else if (status === ACCOUNT_RESOLUTION_STATUS_.NOT_IN_SHEET_LIST) accountCode.notInSheetList += 1;
-      });
-      if (accountCode.missing > 0) outcome.accountCode = accountCode;
+      if (result.write && result.write.written.length) {
+        var writtenIds = Object.create(null);
+        result.write.written.forEach(function(id) { writtenIds[String(id)] = true; });
+        transactions.forEach(function(tx) {
+          var status = tx.accountResolution && tx.accountResolution.status;
+          if (!writtenIds[String(tx.fullTxId)] || status === ACCOUNT_RESOLUTION_STATUS_.MATCHED) return;
+          accountCode.missing += 1;
+          if (status === ACCOUNT_RESOLUTION_STATUS_.NO_MATCH) accountCode.noMatch += 1;
+          else if (status === ACCOUNT_RESOLUTION_STATUS_.AMBIGUOUS) accountCode.ambiguous += 1;
+          else if (status === ACCOUNT_RESOLUTION_STATUS_.INVALID_ENTRY) accountCode.invalidEntry += 1;
+          else if (status === ACCOUNT_RESOLUTION_STATUS_.NOT_IN_SHEET_LIST) accountCode.notInSheetList += 1;
+        });
+      }
+      // 足したものがあれば、C を書かなかった行が 0 でも出す（§23.5）。
+      if (accountListAdded.length) accountCode.listAdded = accountListAdded;
+      if (accountCode.missing > 0 || accountListAdded.length) outcome.accountCode = accountCode;
     }
     outcome.reviews = (result.reviewsRegistered || (result.write && result.write.reviewsRegistered) || []).length;
     return outcome;

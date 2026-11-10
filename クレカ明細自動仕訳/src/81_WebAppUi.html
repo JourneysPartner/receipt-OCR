@@ -750,10 +750,17 @@
           if (file.accountCode.noMatch > 0) accountParts.push('辞書に無い用途 ' + file.accountCode.noMatch + ' 行');
           if (file.accountCode.ambiguous > 0) accountParts.push('候補が割れた ' + file.accountCode.ambiguous + ' 行');
           if (file.accountCode.invalidEntry > 0) accountParts.push('辞書の誤り ' + file.accountCode.invalidEntry + ' 行');
-          if (file.accountCode.notInSheetList > 0) accountParts.push('転記シートの一覧に無い ' + file.accountCode.notInSheetList + ' 行');
+          if (file.accountCode.notInSheetList > 0) accountParts.push('転記シートの一覧に足せない ' + file.accountCode.notInSheetList + ' 行');
           lines.push('【科目コード】' + (file.fileName || file.fileId || '') + '：' +
             file.accountCode.missing + ' 行は相手科目コードを入れていません（' +
             accountParts.join('・') + '）。C 列に手で入れてください');
+        }
+        if (file.accountCode && Array.isArray(file.accountCode.listAdded) &&
+            file.accountCode.listAdded.length) {
+          lines.push('【科目一覧】' + (file.fileName || file.fileId || '') + '：' +
+            '転記シートの科目一覧に「' + file.accountCode.listAdded.map(function(item) {
+              return item.code + ' ' + item.name;
+            }).join('・') + '」を足しました');
         }
       });
       return lines;

@@ -367,13 +367,13 @@ module.exports = ({test, assert, gas}) => {
       dictionary: ['架空店舗A', '架空店舗B', '架空店舗C', '架空店舗D'],
       words: [
         {word: '仕入', code: 712}, {word: '手数料', code: 858},
-        {word: '手数料', code: 859}, {word: 'スマホ', code: 843}
+        {word: '手数料', code: 859}, {word: '謎語', code: 9999}
       ]});
     world.addFile('fileA', [
       '2026/01/10,架空店舗A,1000,仕入れ',
       '2026/01/11,架空店舗B,2000,月額利用料',
       '2026/01/12,架空店舗C,3000,手数料',
-      '2026/01/13,架空店舗D,4000,スマホ代'
+      '2026/01/13,架空店舗D,4000,謎語'
     ]);
     const accountCodeRanges = [];
     gas.stubs.onValuesBatchUpdate((request, spreadsheetId) => {
@@ -388,7 +388,7 @@ module.exports = ({test, assert, gas}) => {
     const file = report.customers[0].files[0];
     assert.equal(file.outcome, 'WRITTEN', JSON.stringify(file));
     assert.deepEqual(file.accountCode, {missing: 3, noMatch: 1, ambiguous: 1,
-      invalidEntry: 0, notInSheetList: 1});
+      invalidEntry: 1, notInSheetList: 0});
 
     assert.equal(cell(5, 3), 712);
     for (const row of [6, 7, 8]) assert.equal(cell(row, 3), '');
@@ -452,8 +452,8 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(results[0].accountCode, undefined);
   });
 
-  // ---------------- ac 7: 転記シートの一覧 ----------------
-  test('ac 7: 一覧に無い・名前違い・文字コード・重複コードは書かず notInSheetList に数える', () => {
+  // ---------------- ac 7: 転記シートの一覧（ぶつかる行） ----------------
+  test('ac 7: 名前違い・文字コード・重複コードは足さず notInSheetList、ぶつからないコードだけ足す', () => {
     const world = setupWorld({accounts: true,
       sheetEntries: [[712, '仕入れ高'], ['858', '支払手数料'], [842, '旅費交通費'],
         [842, '旅費交通費'], [999, '別科目']],
@@ -470,12 +470,23 @@ module.exports = ({test, assert, gas}) => {
     ]);
     const report = importReport(world);
     const file = report.customers[0].files[0];
-    assert.equal(file.accountCode.missing, 4);
-    assert.equal(file.accountCode.notInSheetList, 4);
-    for (const row of [5, 6, 7, 8]) assert.equal(cell(row, 3), '');
+    // 712 は同じコードで名前が違う、858 はコードの欄が文字の同じ数字、842 は
+    // 同じコードが 2 行 ── どれも足さない。843 はコードの行も同じ科目名の
+    // 行も無いので、一覧の空いた行（最後のコード 999 の次の 10 行目）へ
+    // 足して C を書く。
+    assert.deepEqual(file.accountCode, {missing: 3, noMatch: 0, ambiguous: 0,
+      invalidEntry: 0, notInSheetList: 3, listAdded: [{code: 843, name: '通信費'}]});
+    for (const row of [5, 7, 8]) assert.equal(cell(row, 3), '');
+    assert.equal(cell(6, 3), 843);
+    assert.equal(cell(10, 17), 843);
+    assert.equal(cell(10, 18), '通信費');
     const txs = transactionsFor('fileA', ['COMMITTED']);
     assert.equal(txs.length, 4);
-    assert.ok(txs.every((tx) => tx.planned.c === undefined && tx.verified.c === undefined));
+    const byRow = txs.slice().sort((a, b) => a.sourceRow - b.sourceRow);
+    assert.equal(byRow[0].planned.c, undefined);
+    assert.equal(byRow[1].planned.c, 843);
+    assert.equal(byRow[2].planned.c, undefined);
+    assert.equal(byRow[3].planned.c, undefined);
   });
 
   // ---------------- ac 8: 読取確認 ----------------
@@ -577,17 +588,17 @@ module.exports = ({test, assert, gas}) => {
       dictionary: ['架空店舗A', '架空店舗B', '架空店舗C', '架空店舗D'],
       words: [
         {word: '仕入', code: 712}, {word: '手数料', code: 858},
-        {word: '手数料', code: 859}, {word: 'スマホ', code: 843}
+        {word: '手数料', code: 859}, {word: '謎語', code: 9999}
       ]});
     world.addFile('fileA', [
       '2026/01/10,架空店舗A,1000,仕入れ',
       '2026/01/11,架空店舗B,2000,月額利用料',
       '2026/01/12,架空店舗C,3000,手数料',
-      '2026/01/13,架空店舗D,4000,スマホ代'
+      '2026/01/13,架空店舗D,4000,謎語'
     ]);
     const report = importReport(world);
     assert.deepEqual(report.customers[0].files[0].accountCode,
-      {missing: 3, noMatch: 1, ambiguous: 1, invalidEntry: 0, notInSheetList: 1});
+      {missing: 3, noMatch: 1, ambiguous: 1, invalidEntry: 1, notInSheetList: 0});
 
     const source = fs.readFileSync(path.join(__dirname, '..', 'src', '81_WebAppUi.html'), 'utf8');
     const script = /<script>([\s\S]*?)<\/script>/.exec(source)[1];
@@ -602,12 +613,22 @@ module.exports = ({test, assert, gas}) => {
     }
     assert.deepEqual(noticeLines([{fileName: '架空.csv',
       accountCode: {missing: 3, noMatch: 1, ambiguous: 1, invalidEntry: 0, notInSheetList: 1}}]),
-    ['【科目コード】架空.csv：3 行は相手科目コードを入れていません（辞書に無い用途 1 行・候補が割れた 1 行・転記シートの一覧に無い 1 行）。C 列に手で入れてください']);
+    ['【科目コード】架空.csv：3 行は相手科目コードを入れていません（辞書に無い用途 1 行・候補が割れた 1 行・転記シートの一覧に足せない 1 行）。C 列に手で入れてください']);
     assert.deepEqual(noticeLines([{fileName: '架空.csv',
       accountCode: {missing: 1, noMatch: 0, ambiguous: 0, invalidEntry: 1, notInSheetList: 0}}]),
     ['【科目コード】架空.csv：1 行は相手科目コードを入れていません（辞書の誤り 1 行）。C 列に手で入れてください']);
     assert.deepEqual(noticeLines([{fileName: '架空.csv',
       accountCode: {missing: 0, noMatch: 0, ambiguous: 0, invalidEntry: 0, notInSheetList: 0}}]), []);
+    // 一覧へ足した行の知らせ（§23.5）。C を書かなかった行が 0 でも出す。
+    assert.deepEqual(noticeLines([{fileName: '架空.csv',
+      accountCode: {missing: 0, noMatch: 0, ambiguous: 0, invalidEntry: 0,
+        notInSheetList: 0, listAdded: [{code: 362, name: '役員借入金'}]}}]),
+    ['【科目一覧】架空.csv：転記シートの科目一覧に「362 役員借入金」を足しました']);
+    assert.deepEqual(noticeLines([{fileName: '架空.csv',
+      accountCode: {missing: 1, noMatch: 0, ambiguous: 0, invalidEntry: 0, notInSheetList: 1,
+        listAdded: [{code: 843, name: '通信費'}, {code: 362, name: '役員借入金'}]}}]),
+    ['【科目コード】架空.csv：1 行は相手科目コードを入れていません（転記シートの一覧に足せない 1 行）。C 列に手で入れてください',
+      '【科目一覧】架空.csv：転記シートの科目一覧に「843 通信費・362 役員借入金」を足しました']);
   });
 
   // ---------------- ac 12: 回数 ----------------
@@ -899,5 +920,314 @@ module.exports = ({test, assert, gas}) => {
       plain(blank(15)));
     assert.equal(transactionsFor('fileA',
       ['PREPARED', 'WRITING', 'COMMITTED', 'REVIEW_REQUIRED']).length, 0);
+  });
+
+  // ---------------- ac 20: 一覧へ書き足す ----------------
+  test('ac 20: 一覧に無いコードを空いた行へ足して C を書き、2 本目のファイルでは足さず読まない', () => {
+    const world = setupWorld({accounts: true,
+      // 5 行目は空（コードの行より上）。足すのは 7 行目（最後のコード）の下。
+      sheetEntries: [['', ''], [712, '仕入高'], [858, '支払手数料']],
+      listRange: 'Q5:R12',
+      dictionary: ['架空店舗A'],
+      words: [{word: '仕入', code: 712}, {word: 'スマホ', code: 843}]});
+    world.addFile('fileA', ['2026/01/10,架空店舗A,1000,スマホ代'], '架空カード202601.csv');
+    world.addFile('fileB', ['2026/01/11,架空店舗A,1200,スマホ代'], '架空カード202602.csv');
+    const listWrites = [];
+    gas.stubs.onValuesBatchUpdate((request, spreadsheetId) => {
+      (request.data || []).forEach((data) => {
+        if (String(spreadsheetId) === 'dest1' && String(data.range).indexOf("'入力用シート'!Q") === 0) {
+          listWrites.push({spreadsheetId: spreadsheetId, range: data.range,
+            values: plain(data.values)});
+        }
+      });
+    });
+    // 一覧の読取（最初の 1 回・ロックの中の読み直し・読み戻し）を数える。
+    const realReadValues = gas.context.destinationRangeValues_;
+    const listReadRanges = [];
+    let report;
+    try {
+      report = mock({destinationRangeValues_(spreadsheetId, range, option) {
+        if (String(spreadsheetId) === 'dest1' &&
+            String(range).indexOf("'入力用シート'!Q") === 0) {
+          listReadRanges.push(String(range));
+        }
+        return realReadValues(spreadsheetId, range, option);
+      }}, () => importReport(world));
+    } finally { gas.stubs.onValuesBatchUpdate(null); }
+
+    // 最後のコードの行（858 の 7 行目）の次の、空いた 8 行目に入る。
+    // コードの行より上にある空の 5 行目には足さない。
+    assert.equal(listWrites.length, 1, JSON.stringify(listWrites));
+    assert.equal(listWrites[0].spreadsheetId, 'dest1');
+    assert.equal(listWrites[0].range, "'入力用シート'!Q8:R8");
+    assert.deepEqual(listWrites[0].values, [[843, '通信費']]);
+    assert.equal(cell(5, 17), '');
+    assert.equal(cell(8, 17), 843);
+    assert.equal(cell(8, 18), '通信費');
+    // 足したコードの C は両方のファイルの行に入る。
+    assert.equal(cell(5, 3), 843);
+    assert.equal(cell(6, 3), 843);
+    // 2 本目は覚えている一覧で当たるので、読み直さない・足し直さない。
+    assert.deepEqual(listReadRanges, ["'入力用シート'!Q5:R12",
+      "'入力用シート'!Q5:R12", "'入力用シート'!Q8:R8"],
+    '最初の 1 回・ロックの中の読み直し・読み戻しだけ');
+    const files = report.customers[0].files;
+    assert.deepEqual(files.map((file) => file.outcome), ['WRITTEN', 'WRITTEN']);
+    assert.deepEqual(files[0].accountCode, {missing: 0, noMatch: 0, ambiguous: 0,
+      invalidEntry: 0, notInSheetList: 0, listAdded: [{code: 843, name: '通信費'}]});
+    assert.equal(files[1].accountCode, undefined);
+    // 監査は 1 行だけ（足した行があるときだけ）。
+    const audits = master('監査ログ').getDataRange().getValues()
+      .filter((row) => row[11] === 'ACCOUNT_LIST_APPEND');
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0][6], 'DESTINATION');
+    assert.equal(audits[0][7], 'dest1');
+    assert.equal(audits[0][8], 'C001');
+    assert.deepEqual(JSON.parse(audits[0][10]),
+      {rows: [{row: 8, code: 843, name: '通信費'}]});
+  });
+
+  // ---------------- ac 21: 空いた行が無い ----------------
+  test('ac 21: 空いた行が無ければ足さず、C も書かず notInSheetList に数える', () => {
+    // (a) 範囲の最後までコードの行が続く（Q5:R6）。
+    const full = setupWorld({accounts: true,
+      sheetEntries: [[712, '仕入高'], [858, '支払手数料']], listRange: 'Q5:R6',
+      dictionary: ['架空店舗A'], words: [{word: 'スマホ', code: 843}]});
+    full.addFile('fileA', ['2026/01/10,架空店舗A,1000,スマホ代']);
+    const listWrites = [];
+    gas.stubs.onValuesBatchUpdate((request) => {
+      (request.data || []).forEach((data) => {
+        if (String(data.range).indexOf("'入力用シート'!Q") === 0) listWrites.push(data.range);
+      });
+    });
+    let report;
+    try { report = importReport(full); } finally { gas.stubs.onValuesBatchUpdate(null); }
+    assert.deepEqual(listWrites, []);
+    assert.deepEqual(report.customers[0].files[0].accountCode,
+      {missing: 1, noMatch: 0, ambiguous: 0, invalidEntry: 0, notInSheetList: 1});
+    assert.equal(cell(5, 3), '');
+    assert.equal(cell(5, 17), 712);
+
+    // (b) 合計の行の手前まで埋まっている。
+    const total = setupWorld({accounts: true,
+      sheetEntries: [[712, '仕入高'], [858, '支払手数料']], listRange: 'Q5:R10',
+      dictionary: ['架空店舗A'], words: [{word: 'スマホ', code: 843}]});
+    destSheet().getRange(7, 18).setValue('合計');
+    total.addFile('fileA', ['2026/01/10,架空店舗A,1000,スマホ代']);
+    gas.stubs.onValuesBatchUpdate((request) => {
+      (request.data || []).forEach((data) => {
+        if (String(data.range).indexOf("'入力用シート'!Q") === 0) listWrites.push(data.range);
+      });
+    });
+    try { report = importReport(total); } finally { gas.stubs.onValuesBatchUpdate(null); }
+    assert.deepEqual(listWrites, []);
+    assert.deepEqual(report.customers[0].files[0].accountCode,
+      {missing: 1, noMatch: 0, ambiguous: 0, invalidEntry: 0, notInSheetList: 1});
+    assert.equal(cell(5, 3), '');
+    assert.equal(cell(7, 18), '合計');
+  });
+
+  // ---------------- ac 22: ぶつかる行 ----------------
+  test('ac 22: 名前違い・同じ名前で違うコード・文字コード・2 行のコードは足さない', () => {
+    const world = setupWorld({accounts: true,
+      sheetEntries: [[712, '違う名前'], ['843', '通信費'], [842, '旅費交通費'],
+        [842, '旅費交通費'], [999, '地代家賃']],
+      listRange: 'Q5:R20',
+      dictionary: ['架空店舗A', '架空店舗B', '架空店舗C', '架空店舗D'],
+      words: [{word: '仕入', code: 712}, {word: 'スマホ', code: 843},
+        {word: '高速', code: 842}, {word: '家賃', code: 866}]});
+    world.addFile('fileA', [
+      '2026/01/10,架空店舗A,1000,仕入れ',
+      '2026/01/11,架空店舗B,2000,スマホ代',
+      '2026/01/12,架空店舗C,3000,高速代',
+      '2026/01/13,架空店舗D,4000,家賃'
+    ]);
+    const before = plain(destSheet().getRange(1, 17, 20, 2).getValues());
+    const listWrites = [];
+    gas.stubs.onValuesBatchUpdate((request) => {
+      (request.data || []).forEach((data) => {
+        if (String(data.range).indexOf("'入力用シート'!Q") === 0) listWrites.push(data.range);
+      });
+    });
+    let report;
+    try { report = importReport(world); } finally { gas.stubs.onValuesBatchUpdate(null); }
+    assert.deepEqual(listWrites, []);
+    assert.deepEqual(report.customers[0].files[0].accountCode,
+      {missing: 4, noMatch: 0, ambiguous: 0, invalidEntry: 0, notInSheetList: 4});
+    for (const row of [5, 6, 7, 8]) assert.equal(cell(row, 3), '');
+    assert.deepEqual(plain(destSheet().getRange(1, 17, 20, 2).getValues()), before);
+    // 一覧の Map には、文字のコードの行（"843"）を入れない（§6。VLOOKUP が
+    // 当たらないので「一覧に無い」と同じ扱い）。
+    const list = call('readDestinationAccountList_', ['dest1', '入力用シート', 'Q5:R20']);
+    assert.equal(list.has(843), false);
+    assert.equal(list.get(712), '違う名前');
+    assert.equal(list.has(842), false, '同じコードが 2 行なら入れない');
+    assert.equal(list.get(999), '地代家賃');
+  });
+
+  // ---------------- ac 23: 同時の書き足し ----------------
+  test('ac 23: ロックの中の読み直しで次の空いた行に入れ、先に足されたコードは足さない', () => {
+    const world = setupWorld({accounts: true, sheetEntries: [[712, '仕入高']],
+      listRange: 'Q5:R12'});
+    const lease = world.lease('lease-ac23');
+    gas.call('beginRunScopedReads_');
+    let first;
+    let second;
+    try {
+      // 最初の読取（5 行目だけがコードの行。空いた行は 6〜12 行目）。
+      first = call('destinationAccountListForRun_', [world.customer]);
+      assert.equal(first.get(712), '仕入高');
+      // ロックの前に、別の取込が空いた行の 1 つ目へ入れた。
+      destSheet().getRange(6, 17).setValue(888);
+      destSheet().getRange(6, 18).setValue('別科目');
+      const result = plain(call('appendAccountListEntries_',
+        [world.customer, 'lease-ac23', lease, [{code: 843, name: '通信費'}]]));
+      assert.deepEqual(result, {added: [{row: 7, code: 843, name: '通信費'}],
+        matched: [], failed: []});
+      // 同時に入った値を上書きしない。
+      assert.equal(cell(6, 17), 888);
+      assert.equal(cell(6, 18), '別科目');
+      assert.equal(cell(7, 17), 843);
+      assert.equal(cell(7, 18), '通信費');
+      // 実行の中で覚えている一覧も、足した後の内容になる。
+      assert.equal(call('destinationAccountListForRun_', [world.customer]).get(843), '通信費');
+      // 先に同じコードが足されていれば、足さずに MATCHED として返す。
+      second = call('appendAccountListEntries_',
+        [world.customer, 'lease-ac23', lease, [{code: 843, name: '通信費'}]]);
+      assert.deepEqual(plain(second), {added: [], matched: [843], failed: []});
+    } finally { gas.call('endRunScopedReads_'); }
+    assert.equal(cell(7, 17), 843);
+  });
+
+  // ---------------- ac 24: リースが無い ----------------
+  test('ac 24: リースを持たない実行は書き足さない（転記先は変わらない）', () => {
+    const world = setupWorld({accounts: true, sheetEntries: [[712, '仕入高']],
+      listRange: 'Q5:R12'});
+    world.lease('lease-ac24');
+    const before = plain(destSheet().getRange(1, 1, 12, 20).getValues());
+    const result = plain(call('appendAccountListEntries_',
+      [world.customer, 'lease-ac24', 'no-such-lease', [{code: 843, name: '通信費'}]]));
+    assert.deepEqual(result, {added: [], matched: [], failed: [843]});
+    assert.deepEqual(plain(destSheet().getRange(1, 1, 12, 20).getValues()), before);
+  });
+
+  // ---------------- ac 25: 雛形には触らない ----------------
+  test('ac 25: 足すのは取込の転記先（Web アプリでは複製）だけで、雛形の一覧は変えない', () => {
+    const world = setupWorld({accounts: true, sheetEntries: [[712, '仕入高']],
+      listRange: 'Q5:R12'});
+    const lease = world.lease('lease-ac25');
+    const clone = call('webAppCloneDestination_', [world.customer, new Date()]);
+    const cloneId = clone.destinationSpreadsheetId;
+    const cloneCustomer = Object.assign({}, plain(world.customer),
+      {destinationSpreadsheetId: cloneId});
+    const cloneBefore = plain(destSheet(cloneId).getRange(1, 1, 12, 20).getValues());
+    const templateBefore = plain(destSheet('dest1').getRange(1, 1, 12, 20).getValues());
+    gas.call('beginRunScopedReads_');
+    let result;
+    try {
+      result = plain(call('appendAccountListEntries_',
+        [cloneCustomer, 'lease-ac25', lease, [{code: 843, name: '通信費'}]]));
+    } finally { gas.call('endRunScopedReads_'); }
+    assert.deepEqual(result.added, [{row: 6, code: 843, name: '通信費'}]);
+    assert.equal(cell(6, 17, cloneId), 843);
+    assert.equal(cell(6, 18, cloneId), '通信費');
+    const cloneAfter = plain(destSheet(cloneId).getRange(1, 1, 12, 20).getValues());
+    cloneAfter.forEach((row, index) => {
+      if (index === 5) return;
+      assert.deepEqual(row, cloneBefore[index], (index + 1) + ' 行目は変えない');
+    });
+    assert.deepEqual(plain(destSheet('dest1').getRange(1, 1, 12, 20).getValues()),
+      templateBefore);
+  });
+
+  // ---------------- ac 26: 読み戻しが違う ----------------
+  test('ac 26: 読み戻しが違うコードは足せなかった扱いにして C を書かない（書いた値は戻さない）', () => {
+    const world = setupWorld({accounts: true, sheetEntries: [[712, '仕入高']],
+      listRange: 'Q5:R12', dictionary: ['架空店舗A'],
+      words: [{word: 'スマホ', code: 843}]});
+    world.addFile('fileA', ['2026/01/10,架空店舗A,1000,スマホ代']);
+    const realRange = gas.context.destinationRangeValues_;
+    let readBacks = 0;
+    let report;
+    report = mock({destinationRangeValues_(spreadsheetId, range, option) {
+      const values = realRange(spreadsheetId, range, option);
+      const match = /^'入力用シート'!Q(\d+):R(\d+)$/.exec(String(range));
+      if (String(spreadsheetId) === 'dest1' && match && match[1] === match[2]) {
+        readBacks += 1;
+        return values.map((row) => [row[0], '違う科目名']);
+      }
+      return values;
+    }}, () => importReport(world));
+    assert.equal(readBacks, 1);
+    const file = report.customers[0].files[0];
+    assert.equal(file.outcome, 'WRITTEN', JSON.stringify(file));
+    assert.deepEqual(file.accountCode, {missing: 1, noMatch: 0, ambiguous: 0,
+      invalidEntry: 0, notInSheetList: 1});
+    assert.equal(cell(5, 3), '');
+    // 足せなかったものとして扱うが、書いた値は戻さない。
+    assert.equal(cell(6, 17), 843);
+    assert.equal(cell(6, 18), '通信費');
+    const txs = transactionsFor('fileA', ['COMMITTED']);
+    assert.equal(txs[0].planned.c, undefined);
+  });
+
+  // ---------------- ac 27: 顧客の区分 ----------------
+  test('ac 27: 顧客の区分は見るだけで変えず、apply で AJ と監査を書き、検査に通らなければ書かない', () => {
+    const world = setupWorld({accounts: true, sheetEntries: [[712, '仕入高']]});
+    const aj = () => master('顧客マスター').getRange(2, 36).getValue();
+    assert.equal(aj(), 'CORPORATE');
+    // 個人にするには AK の年度が要る。無ければ見るだけでも止まる。
+    assert.throws(() => call('opsSetCustomerCategory', ['C001', 'INDIVIDUAL', false]),
+      (error) => error && error.code === 'CUSTOMER_MASTER_INVALID');
+    call('setCustomerFiscalYear', ['C001', 2026, 'tester@example.com', 'TEST']);
+    const dry = plain(call('opsSetCustomerCategory', ['C001', 'INDIVIDUAL', false]));
+    assert.deepEqual(dry, {customerId: 'C001', currentCategory: 'CORPORATE',
+      category: 'INDIVIDUAL', fiscalYear: 2026, applied: false});
+    assert.equal(aj(), 'CORPORATE');
+
+    const applied = plain(call('opsSetCustomerCategory', ['C001', 'INDIVIDUAL', true]));
+    assert.equal(applied.applied, true);
+    assert.equal(aj(), 'INDIVIDUAL');
+    assert.equal(call('getCustomerById', ['C001']).customerCategory, 'INDIVIDUAL');
+    const audits = master('監査ログ').getDataRange().getValues()
+      .filter((row) => row[11] === 'CUSTOMER_CATEGORY');
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0][2], 'SETTING');
+    assert.equal(audits[0][8], 'C001');
+    assert.deepEqual(JSON.parse(audits[0][9]), {AJ: 'CORPORATE'});
+    assert.deepEqual(JSON.parse(audits[0][10]), {AJ: 'INDIVIDUAL'});
+
+    // 不正な値は書かない。
+    assert.throws(() => call('opsSetCustomerCategory', ['C001', '謎', true]),
+      (error) => error && error.code === 'CUSTOMER_MASTER_INVALID');
+    assert.equal(aj(), 'INDIVIDUAL');
+
+    // 監査が書けなければ書かない。
+    assert.throws(() => mock({appendAuditUnlocked_() { throw new Error('audit down'); }},
+      () => call('opsSetCustomerCategory', ['C001', 'CORPORATE', true])), /audit down/);
+    assert.equal(aj(), 'INDIVIDUAL');
+  });
+
+  // ---------------- ac 28: 回数 ----------------
+  test('ac 28: 一覧へ足すときの読取・書込の回数を固定する（足さないときは 1.1 と同じ）', () => {
+    function countsFor(sheetEntries) {
+      const world = setupWorld({accounts: true, sheetEntries: sheetEntries,
+        listRange: 'Q5:R12', dictionary: ['架空店舗A'],
+        words: [{word: 'スマホ', code: 843}]});
+      world.addFile('fileA', ['2026/01/10,架空店舗A,1000,スマホ代']);
+      gas.stubs.resetApiCallCounts();
+      const report = importReport(world);
+      assert.equal(report.customers[0].files[0].outcome, 'WRITTEN');
+      return gas.stubs.getApiCallCounts();
+    }
+    // 足す場合（測った値）：リースの確認 1・ロックの中の読み直し 1・読み戻し 1・
+    // 監査の末尾 1 で batchGet +4、一覧の書込 1 で batchUpdate +1。
+    // 足すものが無い場合は、1.1 と同じく差 0（ac 12 の C なしとの比較も同じ）。
+    const appended = countsFor([[712, '仕入高']]);
+    const already = countsFor([[712, '仕入高'], [843, '通信費']]);
+    assert.deepEqual({batchGet: appended.batchGet - already.batchGet,
+      batchUpdate: appended.batchUpdate - already.batchUpdate},
+    {batchGet: 4, batchUpdate: 1},
+    JSON.stringify({appended, already}));
   });
 };
