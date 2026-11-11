@@ -24,9 +24,12 @@ var WEBAPP_CLONE_TRIPS_ = 3;
 var WEBAPP_TRIP_WORST_MS_ = 400;
 var WEBAPP_DEADLINE_MS_ = 300000;
 var WEBAPP_MAX_FILES_PER_IMPORT_ = 6;
-// 「その他の要確認」をサーバー側でまとめて確定できる操作（第 1 段は計上だけ）。
-// 第 2 段で対象外の 2 つ（EXCLUDE_PRIOR_YEAR・EXCLUDE）を足す。
-var WEBAPP_OTHER_BATCH_CODES_ = ['POST_PRIOR_YEAR', 'POST_ZERO_AMOUNT'];
+// 「その他の要確認」をサーバー側でまとめて確定できる操作。
+// 計上の 2 つは部品 55、対象外の 2 つは部品 57 へ渡す（下の EXCLUDE の表で分ける）。
+var WEBAPP_OTHER_BATCH_CODES_ = ['POST_PRIOR_YEAR', 'POST_ZERO_AMOUNT',
+  'EXCLUDE_PRIOR_YEAR', 'EXCLUDE'];
+// 対象外の 2 つ。この 2 つだけが部品 57 の経路（`resolveReview` の `EXCLUDE`）を通る。
+var WEBAPP_OTHER_EXCLUDE_CODES_ = ['EXCLUDE_PRIOR_YEAR', 'EXCLUDE'];
 // 1へ戻すと従来の順次取込になる。3本以上は読取の枠が天井なので2本まで。
 // 2026-10-17 の実機の受入で、2本は1本ずつより速くならなかった（呼出しごとの
 // 頭の読取を2本ぶん払い、枠が天井になる。spec_parallel_import §6）ので1に戻した。
@@ -1450,8 +1453,11 @@ function webAppResolveOtherReview(customerId, reviewId, code, inputs) {
  *
  * **押せるかどうかは 1 件ずつの経路と同じ関数・同じ材料で決める**
  * （`webAppOtherReviewOptions_`）。判定を写すと片方だけ直す事故が起きる。
- * **対象外の 2 つ（`EXCLUDE_PRIOR_YEAR`・`EXCLUDE`）はここでは受けない。**
- * 画面もそれらは 1 件ずつの流れのまま呼ぶ。
+ * **対象外の 2 つ（`EXCLUDE_PRIOR_YEAR`・`EXCLUDE`）は部品 57
+ * （`excludeOtherReviewsBatch`）へ渡す。**計上と同じく、押せるかの判定は
+ * 件ごとにここで掛かる。役割（`REVIEWER` 以上）・取引の状態・freee 取込済み・
+ * 種別はここで外れる。**役割を部品へ渡す理由**は、1 件ずつの経路が要確認行の
+ * AE（役割）に書くからである（部品 57 が同じ列に書く）。
  *
  * 戻り値の勘定：受け取った ID は（同じ ID が 2 回あっても回ごとに）
  * `resolvedReviewIds`・`reviewId` のある `errors`・`skippedByLeaseReviewIds`・
@@ -1634,9 +1640,16 @@ function webAppResolveOtherReviewsBatch(customerId, reviewIds, code) {
         var sent = queue.slice();
         var componentResult;
         try {
-          componentResult = resolvePartnerReviewsBatch(wantedCustomerId, fileId,
-            sent.map(function(item) { return {reviewId: item.reviewId, operation: code}; }),
-            {actor: actor, customer: customer});
+          // **関数は呼ぶ時に名前で引く**（テストが包めるように。読み込み時に
+          // 変数へ控えない）。対象外は部品 57、計上は部品 55 へ渡す。
+          var isExclude = WEBAPP_OTHER_EXCLUDE_CODES_.indexOf(code) >= 0;
+          componentResult = isExclude ?
+            excludeOtherReviewsBatch(wantedCustomerId, fileId,
+              sent.map(function(item) { return {reviewId: item.reviewId, operation: code}; }),
+              {actor: actor, role: role || null, customer: customer}) :
+            resolvePartnerReviewsBatch(wantedCustomerId, fileId,
+              sent.map(function(item) { return {reviewId: item.reviewId, operation: code}; }),
+              {actor: actor, customer: customer});
         } catch (componentError) {
           // 想定外の失敗の後で他のファイルへ進まない（そのファイルの後始末だけ）。
           var componentCode = String(componentError && componentError.code || 'RESOLVE_FAILED');

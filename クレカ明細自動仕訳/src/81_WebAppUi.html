@@ -1205,11 +1205,10 @@
     /** まとめて確定できる操作だけを、この順で扱う。 */
     var OTHER_BULK_CODES = ['POST_PRIOR_YEAR', 'EXCLUDE_PRIOR_YEAR', 'POST_ZERO_AMOUNT', 'EXCLUDE'];
     /**
-     * サーバー側でファイルごとにまとめて確定する操作（第 1 段は計上だけ）。
-     * 対象外の 2 つは、取り消せないうえ件ごとに転記行を空にするので、
-     * 第 2 段まで今の 1 件ずつの流れのままにする。
+     * サーバー側でファイルごとにまとめて確定する操作。
+     * 計上の 2 つは部品 55、対象外の 2 つは部品 57 へ渡す（帯の 4 つすべて）。
      */
-    var OTHER_SERVER_BATCH_CODES = ['POST_PRIOR_YEAR', 'POST_ZERO_AMOUNT'];
+    var OTHER_SERVER_BATCH_CODES = ['POST_PRIOR_YEAR', 'EXCLUDE_PRIOR_YEAR', 'POST_ZERO_AMOUNT', 'EXCLUDE'];
 
     function otherBulkOption(review, code) {
       var options = review && Array.isArray(review.options) ? review.options : [];
@@ -2833,11 +2832,20 @@
       return order.map(function(label) { return label + ' ' + counts[label] + ' 件'; }).join('、');
     }
 
-    function otherBulkConfirmMessage(code, reviews) {
-      return '「その他の要確認」の ' + reviews.length + ' 件（' + otherBulkTypeSummary(reviews) +
-        '）にまとめて行います。' + TEXT.otherEffect(code, {}) +
-        ' 1 件ずつ順に確定します（件数が多いと時間がかかります。1 分に 2〜3 件が目安です）。' +
-        '途中で［中止］を押すと、そこで止まります（済んだ分は戻りません）。';
+    /**
+     * 押した時点の条件を確かめ、選んだ行をサーバーでファイルごとにまとめて確定する。
+     *
+     * これは取り消せない操作（対象外は転記行を空にして取引を対象外にする）を
+     * まとめて行う。押した時点の選択と顧客を控え、応答のたびに画面が変わって
+     * いないかを確かめてから次を呼ぶ（`runOtherServerBulk`）。
+     */
+    async function runOtherBulk() {
+      if (isMutationBusy()) return;
+      var code = state.otherBulkCode;
+      var targets = selectedOtherReviews();
+      if (!code || !targets.length || otherCommonCodes(targets).indexOf(code) < 0) return;
+      // 4 つの操作のどれでも、サーバーでファイルごとにまとめる。
+      if (OTHER_SERVER_BATCH_CODES.indexOf(code) >= 0) return runOtherServerBulk(code, targets);
     }
 
     function otherBulkTargetLabel(review) {
@@ -2849,97 +2857,6 @@
     function otherBulkReason(text) {
       var value = String(text || '');
       return value.charAt(value.length - 1) === '。' ? value : value + '。';
-    }
-
-    /**
-     * 選んだ行を、表に並んでいる順に 1 件ずつ確定する。
-     *
-     * これは取り消せない操作（転記行を空にする・取引を対象外にする）をまとめて
-     * 行うので、押した時点の選択と顧客を控え、応答のたびに画面が変わっていないか
-     * 確かめてから次を呼ぶ。途中で止めた分は選んだまま残す。
-     */
-    async function runOtherBulk() {
-      if (isMutationBusy()) return;
-      var code = state.otherBulkCode;
-      var targets = selectedOtherReviews();
-      if (!code || !targets.length || otherCommonCodes(targets).indexOf(code) < 0) return;
-      // 計上の 2 つだけサーバーでまとめる。対象外の 2 つは今の 1 件ずつの流れ。
-      if (OTHER_SERVER_BATCH_CODES.indexOf(code) >= 0) return runOtherServerBulk(code, targets);
-      var label = (otherBulkOption(targets[0], code) || {}).label || code;
-      if (!await formatConfirm(label, otherBulkConfirmMessage(code, targets))) return;
-
-      var token = ++state.resolveRun;
-      var generation = state.viewGeneration;
-      var customerId = state.selectedCustomerId;
-      var run = {canceled: false};
-      state.otherBulkRun = run;
-      state.resolveBusy = true;
-      clearNotice();
-      renderSelection();
-
-      var done = 0, already = 0, stopped = null, canceled = false, changed = false;
-      try {
-        for (var index = 0; index < targets.length; index++) {
-          if (!otherBulkIsCurrent(token, generation, customerId)) { changed = true; break; }
-          if (run.canceled) { canceled = true; break; }
-          var review = targets[index];
-          el['other-bulk-progress'].textContent =
-            'まとめて確定中… ' + (index + 1) + ' / ' + targets.length + ' 件';
-          var result;
-          try {
-            result = await gasCall('webAppResolveOtherReview', [customerId, review.reviewId, code, {}]);
-          } catch (error) {
-            if (!otherBulkIsCurrent(token, generation, customerId)) { changed = true; break; }
-            stopped = {review: review, text: failureMessage(error), details: []};
-            break;
-          }
-          if (!otherBulkIsCurrent(token, generation, customerId)) { changed = true; break; }
-          var id = String(review.reviewId);
-          if (result.ok === true && result.resolved === 1) {
-            done += 1;
-            state.otherSelectedIds.delete(id);
-            state.otherInputs.delete(id);
-            if ((result.errors || []).length) {
-              var doneNotice = otherResultNotice(result);
-              stopped = {review: review, text: doneNotice.message, details: doneNotice.details};
-              break;
-            }
-          } else if (result.ok === false &&
-              (result.code === 'ALREADY_SETTLED' || result.code === 'REVIEW_NOT_FOUND')) {
-            already += 1;
-            state.otherSelectedIds.delete(id);
-            state.otherInputs.delete(id);
-          } else {
-            var failed = otherResultNotice(result);
-            stopped = {review: review, text: failed.message, details: failed.details};
-            break;
-          }
-        }
-      } finally {
-        if (token === state.resolveRun && generation === state.viewGeneration) {
-          state.resolveBusy = false;
-          state.otherBulkRun = null;
-          el['other-bulk-progress'].textContent = '';
-          markFinalReviewStale();
-          renderSelection();
-          loadReviews(customerId, state.reviewOffset, generation);
-          if (state.selectedFolderId) loadFiles(customerId, state.selectedFolderId, generation);
-          if (!changed && !canceled && !stopped) state.otherBulkCode = '';
-        }
-      }
-      if (changed) return;
-      var remaining = targets.length - done - already;
-      if (canceled) {
-        showNotice('中止しました。' + done + ' 件を確定しました（' + label + '）。残り ' +
-          remaining + ' 件は選んだままです。', 'warning');
-      } else if (stopped) {
-        showNotice(done + ' 件を確定したところで止まりました（' + label + '）。' +
-          otherBulkTargetLabel(stopped.review) + '：' + otherBulkReason(stopped.text) +
-          '残り ' + remaining + ' 件は選んだままです。', 'warning', stopped.details);
-      } else {
-        showNotice('「その他の要確認」 ' + done + ' 件をまとめて確定しました（' + label + '）。' +
-          (already ? already + ' 件は既に片付いていました。' : ''), 'success');
-      }
     }
 
     /**

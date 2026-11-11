@@ -7742,7 +7742,9 @@ module.exports = ({test, assert, gas}) => {
     const seeded = pbWorld([{fileId: 'pb14_file', name: '架空認可明細.csv',
       rows: ['2025/01/05,既知店,1100,仕入れ']}]);
     const ids = seeded.reviews.map((review) => review.reviewId);
-    for (const code of ['EXCLUDE', 'EXCLUDE_PRIOR_YEAR', 'FIX_DATE_AMOUNT', 'ADOPT_EXISTING_PARTNER']) {
+    // 対象外の 2 つは第 2 段でまとめて確定できるようになったので、ここでは
+    // まとめて確定できない操作（日付・金額の修正と取引先の採用）だけを確かめる。
+    for (const code of ['FIX_DATE_AMOUNT', 'ADOPT_EXISTING_PARTNER']) {
       kw2NoWrite(() => pbBatch('C001', ids, code), 'OPERATION_NOT_BATCHABLE');
     }
     kw2NoWrite(() => call('webAppResolveOtherReviewsBatch',
@@ -7829,6 +7831,860 @@ module.exports = ({test, assert, gas}) => {
       assert.equal(line.includes(String(amount)), false, '金額');
       assert.equal(line.includes('株式会社'), false, '取引先名');
     }
+  });
+
+  // ---- その他の要確認をサーバーでまとめて対象外にする（第 2 段） ----
+  // `work/spec_other_reviews_exclude_batch.md` §6.1。材料は架空の明細だけ。
+  function xbBatch(ids, code = 'EXCLUDE_PRIOR_YEAR', customerId = 'C001') {
+    return call('webAppResolveOtherReviewsBatch', [customerId, ids, code]);
+  }
+  function xbComponent(fileId, decisions, extra = {}) {
+    return call('excludeOtherReviewsBatch', ['C001', fileId, decisions,
+      Object.assign({actor: 'reviewer@example.com', role: 'REVIEWER'}, extra)]);
+  }
+  function xbSheet(spreadsheetId, sheetName) {
+    return gas.stubs.getSpreadsheet(spreadsheetId)
+      .getSheetByName(sheetName || '入力用シート');
+  }
+  function xbClearIndices() {
+    const customer = call('getCustomerById', ['C001']);
+    const keys = ['txId', 'b', 'f', 'i', 'k', 'm'];
+    if (customer.columnMapping.L) keys.push('l');
+    if (customer.columnMapping.C) keys.push('c');
+    return keys.map((key) => call('writeColumnNumber_', [customer, key]) - 1);
+  }
+  function xbRowValues(review) {
+    const tx = call('getTransaction', [review.fullTxId]);
+    if (!tx) return null;
+    return plain(xbSheet(review.destinationSpreadsheetId, review.destinationSheetName)
+      .getDataRange().getValues()[Number(tx.destinationRow) - 1] || []);
+  }
+  function xbRowIsClear(review) {
+    const values = xbRowValues(review) || [];
+    return xbClearIndices().every((index) =>
+      values[index] === '' || values[index] === null || values[index] === undefined);
+  }
+  function xbDestinationRows() {
+    return spreadsheetIds().filter((id) =>
+      gas.stubs.getSpreadsheet(id).getSheetByName('入力用シート'))
+      .map((id) => ({id, rows: plain(gas.stubs.getSpreadsheet(id)
+        .getSheetByName('入力用シート').getDataRange().getValues())}));
+  }
+  function xbChangedCells(before, after) {
+    const diffs = [];
+    before.forEach((entry, index) => {
+      const current = after[index];
+      assert.equal(current.id, entry.id);
+      const length = Math.max(entry.rows.length, current.rows.length);
+      for (let row = 0; row < length; row += 1) {
+        const a = entry.rows[row] || [];
+        const b = current.rows[row] || [];
+        const width = Math.max(a.length, b.length);
+        for (let column = 0; column < width; column += 1) {
+          if (JSON.stringify(a[column]) !== JSON.stringify(b[column])) {
+            diffs.push({id: entry.id, row: row + 1, column: column + 1});
+          }
+        }
+      }
+    });
+    return diffs;
+  }
+  function xbWithTiming(durations, fn) {
+    let now = 1000;
+    let index = 0;
+    const realBatch = gas.context.excludeOtherReviewsBatch;
+    return withMocks({
+      partnerBatchClockNow_: () => now,
+      excludeOtherReviewsBatch(...args) {
+        const value = realBatch.apply(this, args);
+        now += Number(durations[index++] || 0);
+        return value;
+      }
+    }, fn);
+  }
+
+  test('xb 1: 前年利用日の対象外は1件ずつと同じ結果で、未知店の取引先の要確認は開いたまま', () => {
+    const files = [{fileId: 'xb1_file', name: '架空対象外明細.csv', rows: [
+      '2025/01/05,既知店,1100,仕入れ',
+      '2025/01/06,既知店,1200,仕入れ',
+      '2025/01/07,未知店,1300,仕入れ']}];
+    const singles = pbWorld(files);
+    const singleReviews = singles.reviews.filter((review) => review.reviewType === 'PRIOR_YEAR')
+      .sort((a, b) => pbSourceRow(a) - pbSourceRow(b));
+    assert.equal(singleReviews.length, 3);
+    singleReviews.forEach((review) =>
+      assert.equal(pbResolve(review, 'EXCLUDE_PRIOR_YEAR').resolved, 1));
+    const singleState = pbComparable(singles);
+
+    const batched = pbWorld(files);
+    const batchedReviews = batched.reviews.filter((review) => review.reviewType === 'PRIOR_YEAR')
+      .sort((a, b) => pbSourceRow(a) - pbSourceRow(b));
+    const result = xbBatch(batchedReviews.map((review) => review.reviewId), 'EXCLUDE_PRIOR_YEAR');
+    assert.equal(result.ok, true);
+    assert.equal(result.code, 'EXCLUDE_PRIOR_YEAR');
+    assert.equal(result.label, '前年の利用分として対象外にする（転記行を空にします）');
+    assert.equal(result.resolved, 3);
+    assert.equal(result.committed, 0);
+    assert.deepEqual(result.unmetTexts, []);
+    assert.deepEqual(result.errors, []);
+    assert.deepEqual(result.skippedByLeaseReviewIds, []);
+    assert.deepEqual(result.notAttemptedReviewIds, []);
+    assert.deepEqual(result.resolvedReviewIds, batchedReviews.map((review) => review.reviewId));
+    assert.deepEqual(pbComparable(batched), singleState);
+    batchedReviews.forEach((review) => {
+      assert.equal(transactionFor(review).transactionStatus, 'CANCELED');
+      assert.equal(xbRowIsClear(review), true);
+    });
+    // X9：同じ取引の取引先の要確認（未知店）には触れない。
+    const partner = batched.reviews.find((review) => review.reviewType === 'PARTNER');
+    assert.ok(partner);
+    assert.equal(reviewById(partner.reviewId).status, 'OPEN');
+  });
+
+  test('xb 2: 0円と日付不明・取引先の対象外も1件ずつと同じ結果になる', () => {
+    const files = [{fileId: 'xb2_file', name: '架空対象外2.csv', rows: [
+      '2026/01/05,既知店,0,仕入れ',
+      '2026/01/06,既知店,0,仕入れ',
+      '日付不明,既知店,1000,仕入れ']}];
+    const singles = pbWorld(files);
+    const singleReviews = singles.reviews.filter((review) =>
+      review.reviewType === 'ZERO_AMOUNT' || review.reviewType === 'DATE')
+      .sort((a, b) => pbSourceRow(a) - pbSourceRow(b));
+    assert.equal(singleReviews.filter((review) => review.reviewType === 'ZERO_AMOUNT').length, 2);
+    assert.equal(singleReviews.filter((review) => review.reviewType === 'DATE').length, 1);
+    singleReviews.forEach((review) => assert.equal(pbResolve(review, 'EXCLUDE').resolved, 1));
+    const singleState = pbComparable(singles);
+
+    const batched = pbWorld(files);
+    const batchedReviews = batched.reviews.filter((review) =>
+      review.reviewType === 'ZERO_AMOUNT' || review.reviewType === 'DATE')
+      .sort((a, b) => pbSourceRow(a) - pbSourceRow(b));
+    const result = xbBatch(batchedReviews.map((review) => review.reviewId), 'EXCLUDE');
+    assert.equal(result.ok, true);
+    assert.equal(result.label, '対象外にする（転記行を空にします）');
+    assert.equal(result.resolved, 3);
+    assert.equal(result.committed, 0);
+    assert.deepEqual(result.errors, []);
+    assert.deepEqual(result.unmetTexts, []);
+    assert.deepEqual(pbComparable(batched), singleState);
+
+    // PARTNER の要確認も、1 件ずつの経路と同じく対象外にできる。
+    const partnerFiles = [{fileId: 'xb2_partner', name: '架空取引先対象外.csv',
+      rows: ['2026/01/09,未知店,1200,仕入れ']}];
+    const partnerSingles = pbWorld(partnerFiles);
+    const partnerReview = partnerSingles.reviews.find((review) => review.reviewType === 'PARTNER');
+    assert.ok(partnerReview);
+    assert.equal(pbResolve(partnerReview, 'EXCLUDE').resolved, 1);
+    const partnerSingleState = pbComparable(partnerSingles);
+    const partnerBatched = pbWorld(partnerFiles);
+    const partnerBatchedReview = partnerBatched.reviews
+      .find((review) => review.reviewType === 'PARTNER');
+    const partnerResult = xbBatch([partnerBatchedReview.reviewId], 'EXCLUDE');
+    assert.equal(partnerResult.resolved, 1);
+    assert.deepEqual(partnerResult.errors, []);
+    assert.deepEqual(pbComparable(partnerBatched), partnerSingleState);
+  });
+
+  test('xb 3: 対象外は取引ログのJ・ASと要確認の決まった列だけを変える', () => {
+    const seeded = pbWorld([{fileId: 'xb3_file', name: '架空列明細.csv', rows: [
+      '2025/01/05,既知店,1100,仕入れ',
+      '2025/01/06,未知店,1200,仕入れ',
+      '2026/01/07,既知店,0,仕入れ']}]);
+    const targets = pbFileReviews('xb3_file', 'PRIOR_YEAR');
+    assert.equal(targets.length, 2);
+    const txBefore = targets.map((review) => {
+      const tx = transactionFor(review);
+      // AS が前の値と同じ秒だと「変わった列」に見えないので、古い値にしておく。
+      txLogSheet().getRange(tx._rowNumber, 45).setValue('2020-01-01T00:00:00.000Z');
+      return {review, tx,
+        row: plain(txLogSheet().getRange(tx._rowNumber, 1, 1, 47).getValues()[0])};
+    });
+    const reviewBefore = targets.map((review) => ({
+      review,
+      row: plain(gas.stubs.getSpreadsheet('master').getSheetByName('要確認')
+        .getRange(review._rowNumber, 1, 1, 32).getValues()[0])
+    }));
+    const destinationBefore = xbDestinationRows();
+    const clearIndices = xbClearIndices();
+    const result = xbBatch(targets.map((review) => review.reviewId), 'EXCLUDE_PRIOR_YEAR');
+    assert.equal(result.resolved, 2);
+
+    // X4：取引ログで変わるのは J（10）と AS（45）だけ。L 列には書かない。
+    txBefore.forEach(({tx, row}) => {
+      const after = txLogSheet().getRange(tx._rowNumber, 1, 1, 47).getValues()[0];
+      const changed = [];
+      after.forEach((value, index) => {
+        if (String(value) !== String(row[index])) changed.push(index);
+      });
+      assert.deepEqual(changed, [9, 44]);
+      assert.equal(after[9], 'CANCELED');
+      assert.equal(after[11], row[11], 'L列は変えない');
+    });
+
+    // X5：要確認で変わるのは B・Z・AB・AC・AD・AE・AF だけ。
+    reviewBefore.forEach(({review, row}) => {
+      const after = gas.stubs.getSpreadsheet('master').getSheetByName('要確認')
+        .getRange(review._rowNumber, 1, 1, 32).getValues()[0];
+      const changed = [];
+      after.forEach((value, index) => {
+        if (String(value) !== String(row[index])) changed.push(index);
+      });
+      assert.deepEqual(changed.slice().sort((a, b) => a - b), [1, 25, 27, 28, 29, 30, 31]);
+      assert.equal(after[1], 'EXCLUDED');
+      assert.equal(after[27], 'reviewer@example.com');
+      assert.equal(after[29], 'EXCLUDE_PRIOR_YEAR');
+      assert.equal(after[30], 'REVIEWER');
+      assert.equal(after[31], 'REVIEWER_JUDGEMENT');
+      // Z は元の検出詳細の鍵を全部残し、previousStatus を足す。
+      const beforeDetail = JSON.parse(row[25]);
+      const afterDetail = JSON.parse(after[25]);
+      Object.keys(beforeDetail).forEach((key) =>
+        assert.deepEqual(afterDetail[key], beforeDetail[key], key));
+      assert.equal(afterDetail.previousStatus, 'REVIEW_REQUIRED');
+      // R・V・W は変えない。
+      [17, 21, 22].forEach((index) => assert.equal(after[index], row[index]));
+    });
+
+    // X1：転記先で変わるのは、対象の行の消す列のうち、もと値があったセルだけ。
+    const beforeById = Object.create(null);
+    destinationBefore.forEach((entry) => { beforeById[entry.id] = entry.rows; });
+    const expected = [];
+    targets.forEach((review) => {
+      const tx = transactionFor(review);
+      const rowNumber = Number(tx.destinationRow);
+      const beforeRow = (beforeById[review.destinationSpreadsheetId] || [])[rowNumber - 1] || [];
+      clearIndices.forEach((index) => {
+        const value = beforeRow[index];
+        if (value === '' || value === null || value === undefined) return;
+        expected.push({id: review.destinationSpreadsheetId, row: rowNumber, column: index + 1});
+      });
+    });
+    const diffs = xbChangedCells(destinationBefore, xbDestinationRows());
+    const sortKey = (entry) => [entry.id, entry.row, entry.column].join(':');
+    assert.deepEqual(diffs.map(sortKey).sort(), expected.map(sortKey).sort());
+    assert.ok(destinationBefore.length >= 2, '雛形と複製の両方を見る');
+  });
+
+  test('xb 4: 行を取引IDで確かめ、合わない件には1セルも書かない', () => {
+    const cases = [
+      ['別の取引のIDが入っている', ({target, third, destSheet}) => {
+        destSheet.getRange(Number(transactionFor(target).destinationRow), 7)
+          .setValue(transactionFor(third).fullTxId);
+      }],
+      ['行が動いた', ({target, destSheet}) => {
+        const tx = transactionFor(target);
+        const row = Number(tx.destinationRow);
+        const moved = destSheet.getRange(row, 2, 1, 6).getValues();
+        destSheet.getRange(row + 4, 2, 1, 6).setValues(moved);
+        destSheet.getRange(row, 2, 1, 6).setValues([['', '', '', '', '', '']]);
+      }],
+      ['取引ログの転記先が違う', ({target}) => {
+        setTxCell(target.fullTxId, 29, 'dest_other');
+      }],
+      ['取引IDが2行にある', ({target, destSheet}) => {
+        const tx = transactionFor(target);
+        destSheet.getRange(Number(tx.destinationRow) + 4, 7).setValue(tx.fullTxId);
+      }],
+      ['取引ログの転記先が空で、行も空', ({target, destSheet}) => {
+        const tx = transactionFor(target);
+        setTxCell(target.fullTxId, 29, '');
+        destSheet.getRange(Number(tx.destinationRow), 2, 1, 6)
+          .setValues([['', '', '', '', '', '']]);
+      }]
+    ];
+    for (const [name, tamper] of cases) {
+      const seeded = pbWorld([{fileId: 'xb4_file', name: '架空行確認.csv', rows: [
+        '2025/01/05,既知店,1100,仕入れ',
+        '2025/01/06,既知店,1200,仕入れ',
+        '2025/01/07,既知店,1300,仕入れ']}]);
+      const [target, other, third] = pbFileReviews('xb4_file', 'PRIOR_YEAR');
+      const targetReview = reviewById(target.reviewId);
+      const destSheet = xbSheet(target.destinationSpreadsheetId, target.destinationSheetName);
+      tamper({target, other, third, destSheet});
+      const targetBefore = pbItemState(reviewById(target.reviewId));
+      const targetRowBefore = xbRowValues(targetReview);
+      const destinationBefore = xbDestinationRows();
+      const result = xbBatch([target.reviewId, other.reviewId], 'EXCLUDE_PRIOR_YEAR');
+      assert.equal(result.errors.length, 1, name);
+      assert.equal(result.errors[0].reviewId, target.reviewId, name);
+      assert.equal(result.errors[0].code, 'DESTINATION_ROW_MISMATCH', name);
+      assert.deepEqual(result.resolvedReviewIds, [other.reviewId], name);
+      assert.deepEqual(pbItemState(reviewById(target.reviewId)), targetBefore, name);
+      assert.deepEqual(xbRowValues(targetReview), targetRowBefore, name);
+      const allowed = {id: other.destinationSpreadsheetId, row: Number(transactionFor(other).destinationRow)};
+      xbChangedCells(destinationBefore, xbDestinationRows()).forEach((diff) => {
+        assert.equal(diff.id, allowed.id, name);
+        assert.equal(diff.row, allowed.row, name);
+        assert.equal(xbClearIndices().indexOf(diff.column - 1) >= 0, true, name);
+      });
+      assert.equal(xbDestinationRows().length, destinationBefore.length, name);
+    }
+  });
+
+  test('xb 5: 行を空にした後で止まっても、もう一度呼べば同じ状態になる', () => {
+    const files = [{fileId: 'xb5_file', name: '架空再試行.csv', rows: [
+      '2025/01/05,既知店,1100,仕入れ',
+      '2025/01/06,既知店,1200,仕入れ']}];
+    const singles = pbWorld(files);
+    const singleReviews = pbFileReviews('xb5_file', 'PRIOR_YEAR');
+    singleReviews.forEach((review) =>
+      assert.equal(pbResolve(review, 'EXCLUDE_PRIOR_YEAR').resolved, 1));
+    const singleState = pbComparable(singles);
+
+    const seeded = pbWorld(files);
+    const ids = pbFileReviews('xb5_file', 'PRIOR_YEAR').map((review) => review.reviewId);
+    const realTail = gas.context.allReviewRecordsAndAuditTail_;
+    let thrown = false;
+    const failed = withMocks({allReviewRecordsAndAuditTail_(...args) {
+      if (!thrown) {
+        thrown = true;
+        throw Object.assign(new Error('監査の読取に失敗'), {code: 'TEST_AUDIT_TAIL'});
+      }
+      return realTail.apply(this, args);
+    }}, () => xbBatch(ids, 'EXCLUDE_PRIOR_YEAR'));
+    assert.equal(thrown, true);
+    assert.equal(failed.resolved, 0);
+    assert.deepEqual(failed.errors.map((error) => error.reviewId), ids);
+    assert.equal(failed.errors[0].code, 'TEST_AUDIT_TAIL');
+    // 転記行は空、取引は生きている、要確認は OPEN のまま。
+    ids.forEach((reviewId) => {
+      const review = reviewById(reviewId);
+      assert.equal(review.status, 'OPEN');
+      assert.equal(transactionFor(review).transactionStatus, 'REVIEW_REQUIRED');
+      assert.equal(xbRowIsClear(review), true);
+    });
+    assert.deepEqual(call('activeLeases_', []), []);
+
+    const retried = xbBatch(ids, 'EXCLUDE_PRIOR_YEAR');
+    assert.equal(retried.resolved, ids.length);
+    assert.deepEqual(retried.errors, []);
+    assert.deepEqual(pbComparable(seeded), singleState);
+    const lines = gas.stubs.getLogs().filter((line) => line.startsWith('EXCLUDE_BATCH '))
+      .map((line) => JSON.parse(line.slice('EXCLUDE_BATCH '.length)));
+    assert.equal(lines[lines.length - 1].alreadyCleared, ids.length);
+    assert.equal(pbAuditEvents().length, ids.length);
+  });
+
+  test('xb 6: 読み返しで値が残った件は取引を対象外にしない', () => {
+    const seeded = pbWorld([{fileId: 'xb6_file', name: '架空読返.csv', rows: [
+      '2025/01/05,既知店,1100,仕入れ',
+      '2025/01/06,既知店,1200,仕入れ']}]);
+    const [target, other] = pbFileReviews('xb6_file', 'PRIOR_YEAR');
+    const targetTx = transactionFor(target);
+    const targetRow = Number(targetTx.destinationRow);
+    const destSheet = xbSheet(target.destinationSpreadsheetId, target.destinationSheetName);
+    const realClear = gas.context.clearTransactionRows;
+    let dirtied = false;
+    const result = withMocks({clearTransactionRows(customer, rowNumbers, ...args) {
+      const value = realClear.call(this, customer, rowNumbers, ...args);
+      if (!dirtied && rowNumbers.map(Number).indexOf(targetRow) >= 0) {
+        dirtied = true;
+        // 日付・金額の列は読み返しの正準化が解釈するので、文字列の列（F）に残す。
+        destSheet.getRange(targetRow, 3).setValue('残った値');
+      }
+      return value;
+    }}, () => xbBatch([target.reviewId, other.reviewId], 'EXCLUDE_PRIOR_YEAR'));
+    assert.equal(dirtied, true);
+    const failure = result.errors.find((error) => error.reviewId === target.reviewId);
+    assert.ok(failure, JSON.stringify(result));
+    assert.equal(failure.code, 'DESTINATION_VALUE_MISMATCH');
+    assert.equal(failure.message,
+      '転記行を空にしたあと読み返すと値が残っていました。取引は対象外にしていません。管理者へ連絡してください。');
+    assert.equal(transactionFor(target).transactionStatus, 'REVIEW_REQUIRED');
+    assert.equal(reviewById(target.reviewId).status, 'OPEN');
+    assert.deepEqual(result.resolvedReviewIds, [other.reviewId]);
+    assert.equal(transactionFor(other).transactionStatus, 'CANCELED');
+    assert.equal(pbAuditEvents().length, 1);
+    // 値が残った行はそのまま（報告用）。
+    assert.equal(destSheet.getRange(targetRow, 3).getValue(), '残った値');
+  });
+
+  test('xb 7: 件ごとの番人は書く前に止め、失敗した件を1セルも変えない', () => {
+    const seeded = pbWorld([{fileId: 'xb7_file', name: '架空番人対象外.csv', rows: [
+      '2025/01/05,既知店,1100,仕入れ',
+      '2026/01/06,既知店,0,仕入れ',
+      '2025/01/08,未知店,1400,仕入れ',
+      '2025/01/09,既知店,1500,仕入れ',
+      '2025/01/11,既知店,1600,仕入れ']}]);
+    const other = addCustomer(seeded.world, {suffix: '2', customerId: 'C002',
+      customerCategory: 'INDIVIDUAL', fiscalYear: 2026});
+    const otherFileId = putCsv(other, {fileId: 'xb7_other', name: '架空別顧客.csv',
+      rows: ['2025/02/05,別顧客店,2100,仕入れ']});
+    webImport(other);
+    const otherReview = openReviewsFor('C002', {fileId: otherFileId})
+      .find((review) => review.reviewType === 'PRIOR_YEAR');
+    assert.ok(otherReview);
+
+    const ok = pbFileReviews('xb7_file', 'PRIOR_YEAR')[0];
+    const zero = pbFileReviews('xb7_file', 'ZERO_AMOUNT')[0];
+    const cancelPair = pbFileReviews('xb7_file', 'PRIOR_YEAR')[1];
+    const settled = pbFileReviews('xb7_file', 'PRIOR_YEAR')[2];
+    const freee = pbFileReviews('xb7_file', 'PRIOR_YEAR')[3];
+    assert.equal(transactionFor(cancelPair).originalMerchant, '未知店');
+    const cancelPartner = openReviewsFor('C001', {fileId: 'xb7_file'})
+      .find((review) => review.reviewType === 'PARTNER');
+    call('resolveReview', [cancelPartner.reviewId, 'EXCLUDE', {}]);
+    call('updateReviewStatus', [settled.reviewId, 'RESOLVED', {actor: 'reviewer@example.com'}]);
+    // 先に閉じた要確認のぶんは、後始末の掃除が確定させる（孤児）。I5 の比較から外すため、
+    // 取引もここで確定しておく（pb 6 と同じ）。
+    call('updateTransactionStatus', [settled.fullTxId, 'REVIEW_REQUIRED', 'COMMITTED']);
+    setTxCell(freee.fullTxId, 13, 'IMPORTED');
+    const fileReview = call('registerReview', [{reviewType: 'EMPTY_FILE', fileId: 'xb7_file',
+      customerId: 'C001', customerName: '顧客一', fileNameOriginal: '架空番人対象外.csv'}]).reviewId;
+
+    const failedReviews = [zero, cancelPair, settled, freee, otherReview]
+      .map((review) => reviewById(review.reviewId));
+    const failedBefore = failedReviews.map(pbItemState);
+    const failedRows = failedReviews.map((review) =>
+      review.fullTxId ? xbRowValues(review) : null);
+    const result = xbBatch(['RV_MISSING', otherReview.reviewId, settled.reviewId,
+      zero.reviewId, fileReview, cancelPair.reviewId, freee.reviewId, ok.reviewId,
+      zero.reviewId], 'EXCLUDE_PRIOR_YEAR');
+    const codes = result.errors.map((error) => error.reviewId + ':' + error.code).sort();
+    assert.deepEqual(codes, [
+      'RV_MISSING:REVIEW_NOT_FOUND',
+      otherReview.reviewId + ':REVIEW_CUSTOMER_MISMATCH',
+      settled.reviewId + ':ALREADY_SETTLED',
+      zero.reviewId + ':OPERATION_NOT_OFFERED',
+      fileReview + ':OPERATION_NOT_OFFERED',
+      cancelPair.reviewId + ':OPERATION_DISABLED',
+      freee.reviewId + ':OPERATION_DISABLED',
+      zero.reviewId + ':DUPLICATE_DECISION'
+    ].sort());
+    assert.equal(result.errors.find((error) => error.reviewId === cancelPair.reviewId).message,
+      '（取引の状態 CANCELED では不可。管理者へ）');
+    assert.equal(result.errors.find((error) => error.reviewId === freee.reviewId).message,
+      '（freee取込済みのため画面から不可。管理者へ）');
+    assert.deepEqual(result.resolvedReviewIds, [ok.reviewId]);
+    assert.deepEqual(failedReviews.map(pbItemState), failedBefore);
+    failedReviews.forEach((review, index) => {
+      if (failedRows[index]) assert.deepEqual(xbRowValues(review), failedRows[index]);
+    });
+    assert.equal(reviewById(ok.reviewId).status, 'EXCLUDED');
+    assert.equal(transactionFor(ok).transactionStatus, 'CANCELED');
+    // X8：恒等式。
+    assert.equal(9, result.resolvedReviewIds.length +
+      result.errors.filter((error) => error.reviewId).length +
+      result.skippedByLeaseReviewIds.length + result.notAttemptedReviewIds.length);
+  });
+
+  test('xb 8: リースを持ってから取引の状態・freeeの状態が変わったら書かない', () => {
+    for (const kind of ['CANCELED', 'IMPORTED']) {
+      const seeded = pbWorld([{fileId: 'xb8_file', name: '架空 Lease 見直し.csv', rows: [
+        '2025/01/05,既知店,1100,仕入れ']}]);
+      const target = pbFileReviews('xb8_file', 'PRIOR_YEAR')[0];
+      const rowBefore = xbRowValues(target);
+      const stateBefore = pbItemState(reviewById(target.reviewId));
+      const realRead = gas.context.getTransactionsForFile_;
+      let tampered = false;
+      const result = withMocks({getTransactionsForFile_(fileId) {
+        if (!tampered) {
+          tampered = true;
+          if (kind === 'CANCELED') {
+            call('updateTransactionStatus', [target.fullTxId, 'REVIEW_REQUIRED', 'CANCELED']);
+          } else {
+            setTxCell(target.fullTxId, 13, 'IMPORTED');
+          }
+        }
+        return realRead.call(this, fileId);
+      }}, () => xbBatch([target.reviewId], 'EXCLUDE_PRIOR_YEAR'));
+      assert.equal(tampered, true);
+      const failure = result.errors.find((error) => error.reviewId === target.reviewId);
+      assert.ok(failure, JSON.stringify(result));
+      assert.equal(failure.code, kind === 'CANCELED' ? 'STATE_TRANSITION' : 'FREEE_IMPORTED');
+      assert.deepEqual(result.resolvedReviewIds, []);
+      assert.deepEqual(xbRowValues(reviewById(target.reviewId)), rowBefore);
+      const after = pbItemState(reviewById(target.reviewId));
+      if (kind === 'CANCELED') assert.notDeepEqual(after, stateBefore);
+      else assert.equal(after.review[1], 'OPEN');
+    }
+  });
+
+  test('xb 9: 閉じられた要確認・変わった取引は上書きせず、行は空のまま', () => {
+    for (const kind of ['SETTLED', 'CHANGED']) {
+      const seeded = pbWorld([{fileId: 'xb9_file', name: '架空同時変更.csv', rows: [
+        '2025/01/05,既知店,1100,仕入れ',
+        '2025/01/06,既知店,1200,仕入れ']}]);
+      const [target, other] = pbFileReviews('xb9_file', 'PRIOR_YEAR');
+      // 行を空にした後・ロックの外で、要確認を閉じる／取引を変える（手順 7 の直前）。
+      const targetRow = Number(transactionFor(target).destinationRow);
+      const realClear = gas.context.clearTransactionRows;
+      let tampered = false;
+      const result = withMocks({clearTransactionRows(customer, rowNumbers, ...args) {
+        const value = realClear.call(this, customer, rowNumbers, ...args);
+        if (!tampered && rowNumbers.map(Number).indexOf(targetRow) >= 0) {
+          tampered = true;
+          if (kind === 'SETTLED') {
+            call('updateReviewStatus', [target.reviewId, 'EXCLUDED',
+              {excludeReason: 'REVIEWER_JUDGEMENT'}]);
+          } else {
+            call('updateTransactionStatus', [target.fullTxId, 'REVIEW_REQUIRED', 'COMMITTED']);
+          }
+        }
+        return value;
+      }}, () => xbBatch([target.reviewId, other.reviewId], 'EXCLUDE_PRIOR_YEAR'));
+      assert.equal(tampered, true);
+      const failure = result.errors.find((error) => error.reviewId === target.reviewId);
+      assert.ok(failure, JSON.stringify(result));
+      assert.equal(failure.code, kind === 'SETTLED' ? 'ALREADY_SETTLED' : 'CONCURRENT_CHANGE');
+      assert.deepEqual(result.resolvedReviewIds, [other.reviewId]);
+      if (kind === 'SETTLED') {
+        assert.equal(reviewById(target.reviewId).status, 'EXCLUDED');
+        assert.equal(reviewById(target.reviewId).excludeReason, 'REVIEWER_JUDGEMENT');
+        // 要確認が閉じた取引は、後始末の掃除が確定させる（孤児）。対象外にはしない。
+        assert.notEqual(transactionFor(target).transactionStatus, 'CANCELED');
+      } else {
+        assert.equal(reviewById(target.reviewId).status, 'OPEN');
+        assert.equal(transactionFor(target).transactionStatus, 'COMMITTED');
+      }
+      // 行は先に空になっている（§2.2.2 の残り）。
+      assert.equal(xbRowIsClear(reviewById(target.reviewId)), true);
+      assert.equal(transactionFor(other).transactionStatus, 'CANCELED');
+    }
+  });
+
+  test('xb 10: 同じ取引の2件目は DUPLICATE_TRANSACTION で1件目だけ対象外', () => {
+    const files = [{fileId: 'xb10_file', name: '架空同取引対象外.csv',
+      rows: ['日付不明,既知店,0,仕入れ']}];
+    const singles = pbWorld(files);
+    const singleDate = singles.reviews.find((review) => review.reviewType === 'DATE');
+    let singleZero = singles.reviews.find((review) => review.reviewType === 'ZERO_AMOUNT');
+    assert.ok(singleDate);
+    if (!singleZero) {
+      const registered = call('registerReview', [Object.assign({}, singleDate,
+        {reviewId: undefined, suppressionKey: undefined, detail: undefined,
+          reviewType: 'ZERO_AMOUNT'})]);
+      singleZero = reviewById(registered.reviewId);
+      singles.reviews.push(singleZero);
+    }
+    assert.equal(pbResolve(singleDate, 'EXCLUDE').resolved, 1);
+    assert.equal(pbResolve(singleZero, 'EXCLUDE').ok, false);
+    const singleState = pbComparable(singles);
+
+    const batched = pbWorld(files);
+    const batchedDate = batched.reviews.find((review) => review.reviewType === 'DATE');
+    let batchedZero = batched.reviews.find((review) => review.reviewType === 'ZERO_AMOUNT');
+    if (!batchedZero) {
+      const registered = call('registerReview', [Object.assign({}, batchedDate,
+        {reviewId: undefined, suppressionKey: undefined, detail: undefined,
+          reviewType: 'ZERO_AMOUNT'})]);
+      batchedZero = reviewById(registered.reviewId);
+      batched.reviews.push(batchedZero);
+    }
+    const result = xbBatch([batchedDate.reviewId, batchedZero.reviewId], 'EXCLUDE');
+    assert.deepEqual(result.resolvedReviewIds, [batchedDate.reviewId]);
+    assert.equal(result.errors.length, 1);
+    assert.equal(result.errors[0].reviewId, batchedZero.reviewId);
+    assert.equal(result.errors[0].code, 'DUPLICATE_TRANSACTION');
+    assert.equal(result.errors[0].message,
+      '同じ取引の要確認がほかにも選ばれています。対象外は取引ごとなので、1 件だけ選んでください。');
+    assert.equal(reviewById(batchedZero.reviewId).status, 'OPEN');
+    assert.deepEqual(pbComparable(batched), singleState);
+  });
+
+  test('xb 11: 2つの取引が同じ転記行を指したら、どちらの行も変えない', () => {
+    const seeded = pbWorld([{fileId: 'xb11_file', name: '架空行衝突.csv', rows: [
+      '2025/01/05,既知店,1100,仕入れ',
+      '2025/01/06,既知店,1200,仕入れ']}]);
+    const [first, second] = pbFileReviews('xb11_file', 'PRIOR_YEAR');
+    const firstRow = Number(transactionFor(first).destinationRow);
+    setTxCell(second.fullTxId, 31, firstRow);
+    const stateBefore = [first, second].map((review) => pbItemState(reviewById(review.reviewId)));
+    const destinationBefore = xbDestinationRows();
+    const result = xbBatch([first.reviewId, second.reviewId], 'EXCLUDE_PRIOR_YEAR');
+    assert.deepEqual(result.errors.map((error) => error.reviewId + ':' + error.code).sort(), [
+      first.reviewId + ':DESTINATION_ROW_CONFLICT',
+      second.reviewId + ':DESTINATION_ROW_CONFLICT'
+    ].sort());
+    assert.deepEqual(result.resolvedReviewIds, []);
+    assert.deepEqual([first, second].map((review) => pbItemState(reviewById(review.reviewId))),
+      stateBefore);
+    assert.deepEqual(xbChangedCells(destinationBefore, xbDestinationRows()), []);
+  });
+
+  test('xb 12: リース衝突のファイルだけを見送り、次のファイルは対象外にする', () => {
+    const seeded = pbWorld([
+      {fileId: 'xb12_a', name: '架空競合E.csv', rows: [
+        '2025/01/05,既知店,1100,仕入れ', '2025/01/06,既知店,1200,仕入れ']},
+      {fileId: 'xb12_b', name: '架空競合F.csv', rows: ['2025/01/07,既知店,1300,仕入れ']}
+    ]);
+    const first = pbFileReviews('xb12_a', 'PRIOR_YEAR');
+    const second = pbFileReviews('xb12_b', 'PRIOR_YEAR');
+    call('acquireLease', ['C001', 'xb12_a', 'OTHER_RUN', 'other@example.com', 'WRITE_ONLY']);
+    const beforeA = first.map((review) => pbItemState(reviewById(review.reviewId)));
+    const result = xbBatch(first.concat(second).map((review) => review.reviewId),
+      'EXCLUDE_PRIOR_YEAR');
+    assert.deepEqual(result.skippedByLeaseReviewIds, first.map((review) => review.reviewId));
+    assert.equal(result.leaseConflicts.length, 1);
+    assert.equal(result.leaseConflicts[0].fileId, 'xb12_a');
+    assert.match(result.leaseConflicts[0].message, /使用中/);
+    assert.deepEqual(first.map((review) => pbItemState(reviewById(review.reviewId))), beforeA);
+    assert.deepEqual(result.resolvedReviewIds, second.map((review) => review.reviewId));
+    assert.deepEqual(result.errors, []);
+    assert.deepEqual(call('activeLeases_', []).map((lease) => lease.runId), ['OTHER_RUN']);
+  });
+
+  test('xb 13: 例外・時間の門・上限で、後のファイルを正しく回す', () => {
+    // (a1) 転記先の書込の例外は、その転記先の件を errors にして次のファイルへ進む
+    // （§2.2 手順 6-5。1 つの転記先の失敗で他を止めない）。
+    const files = [
+      {fileId: 'xb13_a', name: '架空例外C.csv', rows: [
+        '2025/01/05,既知店,1100,仕入れ', '2025/01/06,既知店,1200,仕入れ']},
+      {fileId: 'xb13_b', name: '架空例外D.csv', rows: ['2025/01/07,既知店,1300,仕入れ']}
+    ];
+    const writeWorld = pbWorld(files);
+    const firstIds = pbFileReviews('xb13_a', 'PRIOR_YEAR').map((review) => review.reviewId);
+    const secondIds = pbFileReviews('xb13_b', 'PRIOR_YEAR').map((review) => review.reviewId);
+    const realClear = gas.context.clearTransactionRows;
+    let failedOnce = false;
+    const writeFailed = withMocks({clearTransactionRows(...args) {
+      if (!failedOnce) {
+        failedOnce = true;
+        throw Object.assign(new Error('転記先の書込に失敗'), {code: 'TEST_CLEAR_FAILURE'});
+      }
+      return realClear.apply(this, args);
+    }}, () => xbBatch(firstIds.concat(secondIds), 'EXCLUDE_PRIOR_YEAR'));
+    assert.equal(failedOnce, true);
+    assert.deepEqual(writeFailed.errors.filter((error) => error.reviewId)
+      .map((error) => error.reviewId + ':' + error.code).sort(),
+    firstIds.map((id) => id + ':TEST_CLEAR_FAILURE').sort());
+    assert.deepEqual(writeFailed.resolvedReviewIds, secondIds);
+    assert.deepEqual(call('activeLeases_', []), []);
+    const retried = xbBatch(firstIds, 'EXCLUDE_PRIOR_YEAR');
+    assert.equal(retried.resolved, firstIds.length);
+
+    // (a2) 部品が手順 7 の頭で例外を投げたら、後のファイルは notAttempted。
+    const thrownWorld = pbWorld(files);
+    const thrownFirst = pbFileReviews('xb13_a', 'PRIOR_YEAR').map((review) => review.reviewId);
+    const thrownSecond = pbFileReviews('xb13_b', 'PRIOR_YEAR').map((review) => review.reviewId);
+    const realTail = gas.context.allReviewRecordsAndAuditTail_;
+    let thrown = false;
+    const componentFailed = withMocks({allReviewRecordsAndAuditTail_(...args) {
+      if (!thrown) {
+        thrown = true;
+        throw Object.assign(new Error('監査の読取に失敗'), {code: 'TEST_AUDIT_TAIL'});
+      }
+      return realTail.apply(this, args);
+    }}, () => xbBatch(thrownFirst.concat(thrownSecond), 'EXCLUDE_PRIOR_YEAR'));
+    assert.equal(thrown, true);
+    assert.deepEqual(componentFailed.errors.map((error) => error.reviewId), thrownFirst);
+    assert.deepEqual(componentFailed.notAttemptedReviewIds, thrownSecond);
+    assert.deepEqual(call('activeLeases_', []), []);
+    const allRetried = xbBatch(thrownFirst.concat(thrownSecond), 'EXCLUDE_PRIOR_YEAR');
+    assert.equal(allRetried.resolved, thrownFirst.length + thrownSecond.length);
+
+    // (b) 時間の門：1 つ目のファイルの後で 200 秒経つと、2 つ目は notAttempted。
+    const timed = pbWorld(files);
+    const timedFirst = pbFileReviews('xb13_a', 'PRIOR_YEAR');
+    const timedSecond = pbFileReviews('xb13_b', 'PRIOR_YEAR');
+    const realBatch = gas.context.excludeOtherReviewsBatch;
+    let calls = 0;
+    const timedResult = withMocks({excludeOtherReviewsBatch(...args) {
+      calls += 1;
+      return realBatch.apply(this, args);
+    }}, () => xbWithTiming([200000], () =>
+      xbBatch(timedFirst.concat(timedSecond).map((review) => review.reviewId),
+        'EXCLUDE_PRIOR_YEAR')));
+    assert.equal(calls, 1);
+    assert.deepEqual(timedResult.resolvedReviewIds,
+      timedFirst.map((review) => review.reviewId));
+    assert.deepEqual(timedResult.notAttemptedReviewIds,
+      timedSecond.map((review) => review.reviewId));
+    assert.deepEqual(call('activeLeases_', []), []);
+
+    // (c) 部品の上限：1 ファイル 3 件を 2 件ずつに分けて、同じ呼出しで 3 件とも済む。
+    const capped = pbWorld([{fileId: 'xb13_c', name: '架空上限対象外.csv', rows: [
+      '2025/01/05,既知店,1100,仕入れ', '2025/01/06,既知店,1200,仕入れ',
+      '2025/01/07,既知店,1300,仕入れ']}]);
+    let cappedCalls = 0;
+    const cappedResult = withMocks({PARTNER_BATCH_MAX_ITEMS_: 2,
+      excludeOtherReviewsBatch(...args) {
+        cappedCalls += 1;
+        return realBatch.apply(this, args);
+      }
+    }, () => xbBatch(capped.reviews.map((review) => review.reviewId), 'EXCLUDE_PRIOR_YEAR'));
+    assert.equal(cappedCalls, 2);
+    assert.equal(cappedResult.resolved, 3);
+    assert.deepEqual(cappedResult.notAttemptedReviewIds, []);
+  });
+
+  test('xb 14: 読取は件数に依らない', () => {
+    const world = (fileId, rows) => pbWorld([{fileId, name: '架空読取対象外.csv', rows}]);
+    const rowsFor = (count) => Array.from({length: count}, (_, index) =>
+      `2025/01/${String(5 + index).padStart(2, '0')},既知店,${1000 + index},仕入れ`);
+    const two = world('xb14_two', rowsFor(2));
+    const twoIds = pbFileReviews('xb14_two', 'PRIOR_YEAR').map((review) => review.reviewId);
+    const twoMeasure = pbMeasure(() => xbBatch(twoIds, 'EXCLUDE_PRIOR_YEAR'));
+    const twenty = world('xb14_twenty', rowsFor(20));
+    const twentyIds = pbFileReviews('xb14_twenty', 'PRIOR_YEAR').map((review) => review.reviewId);
+    const twentyMeasure = pbMeasure(() => xbBatch(twentyIds, 'EXCLUDE_PRIOR_YEAR'));
+    assert.equal(twoMeasure.reads, twentyMeasure.reads);
+    assert.equal(twoMeasure.value.resolved, 2);
+    assert.equal(twentyMeasure.value.resolved, 20);
+
+    const both = pbWorld([
+      {fileId: 'xb14_a', name: '架空読取対象外A.csv', rows: rowsFor(20)},
+      {fileId: 'xb14_b', name: '架空読取対象外B.csv',
+        rows: Array.from({length: 21}, (_, index) =>
+          `2025/03/${String(5 + index).padStart(2, '0')},既知店,${5000 + index},仕入れ`)}
+    ]);
+    const bothIds = both.reviews.map((review) => review.reviewId);
+    const bothMeasure = pbMeasure(() => xbBatch(bothIds, 'EXCLUDE_PRIOR_YEAR'));
+    assert.equal(bothMeasure.value.resolved, 41);
+
+    const single = world('xb14_single', rowsFor(1));
+    const singleReview = pbFileReviews('xb14_single', 'PRIOR_YEAR')[0];
+    const singleMeasure = pbMeasure(() => pbResolve(singleReview, 'EXCLUDE_PRIOR_YEAR'));
+    assert.equal(singleMeasure.value.resolved, 1);
+    console.log('XB14_READS ' + JSON.stringify({two: twoMeasure.reads,
+      twenty: twentyMeasure.reads, twoFiles: bothMeasure.reads, single: singleMeasure.reads}));
+  });
+
+  test('xb 15: 全部片付いたファイルを完了にし、孤児が居ないときは掃除を呼ばない', () => {
+    const seeded = pbWorld([{fileId: 'xb15_file', name: '架空完了対象外.csv', rows: [
+      '2025/01/05,既知店,1100,仕入れ', '2025/01/06,既知店,1200,仕入れ']}]);
+    const realCommit = gas.context.commitSettledTransactions_;
+    const realComplete = gas.context.completeFileIfFullyResolved_;
+    const observed = {commit: [], complete: []};
+    const result = withMocks({
+      commitSettledTransactions_(fileId, ...args) {
+        observed.commit.push(String(fileId));
+        return realCommit.call(this, fileId, ...args);
+      },
+      completeFileIfFullyResolved_(fileId, ...args) {
+        observed.complete.push(String(fileId));
+        return realComplete.call(this, fileId, ...args);
+      }
+    }, () => xbBatch(seeded.reviews.map((review) => review.reviewId), 'EXCLUDE_PRIOR_YEAR'));
+    assert.equal(result.resolved, 2);
+    assert.deepEqual(observed.commit, []);
+    assert.deepEqual(observed.complete, ['xb15_file']);
+    assert.equal(result.completedFiles.length, 1);
+    assert.equal(result.completedFiles[0].fileId, 'xb15_file');
+    assert.equal(result.completedFiles[0].stateLabel, call('menuFileStateLabel_', ['COMPLETED']));
+    assert.equal(call('getFileState', ['xb15_file']), 'COMPLETED');
+
+    const failing = pbWorld([{fileId: 'xb15_fault', name: '架空失敗対象外.csv',
+      rows: ['2025/01/05,既知店,1100,仕入れ']}]);
+    const fault = {commit: 0};
+    const failed = withMocks({
+      excludeOtherReviewsBatch() {
+        throw Object.assign(new Error('部品の失敗'), {code: 'TEST_COMPONENT_FAILURE'});
+      },
+      commitSettledTransactions_(...args) {
+        fault.commit += 1;
+        return realCommit.apply(this, args);
+      }
+    }, () => xbBatch(failing.reviews.map((review) => review.reviewId), 'EXCLUDE_PRIOR_YEAR'));
+    assert.equal(failed.resolved, 0);
+    assert.equal(failed.errors[0].code, 'TEST_COMPONENT_FAILURE');
+    assert.equal(fault.commit, 1);
+  });
+
+  test('xb 16: 認可と入口を確かめ、混ぜた操作はそれぞれの操作を記録する', () => {
+    const seeded = pbWorld([{fileId: 'xb16_file', name: '架空認可対象外.csv', rows: [
+      '2025/01/05,既知店,1100,仕入れ', '2025/01/06,既知店,1200,仕入れ']}]);
+    const ids = seeded.reviews.map((review) => review.reviewId);
+
+    // 部品 57 は計上・取引先の操作を読む前に拒む。
+    for (const operation of ['POST_PRIOR_YEAR', 'POST_ZERO_AMOUNT', 'ADOPT_EXISTING_PARTNER']) {
+      const before = kw2Snapshot();
+      const reads = gas.stubs.getApiCallCounts().batchGet;
+      const error = caught(() => call('excludeOtherReviewsBatch', ['C001', 'xb16_file',
+        [{reviewId: ids[0], operation}], {actor: 'reviewer@example.com'}]));
+      assert.equal(error.name, 'TypeError', operation);
+      assert.equal(gas.stubs.getApiCallCounts().batchGet, reads, operation);
+      assert.deepEqual(kw2Snapshot(), before, operation);
+    }
+    // 部品 55 は今どおり対象外を拒む。
+    const notIn55 = caught(() => call('resolvePartnerReviewsBatch', ['C001', 'xb16_file',
+      [{reviewId: ids[0], operation: 'EXCLUDE'}], {actor: 'reviewer@example.com'}]));
+    assert.equal(notIn55.name, 'TypeError');
+
+    // EXCLUDE_PRIOR_YEAR と EXCLUDE を 1 回の呼出しに混ぜてよい。AD はそれぞれの操作。
+    const mixed = xbComponent('xb16_file', [
+      {reviewId: ids[0], operation: 'EXCLUDE_PRIOR_YEAR'},
+      {reviewId: ids[1], operation: 'EXCLUDE'}
+    ]);
+    assert.deepEqual(mixed.resolvedReviewIds, ids);
+    ids.forEach((reviewId, index) => {
+      const review = reviewById(reviewId);
+      assert.equal(review.status, 'EXCLUDED');
+      assert.equal(review.resolveOperation,
+        index === 0 ? 'EXCLUDE_PRIOR_YEAR' : 'EXCLUDE');
+      assert.equal(review.resolverRole, 'REVIEWER');
+    });
+
+    // 権限の無い実行者は例外。シートは監査の PERMISSION 行以外変わらない。
+    gas.stubs.setActiveUser('stranger@example.com');
+    const before = kw2Snapshot(false);
+    const permissions = permissionRows().length;
+    assert.throws(() => xbBatch(ids, 'EXCLUDE'));
+    assert.deepEqual(kw2Snapshot(false), before);
+    assert.equal(permissionRows().length, permissions + 1);
+    gas.stubs.setActiveUser('reviewer@example.com');
+  });
+
+  test('xb 17: ログに明細の値・店名・ファイル名・転記先のIDを出さない', () => {
+    const merchant = '架空対象外店';
+    const fileName = '架空対象外ログ.csv';
+    const amount = 987641;
+    const seeded = pbWorld([{fileId: 'xb17_file', name: fileName,
+      rows: ['2025/01/05,' + merchant + ',' + amount + ',仕入れ']}]);
+    const review = seeded.reviews.find((item) => item.reviewType === 'PRIOR_YEAR');
+    const destinationId = String(review.destinationSpreadsheetId);
+    const result = xbBatch([review.reviewId], 'EXCLUDE_PRIOR_YEAR');
+    assert.equal(result.resolved, 1);
+    const logs = gas.stubs.getLogs();
+    const other = logs.filter((line) => line.startsWith('OTHER_REVIEWS_BATCH '));
+    const exclude = logs.filter((line) => line.startsWith('EXCLUDE_BATCH '));
+    assert.equal(other.length, 1);
+    assert.equal(exclude.length, 1);
+    const otherEntry = JSON.parse(other[0].slice('OTHER_REVIEWS_BATCH '.length));
+    assert.equal(otherEntry.code, 'EXCLUDE_PRIOR_YEAR');
+    assert.equal(otherEntry.items, 1);
+    const excludeEntry = JSON.parse(exclude[0].slice('EXCLUDE_BATCH '.length));
+    assert.deepEqual(excludeEntry.operations, ['EXCLUDE_PRIOR_YEAR']);
+    assert.equal(excludeEntry.excluded, 1);
+    assert.equal(excludeEntry.rowsCleared, 1);
+    for (const line of other.concat(exclude)) {
+      assert.equal(line.includes(merchant), false, '店名');
+      assert.equal(line.includes(fileName), false, 'ファイル名');
+      assert.equal(line.includes(String(amount)), false, '金額');
+      assert.equal(line.includes(destinationId), false, '転記先のID');
+      assert.equal(line.includes('株式会社'), false, '取引先名');
+    }
+  });
+
+  test('xb 18: 取引ログを要確認より先に書く（要確認の書込が失敗しても取引はCANCELED）', () => {
+    const seeded = pbWorld([{fileId: 'xb18_file', name: '架空順序.csv',
+      rows: ['2025/01/05,既知店,1100,仕入れ']}]);
+    const review = pbFileReviews('xb18_file', 'PRIOR_YEAR')[0];
+    const values = gas.context.Sheets.Spreadsheets.Values;
+    const realUpdate = values.batchUpdate;
+    let reviewWriteTried = false;
+    values.batchUpdate = function(request) {
+      const data = (request && request.data) || [];
+      if (data.some((entry) => String(entry.range).indexOf("'要確認'!") >= 0)) {
+        reviewWriteTried = true;
+        throw Object.assign(new Error('要確認の書込に失敗'), {code: 'TEST_REVIEW_WRITE'});
+      }
+      return realUpdate.apply(this, arguments);
+    };
+    let result;
+    try {
+      result = xbBatch([review.reviewId], 'EXCLUDE_PRIOR_YEAR');
+    } finally {
+      values.batchUpdate = realUpdate;
+    }
+    assert.equal(reviewWriteTried, true);
+    assert.equal(result.resolved, 0);
+    assert.equal(result.errors[0].code, 'TEST_REVIEW_WRITE');
+    // 取引ログ（J）は要確認より先に書かれている。
+    assert.equal(transactionFor(review).transactionStatus, 'CANCELED');
+    assert.equal(reviewById(review.reviewId).status, 'OPEN');
+    assert.equal(pbAuditEvents().length, 0);
+    assert.deepEqual(call('activeLeases_', []), []);
   });
 
   function sfEmpty(state = 'FAILED', fileId = 'sf_empty') {
