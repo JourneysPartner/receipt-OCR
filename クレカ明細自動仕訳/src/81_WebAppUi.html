@@ -628,6 +628,7 @@
         else if (name === 'webAppPrepareImport') runner.webAppPrepareImport(args[0], args[1]);
         else if (name === 'webAppResolveReviews') runner.webAppResolveReviews(args[0], args[1], args[2]);
         else if (name === 'webAppResolveOtherReview') runner.webAppResolveOtherReview(args[0], args[1], args[2], args[3]);
+        else if (name === 'webAppResolveOtherReviewsBatch') runner.webAppResolveOtherReviewsBatch(args[0], args[1], args[2]);
         else if (name === 'webAppFinalReview') runner.webAppFinalReview(args[0], args[1], args[2]);
         else if (name === 'webAppExplainUnknownFile') runner.webAppExplainUnknownFile(args[0], args[1], args[2], args[3]);
         else if (name === 'webAppPreviewFormat') runner.webAppPreviewFormat(args[0], args[1], args[2], args[3]);
@@ -1203,6 +1204,12 @@
 
     /** まとめて確定できる操作だけを、この順で扱う。 */
     var OTHER_BULK_CODES = ['POST_PRIOR_YEAR', 'EXCLUDE_PRIOR_YEAR', 'POST_ZERO_AMOUNT', 'EXCLUDE'];
+    /**
+     * サーバー側でファイルごとにまとめて確定する操作（第 1 段は計上だけ）。
+     * 対象外の 2 つは、取り消せないうえ件ごとに転記行を空にするので、
+     * 第 2 段まで今の 1 件ずつの流れのままにする。
+     */
+    var OTHER_SERVER_BATCH_CODES = ['POST_PRIOR_YEAR', 'POST_ZERO_AMOUNT'];
 
     function otherBulkOption(review, code) {
       var options = review && Array.isArray(review.options) ? review.options : [];
@@ -2856,6 +2863,8 @@
       var code = state.otherBulkCode;
       var targets = selectedOtherReviews();
       if (!code || !targets.length || otherCommonCodes(targets).indexOf(code) < 0) return;
+      // 計上の 2 つだけサーバーでまとめる。対象外の 2 つは今の 1 件ずつの流れ。
+      if (OTHER_SERVER_BATCH_CODES.indexOf(code) >= 0) return runOtherServerBulk(code, targets);
       var label = (otherBulkOption(targets[0], code) || {}).label || code;
       if (!await formatConfirm(label, otherBulkConfirmMessage(code, targets))) return;
 
@@ -2933,21 +2942,201 @@
       }
     }
 
+    /**
+     * 1 件ずつの `ok: false` の文（`otherResultNotice` と同じ表）。
+     * まとめて確定の応答の件ごとの失敗にも同じ文を使う（判定を写さない）。
+     */
+    function otherFailureText(code, message) {
+      var messages = {
+        REVIEW_NOT_FOUND: TEXT.reviewMissing, ALREADY_SETTLED: TEXT.alreadySettled,
+        REVIEW_CUSTOMER_MISMATCH: TEXT.reviewMismatch,
+        NOT_SUPPORTED: 'この要確認は画面から確定できません。管理者へ連絡してください。',
+        TRANSACTION_MISSING: TEXT.otherTransactionMissing,
+        OPERATION_NOT_OFFERED: 'この操作はこの要確認では選べません。画面を再読み込みしてください。',
+        OPERATION_DISABLED: 'この操作は選べません' + (message || '') + '。',
+        DATE_REQUIRED: TEXT.otherDateRequired, AMOUNT_REQUIRED: TEXT.otherAmountRequired,
+        INVALID_DATE: '利用日の形が正しくありません（例: 2026-01-05。2000 年以降、今日から 1 年先まで）。',
+        INVALID_AMOUNT: '金額は整数で入力してください（1 億円未満）。'
+      };
+      return messages[String(code || '')] || TEXT.unknownFailure;
+    }
+
+    /** まとめて確定の応答の、件ごとの失敗の文。表に無いコードは応答の文、空なら共通の文。 */
+    function otherServerErrorText(error) {
+      var code = String(error && error.code || '');
+      var message = error && error.message ? String(error.message) : '';
+      var known = ['REVIEW_NOT_FOUND', 'ALREADY_SETTLED', 'REVIEW_CUSTOMER_MISMATCH',
+        'NOT_SUPPORTED', 'TRANSACTION_MISSING', 'OPERATION_NOT_OFFERED', 'OPERATION_DISABLED',
+        'DATE_REQUIRED', 'AMOUNT_REQUIRED', 'INVALID_DATE', 'INVALID_AMOUNT'];
+      if (known.indexOf(code) >= 0) return otherFailureText(code, message);
+      return message || TEXT.unknownFailure;
+    }
+
+    /** まとめて確定（サーバー）の確認の文。 */
+    function otherServerBulkConfirmMessage(code, reviews) {
+      return '「その他の要確認」の ' + reviews.length + ' 件（' + otherBulkTypeSummary(reviews) +
+        '）にまとめて行います。' + TEXT.otherEffect(code, {}) +
+        ' サーバーでファイルごとにまとめて確定します（目安は 1 ファイル 20〜30 秒です）。' +
+        '途中で［中止］を押すと、処理中のまとまりが終わったところで止まります（済んだ分は戻りません）。';
+    }
+
+    /**
+     * 選んだ行の計上を、サーバーでファイルごとにまとめて確定する。
+     *
+     * 前の応答が返ってから次を呼び、応答の `notAttemptedReviewIds` のうち
+     * **前に送った ID だけ**を次の対象にする。失敗・リースで見送り・後始末の
+     * 失敗が 1 つでもあれば次を呼ばない（1 回の呼出しの中でサーバーは失敗した件を
+     * 飛ばして他の件を進めている）。済んだ分は戻らないので、押した時点の選択と
+     * 顧客を控え、応答のたびに画面が変わっていないかを確かめる。
+     */
+    async function runOtherServerBulk(code, targets) {
+      var label = (otherBulkOption(targets[0], code) || {}).label || code;
+      if (!await formatConfirm(label, otherServerBulkConfirmMessage(code, targets))) return;
+
+      var token = ++state.resolveRun;
+      var generation = state.viewGeneration;
+      var customerId = state.selectedCustomerId;
+      var run = {canceled: false};
+      state.otherBulkRun = run;
+      state.resolveBusy = true;
+      clearNotice();
+      renderSelection();
+
+      var total = targets.length;
+      var targetById = Object.create(null);
+      targets.forEach(function(review) { targetById[String(review.reviewId)] = review; });
+      var done = 0, already = 0, canceled = false, changed = false, stopped = null;
+      var unmetTexts = [], completedFiles = 0;
+      var pending = targets.map(function(review) { return String(review.reviewId); });
+
+      try {
+        while (pending.length) {
+          if (!otherBulkIsCurrent(token, generation, customerId)) { changed = true; break; }
+          if (run.canceled) { canceled = true; break; }
+          el['other-bulk-progress'].textContent = 'まとめて確定中… 済み ' + done + ' / ' +
+            total + ' 件（サーバーでファイルごとに処理しています）';
+          var result;
+          try {
+            result = await gasCall('webAppResolveOtherReviewsBatch',
+              [customerId, pending.slice(), code]);
+          } catch (error) {
+            if (!otherBulkIsCurrent(token, generation, customerId)) { changed = true; break; }
+            stopped = {text: failureMessage(error), details: []};
+            break;
+          }
+          if (!otherBulkIsCurrent(token, generation, customerId)) { changed = true; break; }
+          if (!result || result.ok !== true) {
+            var failureCode = result && result.code;
+            stopped = {text: failureCode === 'OPERATION_NOT_BATCHABLE' ||
+              failureCode === 'INVALID_REQUEST' ? TEXT.unknownFailure :
+              otherFailureText(failureCode, result && result.message), details: []};
+            break;
+          }
+
+          var failed = 0, leaseSkipped = 0, cleanupFailed = 0;
+          var details = [];
+          (result.resolvedReviewIds || []).forEach(function(reviewId) {
+            var id = String(reviewId);
+            if (!targetById[id] || !state.otherSelectedIds.has(id)) return;
+            done += 1;
+            state.otherSelectedIds.delete(id);
+            state.otherInputs.delete(id);
+          });
+          (result.errors || []).forEach(function(error) {
+            var id = error && error.reviewId ? String(error.reviewId) : '';
+            if (!id) {
+              // 後始末の失敗（ファイル単位。reviewId は無い）。
+              cleanupFailed += 1;
+              if (error && error.message) details.push(String(error.message));
+              return;
+            }
+            if (!targetById[id]) return;
+            if (error.code === 'ALREADY_SETTLED' || error.code === 'REVIEW_NOT_FOUND') {
+              already += 1;
+              state.otherSelectedIds.delete(id);
+              state.otherInputs.delete(id);
+              return;
+            }
+            failed += 1;
+            details.push(otherBulkTargetLabel(targetById[id]) + '：' + otherServerErrorText(error));
+          });
+          (result.skippedByLeaseReviewIds || []).forEach(function(reviewId) {
+            if (targetById[String(reviewId)]) leaseSkipped += 1;
+          });
+          (result.unmetTexts || []).forEach(function(text) { unmetTexts.push(String(text)); });
+          completedFiles += (result.completedFiles || []).length;
+
+          var returned = Object.create(null);
+          (result.notAttemptedReviewIds || []).forEach(function(reviewId) {
+            returned[String(reviewId)] = true;
+          });
+          var next = pending.filter(function(id) {
+            return returned[id] && state.otherSelectedIds.has(id);
+          });
+          if (failed || cleanupFailed || leaseSkipped) {
+            stopped = {text: '', details: details, failed: failed,
+              lease: leaseSkipped, cleanup: cleanupFailed};
+            break;
+          }
+          if (!next.length) break;
+          if (next.length >= pending.length) {
+            stopped = {text: '', details: [], noProgress: true};
+            break;
+          }
+          pending = next;
+        }
+        // はっきりした停止理由が無いのに集計が合わない（応答の数が足りない）。
+        if (!changed && !canceled && !stopped && done + already !== total) {
+          stopped = {text: '', details: [], noProgress: true};
+        }
+      } finally {
+        if (token === state.resolveRun && generation === state.viewGeneration) {
+          state.resolveBusy = false;
+          state.otherBulkRun = null;
+          el['other-bulk-progress'].textContent = '';
+          markFinalReviewStale();
+          renderSelection();
+          loadReviews(customerId, state.reviewOffset, generation);
+          if (state.selectedFolderId) loadFiles(customerId, state.selectedFolderId, generation);
+          if (!changed && !canceled && !stopped) state.otherBulkCode = '';
+        }
+      }
+      if (changed) return;
+      var remaining = total - done - already;
+      if (canceled) {
+        showNotice('中止しました。' + done + ' 件を確定しました（' + label + '）。残り ' +
+          remaining + ' 件は選んだままです。', 'warning');
+      } else if (stopped) {
+        var reason = '';
+        if (stopped.text) reason = otherBulkReason(stopped.text);
+        else if (stopped.noProgress) reason = '時間が足りず、残りを確定できませんでした。もう一度押してください。';
+        else {
+          if (stopped.failed) reason += '確定できなかった行が ' + stopped.failed + ' 件あります。';
+          if (stopped.lease) reason += 'ほかの処理がファイルを使用中のため ' + stopped.lease +
+            ' 件を見送りました（10 分ほど待ってからもう一度押してください）。';
+          if (stopped.cleanup) reason += '確定の後始末に失敗したファイルがあります。';
+        }
+        showNotice(done + ' 件を確定したところで止まりました（' + label + '）。' + reason +
+          '残り ' + remaining + ' 件は選んだままです。', 'warning', stopped.details);
+      } else if (done + already !== total) {
+        // 念のため（上の noProgress で必ず stopped になる）。
+        showNotice(done + ' 件を確定したところで止まりました（' + label + '）。' +
+          '時間が足りず、残りを確定できませんでした。もう一度押してください。残り ' +
+          remaining + ' 件は選んだままです。', 'warning');
+      } else {
+        showNotice('「その他の要確認」 ' + done + ' 件をまとめて確定しました（' + label + '）。' +
+          (unmetTexts.length ? unmetTexts.length + ' 件は取引がまだ確定していません（' +
+            unmetTexts[0] + '）。' : '') +
+          (completedFiles ? 'ファイル ' + completedFiles + ' 本の要確認がすべて片付きました。' : '') +
+          (already ? already + ' 件は既に片付いていました。' : ''), 'success');
+      }
+    }
+
     /** 確定結果から、1 件ずつのお知らせと同じ文・種類・詳細を作る。 */
     function otherResultNotice(result) {
       if (result.ok === false) {
-        var messages = {
-          REVIEW_NOT_FOUND: TEXT.reviewMissing, ALREADY_SETTLED: TEXT.alreadySettled,
-          REVIEW_CUSTOMER_MISMATCH: TEXT.reviewMismatch,
-          NOT_SUPPORTED: 'この要確認は画面から確定できません。管理者へ連絡してください。',
-          TRANSACTION_MISSING: TEXT.otherTransactionMissing,
-          OPERATION_NOT_OFFERED: 'この操作はこの要確認では選べません。画面を再読み込みしてください。',
-          OPERATION_DISABLED: 'この操作は選べません' + (result.message || '') + '。',
-          DATE_REQUIRED: TEXT.otherDateRequired, AMOUNT_REQUIRED: TEXT.otherAmountRequired,
-          INVALID_DATE: '利用日の形が正しくありません（例: 2026-01-05。2000 年以降、今日から 1 年先まで）。',
-          INVALID_AMOUNT: '金額は整数で入力してください（1 億円未満）。'
-        };
-        return {message: messages[result.code] || TEXT.unknownFailure, kind: 'warning', details: []};
+        return {message: otherFailureText(result.code, result.message),
+          kind: 'warning', details: []};
       }
       var errors = (result.errors || []).map(function(error) {
         return error.message;

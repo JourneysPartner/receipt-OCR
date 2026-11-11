@@ -24,6 +24,9 @@ var WEBAPP_CLONE_TRIPS_ = 3;
 var WEBAPP_TRIP_WORST_MS_ = 400;
 var WEBAPP_DEADLINE_MS_ = 300000;
 var WEBAPP_MAX_FILES_PER_IMPORT_ = 6;
+// 「その他の要確認」をサーバー側でまとめて確定できる操作（第 1 段は計上だけ）。
+// 第 2 段で対象外の 2 つ（EXCLUDE_PRIOR_YEAR・EXCLUDE）を足す。
+var WEBAPP_OTHER_BATCH_CODES_ = ['POST_PRIOR_YEAR', 'POST_ZERO_AMOUNT'];
 // 1へ戻すと従来の順次取込になる。3本以上は読取の枠が天井なので2本まで。
 // 2026-10-17 の実機の受入で、2本は1本ずつより速くならなかった（呼出しごとの
 // 頭の読取を2本ぶん払い、枠が天井になる。spec_parallel_import §6）ので1に戻した。
@@ -1433,6 +1436,305 @@ function webAppResolveOtherReview(customerId, reviewId, code, inputs) {
         return {code: error.code || null, message: String(error.message || '')};
       }),
       notAttempted: outcome.notAttempted, skippedByLease: outcome.skippedByLease};
+  });
+}
+
+/**
+ * 「その他の要確認」の計上（`POST_PRIOR_YEAR`・`POST_ZERO_AMOUNT`）を、
+ * ファイルごとにサーバー側でまとめて確定する
+ * （`work/spec_other_reviews_post_batch.md` §2.2）。
+ *
+ * 1 件ずつ `webAppResolveOtherReview` を呼ぶと 1 件で読取を 20 回前後使うため、
+ * 1 分に 2〜3 件しか進まない。ここでは要確認を頭で 1 回・取引を 1 回読み、
+ * 確定そのものはファイルごとに部品 55 へ渡す ── 読取は件数に依らない。
+ *
+ * **押せるかどうかは 1 件ずつの経路と同じ関数・同じ材料で決める**
+ * （`webAppOtherReviewOptions_`）。判定を写すと片方だけ直す事故が起きる。
+ * **対象外の 2 つ（`EXCLUDE_PRIOR_YEAR`・`EXCLUDE`）はここでは受けない。**
+ * 画面もそれらは 1 件ずつの流れのまま呼ぶ。
+ *
+ * 戻り値の勘定：受け取った ID は（同じ ID が 2 回あっても回ごとに）
+ * `resolvedReviewIds`・`reviewId` のある `errors`・`skippedByLeaseReviewIds`・
+ * `notAttemptedReviewIds` のどれか 1 つだけに入る。画面はこれで「残り」を決める。
+ */
+function webAppResolveOtherReviewsBatch(customerId, reviewIds, code) {
+  return webAppInvoke_(function() {
+    var startedAt = partnerBatchClockNow_();
+    var readsAtStart = apiReadCount_;
+    var authorized = webAppAuthorizeCustomer_(customerId, 'WEBAPP:その他の要確認をまとめて確定');
+    var role = authorized.scope.rolesByCustomerId[authorized.customer.customerId];
+    code = String(code);
+    if (WEBAPP_OTHER_BATCH_CODES_.indexOf(code) < 0) {
+      return {ok: false, code: 'OPERATION_NOT_BATCHABLE'};
+    }
+    if (!Array.isArray(reviewIds)) return {ok: false, code: 'INVALID_REQUEST'};
+    // 1 件ずつの経路（`applyResolveDecision_`）と同じ認可と実行者。
+    var auth = authorizeOperation(code, String(customerId), {});
+    var actor = auth.userEmail;
+    var wantedCustomerId = String(customerId);
+
+    var result = {
+      ok: true, code: code,
+      label: (MENU_RESOLVE_OPERATIONS_[code] || {}).label || code,
+      resolved: 0, committed: 0, resolvedReviewIds: [], unmetTexts: [], errors: [],
+      skippedByLeaseReviewIds: [], leaseConflicts: [], notAttemptedReviewIds: [],
+      completedFiles: [], deferredCommits: 0
+    };
+    var ids = reviewIds.map(function(id) {
+      return id === null || id === undefined ? '' : String(id);
+    });
+    var filesPassed = 0;
+    function finish() {
+      // 数とコードだけ。明細の値・店名・ファイル名・取引先名は出さない。
+      Logger.log('OTHER_REVIEWS_BATCH ' + JSON.stringify({code: code, items: ids.length,
+        resolved: result.resolved, committed: result.committed,
+        errors: result.errors.length,
+        skippedByLease: result.skippedByLeaseReviewIds.length,
+        notAttempted: result.notAttemptedReviewIds.length, files: filesPassed,
+        completedFiles: result.completedFiles.length,
+        ms: partnerBatchClockNow_() - startedAt, reads: apiReadCount_ - readsAtStart}));
+      return result;
+    }
+
+    ids.slice(WEBAPP_MAX_DECISIONS_).forEach(function(id) {
+      result.errors.push({reviewId: id, code: 'TOO_MANY_DECISIONS',
+        message: '一度に確定できるのは ' + WEBAPP_MAX_DECISIONS_ + ' 件までです。'});
+    });
+    var accepted = ids.slice(0, WEBAPP_MAX_DECISIONS_);
+    if (!accepted.length) return finish();
+
+    // 要確認は頭で 1 回だけ読む（同じ ID が複数行なら最初の行）。
+    var reviewsById = Object.create(null);
+    allReviewRecords_().forEach(function(review) {
+      var key = String(review.reviewId);
+      if (!Object.prototype.hasOwnProperty.call(reviewsById, key)) reviewsById[key] = review;
+    });
+    var seenReviewIds = Object.create(null);
+    var checked = [];
+    accepted.forEach(function(reviewId) {
+      if (seenReviewIds[reviewId]) {
+        result.errors.push({reviewId: reviewId, code: 'DUPLICATE_DECISION',
+          message: partnerBatchMessage_('DUPLICATE_DECISION')});
+        return;
+      }
+      seenReviewIds[reviewId] = true;
+      var review = reviewsById[reviewId];
+      var failure = null;
+      if (!review) failure = {code: 'REVIEW_NOT_FOUND', message: ''};
+      else if (String(review.customerId || '') !== wantedCustomerId) {
+        failure = {code: 'REVIEW_CUSTOMER_MISMATCH', message: ''};
+      } else if (review.status !== 'OPEN' && review.status !== 'IN_PROGRESS') {
+        failure = {code: 'ALREADY_SETTLED', message: ''};
+      } else if (String(review.reviewType) === 'INTEGRITY' ||
+          String(review.reviewType) === 'FILE_CHANGED') {
+        failure = {code: 'NOT_SUPPORTED', message: ''};
+      } else if (!isTransactionScopedReviewType(review.reviewType)) {
+        failure = {code: 'OPERATION_NOT_OFFERED', message: ''};
+      } else if (!String(review.fileId || '')) {
+        failure = {code: 'REVIEW_FILE_MISSING',
+          message: '要確認の元ファイルが分かりません。管理者へ連絡してください。'};
+      }
+      if (failure) {
+        result.errors.push({reviewId: reviewId, code: failure.code, message: failure.message});
+        return;
+      }
+      checked.push({reviewId: reviewId, review: review, failed: false});
+    });
+
+    if (!checked.length) return finish();
+    // 残った件の取引を 1 回だけ読む。押せるかの判定は 1 件ずつの経路と同じ材料。
+    var txsById = Object.create(null);
+    var byFullTxId = webAppTransactionsById_(checked.map(function(item) {
+      return item.review.fullTxId;
+    }));
+    checked.forEach(function(item) {
+      var key = String(item.review.fullTxId || '');
+      var tx = byFullTxId[key] || null;
+      txsById[key] = tx ? [tx] : [];
+      if (!tx) {
+        item.failed = true;
+        result.errors.push({reviewId: item.reviewId, code: 'TRANSACTION_MISSING', message: ''});
+        return;
+      }
+      var option = webAppOtherReviewOptions_(webAppOtherReviewItem_(item.review), role, tx)
+        .filter(function(candidate) { return candidate.code === code; })[0];
+      if (!option) {
+        item.failed = true;
+        result.errors.push({reviewId: item.reviewId, code: 'OPERATION_NOT_OFFERED', message: ''});
+        return;
+      }
+      if (!option.enabled) {
+        item.failed = true;
+        result.errors.push({reviewId: item.reviewId, code: 'OPERATION_DISABLED',
+          message: String(option.disabledReason || '')});
+        return;
+      }
+      item.tx = tx;
+    });
+
+    var ready = checked.filter(function(item) { return !item.failed; });
+    if (!ready.length) return finish();
+    var customer = getCustomerById(wantedCustomerId);
+    var fileGroups = [];
+    var groupsByFile = Object.create(null);
+    ready.forEach(function(item) {
+      var fileId = String(item.review.fileId);
+      if (!Object.prototype.hasOwnProperty.call(groupsByFile, fileId)) {
+        groupsByFile[fileId] = {fileId: fileId,
+          fileName: menuDisplayFileName_(item.review) || '（ファイル名不明）', items: []};
+        fileGroups.push(groupsByFile[fileId]);
+      }
+      groupsByFile[fileId].items.push(item);
+    });
+
+    var maxBatchMs = 0;
+    var stopAll = false;
+    function deferItems(items) {
+      items.forEach(function(item) { result.notAttemptedReviewIds.push(item.reviewId); });
+    }
+    function deferFiles(fromIndex) {
+      for (var index = fromIndex; index < fileGroups.length; index += 1) {
+        deferItems(fileGroups[index].items);
+      }
+    }
+
+    for (var fileIndex = 0; fileIndex < fileGroups.length && !stopAll; fileIndex += 1) {
+      var group = fileGroups[fileIndex];
+      var fileId = group.fileId;
+      var fileName = group.fileName;
+      var queue = group.items.slice();
+      var fileStartedAt = null;
+      var fileTouched = false;
+      var filePassed = false;
+      var leaseConflict = false;
+      var followUpKnown = true;
+      var orphanCandidates = null;
+
+      while (queue.length && !stopAll) {
+        // まとまりを始める前に毎回、門を通す（`webAppResolveReviews` と同じ掛け方。
+        // `maxBatchMs` はこの呼出しで済んだファイルの所要の最大値）。
+        var gateMaxBatchMs = maxBatchMs;
+        if (fileStartedAt !== null) {
+          gateMaxBatchMs = Math.max(gateMaxBatchMs, partnerBatchClockNow_() - fileStartedAt);
+        }
+        if (!partnerBatchMayStart_({startedAt: startedAt, deadlineMs: WEBAPP_DEADLINE_MS_,
+            floorMs: PARTNER_BATCH_FLOOR_MS_, factor: PARTNER_BATCH_FACTOR_,
+            maxBatchMs: gateMaxBatchMs})) {
+          deferItems(queue);
+          deferFiles(fileIndex + 1);
+          stopAll = true;
+          break;
+        }
+        if (fileStartedAt === null) fileStartedAt = partnerBatchClockNow_();
+        if (!filePassed) {
+          filePassed = true;
+          fileTouched = true;
+          filesPassed += 1;
+        }
+        var sent = queue.slice();
+        var componentResult;
+        try {
+          componentResult = resolvePartnerReviewsBatch(wantedCustomerId, fileId,
+            sent.map(function(item) { return {reviewId: item.reviewId, operation: code}; }),
+            {actor: actor, customer: customer});
+        } catch (componentError) {
+          // 想定外の失敗の後で他のファイルへ進まない（そのファイルの後始末だけ）。
+          var componentCode = String(componentError && componentError.code || 'RESOLVE_FAILED');
+          sent.forEach(function(item) {
+            result.errors.push({reviewId: item.reviewId, code: componentCode,
+              message: menuOperationErrorMessage_(componentError)});
+          });
+          deferFiles(fileIndex + 1);
+          stopAll = true;
+          break;
+        }
+
+        // 部品の `errors` は、リース衝突の判定より**前**に写す（`webAppResolveReviews`
+        // と同じ順）。部品はリースを取る前の手順 2 で弾いた件（`ALREADY_SETTLED`・
+        // `REVIEW_NOT_FOUND`・`DUPLICATE_TRANSACTION` など）を `errors` に入れて返すので、
+        // リース衝突のときに写さないとその件が戻り値のどこにも入らず、勘定が合わなくなる。
+        (componentResult.errors || []).forEach(function(error) {
+          var errorCode = String(error && error.code || 'RESOLVE_FAILED');
+          result.errors.push({reviewId: String(error && error.reviewId || ''), code: errorCode,
+            message: webAppResolveErrorMessage_(errorCode, error && error.message,
+              reviewsById[String(error && error.reviewId || '')], txsById)});
+        });
+
+        if (componentResult.leaseConflict) {
+          // このファイルだけ手を付けずに次のファイルへ（他のファイルは空いているかも）。
+          var leaseIds = [];
+          (componentResult.skippedByLeaseReviewIds || []).forEach(function(id) {
+            if (leaseIds.indexOf(String(id)) < 0) leaseIds.push(String(id));
+          });
+          (componentResult.notAttemptedReviewIds || []).forEach(function(id) {
+            if (leaseIds.indexOf(String(id)) < 0) leaseIds.push(String(id));
+          });
+          leaseIds.forEach(function(id) { result.skippedByLeaseReviewIds.push(id); });
+          result.leaseConflicts.push({fileId: fileId, fileName: fileName,
+            message: menuLeaseConflictText_(null)});
+          leaseConflict = true;
+          queue = [];
+          break;
+        }
+
+        var followUp = componentResult.followUp;
+        if (followUp && Number.isInteger(followUp.orphanCandidates) &&
+            followUp.orphanCandidates >= 0) {
+          orphanCandidates = followUp.orphanCandidates;
+        } else {
+          followUpKnown = false;
+        }
+        (componentResult.resolvedReviewIds || []).forEach(function(id) {
+          result.resolvedReviewIds.push(String(id));
+        });
+        result.resolved = result.resolvedReviewIds.length;
+        result.committed += (componentResult.committedReviewIds || []).length;
+        (componentResult.unmet || []).forEach(function(item) {
+          result.unmetTexts.push(menuUnmetText_(item));
+        });
+        (componentResult.skippedByLeaseReviewIds || []).forEach(function(id) {
+          result.skippedByLeaseReviewIds.push(String(id));
+        });
+
+        var returnedNotAttempted = (componentResult.notAttemptedReviewIds || []).map(String);
+        var processedNow = Math.max(0, sent.length - returnedNotAttempted.length);
+        if (processedNow < 1) {
+          // 1 件も進まなかったまとまり。残りは次の呼出しに回す。
+          deferItems(sent);
+          deferFiles(fileIndex + 1);
+          stopAll = true;
+          queue = [];
+          break;
+        }
+        queue = sent.slice(processedNow);
+      }
+
+      // 後始末はファイルごとに 1 回（リース衝突で終わらなかったファイルだけ）。
+      if (fileTouched && !leaseConflict) {
+        if (!(followUpKnown && orphanCandidates === 0)) {
+          try {
+            var settled = commitSettledTransactions_(fileId);
+            result.deferredCommits += Number(settled && settled.deferred || 0);
+          } catch (commitError) {
+            webAppFileError_(result, fileId, commitError);
+          }
+        }
+        try {
+          var completion = completeFileIfFullyResolved_(fileId, {readLeases: activeLeases_});
+          if (completion && completion.completed) {
+            result.completedFiles.push({fileId: fileId, fileName: fileName,
+              stateLabel: menuFileStateLabel_(completion.state)});
+          }
+        } catch (completeError) {
+          webAppFileError_(result, fileId, completeError);
+        }
+      }
+      if (fileStartedAt !== null) {
+        maxBatchMs = Math.max(maxBatchMs, partnerBatchClockNow_() - fileStartedAt);
+      }
+    }
+
+    return finish();
   });
 }
 

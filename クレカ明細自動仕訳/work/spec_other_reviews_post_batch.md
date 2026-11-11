@@ -1,12 +1,13 @@
 # 「その他の要確認」をサーバー側でまとめて計上する（第 1 段） 仕様書
 
 作成日：2026-11-10
-版：1.0
+版：1.1（1.0 からの変更：§2.2 手順 10 のリース衝突のときも部品の `errors` を写すことを書いた・pb 9 に足した・変異 P14。§10 に実装と監査の記録）
 読者：本仕様だけを読んで実装する実装者（AI を含む）。書いてあることは変えない。書いていないことは安全側で決め、決めたことは全部報告する。
 前提：`work/spec_other_reviews_server_batch.md`（全体の案。2 段に分ける決定）、`work/spec_other_reviews_bulk.md`（画面だけの版。本番 `gas-push-144`）、`work/spec_partner_batch_resolution.md`（まとめ確定の部品 55。手順の番号はこの §2.2 のもの）。
 
 改訂履歴：
 - 1.0（2026-11-10）：初版。利用者の依頼（2026-11-10）：「サーバー側でまとめる作りの第 1 段（計上する）の仕様書を書いて」。第 2 段（対象外にする）は別の仕様書にする。
+- 1.1（2026-11-11）：監査で見つけた穴。リース衝突のとき、部品がリースの前に弾いた件（手順 2）の `errors` が戻り値から消え、恒等式が崩れた（1.0 の手順 10 の書き方があいまいだった）。
 
 ---
 
@@ -119,7 +120,7 @@
       - `resolvedReviewIds` → `resolvedReviewIds` に足す。`committedReviewIds.length` → `committed` に足す。
       - `unmet` の各要素 → `unmetTexts` に `menuUnmetText_(unmet)` を足す。
       - `errors` の各要素 → `errors` に `{reviewId, code, message: webAppResolveErrorMessage_(code, message, review, txsById)}`（`txsById` は手順 8 の取引を `{fullTxId: [tx]}` の形にしたもの）。
-      - `leaseConflict` があれば：返った `skippedByLeaseReviewIds`・`notAttemptedReviewIds` と、そのファイルでまだ送っていない件を**全部** `skippedByLeaseReviewIds` に入れ、`leaseConflicts` に `{fileId, fileName, message: menuLeaseConflictText_(null)}` を 1 つ足し、**そのファイルは後始末をせずに次のファイルへ**進む（他のファイルは空いているかもしれない）。
+      - `leaseConflict` があれば（1.1：**この場合も、部品の `errors` は上の写し方どおり先に写す**。部品はリースを取る前の手順 2 で弾いた件を `errors` に入れて返すので、写さないとその件がどこにも入らず恒等式が崩れる）：返った `skippedByLeaseReviewIds`・`notAttemptedReviewIds` と、そのファイルでまだ送っていない件を**全部** `skippedByLeaseReviewIds` に入れ、`leaseConflicts` に `{fileId, fileName, message: menuLeaseConflictText_(null)}` を 1 つ足し、**そのファイルは後始末をせずに次のファイルへ**進む（他のファイルは空いているかもしれない）。
       - 返った `notAttemptedReviewIds`（部品の 100 件の上限）→ 同じファイルの次のまとまりへ回す（門を通してから）。1 件も進まなかったまとまり（送った件が全部 `notAttemptedReviewIds` で返った）なら、そのファイルの残りと後のファイルの件を `notAttemptedReviewIds` に入れて抜ける。
     - 部品が例外を投げたら：送った件を全部 `errors` に `{reviewId, code: error.code || 'RESOLVE_FAILED', message: menuOperationErrorMessage_(error)}` で積み、そのファイルの残りと後のファイルの件を `notAttemptedReviewIds` に入れ、**そのファイルの後始末だけをして**抜ける（想定外の失敗の後で他のファイルに進まない）。
 11. 後始末（件を 1 つでも部品へ渡し、リース衝突で終わらなかったファイルごとに 1 回。`webAppResolveReviews` と同じ）：
@@ -257,7 +258,7 @@
 6. **pb 6（件ごとの番人）**：同じ呼出しに、無い ID・他の顧客の要確認・確定済みの要確認・`DATE` の要確認（`POST_PRIOR_YEAR` は選べない）・ファイル単位の要確認・`ZERO_AMOUNT` に `POST_PRIOR_YEAR`・取り消した取引（同じ取引の `PARTNER` を `EXCLUDE` で対象外にした）に残った前年利用日・同じ ID の 2 回目を混ぜる。普通の件は確定し、それぞれ §2.2 の `code`（`REVIEW_NOT_FOUND`・`REVIEW_CUSTOMER_MISMATCH`・`ALREADY_SETTLED`・`OPERATION_NOT_OFFERED`・`OPERATION_NOT_OFFERED`・`OPERATION_NOT_OFFERED`・`OPERATION_DISABLED`（`message` は `disabledReason`）・`DUPLICATE_DECISION`）。失敗の件の要確認・取引は 1 セルも変わらない（I5）。恒等式が成り立つ（I7）。
 7. **pb 7（リースの中で状態を見直す）**：部品の手順 4 の読取の直前に（`withMocks` で `getTransactionsForFile_` を包み、先に元の取引を `CANCELED` へ書き換えてから元を呼ぶ）取引を取り消す → その件は `STATE_TRANSITION`、要確認は `OPEN` のまま、監査の `REVIEW_RESOLVE` は増えない（I5）。
 8. **pb 8（閉じられた要確認を上書きしない）**：部品の手順 4 の直前に（pb 7 と同じ包み方）、1 件の要確認の状態だけを `updateReviewStatus(reviewId, 'EXCLUDED', {excludeReason: …})` で閉じておく（取引は変えない）→ その件は `ALREADY_SETTLED`、要確認行は `EXCLUDED` のまま（I4）。他の件は確定する。
-9. **pb 9（リース衝突）**：他者が 1 つ目のファイルのリースを持つ → そのファイルの件は全部 `skippedByLeaseReviewIds`、`leaseConflicts` に 1 つ、そのファイルは何も変わらない。2 つ目のファイルの件は確定する。リースの行は他者の 1 行だけ残る。
+9. **pb 9（リース衝突）**：他者が 1 つ目のファイルのリースを持つ → そのファイルの件は全部 `skippedByLeaseReviewIds`、`leaseConflicts` に 1 つ、そのファイルは何も変わらない。2 つ目のファイルの件は確定する。リースの行は他者の 1 行だけ残る。（1.1）同じ形で、1 つ目のファイルの 1 件を、部品が呼ばれる直前（`resolvePartnerReviewsBatch` を包む）に要確認の状態だけ閉じておくと、その件は `errors`（`ALREADY_SETTLED`）に入り、残りは `skippedByLeaseReviewIds`、恒等式が成り立つ。
 10. **pb 10（リースを必ず返す・やり直せる）**：部品の手順 8 の頭（`allReviewRecordsAndAuditTail_`）で例外を起こす → 送った件は `errors`、後のファイルの件は `notAttemptedReviewIds`、リースの行が残らない（I6）。もう一度同じ ID で呼ぶと全件確定し、`REVIEW_RESOLVE` の監査行は件ごとにちょうど 1 行。
 11. **pb 11（時間の門）**：`withPartnerTiming` で 1 つ目のファイルの所要を 200 秒にする → 2 つ目のファイルの件は全部 `notAttemptedReviewIds`、部品は 2 回目を呼ばれない、リースの行が残らない。もう一度呼ぶと残りが確定する。
 12. **pb 12（部品の上限）**：`PARTNER_BATCH_MAX_ITEMS_` を 2 に差し替えて 1 ファイル 3 件 → 1 回の呼出しの中で部品が 2 回呼ばれ、3 件とも確定する。
@@ -307,6 +308,7 @@
 - P11：後始末（`completeFileIfFullyResolved_`）を呼ばない
 - P12：リース衝突のファイルの未送の件を `skippedByLeaseReviewIds` に入れない
 - P13：ログに `fileName` を足す
+- P14（1.1）：リース衝突のとき部品の `errors` を写さない
 
 画面：
 - Q1：計上も 1 件ずつ呼ぶ
@@ -343,3 +345,25 @@
 - **`webAppResolveReviews` の繰り返しとは共通にしない**。共通にすると取引先の経路（本番で使っている）にも手が入る。門の判定（`partnerBatchMayStart_`）と後始末の関数は共通のものを呼ぶ。
 - 1 行ごとの［確定…］は 1 件ずつのまま（1 件ならまとめても速くならない）。
 - 読取の見込み（呼出しの頭 6 回前後＋1 ファイル 12 回前後）は、部品の取引先の実測（1 ファイル 10〜12 回・11〜22 秒）からの見積もり。pb 5 の実測で置き換える。
+
+---
+
+## 10. 実装と監査の記録（2026-11-11）
+
+**実装：**OpenCode（Go の DeepSeek V4.1 Flash、worktree `go/other-reviews-post-batch`）。1 回目 4306 秒・$0.63、直し 553 秒・$0.03。変えたのは 55・80・81 と phase8・phase9 だけ。80 は足しただけ（既存の行の変更 0）。
+
+**テスト：**固定データ無しで 1913/2010（落ちるのは固定データが無いための ENOENT の 97 件だけ）。固定データを写して 2010/2010（1 回目は `ac 6` が時刻の秒またぎで落ち、2 回目で通過）。写したものは消した。
+
+**読取の実測（pb 5）：**1 ファイル 2 件 19 回・1 ファイル 20 件 19 回（件数に依らない）・2 ファイル 41 件 31 回・1 件ずつの経路は 1 件 24 回（41 件なら 1000 回前後）。取引先の名簿・辞書は読まない。§1.2 の見込み（頭 6 回＋1 ファイル 12 回）より多いので、受入で `OTHER_REVIEWS_BATCH` の `reads` を記録する。
+
+**変異：**P1〜P14・Q1〜Q9 はすべて赤（実装者の記録）。Claude が自分で入れた 2 つ：X1（計上の呼出しも手順 6 に通す＝P1 と同じ）→ pb 1・2・3 が赤、X2（部品の例外の後も次のファイルへ進む）→ pb 10 が赤。
+
+**監査で直したもの：**
+- 中：リース衝突のとき 80 が部品の `errors` を写さず、§2.2.1 の恒等式が崩れた → 写してからリース衝突を見る形に直し、pb 9 に確かめを足した（P14）。仕様書 1.1。
+- 低：既存の関数 `webAppResolveErrorMessage_` の 1 行目の改行が消えていた → 戻した。
+
+**直さずに記録したもの（低）：**
+- `STATE_TRANSITION` の文に出る取引の状態は、押した時に読んだ値（リースの中で読み直した値ではない）。取引先の経路（`webAppResolveReviews`）と同じ癖。
+- §6.3 で変えないとした `ob 11` の取込中・形式の操作中の所でも、操作名を `EXCLUDE_PRIOR_YEAR` に替えた。押せない判定は操作の分かれ目より前なので、確かめている中身は同じ。
+- 画面は、済んだ件を「まだ選んでいる件」のときだけ数える。実行中は選択を変えられないので実害なし。
+- pb 1・pb 2 の同値の比較では、取引ログの C 列（取込の実行 ID）と AR・AS 列（登録・更新日時）を除いた（別々に取り込んだ 2 つの世界を比べるため）。

@@ -160,7 +160,8 @@ module.exports = ({test, assert, gas}) => {
       'webAppFinalReview', 'webAppExplainUnknownFile', 'webAppPreviewFormat',
       'webAppSaveFormat', 'webAppRequeueFormatFiles', 'webAppReturnFileToCustomer',
       'webAppWithdrawFormat', 'webAppRunImport', 'webAppResolveReviews',
-      'webAppRecheckCustomerFixFile', 'webAppResolveOtherReview', 'webAppPartnerNames', 'webAppRecoverStuckFile']) {
+      'webAppRecheckCustomerFixFile', 'webAppResolveOtherReview', 'webAppResolveOtherReviewsBatch',
+      'webAppPartnerNames', 'webAppRecoverStuckFile']) {
       runner[name] = (...args) => {
         calls.push({name, args});
         const success = runner.success, failure = runner.failure;
@@ -3240,8 +3241,8 @@ module.exports = ({test, assert, gas}) => {
     return world.calls.filter((call) => call.name === 'webAppResolveOtherReview');
   }
   function obSuccess(extra = {}) {
-    return Object.assign({ok: true, resolved: 1, committed: 1, code: 'POST_PRIOR_YEAR',
-      typeLabel: '前年利用日', label: obLabel.POST_PRIOR_YEAR, fileName: '架空明細.csv',
+    return Object.assign({ok: true, resolved: 1, committed: 1, code: 'EXCLUDE_PRIOR_YEAR',
+      typeLabel: '前年利用日', label: obLabel.EXCLUDE_PRIOR_YEAR, fileName: '架空明細.csv',
       unmetTexts: [], completedFiles: [], errors: [], notAttempted: 0}, extra);
   }
 
@@ -3368,7 +3369,7 @@ module.exports = ({test, assert, gas}) => {
     const world = kw2World(rows, {webAppResolveOtherReview: {defer: true}});
     obCheckAll(world, false);
     obCheck(world, 'r1'); obCheck(world, 'r2'); obCheck(world, 'r3');
-    obChoose(world, 'POST_PRIOR_YEAR');
+    obChoose(world, 'EXCLUDE_PRIOR_YEAR');
     const bulk = world.ids['other-bulk-button'].fire('click')[0];
     // 押した後に選んでも、対象は押した時点の選んだ 3 件のまま（§4-2）。
     obCheck(world, 'notselected');
@@ -3376,12 +3377,12 @@ module.exports = ({test, assert, gas}) => {
     world.ids['confirm-submit'].fire('click');
     await kw2Flush();
     assert.deepEqual(JSON.parse(JSON.stringify(obResolveCalls(world).map((call) => call.args))),
-      [['C001', 'r1', 'POST_PRIOR_YEAR', {}]]);
+      [['C001', 'r1', 'EXCLUDE_PRIOR_YEAR', {}]]);
     assert.equal(world.pending.length, 1, 'only one call is in flight');
     assert.equal(world.ids['other-bulk-progress'].textContent, 'まとめて確定中… 1 / 3 件');
     world.pending.shift().reply(obSuccess()); await kw2Flush();
     assert.deepEqual(JSON.parse(JSON.stringify(obResolveCalls(world).map((call) => call.args))),
-      [['C001', 'r1', 'POST_PRIOR_YEAR', {}], ['C001', 'r2', 'POST_PRIOR_YEAR', {}]]);
+      [['C001', 'r1', 'EXCLUDE_PRIOR_YEAR', {}], ['C001', 'r2', 'EXCLUDE_PRIOR_YEAR', {}]]);
     assert.equal(world.pending.length, 1, 'only one call is in flight');
     assert.equal(world.ids['other-bulk-progress'].textContent, 'まとめて確定中… 2 / 3 件');
     world.pending.shift().reply(obSuccess()); await kw2Flush();
@@ -3391,9 +3392,9 @@ module.exports = ({test, assert, gas}) => {
     await bulk; await kw2Flush();
     assert.deepEqual(obResolveCalls(world).map((call) => call.args[1]), ['r1', 'r2', 'r3']);
     assert.deepEqual(JSON.parse(JSON.stringify(obResolveCalls(world).map((call) => call.args))),
-      [['C001', 'r1', 'POST_PRIOR_YEAR', {}],
-        ['C001', 'r2', 'POST_PRIOR_YEAR', {}],
-        ['C001', 'r3', 'POST_PRIOR_YEAR', {}]]);
+      [['C001', 'r1', 'EXCLUDE_PRIOR_YEAR', {}],
+        ['C001', 'r2', 'EXCLUDE_PRIOR_YEAR', {}],
+        ['C001', 'r3', 'EXCLUDE_PRIOR_YEAR', {}]]);
     assert.equal(obResolveCalls(world).some((call) => call.args[1] === 'notselected'), false);
     assert.equal(world.ids['other-bulk-progress'].textContent, '');
     // 実行の対象でなかった行は、押した後に選んでも選んだまま残る。
@@ -3404,12 +3405,12 @@ module.exports = ({test, assert, gas}) => {
     const world = kw2World([obRow('r1', '前年利用日'), obRow('r2', '前年利用日'), obRow('r3', '前年利用日')],
       {webAppResolveOtherReview: obSuccess()});
     obCheckAll(world, true);
-    obChoose(world, 'POST_PRIOR_YEAR');
+    obChoose(world, 'EXCLUDE_PRIOR_YEAR');
     const bulk = world.ids['other-bulk-button'].fire('click')[0];
     world.ids['confirm-submit'].fire('click');
     await bulk; await kw2Flush();
     assert.equal(world.ids.notice.textContent,
-      '「その他の要確認」 3 件をまとめて確定しました（前年の利用分として計上する）。');
+      '「その他の要確認」 3 件をまとめて確定しました（前年の利用分として対象外にする）。');
     assert.match(world.ids.notice.className, /success/);
     assert.equal(world.ui.state.otherSelectedIds.size, 0);
     assert.equal(world.ui.state.otherBulkCode, '');
@@ -3430,14 +3431,15 @@ module.exports = ({test, assert, gas}) => {
         reason: '時間が足りず確定しませんでした。もう一度押してください。', removed: false},
       {reply: new Error('通信失敗'), done: 1, reason: '通信失敗', removed: false},
       {reply: obSuccess({resolved: 1, errors: [{message: '後始末に失敗'}], typeLabel: '前年利用日'}),
-        done: 2, reason: '「前年利用日」の要確認を確定しました（前年の利用分として計上する）。取引を確定しました。',
+        done: 2, reason: '「前年利用日」の要確認を確定しました（前年の利用分として対象外にする）。' +
+          '転記行を空にし、取引を対象外にしました。',
         removed: true, detail: '後始末に失敗'}
     ];
     for (const item of cases) {
       const world = kw2World([obRow('r1', '前年利用日'), obRow('r2', '前年利用日'), obRow('r3', '前年利用日')],
         {webAppResolveOtherReview: (...args) => args[1] === 'r2' ? item.reply : obSuccess()});
       obCheckAll(world, true);
-      obChoose(world, 'POST_PRIOR_YEAR');
+      obChoose(world, 'EXCLUDE_PRIOR_YEAR');
       const bulk = world.ids['other-bulk-button'].fire('click')[0];
       world.ids['confirm-submit'].fire('click');
       await bulk; await kw2Flush();
@@ -3447,7 +3449,7 @@ module.exports = ({test, assert, gas}) => {
       assert.equal(world.ui.state.otherSelectedIds.has('r1'), false);
       const remaining = 3 - item.done;
       assert.equal(world.ids.notice.textContent,
-        item.done + ' 件を確定したところで止まりました（前年の利用分として計上する）。' +
+        item.done + ' 件を確定したところで止まりました（前年の利用分として対象外にする）。' +
         '架空明細.csv 2 行目：' + (item.reason.endsWith('。') ? item.reason : item.reason + '。') +
         '残り ' + remaining + ' 件は選んだままです。' + (item.detail || ''));
       assert.match(world.ids.notice.className, /warning/);
@@ -3465,13 +3467,13 @@ module.exports = ({test, assert, gas}) => {
       const world = kw2World([obRow('r1', '前年利用日'), obRow('r2', '前年利用日'), obRow('r3', '前年利用日')],
         {webAppResolveOtherReview: (...args) => args[1] === 'r2' ? {ok: false, code} : obSuccess()});
       obCheckAll(world, true);
-      obChoose(world, 'POST_PRIOR_YEAR');
+      obChoose(world, 'EXCLUDE_PRIOR_YEAR');
       const bulk = world.ids['other-bulk-button'].fire('click')[0];
       world.ids['confirm-submit'].fire('click');
       await bulk; await kw2Flush();
       assert.deepEqual(obResolveCalls(world).map((call) => call.args[1]), ['r1', 'r2', 'r3'], code);
       assert.equal(world.ids.notice.textContent,
-        '「その他の要確認」 2 件をまとめて確定しました（前年の利用分として計上する）。1 件は既に片付いていました。');
+        '「その他の要確認」 2 件をまとめて確定しました（前年の利用分として対象外にする）。1 件は既に片付いていました。');
       assert.match(world.ids.notice.className, /success/);
       assert.equal(world.ui.state.otherSelectedIds.size, 0);
       assert.equal(world.ui.state.otherBulkCode, '');
@@ -3482,7 +3484,7 @@ module.exports = ({test, assert, gas}) => {
     const world = kw2World([obRow('r1', '前年利用日'), obRow('r2', '前年利用日'), obRow('r3', '前年利用日')],
       {webAppResolveOtherReview: {defer: true}});
     obCheckAll(world, true);
-    obChoose(world, 'POST_PRIOR_YEAR');
+    obChoose(world, 'EXCLUDE_PRIOR_YEAR');
     const bulk = world.ids['other-bulk-button'].fire('click')[0];
     world.ids['confirm-submit'].fire('click');
     await kw2Flush();
@@ -3521,7 +3523,7 @@ module.exports = ({test, assert, gas}) => {
     const world = kw2World([obRow('r1', '前年利用日'), obRow('r2', '前年利用日'), obRow('r3', '前年利用日')],
       {webAppResolveOtherReview: {defer: true}});
     obCheckAll(world, true);
-    obChoose(world, 'POST_PRIOR_YEAR');
+    obChoose(world, 'EXCLUDE_PRIOR_YEAR');
     assert.equal(world.ids['other-bulk-stop'].hidden, true);
     const bulk = world.ids['other-bulk-button'].fire('click')[0];
     world.ids['confirm-submit'].fire('click');
@@ -3534,10 +3536,10 @@ module.exports = ({test, assert, gas}) => {
     await bulk; await kw2Flush();
     assert.equal(obResolveCalls(world).length, 1);
     assert.equal(world.ids.notice.textContent,
-      '中止しました。1 件を確定しました（前年の利用分として計上する）。残り 2 件は選んだままです。');
+      '中止しました。1 件を確定しました（前年の利用分として対象外にする）。残り 2 件は選んだままです。');
     assert.match(world.ids.notice.className, /warning/);
     assert.deepEqual(obSelected(world), ['r2', 'r3']);
-    assert.equal(world.ui.state.otherBulkCode, 'POST_PRIOR_YEAR');
+    assert.equal(world.ui.state.otherBulkCode, 'EXCLUDE_PRIOR_YEAR');
     assert.equal(world.ids['other-bulk-stop'].hidden, true);
   });
 
@@ -3545,7 +3547,7 @@ module.exports = ({test, assert, gas}) => {
     const world = kw2World([obRow('r1', '前年利用日'), obRow('r2', '前年利用日')],
       {webAppResolveOtherReview: {defer: true}});
     obCheckAll(world, true);
-    obChoose(world, 'POST_PRIOR_YEAR');
+    obChoose(world, 'EXCLUDE_PRIOR_YEAR');
     const bulk = world.ids['other-bulk-button'].fire('click')[0];
     world.ids['confirm-submit'].fire('click');
     await kw2Flush();
@@ -3565,7 +3567,7 @@ module.exports = ({test, assert, gas}) => {
     for (const busy of ['importBusy', 'formatBusy']) {
       const other = kw2World([obRow('b1', '前年利用日')]);
       obCheckAll(other, true);
-      obChoose(other, 'POST_PRIOR_YEAR');
+      obChoose(other, 'EXCLUDE_PRIOR_YEAR');
       other.ui.state[busy] = true;
       other.ui.renderSelection();
       assert.equal(other.ids['other-bulk-op'].disabled, true, busy);
@@ -3615,6 +3617,286 @@ module.exports = ({test, assert, gas}) => {
     assert.match(world.ids.notice.textContent, /の要確認を確定しました/);
     assert.deepEqual(obSelected(world), ['r2', 'r3']);
     assert.equal(world.ui.state.resolveBusy, false);
+  });
+
+  /** サーバーでまとめて計上する経路の応答（§6.2 の道具）。 */
+  function pbuReply(extra = {}) {
+    return Object.assign({ok: true, code: 'POST_PRIOR_YEAR', label: obLabel.POST_PRIOR_YEAR,
+      resolved: 3, committed: 2, resolvedReviewIds: ['r1', 'r2', 'r3'], unmetTexts: [],
+      errors: [], skippedByLeaseReviewIds: [], leaseConflicts: [], notAttemptedReviewIds: [],
+      completedFiles: [], deferredCommits: 0}, extra);
+  }
+  function pbuCalls(world) {
+    return world.calls.filter((call) => call.name === 'webAppResolveOtherReviewsBatch');
+  }
+  function pbuArgs(world) {
+    return JSON.parse(JSON.stringify(pbuCalls(world).map((call) => call.args)));
+  }
+  function pbuNoticeText(world) {
+    return world.ids.notice.textContent;
+  }
+  function pbuThreeRows() {
+    return [obRow('r1', '前年利用日'), obRow('r2', '前年利用日'), obRow('r3', '前年利用日')];
+  }
+  function pbuConfirm(code, typeLabel = '前年利用日') {
+    return '「その他の要確認」の 3 件（' + typeLabel + ' 3 件）にまとめて行います。' +
+      clientEval("TEXT.otherEffect('" + code + "', {})") +
+      ' サーバーでファイルごとにまとめて確定します（目安は 1 ファイル 20〜30 秒です）。' +
+      '途中で［中止］を押すと、処理中のまとまりが終わったところで止まります（済んだ分は戻りません）。';
+  }
+  function pbuStart(world, code = 'POST_PRIOR_YEAR', submit = true) {
+    obCheckAll(world, true);
+    obChoose(world, code);
+    const bulk = world.ids['other-bulk-button'].fire('click')[0];
+    if (submit) world.ids['confirm-submit'].fire('click');
+    return bulk;
+  }
+
+  browserAsyncTest('pbu 1: 計上はファイルごとにまとめて呼び、確認の文と進み具合を出す', async () => {
+    for (const scenario of [
+      {code: 'POST_PRIOR_YEAR', label: obLabel.POST_PRIOR_YEAR, ids: ['r1', 'r2', 'r3'],
+        rows: pbuThreeRows()},
+      {code: 'POST_ZERO_AMOUNT', label: obLabel.POST_ZERO_AMOUNT, ids: ['z1', 'z2', 'z3'],
+        typeLabel: '0円', rows: ['z1', 'z2', 'z3'].map((id) => obZeroRow(id))}
+    ]) {
+      const world = kw2World(scenario.rows, {webAppResolveOtherReviewsBatch: {defer: true}});
+      const bulk = pbuStart(world, scenario.code, false);
+      assert.equal(world.ids['confirm-dialog'].open, true);
+      assert.equal(world.ids['confirm-title'].textContent, scenario.label);
+      assert.equal(world.ids['confirm-intro'].textContent,
+        pbuConfirm(scenario.code, scenario.typeLabel || '前年利用日'));
+      assert.match(world.ids['confirm-intro'].textContent, /サーバーでファイルごとにまとめて確定します/);
+      assert.match(world.ids['confirm-intro'].textContent, /目安は 1 ファイル 20〜30 秒です/);
+      // U2: 確認で［戻る］なら 1 回も呼ばず、選択はそのまま。
+      world.ids['confirm-cancel'].fire('click');
+      await bulk;
+      assert.equal(pbuCalls(world).length, 0, 'U2: 戻るなら呼ばない');
+      assert.deepEqual(obSelected(world), scenario.ids);
+      const confirmed = pbuStart(world, scenario.code, false);
+      world.ids['confirm-submit'].fire('click');
+      await kw2Flush();
+      assert.deepEqual(pbuArgs(world), [['C001', scenario.ids, scenario.code]]);
+      assert.equal(obResolveCalls(world).length, 0, 'U6: 1 件ずつの経路を呼ばない');
+      assert.equal(world.pending.length, 1, 'U3: 応答を待つ');
+      assert.equal(world.ids['other-bulk-progress'].textContent,
+        'まとめて確定中… 済み 0 / 3 件（サーバーでファイルごとに処理しています）');
+      world.pending.shift().reply(pbuReply({code: scenario.code, label: scenario.label,
+        resolvedReviewIds: scenario.ids}));
+      await confirmed; await kw2Flush();
+      assert.equal(pbuCalls(world).length, 1, '応答の後に次を呼ばない');
+    }
+  });
+
+  browserAsyncTest('pbu 2: 全部済んだお知らせと後始末', async () => {
+    const cases = [
+      {reply: pbuReply(),
+        expected: '「その他の要確認」 3 件をまとめて確定しました（前年の利用分として計上する）。'},
+      {reply: pbuReply({unmetTexts: ['取引先が未解決']}),
+        expected: '「その他の要確認」 3 件をまとめて確定しました（前年の利用分として計上する）。' +
+          '1 件は取引がまだ確定していません（取引先が未解決）。'},
+      {reply: pbuReply({resolved: 2, resolvedReviewIds: ['r1', 'r2'],
+        completedFiles: [{fileId: 'f1', fileName: '架空明細.csv', stateLabel: '完了 (COMPLETED)'}],
+        errors: [{reviewId: 'r3', code: 'ALREADY_SETTLED', message: ''}]}),
+        expected: '「その他の要確認」 2 件をまとめて確定しました（前年の利用分として計上する）。' +
+          'ファイル 1 本の要確認がすべて片付きました。1 件は既に片付いていました。'}
+    ];
+    for (const item of cases) {
+      const world = kw2World(pbuThreeRows(), {webAppResolveOtherReviewsBatch: item.reply});
+      const bulk = pbuStart(world);
+      await bulk; await kw2Flush();
+      assert.equal(pbuNoticeText(world), item.expected);
+      assert.match(world.ids.notice.className, /success/);
+      assert.equal(world.ui.state.otherSelectedIds.size, 0);
+      assert.equal(world.ui.state.otherBulkCode, '');
+      assert.equal(world.calls.filter((call) => call.name === 'webAppListReviews').length, 1, 'U7');
+      assert.equal(world.calls.filter((call) => call.name === 'webAppListFolder').length, 1, 'U7');
+      assert.equal(world.ui.state.resolveBusy, false);
+      assert.equal(world.ui.state.finalReviewedFor, null);
+      assert.equal(world.ids['other-bulk-progress'].textContent, '');
+      assert.equal(world.ids['other-bulk-stop'].hidden, true);
+    }
+  });
+
+  browserAsyncTest('pbu 3: 戻った notAttempted のうち前に送った ID だけを続けて呼ぶ', async () => {
+    const world = kw2World(pbuThreeRows(), {webAppResolveOtherReviewsBatch: {defer: true}});
+    const bulk = pbuStart(world);
+    await kw2Flush();
+    world.pending.shift().reply(pbuReply({resolved: 2, committed: 2,
+      resolvedReviewIds: ['r1', 'r2'], notAttemptedReviewIds: ['r3', 'zz']}));
+    await kw2Flush();
+    assert.deepEqual(pbuArgs(world), [
+      ['C001', ['r1', 'r2', 'r3'], 'POST_PRIOR_YEAR'],
+      ['C001', ['r3'], 'POST_PRIOR_YEAR']
+    ]);
+    assert.equal(world.pending.length, 1);
+    assert.equal(world.ids['other-bulk-progress'].textContent,
+      'まとめて確定中… 済み 2 / 3 件（サーバーでファイルごとに処理しています）');
+    world.pending.shift().reply(pbuReply({resolved: 1, committed: 1, resolvedReviewIds: ['r3']}));
+    await bulk; await kw2Flush();
+    assert.equal(pbuNoticeText(world),
+      '「その他の要確認」 3 件をまとめて確定しました（前年の利用分として計上する）。');
+    assert.equal(world.calls.filter((call) => call.name === 'webAppListReviews').length, 1);
+    assert.equal(world.calls.filter((call) => call.name === 'webAppListFolder').length, 1);
+    assert.equal(world.ui.state.otherSelectedIds.size, 0);
+  });
+
+  browserAsyncTest('pbu 4: 失敗・リース見送り・後始末の失敗・例外・ok:false では次を呼ばない', async () => {
+    const cases = [
+      {name: 'disabled', reply: pbuReply({resolved: 1, resolvedReviewIds: ['r1'],
+        errors: [{reviewId: 'r2', code: 'OPERATION_DISABLED',
+          message: '（取引の状態 CANCELED では不可。管理者へ）'}],
+        notAttemptedReviewIds: ['r3']}),
+        message: '1 件を確定したところで止まりました（前年の利用分として計上する）。' +
+          '確定できなかった行が 1 件あります。残り 2 件は選んだままです。',
+        details: ['架空明細.csv 2 行目：この操作は選べません（取引の状態 CANCELED では不可。管理者へ）。'],
+        kept: ['r2', 'r3']},
+      {name: 'lease', reply: pbuReply({resolved: 1, resolvedReviewIds: ['r1'],
+        skippedByLeaseReviewIds: ['r2'], notAttemptedReviewIds: ['r3'],
+        leaseConflicts: [{fileId: 'f1', fileName: '架空明細.csv', message: '使用中'}]}),
+        message: '1 件を確定したところで止まりました（前年の利用分として計上する）。' +
+          'ほかの処理がファイルを使用中のため 1 件を見送りました（10 分ほど待ってからもう一度押してください）。' +
+          '残り 2 件は選んだままです。', details: [], kept: ['r2', 'r3']},
+      {name: 'cleanup', reply: pbuReply({resolved: 1, resolvedReviewIds: ['r1'],
+        errors: [{fileId: 'f1', code: 'TEST', message: '後始末に失敗'}],
+        notAttemptedReviewIds: ['r3']}),
+        message: '1 件を確定したところで止まりました（前年の利用分として計上する）。' +
+          '確定の後始末に失敗したファイルがあります。残り 2 件は選んだままです。',
+        details: ['後始末に失敗'], kept: ['r2', 'r3']},
+      {name: 'exception', reply: new Error('通信失敗'),
+        message: '0 件を確定したところで止まりました（前年の利用分として計上する）。' +
+          '通信失敗。残り 3 件は選んだままです。', details: [], kept: ['r1', 'r2', 'r3']},
+      {name: 'batchable', reply: {ok: false, code: 'OPERATION_NOT_BATCHABLE'},
+        message: '0 件を確定したところで止まりました（前年の利用分として計上する）。' +
+          '処理に失敗しました。管理者へ連絡してください。残り 3 件は選んだままです。',
+        details: [], kept: ['r1', 'r2', 'r3']}
+    ];
+    for (const item of cases) {
+      const world = kw2World(pbuThreeRows(), {webAppResolveOtherReviewsBatch: item.reply});
+      const bulk = pbuStart(world);
+      await bulk; await kw2Flush();
+      assert.equal(pbuCalls(world).length, 1, item.name + ': 次を呼ばない（U4）');
+      assert.equal(world.ids.notice.textContent,
+        item.message + item.details.join(''), item.name);
+      assert.match(world.ids.notice.className, /warning/, item.name);
+      assert.deepEqual(obSelected(world), item.kept, item.name);
+      assert.equal(world.calls.filter((call) => call.name === 'webAppListReviews').length, 1,
+        item.name + ': 読み直しは 1 回');
+      assert.equal(world.ids.notice.querySelectorAll('li').length, item.details.length, item.name);
+    }
+  });
+
+  browserAsyncTest('pbu 5: 既に片付いていた件は止めずに外す', async () => {
+    for (const code of ['ALREADY_SETTLED', 'REVIEW_NOT_FOUND']) {
+      const world = kw2World(pbuThreeRows(), {webAppResolveOtherReviewsBatch: pbuReply({
+        resolved: 2, resolvedReviewIds: ['r1', 'r3'],
+        errors: [{reviewId: 'r2', code, message: ''}]})});
+      const bulk = pbuStart(world);
+      await bulk; await kw2Flush();
+      assert.equal(pbuNoticeText(world),
+        '「その他の要確認」 2 件をまとめて確定しました（前年の利用分として計上する）。1 件は既に片付いていました。');
+      assert.match(world.ids.notice.className, /success/);
+      assert.deepEqual(obSelected(world), []);
+      assert.equal(pbuCalls(world).length, 1, code);
+    }
+  });
+
+  browserAsyncTest('pbu 6: 中止は応答の後で止まり、次の呼出しをしない', async () => {
+    const world = kw2World(pbuThreeRows(), {webAppResolveOtherReviewsBatch: {defer: true}});
+    const bulk = pbuStart(world);
+    await kw2Flush();
+    world.ids['other-bulk-stop'].fire('click');
+    assert.equal(world.ids['other-bulk-stop'].disabled, true);
+    world.pending.shift().reply(pbuReply({resolved: 1, resolvedReviewIds: ['r1'],
+      notAttemptedReviewIds: ['r2', 'r3']}));
+    await bulk; await kw2Flush();
+    assert.equal(pbuCalls(world).length, 1, 'U4');
+    assert.equal(pbuNoticeText(world),
+      '中止しました。1 件を確定しました（前年の利用分として計上する）。残り 2 件は選んだままです。');
+    assert.match(world.ids.notice.className, /warning/);
+    assert.deepEqual(obSelected(world), ['r2', 'r3']);
+    assert.equal(world.ui.state.otherBulkCode, 'POST_PRIOR_YEAR');
+    assert.equal(world.ids['other-bulk-stop'].hidden, true);
+  });
+
+  browserAsyncTest('pbu 7: 画面が変わったら次を呼ばず、お知らせも出さない', async () => {
+    const world = kw2World(pbuThreeRows(), {webAppResolveOtherReviewsBatch: {defer: true}});
+    const bulk = pbuStart(world);
+    await kw2Flush();
+    assert.equal(pbuCalls(world).length, 1);
+    const state = world.ui.state;
+    assert.notEqual(state.otherBulkRun, null);
+    // 切替の間だけ実行中の印を外し、顧客の切替の後始末（spec_other_reviews_bulk §3.3）を通す。
+    state.resolveBusy = false;
+    await world.ui.chooseCustomer('C002');
+    await kw2Flush();
+    assert.equal(state.selectedCustomerId, 'C002');
+    const reviewsAfterSwitch = world.calls.filter((call) => call.name === 'webAppListReviews').length;
+    world.pending.shift().reply(pbuReply({notAttemptedReviewIds: ['r2', 'r3']}));
+    await bulk; await kw2Flush();
+    assert.equal(pbuCalls(world).length, 1, 'U4');
+    assert.equal(world.ids.notice.textContent, '');
+    assert.equal(state.selectedCustomerId, 'C002');
+    assert.equal(state.resolveBusy, false);
+    assert.equal(state.otherBulkRun, null);
+    assert.equal(world.ids['other-bulk-progress'].textContent, '');
+    assert.equal(world.calls.filter((call) => call.name === 'webAppListReviews').length,
+      reviewsAfterSwitch, '実行の後始末からは読み直さない');
+  });
+
+  browserAsyncTest('pbu 8: 進まないときは次を呼ばず、全部済んだと言わない', async () => {
+    const stuckCases = [
+      {reply: pbuReply({resolved: 0, committed: 0, resolvedReviewIds: [],
+        notAttemptedReviewIds: ['r1', 'r2', 'r3']})},
+      {reply: pbuReply({resolved: 0, committed: 0, resolvedReviewIds: [],
+        notAttemptedReviewIds: []})}
+    ];
+    for (const item of stuckCases) {
+      const world = kw2World(pbuThreeRows(), {webAppResolveOtherReviewsBatch: item.reply});
+      const bulk = pbuStart(world);
+      await bulk; await kw2Flush();
+      assert.equal(pbuCalls(world).length, 1, 'U4');
+      assert.equal(pbuNoticeText(world),
+        '0 件を確定したところで止まりました（前年の利用分として計上する）。' +
+        '時間が足りず、残りを確定できませんでした。もう一度押してください。残り 3 件は選んだままです。');
+      assert.match(world.ids.notice.className, /warning/);
+      assert.deepEqual(obSelected(world), ['r1', 'r2', 'r3']);
+      assert.equal(world.ui.state.otherBulkCode, 'POST_PRIOR_YEAR');
+    }
+  });
+
+  browserAsyncTest('pbu 9: 実行中はすべての確定操作が押せず、二度押しても呼ばない', async () => {
+    const world = kw2World([obRow('r1', '前年利用日'), obRow('r2', '前年利用日')],
+      {webAppResolveOtherReviewsBatch: {defer: true}});
+    const bulk = pbuStart(world);
+    await kw2Flush();
+    for (const name of ['other-op', 'other-submit', 'other-date', 'other-amount'])
+      assert.equal(kw2Control(world, name) ? kw2Control(world, name).disabled : true, true, name);
+    for (const box of world.root.querySelectorAll('.other-select')) assert.equal(box.disabled, true);
+    assert.equal(world.root.querySelector('.other-select-all').disabled, true);
+    assert.equal(world.ids['other-bulk-op'].disabled, true);
+    assert.equal(world.ids['other-bulk-button'].disabled, true);
+    assert.equal(world.ids['resolve-button'].disabled, true);
+    assert.deepEqual(world.ids['other-bulk-button'].fire('click'), []);
+    assert.equal(pbuCalls(world).length, 1, 'U5');
+    world.pending.shift().reply(pbuReply({resolved: 2, resolvedReviewIds: ['r1', 'r2']}));
+    await bulk; await kw2Flush();
+    assert.equal(pbuCalls(world).length, 1);
+  });
+
+  browserAsyncTest('pbu 10: 対象外の 2 つは今のまま 1 件ずつ呼ぶ', async () => {
+    for (const code of ['EXCLUDE_PRIOR_YEAR', 'EXCLUDE']) {
+      const world = kw2World(pbuThreeRows(), {webAppResolveOtherReview: obSuccess({code,
+        label: code === 'EXCLUDE' ? obLabel.EXCLUDE : obLabel.EXCLUDE_PRIOR_YEAR})});
+      const bulk = pbuStart(world, code);
+      const intro = world.ids['confirm-intro'].textContent;
+      assert.match(intro, /1 件ずつ順に確定します（件数が多いと時間がかかります。1 分に 2〜3 件が目安です）。/);
+      assert.equal(intro.includes('サーバーでファイルごとに'), false, code);
+      await bulk; await kw2Flush();
+      assert.equal(pbuCalls(world).length, 0, 'U6: まとめての経路を呼ばない');
+      assert.deepEqual(obResolveCalls(world).map((call) => call.args[1]), ['r1', 'r2', 'r3'], code);
+      assert.deepEqual(JSON.parse(JSON.stringify(obResolveCalls(world).map((call) => call.args[2]))),
+        [code, code, code]);
+    }
   });
 
   test('rf 8: 両方の表のリンクの上にカード名を出しカード名で絞れる', () => {

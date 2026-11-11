@@ -13,6 +13,15 @@
  *
  * **結果は 1 件ずつ確定したときと同じでなければならない**（転記先の F・I 列、
  * 取引ログ、要確認行、辞書、監査）。違ってよい点は仕様書 §2.4 に挙げたものだけ。
+ *
+ * **計上の操作（`POST_PRIOR_YEAR`・`POST_ZERO_AMOUNT`）も受け付ける**
+ * （`work/spec_other_reviews_post_batch.md` §2.1）。計上は転記先にも取引ログの
+ * 取引先の列にも書かず、要確認を閉じて監査を書き、確定の 3 条件を評価するだけ
+ * である。**取引先の操作と計上の操作を 1 回の呼出しに混ぜてはならない**
+ * （混ざると手順 6 が計上の件まで通り、取引先が未解決の取引の L 列
+ * ＝取引先の解決状態を「解決済み」にしてしまう）。だから混ざっていたら
+ * 何も読まずに `TypeError` にする。**計上の呼出しでは手順 5〜7 を丸ごと飛ばす**
+ * ── 特に手順 6（取引ログ）を飛ばすので、L 列は 1 セルも変わらない。
  */
 
 /** 1 まとまりに入れる件数の上限。超えた分は手を付けずに返す（呼出し側が次へ回す）。 */
@@ -20,6 +29,11 @@ var PARTNER_BATCH_MAX_ITEMS_ = 100;
 /** 時間の門の見積もりの床と係数（取込の門 `fileStartGate` と同じ考え方）。 */
 var PARTNER_BATCH_FLOOR_MS_ = 60000;
 var PARTNER_BATCH_FACTOR_ = 2;
+/**
+ * 取引先ではなく「計上する」だけの操作。転記先にも取引ログの取引先の列にも
+ * 書かない（`work/spec_other_reviews_post_batch.md` §2.1）。
+ */
+var PARTNER_BATCH_POST_OPERATIONS_ = ['POST_PRIOR_YEAR', 'POST_ZERO_AMOUNT'];
 
 /** 門の時計。テストが差し替える。 */
 function partnerBatchClockNow_() {
@@ -45,6 +59,7 @@ function partnerBatchMayStart_(gate) {
 function partnerBatchMessage_(code) {
   var messages = {
     DUPLICATE_DECISION: '同じ要確認が複数回指定されています。',
+    DUPLICATE_TRANSACTION: '同じ取引の要確認が複数指定されています。1 件ずつ確定してください。',
     REVIEW_NOT_FOUND: '要確認が見つかりません。',
     REVIEW_CUSTOMER_MISMATCH: '指定された顧客と要確認が一致しません。',
     REVIEW_FILE_MISMATCH: '指定されたファイルと要確認が一致しません。',
@@ -144,6 +159,7 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
   var readsAtStart = apiReadCount_;
   var operations = ['ADOPT_EXISTING_PARTNER', 'RESOLVE_WITHOUT_PARTNER',
     'RESOLVE_PARTNER_UNKNOWN'];
+  var postOperations = PARTNER_BATCH_POST_OPERATIONS_;
 
   if (typeof customerId !== 'string' || !customerId.trim()) {
     throw new TypeError('customerId must be a non-empty string');
@@ -169,7 +185,8 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
     if (typeof decision.reviewId !== 'string' || !decision.reviewId) {
       throw new TypeError('decision.reviewId must be a non-empty string');
     }
-    if (operations.indexOf(decision.operation) < 0) {
+    if (operations.indexOf(decision.operation) < 0 &&
+        postOperations.indexOf(decision.operation) < 0) {
       throw new TypeError('unsupported partner resolution operation');
     }
     if (decision.operation === 'ADOPT_EXISTING_PARTNER') {
@@ -182,18 +199,37 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
     }
   });
 
+  // **取引先の操作と計上の操作を混ぜない。**計上の呼出しは手順 5〜7 を丸ごと
+  // 飛ばすので、ここで混在を許すと L 列（取引先の解決状態）に書く経路が
+  // 入り込む。呼出し側の誤りなので、何も読まずに止める。
+  var usesPartnerOperation = false;
+  var usesPostOperation = false;
+  decisions.forEach(function(decision) {
+    if (operations.indexOf(decision.operation) >= 0) usesPartnerOperation = true;
+    else usesPostOperation = true;
+  });
+  if (usesPartnerOperation && usesPostOperation) {
+    throw new TypeError('partner and posting operations must not be mixed');
+  }
+  var postingCall = usesPostOperation;
+  var operationCodes = [];
+  decisions.forEach(function(decision) {
+    if (operationCodes.indexOf(decision.operation) < 0) operationCodes.push(decision.operation);
+  });
+
   var result = {
     runId: generateId('RB'), fileId: fileId, customerId: customerId,
     resolvedReviewIds: [], committedReviewIds: [], unmet: [], errors: [],
     skippedByLeaseReviewIds: [], notAttemptedReviewIds: [], leaseConflict: null,
     learnedDictIds: [], followUp: null, ms: 0, reads: 0
   };
-  var logStats = {items: decisions.length, destinations: 0};
+  var logStats = {items: decisions.length, destinations: 0, operations: operationCodes};
   function finish() {
     result.ms = partnerBatchClockNow_() - startedAt;
     result.reads = apiReadCount_ - readsAtStart;
     Logger.log('PARTNER_BATCH ' + JSON.stringify({runId: result.runId, fileId: fileId,
-      items: logStats.items, resolved: result.resolvedReviewIds.length,
+      items: logStats.items, operations: logStats.operations,
+      resolved: result.resolvedReviewIds.length,
       committed: result.committedReviewIds.length, errors: result.errors.length,
       skippedByLease: result.skippedByLeaseReviewIds.length,
       notAttempted: result.notAttemptedReviewIds.length,
@@ -217,7 +253,8 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
       return;
     }
     seenReviewIds[reviewId] = true;
-    selected.push({decision: decision, reviewId: reviewId, failed: null});
+    selected.push({decision: decision, reviewId: reviewId,
+      post: postOperations.indexOf(decision.operation) >= 0, failed: null});
   });
 
   var customer = options.customer || getCustomerById(customerId);
@@ -263,6 +300,10 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
     commonPartnerRowsFromRecords_(commonPartnerRows)) : null;
   var proposedCommonRules = commonDictionaryRows.map(dictionaryRow_);
   var eligible = [];
+  // 同じ取引の要確認を 2 件同時に閉じると、確定（J 列）を 2 回書き、
+  // `committedReviewIds` が取引の数より多くなる。抑止キーにより同じ種別の
+  // 未解決は 1 取引に 1 件なので、1 つの操作を送る画面からは来ない形である。
+  var postingTxIds = Object.create(null);
   selected.forEach(function(item) {
     var review = reviewsById[item.reviewId];
     var decision = item.decision;
@@ -297,6 +338,9 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
             normalized: String(review.merchantNormalized), partnerName: String(decision.partnerName)});
         }
       }
+    } else if (item.post && postingTxIds[String(review.fullTxId || '')]) {
+      // 先の件で同じ取引を扱う。確定を 2 回書く前に、この件だけ止める。
+      code = 'DUPLICATE_TRANSACTION';
     }
     if (code) {
       var issueMessage = code === 'PARTNER_NAME_RETIRED' || code === 'PARTNER_NAME_VARIANT' ?
@@ -304,6 +348,7 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
       partnerBatchFail_(result, item, code, issueMessage);
       return;
     }
+    if (item.post) postingTxIds[String(review.fullTxId || '')] = true;
     item.review = review;
     eligible.push(item);
   });
@@ -342,10 +387,16 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
       var tx = matches[0];
       // 取り消し・除外で空けた行へ F・I 列を書くと、帳簿に居ない取引の行が
       // 転記先に残る（幽霊行）。1 件ずつの自動採用はこれを見ていなかった。
-      if (!code && item.decision.operation !== 'RESOLVE_WITHOUT_PARTNER' &&
+      // 計上の件も、**リースを持ってから読んだ値**で状態を確かめる。1 件ずつの
+      // 経路は画面の判定だけが守りで、リースの外で読んだ値で決まる。取り消した
+      // 取引に残った前年利用日の要確認を「計上」で閉じると、帳簿に居ない取引を
+      // 計上したと記録が残る。
+      var needsStateCheck = item.post || item.decision.operation !== 'RESOLVE_WITHOUT_PARTNER';
+      if (!code && needsStateCheck &&
           tx.transactionStatus !== TX_STATUS.REVIEW_REQUIRED &&
           tx.transactionStatus !== TX_STATUS.COMMITTED) code = 'STATE_TRANSITION';
-      if (!code && item.decision.operation !== 'RESOLVE_WITHOUT_PARTNER' &&
+      // 計上の件は転記先を見ない（書かないので）。
+      if (!code && !item.post && needsStateCheck &&
           (!Number.isInteger(Number(tx.destinationRow)) || Number(tx.destinationRow) < 1 ||
            tx.destinationRow === '' || tx.destinationRow === null || tx.destinationRow === undefined)) {
         code = 'DESTINATION_ROW_MISSING';
@@ -442,7 +493,8 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
     // 取引ログは**位置で読み直して鍵を検算してから**、自分の列だけを 1 回で書く。
     // リースを持つあいだこのファイルの取引ログを書く経路は他に無いが、行が
     // 動いていないことは確かめる（外れたら鍵列の走査へ落ちる）。
-    if (ready.length) {
+    // **計上の呼出しはここに来ない**（取引先の列を書かない。特に L 列）。
+    if (ready.length && !postingCall) {
       withScriptLock_(function() {
         var currentById = partnerBatchReadTransactions_(ready);
         var updates = [];
