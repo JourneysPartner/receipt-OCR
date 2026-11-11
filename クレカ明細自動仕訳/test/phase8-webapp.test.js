@@ -9826,4 +9826,129 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(result.error, message);
     assert.ok(WEBAPP_UI_SOURCE.includes('resultErrors.map(returnedErrorMessage)'));
   });
+
+  function waitPut(customer, fileId, minutesAgo) {
+    const lastUpdated = new Date(Math.floor((Date.now() - minutesAgo * 60000) / 1000) * 1000);
+    putCsv(customer, {fileId, name: '架空明細_' + fileId + '.csv', lastUpdated});
+    return lastUpdated;
+  }
+
+  function waitResponseFor(now, secondsAgo) {
+    return new Date(Math.floor((now - secondsAgo * 1000) / 1000) * 1000);
+  }
+
+  test('wait 3: 選んだカードフォルダ直下の待ちだけを数え、遅いほうの時刻を返す', () => {
+    const seeded = setupWorld();
+    const two = waitPut(seeded.customer, 'w3_a', 2);
+    waitPut(seeded.customer, 'w3_b', 6);
+    const otherAt = waitResponseFor(Date.now(), 60);
+    gas.stubs.createFile('w3_other', {name: 'w3_other.csv', bytes: Buffer.from('a'), contentType: 'text/csv',
+      lastUpdated: otherAt, createdTime: '2026-08-01T00:00:00Z'});
+    gas.stubs.createFolder('w3_card2', {name: '架空カード2', fileIds: ['w3_other']});
+    seeded.customer.rootFolder.subFolderIds.push('w3_card2');
+
+    const before = Date.now();
+    const result = webImport(seeded.customer, {});
+    const after = Date.now();
+    assert.equal(result.done, 0);
+    assert.equal(result.total, 0);
+    assert.equal(result.remaining, 0);
+    assert.equal(result.stoppedBy, null);
+    assert.equal(result.waitingFiles.count, 2, '別のカードフォルダの待ちは数えない');
+    assert.equal(Date.parse(result.waitingFiles.readyAt), two.getTime() + 10 * 60 * 1000);
+    const serverNow = Date.parse(result.waitingFiles.serverNow);
+    assert.ok(serverNow >= before - 1000 && serverNow <= after + 1000,
+      'serverNow は呼出しの時刻');
+  });
+
+  test('wait 4: 一部を取り込んでも転記先・取引ログ・done・total は待ちが無い世界と同じ', () => {
+    function run(withNewFile) {
+      const seeded = setupWorld({knownMerchant: true});
+      const stableAt = new Date(Math.floor((Date.now() - 60 * 60000) / 1000) * 1000);
+      putCsv(seeded.customer, {fileId: 'w4_file', name: '架空明細_w4.csv',
+        rows: ['2025/12/10,既知店,1000,仕入れ'], lastUpdated: stableAt});
+      let newAt = null;
+      if (withNewFile) newAt = waitPut(seeded.customer, 'w4_new', 5);
+      const result = webImport(seeded.customer, {});
+      const sheet = gas.stubs.getSpreadsheet(result.destinationSpreadsheetId)
+        .getSheetByName('入力用シート');
+      return {
+        result,
+        destination: plain(sheet.getDataRange().getValues()),
+        transactions: call('getTransactionsForFile_', ['w4_file']),
+        newAt
+      };
+    }
+    const baseline = run(false);
+    const imported = run(true);
+    assert.equal(imported.result.done, baseline.result.done);
+    assert.equal(imported.result.total, baseline.result.total);
+    assert.equal(imported.result.total, 1);
+    assert.equal(imported.result.remaining, baseline.result.remaining);
+    assert.equal(imported.result.stoppedBy, baseline.result.stoppedBy);
+    assert.deepEqual(imported.destination, baseline.destination, '転記先の行は同じ');
+    const pick = (tx) => ({fileId: tx.fileId, transactionStatus: tx.transactionStatus,
+      originalDate: tx.originalDate, originalMerchant: tx.originalMerchant,
+      originalAmount: tx.originalAmount, originalPurpose: tx.originalPurpose,
+      planned: tx.planned, verified: tx.verified, destinationRow: tx.destinationRow,
+      destinationSheetName: tx.destinationSheetName});
+    assert.deepEqual(imported.transactions.map(pick), baseline.transactions.map(pick),
+      '取引ログの内容は同じ');
+    assert.equal(imported.result.waitingFiles.count, 1);
+    assert.equal(Date.parse(imported.result.waitingFiles.readyAt),
+      imported.newAt.getTime() + 10 * 60 * 1000);
+  });
+
+  test('wait 5: 待ちが無ければ null、フォルダが空・取込中の戻りには waitingFiles を付けない', () => {
+    const emptyWorld = setupWorld();
+    const empty = webImport(emptyWorld.customer, {});
+    assert.equal(Object.prototype.hasOwnProperty.call(empty, 'waitingFiles'), false);
+
+    const noCandidatesWorld = setupWorld();
+    gas.stubs.createFile('w5_pdf', {name: 'w5_pdf.pdf', bytes: Buffer.from('x'),
+      contentType: 'application/pdf', lastUpdated: new Date(Date.now() - 60 * 60 * 1000),
+      createdTime: '2026-08-01T00:00:00Z'});
+    noCandidatesWorld.customer.cardFolder.fileIds.push('w5_pdf');
+    const noCandidates = webImport(noCandidatesWorld.customer, {});
+    assert.equal(noCandidates.done, 0);
+    assert.equal(noCandidates.total, 0);
+    assert.equal(Object.prototype.hasOwnProperty.call(noCandidates, 'waitingFiles'), false,
+      '候補が 0 本の戻りにも待ちが無ければ waitingFiles を付けない');
+
+    const importedWorld = setupWorld();
+    putCsv(importedWorld.customer, {fileId: 'w5_old'});
+    const imported = webImport(importedWorld.customer, {});
+    assert.equal(imported.done, 1);
+    assert.equal(Object.prototype.hasOwnProperty.call(imported, 'waitingFiles'), false,
+      '取込を走らせた後の戻りにも待ちが無ければ waitingFiles を付けない');
+
+    const seeded = setupWorld();
+    const fileId = putCsv(seeded.customer, {fileId: 'w5_file'});
+    const previousLanes = gas.evaluate('WEBAPP_IMPORT_LANES_');
+    try {
+      gas.evaluate('WEBAPP_IMPORT_LANES_=2;');
+      call('acquireLease', [seeded.customer.customerId, fileId, 'other-run',
+        'other@example.com', 'PROCESS']);
+      const preparing = call('webAppPrepareImport',
+        [seeded.customer.customerId, seeded.customer.cardId]);
+      assert.equal(preparing.stoppedBy, 'IMPORT_IN_PROGRESS');
+      assert.equal(Object.prototype.hasOwnProperty.call(preparing, 'waitingFiles'), false);
+    } finally {
+      gas.evaluate('WEBAPP_IMPORT_LANES_=' + Number(previousLanes) + ';');
+    }
+  });
+
+  test('wait 6: IMPORT_CALL には待ちの本数だけを出し、ファイル名・ID・時刻を出さない', () => {
+    const seeded = setupWorld();
+    waitPut(seeded.customer, 'w6_a', 2);
+    waitPut(seeded.customer, 'w6_b', 6);
+    webImport(seeded.customer, {});
+    const record = latestImportCall();
+    assert.equal(record.waiting, 2);
+    const text = gas.stubs.getLogs().filter((line) => line.startsWith('IMPORT_CALL ')).join('\n');
+    assert.ok(text.includes('"waiting":2'));
+    ['w6_a', 'w6_b', '架空明細_w6', 'readyAt', 'serverNow'].forEach((secret) => {
+      assert.equal(text.includes(secret), false, secret + ' をログに出さない');
+    });
+  });
 };

@@ -783,6 +783,7 @@ function webAppImportCall_(customerId, folderId, options, prepare) {
   var stages = [];
   var report = null;
   var finalResult = null;
+  var waitingFiles = null;
   var loggedError = null;
   function measureStage(name, fn) {
     var at = importClockNow_();
@@ -855,11 +856,32 @@ function webAppImportCall_(customerId, folderId, options, prepare) {
         return webAppImportResult_(0, 0, suppliedDestinationId, [], null, null);
       }
       var candidatesBeforeLease = measureStage('scan', function() {
-        return scanUnprocessedFiles(customer.customerId, {now: now})
+        var waiting = [];
+        var scanOptions = {now: now};
+        if (!prepare && !isLane) scanOptions.waiting = waiting;
+        var scanned = scanUnprocessedFiles(customer.customerId, scanOptions)
           .filter(function(candidate) {
             return Boolean(directFileIds[String(candidate.fileId)]) &&
               (!isLane || opts.fileIds.indexOf(String(candidate.fileId)) >= 0);
           });
+        if (!prepare && !isLane) {
+          var directWaiting = waiting.filter(function(item) {
+            return Boolean(directFileIds[String(item.fileId)]);
+          });
+          if (directWaiting.length) {
+            // 全部が取り込めるようになる時刻（いちばん遅い readyAt）を返す。
+            var latestReadyAt = directWaiting.reduce(function(latest, item) {
+              var at = Date.parse(item.readyAt);
+              return at > latest ? at : latest;
+            }, -Infinity);
+            waitingFiles = {
+              count: directWaiting.length,
+              readyAt: toIso8601(new Date(latestReadyAt)),
+              serverNow: toIso8601(new Date(startedAt))
+            };
+          }
+        }
+        return scanned;
       });
 
       var candidateData = measureStage('leases', function() {
@@ -885,8 +907,11 @@ function webAppImportCall_(customerId, folderId, options, prepare) {
         return webAppImportResult_(0, 0, null, [], 'IMPORT_IN_PROGRESS', null);
       }
       if (!candidates.length) {
-        return webAppImportResult_(0, 0, suppliedDestinationId, [],
+        var emptyResult = webAppImportResult_(0, 0, suppliedDestinationId, [],
           candidatesBeforeLease.length ? 'LEASE_CONFLICT' : null, null);
+        // 待ちが無いときは鍵そのものを付けない（画面は鍵の無いことを待ち無しとして扱う）。
+        if (!prepare && !isLane && waitingFiles) emptyResult.waitingFiles = waitingFiles;
+        return emptyResult;
       }
 
       var total = candidates.length;
@@ -988,8 +1013,10 @@ function webAppImportCall_(customerId, folderId, options, prepare) {
       })) {
         stoppedBy = 'LEASE_CONFLICT';
       }
-      return webAppImportResult_(done, total, destinationSpreadsheetId,
+      var importResult = webAppImportResult_(done, total, destinationSpreadsheetId,
         fileResults, stoppedBy, schemaValidation);
+      if (!prepare && !isLane && waitingFiles) importResult.waitingFiles = waitingFiles;
+      return importResult;
     });
     if (prepare) {
       if (!finalResult.fileIds) finalResult.fileIds = [];
@@ -1046,6 +1073,10 @@ function webAppImportCall_(customerId, folderId, options, prepare) {
         total: finalResult ? Number(finalResult.total) || 0 : 0,
         stoppedBy: finalResult && finalResult.stoppedBy || null
       };
+      // 待ちが無いときは waiting の鍵も付けない（既存の IMPORT_CALL の鍵の並びを保つ）。
+      if (!prepare && !isLane && waitingFiles) {
+        record.waiting = waitingFiles.count;
+      }
       if (prepare || isLane) {
         record.prepare = Boolean(prepare);
         record.lane = prepare ? null : opts.lane;

@@ -120,6 +120,64 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(moved.after.binaryHash.length, 64);
   });
 
+  function waitOneSetup() {
+    setup([
+      indexRow({fileId: 'completed1', state: 'COMPLETED'}),
+      indexRow({fileId: 'discovered1', state: 'DISCOVERED'})
+    ]);
+    const nowMs = Date.now();
+    const at = (minutesAgo, secondsAgo = 0) =>
+      new Date(Math.floor((nowMs - minutesAgo * 60 * 1000 - secondsAgo * 1000) / 1000) * 1000);
+    const old1 = at(60);
+    const five1 = at(5);
+    const nine591 = at(9, 59);
+    const target1 = at(3);
+    const discovered1 = at(3);
+    gas.stubs.createFile('old1', {name: 'old1.csv', bytes: Buffer.from('a'), lastUpdated: old1, createdTime: '2026-08-01T00:00:00Z'});
+    gas.stubs.createFile('five1', {name: 'five1.csv', bytes: Buffer.from('a'), lastUpdated: five1, createdTime: '2026-08-02T00:00:00Z'});
+    gas.stubs.createFile('nine591', {name: 'nine591.csv', bytes: Buffer.from('a'), lastUpdated: nine591, createdTime: '2026-08-03T00:00:00Z'});
+    gas.stubs.createFile('memo1', {name: 'memo1.txt', bytes: Buffer.from('a'), lastUpdated: at(1), createdTime: '2026-08-04T00:00:00Z'});
+    gas.stubs.createFile('completed1', {name: 'completed1.csv', bytes: Buffer.from('a'), lastUpdated: at(2), createdTime: '2026-08-05T00:00:00Z'});
+    gas.stubs.createFile('discovered1', {name: 'discovered1.csv', bytes: Buffer.from('a'), lastUpdated: discovered1, createdTime: '2026-08-06T00:00:00Z'});
+    gas.stubs.createFile('target1', {name: 'target1', contentType: 'application/vnd.google-apps.spreadsheet',
+      bytes: Buffer.from('a'), lastUpdated: target1, createdTime: '2026-08-07T00:00:00Z'});
+    gas.stubs.createFile('shortcut1', {name: 'shortcut1', contentType: 'application/vnd.google-apps.shortcut',
+      bytes: Buffer.from(''), targetId: 'target1', targetMimeType: 'application/vnd.google-apps.spreadsheet',
+      lastUpdated: at(60), createdTime: '2026-08-08T00:00:00Z'});
+    gas.stubs.createFolder('folder1', {fileIds: [
+      'old1', 'five1', 'nine591', 'memo1', 'completed1', 'discovered1', 'shortcut1'
+    ]});
+    return {nowMs: nowMs, times: {five1, nine591, target1, discovered1}};
+  }
+
+  test('wait 1: 待ちは取り込める種類・未登録かDISCOVERED・10分未満だけを集める', () => {
+    const material = waitOneSetup();
+    const waiting = [];
+    const candidates = plain(gas.call('scanUnprocessedFiles', ['C001', {now: material.nowMs, waiting: waiting}]));
+    assert.deepEqual(candidates.map((c) => c.fileId), ['old1']);
+    assert.deepEqual(waiting.map((w) => w.fileId).sort(),
+      ['discovered1', 'five1', 'nine591', 'shortcut1']);
+    const expected = {
+      five1: material.times.five1.getTime() + 10 * 60 * 1000,
+      nine591: material.times.nine591.getTime() + 10 * 60 * 1000,
+      discovered1: material.times.discovered1.getTime() + 10 * 60 * 1000,
+      shortcut1: material.times.target1.getTime() + 10 * 60 * 1000
+    };
+    waiting.forEach((item) => {
+      assert.equal(Date.parse(item.readyAt), expected[item.fileId], item.fileId + ' の readyAt');
+    });
+    assert.equal(new Set(waiting.map((w) => w.fileId)).size, waiting.length, '同じファイルを2回足さない');
+  });
+
+  test('wait 2: waiting の有無で候補の配列は1件も変わらない', () => {
+    const material = waitOneSetup();
+    const without = plain(gas.call('scanUnprocessedFiles', ['C001', {now: material.nowMs}]));
+    const waiting = [];
+    const withWaiting = plain(gas.call('scanUnprocessedFiles', ['C001', {now: material.nowMs, waiting: waiting}]));
+    assert.deepEqual(withWaiting, without);
+    assert.equal(waiting.length, 4);
+  });
+
   test('mode 2 is read-only: no state transition, no lease row', () => {
     const modified = new Date(Date.now() - 24 * 3600 * 1000);
     setup([indexRow({fileId: 'same1', modifiedTime: modified.toISOString(), revision: 'rev-1'})]);

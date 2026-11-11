@@ -2,10 +2,21 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-  function browserWorld(responses = {}) {
+  function browserWorld(responses = {}, options = {}) {
     // 結果だけでは、空の待ち行列で早退した本を、残った本が補えてしまう。
     // Promise.allへ渡す本の寿命を観測し、相手の返事を待っていることも確かめる。
     const promiseGroups = [];
+    const RealDate = Date;
+    let nowValue = options.now === undefined ? RealDate.now() : Number(options.now);
+    class FakeDate extends RealDate {
+      constructor(...args) {
+        if (args.length) super(...args);
+        else super(nowValue);
+      }
+      static now() { return nowValue; }
+    }
+    const intervals = new Map();
+    let nextIntervalId = 1;
     class ObservedPromise extends Promise {
       static all(values) {
         const settled = values.map(() => false);
@@ -132,9 +143,16 @@ const vm = require('node:vm');
       '    bootstrap();',
       '    globalThis.__ui = {state, el, startImport, startProgressTimer, TEXT, bootstrap, renderSelection, renderFiles, renderFormatPanel, previewFormat, saveFormat, returnFormatToCustomer, openFormat, chooseFolder, chooseCustomer, loadFinalReview, formatSetBusy, recheckCustomerFix: typeof recheckCustomerFix === "function" ? recheckCustomerFix : null};');
     const sandbox = {document, Promise: ObservedPromise, google: {script: {run: runner}}, window: {open() { return {}; }},
-      setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {}, console};
+      setTimeout, clearTimeout, setInterval(fn) { const id = nextIntervalId++; intervals.set(id, fn); return id; },
+      clearInterval(id) { intervals.delete(id); }, console,
+      Date: options.clock === true ? FakeDate : RealDate};
     vm.runInNewContext(script, sandbox);
-    return {ui: sandbox.__ui, document, calls, pending, ids, root, Node, promiseGroups};
+    function advance(ms) {
+      nowValue += Number(ms) || 0;
+      Array.from(intervals.values()).forEach((fn) => fn());
+    }
+    return {ui: sandbox.__ui, document, calls, pending, ids, root, Node, promiseGroups,
+      intervals, advance, setNow(ms) { nowValue = Number(ms); }};
   }
 
 module.exports = {browserWorld};

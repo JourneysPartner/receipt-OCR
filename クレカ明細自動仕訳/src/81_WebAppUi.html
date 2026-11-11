@@ -237,6 +237,19 @@
     .confirmation-details { margin-top: 14px; }
     .confirmation-details > summary { cursor: pointer; color: var(--brand); }
     .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px 16px; border-top: 1px solid var(--line); }
+    .wait-dialog { width: min(680px, calc(100vw - 48px)); }
+    .wait-heading { margin: 0 0 6px; font-size: 18px; }
+    .wait-big { margin: 12px 0; font-size: 44px; font-weight: 700; line-height: 1.3; }
+    .wait-big.waiting { color: var(--warn); }
+    .wait-big.ready { color: var(--ok); }
+    .wait-big.blink { animation: wait-notice-blink 1.2s ease-in-out infinite; }
+    @keyframes wait-notice-blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: .3; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .wait-big.blink { animation: none; opacity: 1; }
+    }
     @media (max-width: 1120px) {
       body { min-width: 760px; }
       .workspace { grid-template-columns: 220px minmax(340px, 1fr); }
@@ -408,6 +421,20 @@
     <div class="dialog-actions">
       <button id="confirm-cancel" type="button" class="button">戻る</button>
       <button id="confirm-submit" type="button" class="button danger">確定する</button>
+    </div>
+  </dialog>
+
+  <dialog id="wait-dialog" class="wait-dialog" role="alertdialog" aria-labelledby="wait-title" aria-describedby="wait-desc1 wait-desc2">
+    <div class="dialog-body">
+      <h2 id="wait-title" class="wait-heading"></h2>
+      <p id="wait-big" class="wait-big waiting blink"></p>
+      <p id="wait-desc1"></p>
+      <p id="wait-desc2"></p>
+      <p id="wait-desc3" hidden></p>
+    </div>
+    <div class="dialog-actions">
+      <button id="wait-run" type="button" class="button primary" hidden>記帳を実行</button>
+      <button id="wait-close" type="button" class="button">閉じる</button>
     </div>
   </dialog>
 
@@ -611,7 +638,9 @@
       'confirm-dialog', 'confirm-title', 'confirm-intro', 'confirm-new-partners',
       'confirm-new-partners-intro', 'confirm-new-partners-list', 'confirm-summary',
       'confirm-details', 'confirm-details-summary', 'confirm-list',
-      'confirm-cancel', 'confirm-submit'
+      'confirm-cancel', 'confirm-submit',
+      'wait-dialog', 'wait-title', 'wait-big', 'wait-desc1', 'wait-desc2', 'wait-desc3',
+      'wait-run', 'wait-close'
       , 'format-panel', 'format-body', 'format-close'
     ].forEach(function(id) { el[id] = document.getElementById(id); });
     var activeProgressTimers = Object.create(null);
@@ -681,6 +710,92 @@
     function stopProgressTimer(progressId) {
       var timer = activeProgressTimers[progressId];
       if (timer) timer.stop();
+    }
+
+    // 取込の待ちダイアログ。タイマーは 1 つだけ持ち、閉じるときに必ず止める。
+    var waitDialog = null;
+
+    function waitMinutesFrom(waitingFiles) {
+      var readyAt = Date.parse(waitingFiles && waitingFiles.readyAt);
+      var serverNow = Date.parse(waitingFiles && waitingFiles.serverNow);
+      if (!isFinite(readyAt) || !isFinite(serverNow)) return null;
+      var remainingMs = readyAt - serverNow;
+      return remainingMs > 0 ? Math.max(1, Math.ceil(remainingMs / 60000)) : 0;
+    }
+
+    function waitClockText(ms) {
+      var d = new Date(ms);
+      return String(d.getHours()).padStart(2, '0') + ':' +
+        String(d.getMinutes()).padStart(2, '0');
+    }
+
+    function closeWaitDialog() {
+      if (waitDialog && waitDialog.timer !== null) {
+        clearInterval(waitDialog.timer);
+      }
+      waitDialog = null;
+      el['wait-run'].hidden = true;
+      if (typeof el['wait-dialog'].close === 'function') el['wait-dialog'].close();
+      else el['wait-dialog'].removeAttribute('open');
+    }
+
+    function renderWaitDialog() {
+      var d = waitDialog;
+      if (!d) return;
+      // サーバーと画面の時計のずれを引いた残り。負なら時刻が来た後。
+      var remainingMs = d.readyAtMs - (Date.now() + d.skewMs);
+      var ready = remainingMs <= 0;
+      if (ready) {
+        el['wait-title'].textContent = '取り込めるようになりました';
+        el['wait-big'].textContent = '［記帳を実行］を押してください';
+        el['wait-big'].className = 'wait-big ready blink';
+        el['wait-desc2'].hidden = true;
+        el['wait-run'].hidden = false;
+      } else {
+        el['wait-title'].textContent = 'まだ取り込めないファイルがあります';
+        el['wait-big'].textContent = 'あと ' +
+          Math.max(1, Math.ceil(remainingMs / 60000)) + ' 分 お待ちください';
+        el['wait-big'].className = 'wait-big waiting blink';
+        el['wait-desc2'].textContent = waitClockText(d.readyAtMs - d.skewMs) +
+          ' ごろに、もう一度［記帳を実行］を押してください。';
+        el['wait-desc2'].hidden = false;
+        el['wait-run'].hidden = true;
+      }
+      el['wait-desc1'].textContent = '置いたばかりのファイルが ' + d.count +
+        ' 本あります。ファイルを置いてから 10 分たつと取り込めます。';
+      el['wait-desc3'].textContent = d.doneCount > 0 ?
+        '（ほかの ' + d.doneCount + ' 件は取り込みました）' : '';
+      el['wait-desc3'].hidden = d.doneCount <= 0;
+      if (ready && !d.reloaded) {
+        d.reloaded = true;
+        if (d.generation === state.viewGeneration &&
+            String(d.customerId) === String(state.selectedCustomerId) &&
+            String(d.folderId) === String(state.selectedFolderId)) {
+          loadFiles(d.customerId, d.folderId, d.generation);
+        }
+      }
+    }
+
+    function openWaitDialog(waitingFiles, doneCount, generation, customerId, folderId) {
+      var readyAtMs = Date.parse(waitingFiles && waitingFiles.readyAt);
+      var serverNowMs = Date.parse(waitingFiles && waitingFiles.serverNow);
+      if (!isFinite(readyAtMs) || !isFinite(serverNowMs)) return;
+      closeWaitDialog();
+      waitDialog = {
+        timer: null,
+        generation: generation,
+        customerId: customerId,
+        folderId: folderId,
+        readyAtMs: readyAtMs,
+        skewMs: serverNowMs - Date.now(),
+        count: Number(waitingFiles.count) || 0,
+        doneCount: Number(doneCount) || 0,
+        reloaded: false
+      };
+      renderWaitDialog();
+      if (typeof el['wait-dialog'].showModal === 'function') el['wait-dialog'].showModal();
+      else el['wait-dialog'].setAttribute('open', 'open');
+      waitDialog.timer = setInterval(renderWaitDialog, 1000);
     }
 
     function formatElapsed(ms) {
@@ -1906,6 +2021,7 @@
       if (isMutationBusy()) return;
       if (state.formatSaved && !await formatConfirm('保存結果を閉じる',
           '保存結果と取り消しの操作を閉じます。続けますか。')) return;
+      closeWaitDialog();
       state.viewGeneration += 1;
       invalidateOperations();
       state.selectedCustomerId = String(customerId);
@@ -1972,6 +2088,7 @@
       if (isMutationBusy()) return;
       if (state.formatSaved && !await formatConfirm('保存結果を閉じる',
           '保存結果と取り消しの操作を閉じます。続けますか。')) return;
+      closeWaitDialog();
       state.formatRequest += 1;
       state.formatFileId = null;
       state.formatDiagnosis = null;
@@ -2243,6 +2360,7 @@
       if (!customer.canImport) { showNotice(TEXT.notAssignee, 'warning'); return; }
       if (isMutationBusy()) return;
 
+      closeWaitDialog();
       var token = ++state.importRun;
       var generation = state.viewGeneration;
       var customerId = state.selectedCustomerId;
@@ -2299,7 +2417,24 @@
 
           if (remaining > 0 && !result.stoppedBy && done > 0) continue;
 
-          if (result.stoppedBy) {
+          var waitingFiles = result.waitingFiles || null;
+          var waitingCount = waitingFiles ? Number(waitingFiles.count) || 0 : 0;
+          var waitingNotice = null;
+          if (waitingCount >= 1 && !result.stoppedBy && !(remaining > 0 && done === 0)) {
+            var waitMinutes = waitMinutesFrom(waitingFiles);
+            if (waitMinutes !== null) {
+              waitingNotice = 'まだ取り込めないファイルが ' + waitingCount +
+                ' 本あります。あと ' + waitMinutes +
+                ' 分たってから、もう一度［記帳を実行］を押してください。';
+            }
+          }
+
+          if (waitingNotice !== null) {
+            if (cumulativeDone === 0) showNotice(waitingNotice, 'warning', warnings);
+            else showNotice(cumulativeDone + ' 件を取り込みました。' + waitingNotice,
+              'success', warnings);
+            openWaitDialog(waitingFiles, cumulativeDone, generation, customerId, folderId);
+          } else if (result.stoppedBy) {
             showNotice(stoppedByMessage(result.stoppedBy), 'warning', warnings);
           } else if (remaining > 0 && done === 0) {
             var failed = Array.isArray(result.fileResults) && result.fileResults.some(function(file) {
@@ -4444,6 +4579,12 @@
         closeConfirmation(); resolve(true); return;
       }
       startResolve();
+    });
+    el['wait-close'].addEventListener('click', closeWaitDialog);
+    el['wait-dialog'].addEventListener('cancel', function() { closeWaitDialog(); });
+    el['wait-run'].addEventListener('click', function() {
+      closeWaitDialog();
+      startImport();
     });
     document.querySelectorAll('[data-coming-soon]').forEach(function(button) {
       button.addEventListener('click', function() { showNotice(TEXT.comingSoon, 'info'); });

@@ -147,6 +147,8 @@ function scanUnprocessedFiles(customerId, options) {
   if (!customer) throw new MasterDataError('Unknown customer: ' + customerId);
   var now = options && options.now ? new Date(options.now) : new Date();
   var stableBefore = now.getTime() - 10 * 60 * 1000;
+  var waiting = options && Array.isArray(options.waiting) ? options.waiting : null;
+  var waitingSeen = Object.create(null);
 
   var stateByFileId = Object.create(null);
   permanentIndexRowsForScan_().forEach(function(row) {
@@ -172,7 +174,19 @@ function scanUnprocessedFiles(customerId, options) {
         }
       }
       var modified = file.modifiedTime ? new Date(file.modifiedTime).getTime() : 0;
-      return modified <= stableBefore;
+      if (!isFinite(modified)) return false;
+      if (modified <= stableBefore) return true;
+      // 10分の判定だけで外れたもの（取り込める種類・未登録かDISCOVERED）を、
+      // 候補の配列には触れずに待ちの材料として集める。読めない時刻は従来どおり
+      // 候補に残る（modified === 0 は上の条件で候補）。
+      if (waiting && !waitingSeen[String(file.id)]) {
+        waitingSeen[String(file.id)] = true;
+        waiting.push({
+          fileId: String(file.id),
+          readyAt: toIso8601(new Date(modified + 10 * 60 * 1000))
+        });
+      }
+      return false;
     })
     .map(function(file) {
       return {
