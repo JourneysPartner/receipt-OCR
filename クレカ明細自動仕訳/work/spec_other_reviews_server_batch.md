@@ -54,3 +54,5 @@
 **決定（2026-11-10 夜、利用者「よい」）：**1＝2 段に分ける。2＝画面だけの版を先に出す（同日 `bc606c9`・`gas-push-144` で本番反映）。
 
 **第 1 段の仕様書：**`work/spec_other_reviews_post_batch.md` 1.0（2026-11-10）。本書の §4 の公開関数の形は、そちらで `webAppResolveOtherReviewsBatch(customerId, reviewIds, code)`（操作は 1 つ）に決めた。第 2 段は別の仕様書にする。
+
+**第 2 段の仕様書：**`work/spec_other_reviews_exclude_batch.md` 1.0（2026-11-11）。本書 §3 の「1 件ずつと同じ番人」に加え、消す前に行を取引 ID で確かめ、消した後に読み返す。部品は 55 に足さず新しい `57_ReviewExclusionBatch.gs` にした（理由はそちらの §9）。
