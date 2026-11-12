@@ -1469,6 +1469,7 @@ function webAppResolveOtherReview(customerId, reviewId, code, inputs) {
       errors: outcome.errors.map(function(error) {
         return {code: error.code || null, message: String(error.message || '')};
       }),
+      compaction: (outcome.compactions || [])[0] || null,
       notAttempted: outcome.notAttempted, skippedByLease: outcome.skippedByLease};
   });
 }
@@ -1515,7 +1516,7 @@ function webAppResolveOtherReviewsBatch(customerId, reviewIds, code) {
       label: (MENU_RESOLVE_OPERATIONS_[code] || {}).label || code,
       resolved: 0, committed: 0, resolvedReviewIds: [], unmetTexts: [], errors: [],
       skippedByLeaseReviewIds: [], leaseConflicts: [], notAttemptedReviewIds: [],
-      completedFiles: [], deferredCommits: 0
+      completedFiles: [], deferredCommits: 0, compactions: []
     };
     var ids = reviewIds.map(function(id) {
       return id === null || id === undefined ? '' : String(id);
@@ -1739,6 +1740,9 @@ function webAppResolveOtherReviewsBatch(customerId, reviewIds, code) {
         (componentResult.skippedByLeaseReviewIds || []).forEach(function(id) {
           result.skippedByLeaseReviewIds.push(String(id));
         });
+        (componentResult.compactions || []).forEach(function(compaction) {
+          result.compactions.push(compaction);
+        });
 
         var returnedNotAttempted = (componentResult.notAttemptedReviewIds || []).map(String);
         var processedNow = Math.max(0, sent.length - returnedNotAttempted.length);
@@ -1796,8 +1800,28 @@ function webAppResolveErrorMessage_(code, message, review, txsById) {
 }
 
 
+/**
+ * 前の呼出しが残した詰める処理の印を、取引 ID の位置から直す（§2.3）。
+ * **例外は飲み込む。**直せなくても `fn()` は必ず呼び、書込は門が止める。
+ */
+function repairPendingDestinationCompaction_() {
+  try {
+    var marker = readDestinationCompactionMarker_();
+    if (!marker) return;
+    withScriptLock_(function() {
+      var fresh = readDestinationCompactionMarker_();
+      if (!fresh) return;
+      settleDestinationCompaction_(fresh, activeUserEmail_());
+    });
+  } catch (ignored) {
+    // 読めない・直せないときも印は残る（Script Properties が読めないときは
+    // 門の読取も止まる側）。`fn()` は必ず呼ぶ。
+  }
+}
+
 /** 公開関数の例外を、既存メニューと同じ日本語へ変換する。 */
 function webAppInvoke_(fn) {
+  repairPendingDestinationCompaction_();
   try {
     return fn();
   } catch (error) {

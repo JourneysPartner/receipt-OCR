@@ -349,50 +349,106 @@ function reevaluatePriorYearForTransaction_(review, customer, plannedB, actor) {
  * 許す。既に転記済みの取引を後から対象外にする場面が実際にあるためである。
  */
 function excludeTransaction_(review, operation, actor, input) {
+  input = input || {};
+  function assertExcludable_(candidate) {
+    var status = candidate ? candidate.transactionStatus : 'MISSING';
+    if (status !== TX_STATUS.REVIEW_REQUIRED && status !== TX_STATUS.COMMITTED) {
+      throw new StateTransitionError(
+        'Exclusion is not offered while the transaction is ' + status);
+    }
+    // freee取込済みの取引は、取消し（4.29）と同じ管理者判断を要する（仕様17.3）。
+    // シートの行だけ消すと、freee側に仕訳が残ったまま突合が永久に合わなくなる。
+    // このガードを迂回できる経路を1つでも残すと、53のガードは飾りになる。
+    if ((candidate.freeeStatus === FREEE_IMPORT_STATUS.IMPORTED ||
+         candidate.freeeStatus === FREEE_IMPORT_STATUS.NEEDS_FREEE_FIX) && !input.allowImported) {
+      throw new StateTransitionError(
+        'freee-imported transactions require an administrator decision: ' + review.fullTxId);
+    }
+    return status;
+  }
+  function fail(code, detail) {
+    var error = new IntegrityError(code, detail);
+    error.displayMessage = excludeBatchMessage_(code);
+    return error;
+  }
+
   var tx = getTransaction(review.fullTxId);
-  var from = tx.transactionStatus;
-  if (from !== TX_STATUS.REVIEW_REQUIRED && from !== TX_STATUS.COMMITTED) {
-    throw new StateTransitionError(
-      'Exclusion is not offered while the transaction is ' + from);
-  }
-  // freee取込済みの取引は、取消し（4.29）と同じ管理者判断を要する（仕様17.3）。
-  // シートの行だけ消すと、freee側に仕訳が残ったまま突合が永久に合わなくなる。
-  // このガードを迂回できる経路を1つでも残すと、53のガードは飾りになる。
-  if ((tx.freeeStatus === FREEE_IMPORT_STATUS.IMPORTED ||
-       tx.freeeStatus === FREEE_IMPORT_STATUS.NEEDS_FREEE_FIX) && !input.allowImported) {
-    throw new StateTransitionError(
-      'freee-imported transactions require an administrator decision: ' + review.fullTxId);
-  }
-  var customer = reviewWriteCustomer_(review);
+  var from = assertExcludable_(tx);
+  var customer = getCustomerById(review.customerId);
+  var dest = reviewWriteCustomer_(review, customer);
   var leaseId = acquireLease(review.customerId, review.fileId, input.runId || null,
     actor, LEASE_PURPOSE.WRITE_ONLY);
+  var compaction = null;
   try {
-    if (tx.destinationRow) {
-      clearTransactionRows(customer, [Number(tx.destinationRow)], leaseId, review.fileId);
+    // **リースを持ってから読み直す。**外で読んだ状態で決めると、待っている間に
+    // 取り消された取引を対象外にしてしまう（§2.1 手順 4。S3）。
+    var live = getTransaction(review.fullTxId);
+    from = assertExcludable_(live);
+
+    // 転記先と行を、まとめて対象外と同じ表で確かめる（§2.2.1。S1）。
+    var recorded = recordedDestinationOf_(live, customer);
+    if (recorded && (recorded.spreadsheetId !== String(dest.destinationSpreadsheetId) ||
+        recorded.sheetName !== String(dest.destinationSheetName))) {
+      throw fail('DESTINATION_ROW_MISMATCH',
+        'Recorded destination differs from the review destination');
     }
+    var destinationRow = live.destinationRow;
+    var hasRow = !(destinationRow === '' || destinationRow === null || destinationRow === undefined);
+    if (hasRow && !txHasDestinationRow_(live)) {
+      throw fail('DESTINATION_ROW_MISMATCH',
+        'Destination row is not a positive integer');
+    }
+    var index = buildIndex(dest, {valuesOnly: true});
+    var decision = excludeBatchClassifyRow_(dest, index,
+      {tx: live, review: review, recorded: recorded});
+    if (decision.kind === 'MISMATCH') {
+      throw fail('DESTINATION_ROW_MISMATCH',
+        'The destination row does not carry this transaction id');
+    }
+    if (decision.kind === 'CLEAR') {
+      clearTransactionRows(dest, [decision.rowNumber], leaseId, review.fileId);
+      // **消した後に読み返す。**値が残った行の取引は CANCELED にしない（S2）。
+      var verified = verifyWrittenValues(dest, [{rowNumber: decision.rowNumber,
+        fullTxId: null, values: excludeBatchEmptyValues_(dest)}]);
+      if (!verified[0] || !verified[0].ok) {
+        throw fail('DESTINATION_VALUE_MISMATCH',
+          'The cleared destination row still has a value');
+      }
+    }
+    // `ALREADY_CLEARED`・`NO_ROW` は書かない。
+
     updateTransactionStatus(review.fullTxId, from, TX_STATUS.CANCELED);
+
+    var reason = REVIEW_EXCLUDE_REASON.REVIEWER_JUDGEMENT;
+    // Z列（検出詳細）は**上書きせず追記マージ**する。元の検出詳細を消すと、
+    // なぜ要確認が立ったのかを後から追えない。
+    var mergedDetail = Object.assign({}, review.detail ? jsonCell_(review.detail, {}) : {},
+      {previousStatus: from});
+    // 要確認と監査は**リースを持ったまま**書く（手順 8 の詰める処理の前に
+    // 済ませるため。§2.1 手順 7）。
+    updateReviewStatus(review.reviewId, 'EXCLUDED', {
+      actor: actor, operation: operation, role: input.role || null,
+      excludeReason: reason, detail: mergedDetail
+    });
+    appendAudit({
+      type: 'REVIEW_RESOLVE', actor: actor, targetType: 'TRANSACTION',
+      targetId: review.fullTxId, before: {transactionStatus: from},
+      after: {transactionStatus: TX_STATUS.CANCELED, excludeReason: reason}
+    });
+
+    if (decision.kind === 'CLEAR' || decision.kind === 'ALREADY_CLEARED') {
+      compaction = compactDestinationAfterExclusion_(dest,
+        {leaseId: leaseId, fileId: review.fileId, actor: actor, customer: customer});
+    }
   } finally {
     releaseLeaseById(leaseId, 'RESOLVE_DONE');
   }
 
-  var reason = REVIEW_EXCLUDE_REASON.REVIEWER_JUDGEMENT;
-  // Z列（検出詳細）は**上書きせず追記マージ**する。元の検出詳細を消すと、
-  // なぜ要確認が立ったのかを後から追えない。
-  var mergedDetail = Object.assign({}, review.detail ? jsonCell_(review.detail, {}) : {},
-    {previousStatus: from});
-  updateReviewStatus(review.reviewId, 'EXCLUDED', {
-    actor: actor, operation: operation, role: input.role || null,
-    excludeReason: reason, detail: mergedDetail
-  });
-  appendAudit({
-    type: 'REVIEW_RESOLVE', actor: actor, targetType: 'TRANSACTION',
-    targetId: review.fullTxId, before: {transactionStatus: from},
-    after: {transactionStatus: TX_STATUS.CANCELED, excludeReason: reason}
-  });
   // `CANCELED`は終端である。確定条件を評価しない。
   return {
     reviewId: review.reviewId, operation: operation, committed: false,
-    unmetConditions: [], openReviewTypes: [], transactionStatus: TX_STATUS.CANCELED
+    unmetConditions: [], openReviewTypes: [], transactionStatus: TX_STATUS.CANCELED,
+    compaction: compaction
   };
 }
 

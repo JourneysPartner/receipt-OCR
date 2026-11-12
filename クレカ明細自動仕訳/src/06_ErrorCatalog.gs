@@ -61,6 +61,8 @@ const ERROR_CATALOG = Object.freeze({
   PRIOR_YEAR_EXCLUSION_CONFLICT: errorCatalogEntry_('前年分の除外判定と有効な既存取引が食い違う', false, 'システム管理者', null, '止まったファイルを取り消して取り込み直す'),
   TRANSACTION_ID_COLLISION: errorCatalogEntry_('表示ID衝突、または同一取引IDが転記先の複数行に存在', false, 'システム管理者', REVIEW_TYPE.INTEGRITY, '自動修復せず停止する。リースを解放し内部状態を`REVIEW_WAIT`とする'),
   DESTINATION_VALUE_MISMATCH: errorCatalogEntry_('書込後の読取値が予定値と不一致', false, 'システム管理者', REVIEW_TYPE.INTEGRITY, '`COMMITTED`にせず要確認へ回す'),
+  DESTINATION_ROW_MISMATCH: errorCatalogEntry_('転記先の行が取引の行と一致しない', false, 'システム管理者', null, '書かずに止める。転記先の行が動いていないか確かめる'),
+  DESTINATION_COMPACTION_PENDING: errorCatalogEntry_('転記先の行を詰める処理が途中で止まっている', false, 'システム管理者', null, '画面を開き直してから（F5）もう一度押す。続くときは管理者へ連絡する'),
   TRANSACTION_LOG_AMBIGUOUS: errorCatalogEntry_('同一取引IDの`有効=TRUE`行が2行以上（INV-03）', false, 'システム管理者', REVIEW_TYPE.INTEGRITY, '自動修復せず停止する'),
   LEASE_CONFLICT: errorCatalogEntry_('有効な別リースが存在、またはスクリプトロック取得不能', false, 'システム管理者', null, '当該ファイルをスキップし所有者を表示する'),
   FILE_RENAME_RETRY_EXHAUSTED: errorCatalogEntry_('ファイル名変更の再試行上限に到達', false, 'システム管理者', null, '内部状態は正しいため再転記しない。接頭辞を手動修正する'),

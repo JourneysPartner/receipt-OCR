@@ -1296,8 +1296,13 @@ module.exports = ({test, assert, gas}) => {
       ['REVIEW_REQUIRED', 'CANCELED', 'REVIEW_REQUIRED']);
     const destination = gas.stubs.getSpreadsheet('dest1').getSheetByName('入力用シート');
     const terminalRowNumber = transactionsBefore[1].destinationRow;
+    // 空いた真ん中の行は、下の取引が上へ詰まって埋まる（§2.2）。
+    assert.equal(transactionsBefore[2].destinationRow, terminalRowNumber,
+      '下の取引が上へ詰まる');
     const terminalBefore = plain(destination.getRange(terminalRowNumber, 2, 1, 5).getValues()[0]);
-    assert.deepEqual(terminalBefore, ['', '', '', '', ''], '2件目の B・F・I・K・M 列は空');
+    assert.notDeepEqual(terminalBefore, ['', '', '', '', ''], '空いた行は下の取引で詰まる');
+    assert.deepEqual(plain(destination.getRange(4, 2, 1, 5).getValues()[0]),
+      ['', '', '', '', ''], 'いちばん下に空いた行が残る');
     gas.stubs.resetUiEvents(); gas.stubs.resetApiCallCounts(); gas.stubs.resetRoundTrips();
 
     const outcome = call('applyResolveDecision_', [applyItem(partnerReviews), 'ADOPT_EXISTING_PARTNER',
@@ -1311,8 +1316,10 @@ module.exports = ({test, assert, gas}) => {
       assert.equal(plain(gas.call('getTransaction', [partnerReviews[index].fullTxId])).transactionStatus,
         'COMMITTED');
     });
-    assert.deepEqual(plain(destination.getRange(terminalRowNumber, 2, 1, 5).getValues()[0]),
-      terminalBefore, '終端取引の B・F・I・K・M 列を変えない');
+    const terminalAfter = plain(destination.getRange(terminalRowNumber, 2, 1, 5).getValues()[0]);
+    [0, 2, 3, 4].forEach((index) =>
+      assert.equal(terminalAfter[index], terminalBefore[index], '詰めた取引の値を変えない'));
+    assert.equal(terminalAfter[1], '株式会社テスト');
     assert.equal(plain(gas.call('getReviewById', [partnerReviews[1].reviewId])).status, 'OPEN');
     assert.equal(plain(gas.call('getTransaction', [partnerReviews[1].fullTxId])).transactionStatus,
       'CANCELED');
@@ -1329,6 +1336,9 @@ module.exports = ({test, assert, gas}) => {
     const seeded = setupPartnerImport(1, 3);
     const selected = seeded.reviews[1];
     const liveBefore = seeded.reviews.map((row) => plain(gas.call('getTransaction', [row.fullTxId])));
+    const beforeSheet = gas.stubs.getSpreadsheet('dest1').getSheetByName('入力用シート');
+    const thirdRowBefore = beforeSheet.getRange(Number(liveBefore[2].destinationRow), 2, 1, 6)
+      .getValues()[0];
     gas.stubs.resetUiEvents(); gas.stubs.resetApiCallCounts(); gas.stubs.resetRoundTrips();
     const storedIdentity = (row) =>
       (gas.call('normalizeMerchant', [row.merchantOriginal]) ? row.merchantOriginal : '（店名なし）') +
@@ -1354,13 +1364,14 @@ module.exports = ({test, assert, gas}) => {
       assert.equal(stored.status, index === 1 ? 'EXCLUDED' : 'OPEN');
       assert.equal(transaction.transactionStatus, index === 1 ? 'CANCELED' : 'REVIEW_REQUIRED');
     });
-    const destination = gas.stubs.getSpreadsheet('dest1').getSheetByName('入力用シート')
-      .getDataRange().getValues();
-    assert.ok(destination[liveBefore[1].destinationRow - 1].slice(1, 7).every((value) => value === ''),
-      '選んだ転記行の B・F・I・K・M・取引IDだけを空にする');
-    [0, 2].forEach((index) => {
-      assert.notEqual(destination[liveBefore[index].destinationRow - 1][6], '', '他2件の取引IDは残す');
-    });
+    const destination = gas.stubs.getSpreadsheet('dest1').getSheetByName('入力用シート');
+    // 対象外にした行は、下の取引が上へ詰まって埋まる（§2.2）。いちばん下に空いた行が残る。
+    assert.deepEqual(destination.getRange(Number(liveBefore[1].destinationRow), 2, 1, 6)
+      .getValues()[0], thirdRowBefore, '下の取引が上へ詰まる');
+    assert.deepEqual(destination.getRange(Number(liveBefore[2].destinationRow), 2, 1, 6)
+      .getValues()[0], ['', '', '', '', '', ''], '空いた行は残る');
+    assert.notEqual(destination.getRange(Number(liveBefore[0].destinationRow), 7)
+      .getValue(), '', '他の取引のIDは残す');
   });
 
   test('ops menu 16 confirmation: imported PARTNER EXCLUDE shows live transaction values', () => {

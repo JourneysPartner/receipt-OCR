@@ -148,10 +148,11 @@ function excludeOtherReviewsBatch(customerId, fileId, decisions, options) {
     runId: generateId('XB'), fileId: fileId, customerId: customerId,
     resolvedReviewIds: [], committedReviewIds: [], unmet: [], errors: [],
     skippedByLeaseReviewIds: [], notAttemptedReviewIds: [], leaseConflict: null,
-    followUp: null, ms: 0, reads: 0
+    followUp: null, compactions: [], ms: 0, reads: 0
   };
   var stats = {items: decisions.length, operations: operationCodes,
-    destinations: 0, rowsCleared: 0, alreadyCleared: 0, noRow: 0};
+    destinations: 0, rowsCleared: 0, alreadyCleared: 0, noRow: 0,
+    compacted: 0, compactionReasons: []};
   var fileTransactions = null;
   var followUpReviews = null;
   var closedReviewIds = Object.create(null);
@@ -187,6 +188,7 @@ function excludeOtherReviewsBatch(customerId, fileId, decisions, options) {
       notAttempted: result.notAttemptedReviewIds.length,
       destinations: stats.destinations, rowsCleared: stats.rowsCleared,
       alreadyCleared: stats.alreadyCleared, noRow: stats.noRow,
+      compacted: stats.compacted, compactionReasons: stats.compactionReasons,
       ms: result.ms, reads: result.reads,
       orphanCandidates: result.followUp ? result.followUp.orphanCandidates : null}));
     return result;
@@ -376,6 +378,7 @@ function excludeOtherReviewsBatch(customerId, fileId, decisions, options) {
       try {
         group.items.forEach(function(item) {
           var decision = excludeBatchClassifyRow_(group.customer, index, item);
+          item.rowDecision = decision.kind;
           if (decision.kind === 'MISMATCH') {
             partnerBatchFail_(result, item, 'DESTINATION_ROW_MISMATCH',
               excludeBatchMessage_('DESTINATION_ROW_MISMATCH'));
@@ -509,10 +512,40 @@ function excludeOtherReviewsBatch(customerId, fileId, decisions, options) {
         openNow.forEach(function(entry) {
           closedReviewIds[String(entry.item.reviewId)] = true;
           canceledTxIds[String(entry.item.review.fullTxId)] = true;
+          entry.item.resolvedNow = true;
           result.resolvedReviewIds.push(entry.item.reviewId);
         });
       });
     }
+
+    // §2.5：手順 7 の後（リースを持ったまま）。この呼出しが CLEAR・
+    // ALREADY_CLEARED で対象外にした件がある転記先だけ、1 回ずつ詰める。
+    // 詰める処理の結果は resolvedReviewIds・errors に影響しない。
+    destinationGroups.forEach(function(group) {
+      var wanted = group.items.some(function(item) {
+        return item.resolvedNow === true &&
+          (item.rowDecision === 'CLEAR' || item.rowDecision === 'ALREADY_CLEARED');
+      });
+      if (!wanted) return;
+      var compaction;
+      try {
+        compaction = compactDestinationAfterExclusion_(group.customer, {
+          leaseId: leaseId, fileId: fileId, actor: options.actor, customer: customer
+        });
+      } catch (compactionError) {
+        var compactionCode = String(compactionError && compactionError.code || 'COMPACTION_FAILED');
+        compaction = {compacted: false, reason: compactionCode,
+          reasonText: destinationCompactionReasonText_(compactionCode) ||
+            destinationCompactionReasonText_('COMPACTION_FAILED'),
+          gapsClosed: 0, rowsMoved: 0, ms: 0, reads: 0};
+      }
+      result.compactions.push(compaction);
+      if (compaction && compaction.compacted) stats.compacted += 1;
+      else if (compaction && compaction.reason &&
+          stats.compactionReasons.indexOf(compaction.reason) < 0) {
+        stats.compactionReasons.push(String(compaction.reason));
+      }
+    });
   } finally {
     releaseLeaseById(leaseId, 'RESOLVE_DONE');
   }

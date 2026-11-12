@@ -6987,11 +6987,29 @@ module.exports = ({test, assert, gas}) => {
 
   test('kw2 7: partner exclusion affects one review and rejects partner adoption paths', () => {
     const seeded = seedPartnerViaWeb({count: 2}); const review = seeded.reviews[0];
+    const fileTxsBefore = call('getTransactionsForFile_', [seeded.fileId])
+      .sort((a, b) => Number(a.sourceRow) - Number(b.sourceRow));
+    assert.equal(fileTxsBefore.length, 2);
+    const secondBefore = fileTxsBefore[1];
     for (const code of ['ADOPT_EXISTING_PARTNER', 'RESOLVE_WITHOUT_PARTNER'])
       kw2NoWrite(() => kw2Resolve(review, code, {partnerName: '既知店'}), 'OPERATION_NOT_OFFERED');
     assert.equal(kw2Resolve(review, 'EXCLUDE').resolved, 1);
     const tx = transactionFor(review);
-    for (const column of [2, 3, 4, 5, 6, 7]) assert.equal(destinationValue(review.destinationSpreadsheetId, tx.destinationRow, column), '');
+    // 空いた行は下の取引が上へ詰まる（§2.2）。対象外そのものは 1 件だけ。
+    const secondLive = call('getTransactionsForFile_', [seeded.fileId])
+      .find((item) => item.fullTxId === secondBefore.fullTxId);
+    assert.ok(secondLive);
+    assert.equal(Number(secondLive.destinationRow), Number(tx.destinationRow));
+    assert.equal(destinationValue(review.destinationSpreadsheetId,
+      secondLive.destinationRow, 7), secondBefore.fullTxId);
+    for (const column of [2, 4, 5, 6]) {
+      assert.notEqual(destinationValue(review.destinationSpreadsheetId,
+        secondLive.destinationRow, column), '');
+    }
+    for (const column of [2, 3, 4, 5, 6, 7]) {
+      assert.equal(destinationValue(review.destinationSpreadsheetId,
+        secondBefore.destinationRow, column), '');
+    }
     assert.equal(tx.transactionStatus, 'CANCELED');
     assert.ok(!['OPEN', 'IN_PROGRESS'].includes(reviewById(review.reviewId).status));
     assert.equal(reviewById(seeded.reviews[1].reviewId).status, 'OPEN');
@@ -7912,7 +7930,9 @@ module.exports = ({test, assert, gas}) => {
     const singleReviews = singles.reviews.filter((review) => review.reviewType === 'PRIOR_YEAR')
       .sort((a, b) => pbSourceRow(a) - pbSourceRow(b));
     assert.equal(singleReviews.length, 3);
-    singleReviews.forEach((review) =>
+    // 詰める処理が入ったので、1 件ずつは下から対象外にする（どの行も動かない）。
+    // 上から消すと、消すたびに下の取引が上へ詰まり、まとめての AE と比べられない。
+    singleReviews.slice().reverse().forEach((review) =>
       assert.equal(pbResolve(review, 'EXCLUDE_PRIOR_YEAR').resolved, 1));
     const singleState = pbComparable(singles);
 
@@ -7952,7 +7972,9 @@ module.exports = ({test, assert, gas}) => {
       .sort((a, b) => pbSourceRow(a) - pbSourceRow(b));
     assert.equal(singleReviews.filter((review) => review.reviewType === 'ZERO_AMOUNT').length, 2);
     assert.equal(singleReviews.filter((review) => review.reviewType === 'DATE').length, 1);
-    singleReviews.forEach((review) => assert.equal(pbResolve(review, 'EXCLUDE').resolved, 1));
+    // 詰める処理が入ったので、1 件ずつは下から対象外にする（どの行も動かない）。
+    singleReviews.slice().reverse().forEach((review) =>
+      assert.equal(pbResolve(review, 'EXCLUDE').resolved, 1));
     const singleState = pbComparable(singles);
 
     const batched = pbWorld(files);
@@ -8005,7 +8027,6 @@ module.exports = ({test, assert, gas}) => {
         .getRange(review._rowNumber, 1, 1, 32).getValues()[0])
     }));
     const destinationBefore = xbDestinationRows();
-    const clearIndices = xbClearIndices();
     const result = xbBatch(targets.map((review) => review.reviewId), 'EXCLUDE_PRIOR_YEAR');
     assert.equal(result.resolved, 2);
 
@@ -8045,54 +8066,89 @@ module.exports = ({test, assert, gas}) => {
       [17, 21, 22].forEach((index) => assert.equal(after[index], row[index]));
     });
 
-    // X1：転記先で変わるのは、対象の行の消す列のうち、もと値があったセルだけ。
-    const beforeById = Object.create(null);
-    destinationBefore.forEach((entry) => { beforeById[entry.id] = entry.rows; });
-    const expected = [];
-    targets.forEach((review) => {
-      const tx = transactionFor(review);
-      const rowNumber = Number(tx.destinationRow);
-      const beforeRow = (beforeById[review.destinationSpreadsheetId] || [])[rowNumber - 1] || [];
-      clearIndices.forEach((index) => {
-        const value = beforeRow[index];
-        if (value === '' || value === null || value === undefined) return;
-        expected.push({id: review.destinationSpreadsheetId, row: rowNumber, column: index + 1});
+    // X1：詰めた後の転記先の全セルを、前の転記先から組み立てて深く比べる
+    // （§2.2。C1）。対象外にした行を除き、下の取引の動かす列を上へ寄せ、
+    // 空く行の動かす列を雛形の行と同じにする。比べる列・雛形より下・
+    // 他の転記先は変えない。
+    const customer = call('getCustomerById', ['C001']);
+    const mapping = customer.columnMapping || {};
+    const moveKeys = ['txId', 'b', 'f', 'i', 'k', 'm'];
+    if (mapping.L) moveKeys.push('l');
+    if (mapping.C) moveKeys.push('c');
+    if (mapping.G) moveKeys.push('g');
+    const moveColumns = moveKeys.map((key) => call('writeColumnNumber_', [customer, key]));
+    const txColumn = call('writeColumnNumber_', [customer, 'txId']);
+    const firstDataRow = Number(customer.headerRow) + 1;
+    const beforeSheet = destinationBefore.find((entry) =>
+      entry.id === targets[0].destinationSpreadsheetId).rows;
+    const excludedRows = targets.map((review) =>
+      Number(transactionFor(review).destinationRow));
+    const idAt = (row) => String((row || [])[txColumn - 1] || '');
+    const liveRows = [];
+    for (let row = firstDataRow; row <= beforeSheet.length; row += 1) {
+      if (excludedRows.indexOf(row) >= 0) continue;
+      if (idAt(beforeSheet[row - 1]) !== '') liveRows.push(row);
+    }
+    const lastTxRow = liveRows.length ? liveRows[liveRows.length - 1] : 0;
+    const emptyRows = [];
+    for (let row = firstDataRow; row <= lastTxRow; row += 1) {
+      if (excludedRows.indexOf(row) >= 0 || idAt(beforeSheet[row - 1]) === '') {
+        emptyRows.push(row);
+      }
+    }
+    assert.ok(emptyRows.length > 0, '空き行がある');
+    const firstEmptyRow = emptyRows[0];
+    const moving = liveRows.filter((row) => row > firstEmptyRow);
+    const templateRow = lastTxRow + 1;
+    const expectedRows = beforeSheet.map((row) => row.slice());
+    moveColumns.forEach((column) => {
+      moving.forEach((row, offset) => {
+        expectedRows[firstEmptyRow - 1 + offset][column - 1] =
+          beforeSheet[row - 1][column - 1];
       });
+      for (let row = firstEmptyRow + moving.length; row <= lastTxRow; row += 1) {
+        expectedRows[row - 1][column - 1] = beforeSheet[templateRow - 1][column - 1];
+      }
     });
-    const diffs = xbChangedCells(destinationBefore, xbDestinationRows());
-    const sortKey = (entry) => [entry.id, entry.row, entry.column].join(':');
-    assert.deepEqual(diffs.map(sortKey).sort(), expected.map(sortKey).sort());
+    xbDestinationRows().forEach((entry, index) => {
+      const expected = entry.id === targets[0].destinationSpreadsheetId ?
+        expectedRows : destinationBefore[index].rows;
+      assert.deepEqual(entry.rows, expected, entry.id);
+    });
     assert.ok(destinationBefore.length >= 2, '雛形と複製の両方を見る');
   });
 
   test('xb 4: 行を取引IDで確かめ、合わない件には1セルも書かない', () => {
     const cases = [
-      ['別の取引のIDが入っている', ({target, third, destSheet}) => {
+      ['別の取引のIDが入っている', false, 'ROW_LOG_MISMATCH', ({target, third, destSheet}) => {
         destSheet.getRange(Number(transactionFor(target).destinationRow), 7)
           .setValue(transactionFor(third).fullTxId);
       }],
-      ['行が動いた', ({target, destSheet}) => {
+      ['行が動いた', false, 'MANUAL_EDIT', ({target, destSheet}) => {
         const tx = transactionFor(target);
         const row = Number(tx.destinationRow);
         const moved = destSheet.getRange(row, 2, 1, 6).getValues();
         destSheet.getRange(row + 4, 2, 1, 6).setValues(moved);
         destSheet.getRange(row, 2, 1, 6).setValues([['', '', '', '', '', '']]);
       }],
-      ['取引ログの転記先が違う', ({target}) => {
+      // 対象の取引は F より上にあるので、詰める処理は正当に走る（§2.2.6）。
+      ['取引ログの転記先が違う', true, null, ({target}) => {
         setTxCell(target.fullTxId, 29, 'dest_other');
       }],
-      ['取引IDが2行にある', ({target, destSheet}) => {
+      ['取引IDが2行にある', false, 'MANUAL_EDIT', ({target, destSheet}) => {
         const tx = transactionFor(target);
         destSheet.getRange(Number(tx.destinationRow) + 4, 7).setValue(tx.fullTxId);
       }],
-      ['取引ログの転記先が空で、行も空', ({target, destSheet}) => {
+      // 転記先の記録（AC）が空でも、要確認の M 列がこの転記先（複製）を指す取引は
+      // 詰めてはいけない（§2.2.6、`cmp 17` (d)）。
+      ['取引ログの転記先が空で、行も空', false, 'ROW_LOG_MISMATCH', ({target, destSheet}) => {
         const tx = transactionFor(target);
         setTxCell(target.fullTxId, 29, '');
         destSheet.getRange(Number(tx.destinationRow), 2, 1, 6)
           .setValues([['', '', '', '', '', '']]);
       }]
     ];
-    for (const [name, tamper] of cases) {
+    for (const [name, compacts, reason, tamper] of cases) {
       const seeded = pbWorld([{fileId: 'xb4_file', name: '架空行確認.csv', rows: [
         '2025/01/05,既知店,1100,仕入れ',
         '2025/01/06,既知店,1200,仕入れ',
@@ -8100,6 +8156,8 @@ module.exports = ({test, assert, gas}) => {
       const [target, other, third] = pbFileReviews('xb4_file', 'PRIOR_YEAR');
       const targetReview = reviewById(target.reviewId);
       const destSheet = xbSheet(target.destinationSpreadsheetId, target.destinationSheetName);
+      // 詰める前の行番号を控える（詰めると動く取引の AE が変わる）。
+      const otherRow = Number(transactionFor(other).destinationRow);
       tamper({target, other, third, destSheet});
       const targetBefore = pbItemState(reviewById(target.reviewId));
       const targetRowBefore = xbRowValues(targetReview);
@@ -8111,13 +8169,71 @@ module.exports = ({test, assert, gas}) => {
       assert.deepEqual(result.resolvedReviewIds, [other.reviewId], name);
       assert.deepEqual(pbItemState(reviewById(target.reviewId)), targetBefore, name);
       assert.deepEqual(xbRowValues(targetReview), targetRowBefore, name);
-      const allowed = {id: other.destinationSpreadsheetId, row: Number(transactionFor(other).destinationRow)};
-      xbChangedCells(destinationBefore, xbDestinationRows()).forEach((diff) => {
-        assert.equal(diff.id, allowed.id, name);
-        assert.equal(diff.row, allowed.row, name);
-        assert.equal(xbClearIndices().indexOf(diff.column - 1) >= 0, true, name);
+      assert.equal(result.compactions.length, 1, name);
+      const compaction = result.compactions[0];
+      if (!compacts) {
+        assert.equal(compaction.compacted, false, name);
+        assert.equal(compaction.reason, reason, name);
+        const allowed = {id: other.destinationSpreadsheetId, row: otherRow};
+        xbChangedCells(destinationBefore, xbDestinationRows()).forEach((diff) => {
+          assert.equal(diff.id, allowed.id, name);
+          assert.equal(diff.row, allowed.row, name);
+          assert.equal(xbClearIndices().indexOf(diff.column - 1) >= 0, true, name);
+        });
+        assert.equal(xbDestinationRows().length, destinationBefore.length, name);
+        continue;
+      }
+      // (c) だけは詰めた後の正確な状態を、前の転記先から組み立てて全セルで比べる
+      // （`xb 3` と同じ組み立て方）。対象外にした `other` の行を除き、下の取引の
+      // 動かす列を上へ寄せ、空く行の動かす列を雛形の行と同じにする。
+      assert.equal(compaction.compacted, true, name);
+      assert.equal(compaction.reason, null, name);
+      const customer = call('getCustomerById', ['C001']);
+      const mapping = customer.columnMapping || {};
+      const moveKeys = ['txId', 'b', 'f', 'i', 'k', 'm'];
+      if (mapping.L) moveKeys.push('l');
+      if (mapping.C) moveKeys.push('c');
+      if (mapping.G) moveKeys.push('g');
+      const moveColumns = moveKeys.map((key) => call('writeColumnNumber_', [customer, key]));
+      const txColumn = call('writeColumnNumber_', [customer, 'txId']);
+      const firstDataRow = Number(customer.headerRow) + 1;
+      const beforeSheet = destinationBefore.find((entry) =>
+        entry.id === target.destinationSpreadsheetId).rows;
+      const idAt = (row) => String((row || [])[txColumn - 1] || '');
+      const clearedRows = [otherRow];
+      const liveRows = [];
+      for (let row = firstDataRow; row <= beforeSheet.length; row += 1) {
+        if (clearedRows.indexOf(row) >= 0) continue;
+        if (idAt(beforeSheet[row - 1]) !== '') liveRows.push(row);
+      }
+      const lastTxRow = liveRows.length ? liveRows[liveRows.length - 1] : 0;
+      const emptyRows = [];
+      for (let row = firstDataRow; row <= lastTxRow; row += 1) {
+        if (clearedRows.indexOf(row) >= 0 || idAt(beforeSheet[row - 1]) === '') {
+          emptyRows.push(row);
+        }
+      }
+      assert.ok(emptyRows.length > 0, name + ': 空き行がある');
+      const firstEmptyRow = emptyRows[0];
+      const moving = liveRows.filter((row) => row > firstEmptyRow);
+      const templateRow = lastTxRow + 1;
+      const expectedRows = beforeSheet.map((row) => row.slice());
+      moveColumns.forEach((column) => {
+        moving.forEach((row, offset) => {
+          expectedRows[firstEmptyRow - 1 + offset][column - 1] =
+            beforeSheet[row - 1][column - 1];
+        });
+        for (let row = firstEmptyRow + moving.length; row <= lastTxRow; row += 1) {
+          expectedRows[row - 1][column - 1] = beforeSheet[templateRow - 1][column - 1];
+        }
       });
-      assert.equal(xbDestinationRows().length, destinationBefore.length, name);
+      const afterAll = xbDestinationRows();
+      assert.equal(afterAll.length, destinationBefore.length, name);
+      afterAll.forEach((entry, index) => {
+        const expected = entry.id === target.destinationSpreadsheetId ?
+          expectedRows : destinationBefore[index].rows;
+        assert.deepEqual(entry.rows, expected, name + ' ' + entry.id);
+      });
     }
   });
 
@@ -8127,7 +8243,8 @@ module.exports = ({test, assert, gas}) => {
       '2025/01/06,既知店,1200,仕入れ']}];
     const singles = pbWorld(files);
     const singleReviews = pbFileReviews('xb5_file', 'PRIOR_YEAR');
-    singleReviews.forEach((review) =>
+    // 詰める処理が入ったので、1 件ずつは下から対象外にする（どの行も動かない）。
+    singleReviews.slice().reverse().forEach((review) =>
       assert.equal(pbResolve(review, 'EXCLUDE_PRIOR_YEAR').resolved, 1));
     const singleState = pbComparable(singles);
 

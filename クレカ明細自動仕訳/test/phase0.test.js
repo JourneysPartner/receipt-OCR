@@ -88,6 +88,7 @@ module.exports = function registerPhase0Tests({test, assert, gas}) {
       'SHORTCUT_FISCAL_YEAR_REQUIRED', 'SHORTCUT_TARGET_TRASHED',
       'PRIOR_YEAR_EXCLUSION_CONFLICT',
       'TRANSACTION_ID_COLLISION', 'DESTINATION_VALUE_MISMATCH',
+      'DESTINATION_ROW_MISMATCH', 'DESTINATION_COMPACTION_PENDING',
       'TRANSACTION_LOG_AMBIGUOUS', 'LEASE_CONFLICT',
       'FILE_RENAME_RETRY_EXHAUSTED', 'FILE_NOT_FOUND',
       'CONTINUATION_TRIGGER_CREATE_FAILED', 'QUOTA_WAIT_REQUIRED',
@@ -97,7 +98,7 @@ module.exports = function registerPhase0Tests({test, assert, gas}) {
       'REQUIRED_LOG_WRITE_FAILED', 'PARTNER_NAME_RETIRED', 'PARTNER_NAME_VARIANT',
       'COMMON_DICTIONARY_DIFFERENT_PARTNER'
     ];
-    assert.equal(errorCodes.length, 58);
+    assert.equal(errorCodes.length, 60);
     assert.deepEqual(gas.json('Object.keys(ERROR_CATALOG).sort()'), errorCodes.sort());
     assert.equal(
       gas.evaluate('Object.values(ERROR_CATALOG).every(function(e) { return typeof e.message === "string" && typeof e.retryable === "boolean" && Object.prototype.hasOwnProperty.call(e, "handler") && Object.prototype.hasOwnProperty.call(e, "reviewType") && typeof e.guidance === "string"; })'),

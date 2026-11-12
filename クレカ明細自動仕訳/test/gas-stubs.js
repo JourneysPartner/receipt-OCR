@@ -783,7 +783,59 @@ function createGasStubs() {
     },
     batchUpdate(request, spreadsheetId) {
       const spreadsheet = openSpreadsheet(spreadsheetId); const replies = [];
-      for (const item of request.requests || []) {
+      const items = (request && request.requests) || [];
+      // GridRange（0 始まり・終端は含まない）を、スタブの行・列（1 始まり）へ。
+      const grid = (spec) => {
+        if (!spec) throw new Error('GridRange is required');
+        const sheet = spreadsheet.getSheets()
+          .find((candidate) => candidate.getSheetId() === Number(spec.sheetId));
+        if (!sheet) throw new Error(`Unknown sheetId: ${spec.sheetId}`);
+        const startRowIndex = Number(spec.startRowIndex);
+        const endRowIndex = Number(spec.endRowIndex);
+        const startColumnIndex = Number(spec.startColumnIndex);
+        const endColumnIndex = Number(spec.endColumnIndex);
+        if (![startRowIndex, endRowIndex, startColumnIndex, endColumnIndex].every(Number.isInteger) ||
+            startRowIndex < 0 || startColumnIndex < 0 ||
+            endRowIndex <= startRowIndex || endColumnIndex <= startColumnIndex) {
+          throw new Error(`Invalid GridRange: ${JSON.stringify(spec)}`);
+        }
+        return {sheet, row: startRowIndex + 1, column: startColumnIndex + 1,
+          rows: endRowIndex - startRowIndex, columns: endColumnIndex - startColumnIndex};
+      };
+      // **全部を確かめてから適用する。**知らない要求が 1 つでもあれば何も変えない。
+      items.forEach((item) => {
+        if (item.addSheet) {
+          if (!item.addSheet.properties || !item.addSheet.properties.title) {
+            throw new Error('addSheet requires properties.title');
+          }
+        } else if (item.insertDimension || item.deleteDimension) {
+          const operation = item.insertDimension || item.deleteDimension;
+          const range = operation.range;
+          if (!range || range.dimension !== 'ROWS') {
+            throw new Error('Stub supports row dimensions only');
+          }
+          const sheet = spreadsheet.getSheets()
+            .find((candidate) => candidate.getSheetId() === range.sheetId);
+          if (!sheet) throw new Error(`Unknown sheetId: ${range.sheetId}`);
+          if (!Number.isInteger(range.startIndex) || !Number.isInteger(range.endIndex) ||
+              range.startIndex < 0 || range.endIndex <= range.startIndex) {
+            throw new Error('Invalid row dimension range');
+          }
+        } else if (item.copyPaste) {
+          const copy = item.copyPaste;
+          if (copy.pasteType !== 'PASTE_NORMAL' || copy.pasteOrientation !== 'NORMAL') {
+            throw new Error(`Unsupported copyPaste options: ${JSON.stringify(copy)}`);
+          }
+          const source = grid(copy.source);
+          const destination = grid(copy.destination);
+          if (source.rows !== destination.rows || source.columns !== destination.columns) {
+            throw new Error('copyPaste source and destination must be the same size');
+          }
+        } else {
+          throw new Error(`Unsupported Sheets.batchUpdate request: ${JSON.stringify(item)}`);
+        }
+      });
+      for (const item of items) {
         if (item.addSheet) {
           const properties = item.addSheet.properties;
           const sheet = spreadsheet.insertSheet(properties.title, {
@@ -794,11 +846,35 @@ function createGasStubs() {
         } else if (item.insertDimension || item.deleteDimension) {
           const operation = item.insertDimension || item.deleteDimension; const range = operation.range;
           const sheet = spreadsheet.getSheets().find((candidate) => candidate.getSheetId() === range.sheetId);
-          if (range.dimension !== 'ROWS') throw new Error('Stub supports row dimensions only');
           if (item.insertDimension) sheet.insertRowsAfter(range.startIndex, range.endIndex - range.startIndex);
           else sheet.deleteRows(range.startIndex + 1, range.endIndex - range.startIndex);
           replies.push({});
-        } else throw new Error(`Unsupported Sheets.batchUpdate request: ${JSON.stringify(item)}`);
+        } else {
+          const copy = item.copyPaste;
+          const source = grid(copy.source);
+          const destination = grid(copy.destination);
+          // 元の値・数式・書式を先に控えてから、同じ大きさの先へ書く。
+          const values = source.sheet._read(source.row, source.column,
+            source.rows, source.columns, false);
+          const formulas = source.sheet._read(source.row, source.column,
+            source.rows, source.columns, true);
+          const formats = Array.from({length: source.rows}, (_, r) =>
+            Array.from({length: source.columns}, (_, c) =>
+              source.sheet._format(source.row + r, source.column + c)));
+          values.forEach((row, r) => row.forEach((value, c) => {
+            const rowNumber = destination.row + r;
+            const columnNumber = destination.column + c;
+            destination.sheet._write(rowNumber, columnNumber, [[value]], false);
+            if (formulas[r][c] !== '') {
+              destination.sheet._write(rowNumber, columnNumber, [[formulas[r][c]]], true);
+            } else if (value === '') {
+              // 空のセルは数式も消す（`_write` は空文字で既存の数式を残す）。
+              destination.sheet._write(rowNumber, columnNumber, [['']], true);
+            }
+            destination.sheet._setFormat(rowNumber, columnNumber, formats[r][c]);
+          }));
+          replies.push({});
+        }
       }
       return {replies};
     }

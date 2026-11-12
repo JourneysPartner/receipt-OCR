@@ -222,7 +222,26 @@ function verifyActiveLease(leaseId, runId) {
 }
 
 function assertLeaseHeldForWrite(fileId, leaseId) {
-  var matches = activeLeases_().filter(function(lease) { return lease.fileId === String(fileId) && lease.leaseId === String(leaseId); });
+  // 印（`58`）が残っている間は、その顧客の転記先への書込を全部止める。
+  // 転記先と取引ログは別のスプレッドシートなので、間で止まると AE が別の
+  // 取引の行を指す。そのまま解決操作を通すと別の取引の行を上書きする（§2.4）。
+  // **印を読めないときは例外のまま**（止まる側）。壊れているときは全部止める。
+  var marker = readDestinationCompactionMarker_();
+  var leases = activeLeases_();
+  if (marker) {
+    var blocked = true;
+    if (!marker.broken && marker.customerId !== undefined && marker.customerId !== null) {
+      var held = leases.filter(function(lease) { return lease.leaseId === String(leaseId); })[0];
+      blocked = !held || String(held.customerId) === String(marker.customerId);
+    }
+    if (blocked) {
+      var error = new IntegrityError('DESTINATION_COMPACTION_PENDING',
+        'A destination compaction marker is still pending');
+      error.displayMessage = DESTINATION_COMPACTION_GATE_TEXT_;
+      throw error;
+    }
+  }
+  var matches = leases.filter(function(lease) { return lease.fileId === String(fileId) && lease.leaseId === String(leaseId); });
   if (matches.length !== 1) throw leaseConflict_('Required write lease is not held');
 }
 

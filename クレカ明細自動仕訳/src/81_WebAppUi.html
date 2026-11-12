@@ -492,7 +492,7 @@
         if (code === 'POST_ZERO_AMOUNT' || code === 'POST_PRIOR_YEAR')
           return '要確認を確定し、いまの転記行の内容をそのまま残します。取り消せません（戻すには管理者の操作が必要です）。';
         if (code === 'EXCLUDE' || code === 'EXCLUDE_PRIOR_YEAR')
-          return '転記行の B・F・I・K・M列と取引 ID を空にし、取引を対象外にします。取り消せません（戻すには管理者による再取込が必要です）。';
+          return '転記行を消し、下の行を上へ詰めて、取引を対象外にします（安全に詰められないときは行を空けたままにします）。取り消せません（戻すには管理者による再取込が必要です）。';
         if (code === 'CONFIRM_EMPTY_FILE')
           return '0 件で正しいことを記録し、ファイルを【完了】にします。転記先には何も書きません。取り消せません（戻すには管理者の操作が必要です）。';
         if (['APPROVE_COUNT_MISMATCH', 'APPROVE_SCAN_TRUNCATION', 'REGISTER_FORMAT', 'CONFIRM_DESTINATION_FIXED'].indexOf(code) >= 0)
@@ -3058,7 +3058,7 @@
       var targetById = Object.create(null);
       targets.forEach(function(review) { targetById[String(review.reviewId)] = review; });
       var done = 0, already = 0, canceled = false, changed = false, stopped = null;
-      var unmetTexts = [], completedFiles = 0;
+      var unmetTexts = [], completedFiles = 0, compactions = [];
       var pending = targets.map(function(review) { return String(review.reviewId); });
 
       try {
@@ -3117,6 +3117,9 @@
           });
           (result.unmetTexts || []).forEach(function(text) { unmetTexts.push(String(text)); });
           completedFiles += (result.completedFiles || []).length;
+          (result.compactions || []).forEach(function(compaction) {
+            compactions.push(compaction);
+          });
 
           var returned = Object.create(null);
           (result.notAttemptedReviewIds || []).forEach(function(reviewId) {
@@ -3176,12 +3179,39 @@
           '時間が足りず、残りを確定できませんでした。もう一度押してください。残り ' +
           remaining + ' 件は選んだままです。', 'warning');
       } else {
-        showNotice('「その他の要確認」 ' + done + ' 件をまとめて確定しました（' + label + '）。' +
+        var successMessage = '「その他の要確認」 ' + done + ' 件をまとめて確定しました（' + label + '）。' +
           (unmetTexts.length ? unmetTexts.length + ' 件は取引がまだ確定していません（' +
             unmetTexts[0] + '）。' : '') +
           (completedFiles ? 'ファイル ' + completedFiles + ' 本の要確認がすべて片付きました。' : '') +
-          (already ? already + ' 件は既に片付いていました。' : ''), 'success');
+          (already ? already + ' 件は既に片付いていました。' : '');
+        successMessage += otherCompactionLeadText(compactions);
+        var compactionDetails = otherCompactionDetails(compactions);
+        showNotice(successMessage, 'success',
+          compactionDetails.length ? compactionDetails : undefined);
       }
+    }
+
+    /** 詰めなかったときの詳細 1 行（同じ理由は 1 行にまとめる）。 */
+    function otherCompactionDetailText(compaction) {
+      if (!compaction || compaction.compacted === true || !compaction.reason) return '';
+      var reason = compaction.reasonText || compaction.reason;
+      return '空いた行は詰めずに残しました（' + reason + '）。';
+    }
+
+    function otherCompactionDetails(compactions) {
+      var lines = [];
+      (compactions || []).forEach(function(compaction) {
+        var text = otherCompactionDetailText(compaction);
+        if (text && lines.indexOf(text) < 0) lines.push(text);
+      });
+      return lines;
+    }
+
+    function otherCompactionLeadText(compactions) {
+      var any = (compactions || []).some(function(compaction) {
+        return Boolean(compaction && compaction.compacted === true);
+      });
+      return any ? '転記先の空いた行を詰めました。' : '';
     }
 
     /** 確定結果から、1 件ずつのお知らせと同じ文・種類・詳細を作る。 */
@@ -3193,6 +3223,7 @@
       var errors = (result.errors || []).map(function(error) {
         return error.message;
       });
+      var details = errors.slice();
       if (result.resolved !== 1) {
         return {message: errors.length ? 'この要確認は確定できませんでした。' : result.notAttempted > 0 ?
           '時間が足りず確定しませんでした。もう一度押してください。' : TEXT.unknownFailure,
@@ -3203,7 +3234,15 @@
       if (['FIX_DATE_AMOUNT', 'POST_ZERO_AMOUNT', 'POST_PRIOR_YEAR'].indexOf(code) >= 0) {
         if (result.committed > 0) message += '取引を確定しました。';
         else if (result.unmetTexts && result.unmetTexts.length) message += '取引はまだ確定していません（' + result.unmetTexts[0] + '）。';
-      } else if (code === 'EXCLUDE' || code === 'EXCLUDE_PRIOR_YEAR') message += '転記行を空にし、取引を対象外にしました。';
+      } else if (code === 'EXCLUDE' || code === 'EXCLUDE_PRIOR_YEAR') {
+        if (result.compaction && result.compaction.compacted === true) {
+          message += '転記行を消して下の行を上へ詰め、取引を対象外にしました。';
+        } else {
+          message += '転記行を空にし、取引を対象外にしました。';
+          var compactionText = otherCompactionDetailText(result.compaction);
+          if (compactionText) details.push(compactionText);
+        }
+      }
       else if (code === 'CONFIRM_EMPTY_FILE') message += '「' + fileName + '」を完了にしました。';
       else if (['APPROVE_COUNT_MISMATCH', 'APPROVE_SCAN_TRUNCATION', 'REGISTER_FORMAT', 'CONFIRM_DESTINATION_FIXED'].indexOf(code) >= 0) {
         if (result.rewound) message += '「' + fileName + '」を取込待ちに戻しました。［記帳を実行］で取り込み直します。';
@@ -3214,7 +3253,8 @@
       (result.completedFiles || []).forEach(function(completed) {
         message += 'ファイル「' + fileName + '」の要確認がすべて片付きました（' + completed.stateLabel + '）。';
       });
-      return {message: message, kind: errors.length ? 'warning' : 'success', details: errors};
+      return {message: message, kind: errors.length ? 'warning' : 'success',
+        details: details};
     }
 
     /** 確定後の後処理だけが失敗した場合も、済んだ操作と残った問題を分けて伝える。 */

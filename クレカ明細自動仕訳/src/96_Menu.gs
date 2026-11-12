@@ -878,6 +878,12 @@ function applyResolveDecision_(item, code, inputs, options) {
       if (definition.unit !== 'FILE') transactionTouched[fileId] = true;
       var result = definition.unit === 'FILE' ? resolveFileReview(review.reviewId, code, input) :
         resolveReview(review.reviewId, code, input);
+      // 対象外の詰める処理の結果だけを足す。compaction の無い操作では
+      // `outcome` の形を変えない（§2.6）。
+      if (Object.prototype.hasOwnProperty.call(result, 'compaction')) {
+        outcome.compactions = outcome.compactions || [];
+        outcome.compactions.push(result.compaction);
+      }
       if (code === 'ADOPT_EXISTING_PARTNER' && input.learn === true) learned = true;
       outcome.resolved += 1;
       if (definition.unit === 'FILE') {
@@ -1043,6 +1049,9 @@ function menuLeaseConflictText_(lease) {
 }
 
 function menuOperationErrorMessage_(error) {
+  if (error && typeof error.displayMessage === 'string' && error.displayMessage) {
+    return error.displayMessage;
+  }
   var message = String(error && error.message || error || '');
   if (error && error.code === 'LEASE_CONFLICT') return menuLeaseConflictText_(null) + (error.detail ? '\n' + error.detail : '');
   if (error && error.code === 'FAULT_INJECTED') return '試験用の障害注入で停止しました（' + (error.pointId || '') + '）。本番のマスターでは起きません。';
