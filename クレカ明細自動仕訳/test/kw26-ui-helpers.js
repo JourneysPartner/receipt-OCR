@@ -124,7 +124,8 @@ const vm = require('node:vm');
       'webAppFinalReview', 'webAppExplainUnknownFile', 'webAppPreviewFormat',
       'webAppSaveFormat', 'webAppRequeueFormatFiles', 'webAppReturnFileToCustomer',
       'webAppPrepareImport', 'webAppWithdrawFormat', 'webAppRunImport', 'webAppResolveReviews',
-      'webAppRecheckCustomerFixFile']) {
+      'webAppRecheckCustomerFixFile', 'webAppRegistrationStart', 'webAppRegistrationInspect',
+      'webAppRegisterCustomer']) {
       runner[name] = (...args) => {
         calls.push({name, args});
         const success = runner.success, failure = runner.failure;
@@ -141,7 +142,7 @@ const vm = require('node:vm');
     const source = fs.readFileSync(path.join(__dirname, '..', 'src', '81_WebAppUi.html'), 'utf8');
     const script = /<script>([\s\S]*?)<\/script>/.exec(source)[1].replace(
       '    bootstrap();',
-      '    globalThis.__ui = {state, el, startImport, startProgressTimer, TEXT, bootstrap, renderSelection, renderFiles, renderFormatPanel, previewFormat, saveFormat, returnFormatToCustomer, openFormat, chooseFolder, chooseCustomer, loadFinalReview, formatSetBusy, recheckCustomerFix: typeof recheckCustomerFix === "function" ? recheckCustomerFix : null};');
+      '    globalThis.__ui = {state, el, startImport, startProgressTimer, TEXT, bootstrap, renderSelection, renderFiles, renderFormatPanel, previewFormat, saveFormat, returnFormatToCustomer, openFormat, chooseFolder, chooseCustomer, loadFinalReview, formatSetBusy, recheckCustomerFix: typeof recheckCustomerFix === "function" ? recheckCustomerFix : null, openSettings, closeSettings, loadRegistrationStart, inspectRegistration, chooseRegistrationFolder, chooseRegistrationStage, chooseRegistrationCustomer, submitRegistration, renderRegistration, registrationCanSubmit, registrationNameProblem, registrationCodeText};');
     const sandbox = {document, Promise: ObservedPromise, google: {script: {run: runner}}, window: {open() { return {}; }},
       setTimeout, clearTimeout, setInterval(fn) { const id = nextIntervalId++; intervals.set(id, fn); return id; },
       clearInterval(id) { intervals.delete(id); }, console,

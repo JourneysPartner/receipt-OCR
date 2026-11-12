@@ -997,6 +997,12 @@ module.exports = ({test, assert, gas}) => {
       (world) => {
         gas.stubs.createSpreadsheet('rr-existing-copy', {name: '雛形（個人）'});
         world.templateParent.fileIds.push('rr-existing-copy');
+      },
+      // 作業用の親が親を 2 つ持つ（場所が分からない → CONFLICT・何も書かない）。
+      (world) => {
+        ['rr-ops-parent-extra1', 'rr-ops-parent-extra2'].forEach((id) => {
+          gas.stubs.createFolder(id, {name: '架空別作業親'}).subFolderIds.push(world.opsParent.id);
+        });
       }
     ];
     cases.forEach((mutate, caseIndex) => {
@@ -1012,6 +1018,9 @@ module.exports = ({test, assert, gas}) => {
       assert.equal(gas.stubs.getDriveWrites().length, 0, 'drive case ' + caseIndex);
       assert.equal(auditRows().length, auditBefore, 'audit case ' + caseIndex);
       assert.deepEqual(snapshot(), before, 'master case ' + caseIndex);
+      if (caseIndex === 3) {
+        assert.equal(report.workFolder.parentLocationUnknown, true, 'unknown parent location');
+      }
     });
     // 親が顧客フォルダの中
     const world = opsWorld();
@@ -1025,5 +1034,63 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(gas.stubs.getDriveWrites().length, 0);
     assert.equal(auditRows().length, auditBefore);
     assert.deepEqual(snapshot(), before);
+  });
+
+  // reg 23: 59 の関数名が他の .gs と重ならない（F1）
+  test('reg 23: no top-level function in 59 shares a name with another .gs file', () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const topLevelFunctions = (source) => {
+      const names = [];
+      const pattern = /^function\s+([A-Za-z0-9_$]+)\s*\(/gm;
+      let match;
+      while ((match = pattern.exec(source)) !== null) names.push(match[1]);
+      return names;
+    };
+    const srcDir = path.join(__dirname, '..', 'src');
+    const own = topLevelFunctions(fs.readFileSync(
+      path.join(srcDir, '59_CustomerRegistration.gs'), 'utf8'));
+    assert.ok(own.length > 0);
+    const collisions = [];
+    fs.readdirSync(srcDir)
+      .filter((file) => file.endsWith('.gs') && file !== '59_CustomerRegistration.gs')
+      .forEach((file) => {
+        const source = fs.readFileSync(path.join(srcDir, file), 'utf8');
+        topLevelFunctions(source).forEach((name) => {
+          if (own.indexOf(name) >= 0) collisions.push(file + ':' + name);
+        });
+      });
+    assert.deepEqual(collisions, []);
+    // 97 と同じ名前の互換名は戻っていない。
+    ['diagSortedEntries_', 'diagChooseChildFolder_'].forEach((name) => {
+      assert.equal(own.indexOf(name), -1, name);
+    });
+  });
+
+  // reg 24: 下調べと登録で同じ道の確かめをする（F2）
+  test('reg 24: inspect reports the path problem that registration would stop on', () => {
+    const world = setup();
+    const flat = addCustomer(world, {key: 'flat', id: 'rr-cust-flat', name: '架空 平',
+      shared: '☆資料共有', year: '令和8年分', accounting: 'クレカ', statement: 'AUPAY'});
+    const inspect = plainCall('webAppRegistrationInspect', [flat.id,
+      {accounting: flat.accounting.id, statement: flat.statement.id}]);
+    assert.equal(inspect.status, 'READY');
+    assert.equal(inspect.folderProblem, 'FOLDER_STRUCTURE');
+    const before = snapshot();
+    const auditBefore = auditRows().length;
+    const result = plainCall('webAppRegisterCustomer', [{
+      category: 'INDIVIDUAL',
+      customerFolderId: flat.id,
+      statementFolderId: flat.statement.id,
+      customerId: 'K9002',
+      customerName: '架空 花子'
+    }]);
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'FOLDER_STRUCTURE');
+    assertNoWrites(before, auditBefore, 0);
+    // §2.1 の形の顧客は null のまま。
+    const taro = plainCall('webAppRegistrationInspect', [world.customers.taro.id, {}]);
+    assert.equal(taro.status, 'READY');
+    assert.equal(taro.folderProblem, null);
   });
 };

@@ -500,8 +500,13 @@ function createGasStubs() {
   const recordDrive = (op, id, extra) => {
     driveOps.push(Object.assign({op: String(op), id: String(id)}, extra || {}));
   };
-  const DRIVE_WRITE_OPS_ = ['renameFile', 'copyFile', 'createFolder', 'createFile',
-    'moveFile', 'trashFile', 'updateContent', 'changeSharing'];
+  // 記録するのは、模型が実際に持つ書込の方法だけ（F5）。名前だけあって
+  // どこからも記録されない `moveFile`・`trashFile`・`updateContent`・
+  // `changeSharing`・`createFile` は外した（模型にその方法が無い）。
+  //   renameFile   … ファイル・スプレッドシートの setName
+  //   copyFile     … スプレッドシートの makeCopy
+  //   createFolder … フォルダの createFolder
+  const DRIVE_WRITE_OPS_ = ['renameFile', 'copyFile', 'createFolder'];
   const isDriveWrite = (operation) => DRIVE_WRITE_OPS_.indexOf(String(operation.op)) >= 0;
   let folderCounter = 0;
   let spreadsheetCopyCounter = 0;

@@ -322,8 +322,16 @@ function webAppRegistrationInspect(customerFolderId, picks) {
     var masterRows = registrationMasterRows_();
     var proposedName = registrationDisplayName_(customerFolder.getName());
     var nameProblem = registrationNameProblem_(proposedName, masterRows);
-    var folderProblem = registrationFolderProblem_(resolved.statementFolderId,
-      resolved.pathIds, masterRows);
+    // **下調べでも登録と同じ道の確かめをする（F2）。** ここを通さないと、
+    // 下調べは READY なのに登録で FOLDER_STRUCTURE になることがある。
+    var folderProblem = null;
+    var traverse = registrationTraverseStatementFolder_(resolved.statementFolderId);
+    if (!traverse.ok || traverse.customerFolderId !== String(customerFolder.getId())) {
+      folderProblem = 'FOLDER_STRUCTURE';
+    } else {
+      folderProblem = registrationFolderProblem_(resolved.statementFolderId,
+        traverse.pathIds, masterRows);
+    }
     resolved.proposedName = proposedName;
     resolved.nameProblem = nameProblem;
     resolved.folderProblem = folderProblem;

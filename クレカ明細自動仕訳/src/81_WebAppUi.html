@@ -118,6 +118,30 @@
     .search { width: 100%; border: 1px solid #b8c3d2; border-radius: 7px; padding: 9px 10px; }
     .customer-count { margin: 8px 0; color: var(--muted); font-size: 12px; }
     .customer-list, .folder-list { display: grid; gap: 6px; }
+    /* 設定（顧客一覧への登録）。名前はすべて textContent で出す。 */
+    .settings-panel { margin: 12px 22px 24px; }
+    .settings-step { margin: 0 0 18px; padding: 0 0 14px; border-bottom: 1px solid var(--line); }
+    .settings-step:last-of-type { border-bottom: 0; }
+    .settings-list { display: grid; gap: 6px; }
+    .settings-row {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      color: var(--ink);
+      text-align: left;
+      background: #fff;
+    }
+    .settings-row:hover { background: #f6f8fc; }
+    .settings-row.selected { border-color: #9cbcf0; background: var(--brand-soft); }
+    .settings-row-name { display: block; font-weight: 700; overflow-wrap: anywhere; }
+    .settings-row-meta { display: block; margin-top: 2px; font-size: 12px; overflow-wrap: anywhere; }
+    .settings-path { margin: 4px 0; overflow-wrap: anywhere; }
+    .settings-year { margin: 8px 0; font-size: 22px; font-weight: 700; color: var(--brand); }
+    .settings-cards { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+    .settings-chip { border-radius: 999px; padding: 2px 9px; background: #eef2f6; font-size: 12px;
+      overflow-wrap: anywhere; }
+    .settings-warning { color: var(--warn); }
     .customer-item, .folder-item {
       width: 100%;
       border: 1px solid transparent;
@@ -264,11 +288,11 @@
   </header>
 
   <nav class="utility-nav" aria-label="機能">
-    <button type="button" class="active">クレカ取込・記帳</button>
+    <button type="button" id="nav-import" class="active">クレカ取込・記帳</button>
     <button type="button" data-coming-soon>取引一覧</button>
     <button type="button" data-coming-soon>レポート</button>
     <button type="button" data-coming-soon>マスタ管理</button>
-    <button type="button" data-coming-soon>設定</button>
+    <button type="button" id="nav-settings">設定</button>
   </nav>
 
   <div class="steps" aria-label="進捗">
@@ -403,6 +427,54 @@
       </div>
     </section>
   </div>
+
+  <section id="settings-panel" class="panel settings-panel" aria-labelledby="settings-heading" hidden>
+    <div class="panel-header">
+      <h2 id="settings-heading">顧客一覧への登録</h2>
+      <button id="settings-back" type="button" class="button">クレカ取込・記帳へ戻る</button>
+    </div>
+    <div class="panel-body">
+      <section class="settings-step" aria-labelledby="registration-category-heading">
+        <h3 id="registration-category-heading" class="subheading">1. 区分</h3>
+        <label><input id="registration-category-individual" type="radio" name="registration-category" checked> 個人</label>
+        <label class="muted"><input id="registration-category-corporate" type="radio" name="registration-category" disabled> 法人</label>
+        <span class="muted">法人用の雛形ができてから使えます。</span>
+      </section>
+      <div id="registration-missing" class="muted" hidden></div>
+      <section id="registration-folders-section" class="settings-step" aria-labelledby="registration-folders-heading" hidden>
+        <h3 id="registration-folders-heading" class="subheading">2. 顧客フォルダ</h3>
+        <label for="registration-folder-search" class="muted">検索</label>
+        <input id="registration-folder-search" class="search" type="search" autocomplete="off" placeholder="顧客名で検索">
+        <div id="registration-folder-count" class="customer-count"></div>
+        <div id="registration-folder-list" class="settings-list"></div>
+      </section>
+      <section id="registration-statement-section" class="settings-step" aria-labelledby="registration-statement-heading" hidden>
+        <h3 id="registration-statement-heading" class="subheading">3. 明細フォルダ</h3>
+        <div id="registration-statement-path" class="settings-path"></div>
+        <div id="registration-statement-year" class="settings-year"></div>
+        <div id="registration-statement-cards" class="settings-cards"></div>
+        <div id="registration-statement-message" class="muted"></div>
+        <div id="registration-statement-choices" class="settings-list"></div>
+      </section>
+      <section id="registration-contract-section" class="settings-step" aria-labelledby="registration-contract-heading" hidden>
+        <h3 id="registration-contract-heading" class="subheading">4. 顧客 ID</h3>
+        <div id="registration-contract-summary"></div>
+        <div id="registration-contract-message" class="muted"></div>
+        <button id="registration-contract-reselect" type="button" class="button" hidden>選び直す</button>
+        <input id="registration-contract-search" class="search" type="search" autocomplete="off" placeholder="顧客 ID・顧客名で検索" hidden>
+        <div id="registration-contract-list" class="settings-list"></div>
+      </section>
+      <section id="registration-name-section" class="settings-step" aria-labelledby="registration-name-heading" hidden>
+        <h3 id="registration-name-heading" class="subheading">5. 顧客名（表示名）</h3>
+        <input id="registration-name" class="search" type="text" autocomplete="off">
+        <div id="registration-name-problem" class="settings-warning"></div>
+        <div class="muted">登録した後は変えられません（転記シートの名前に使うため）。</div>
+      </section>
+      <div class="action-row">
+        <button id="registration-submit" type="button" class="button primary" disabled>登録する</button>
+      </div>
+    </div>
+  </section>
 
   <dialog id="confirm-dialog" aria-labelledby="confirm-title">
     <div class="dialog-header"><h2 id="confirm-title">要確認の確定</h2></div>
@@ -543,7 +615,78 @@
       },
       newPartnerIntro: function(count) {
         return '新しい取引先名が ' + count + ' 件あります。打ち間違いでないか確かめてください（確定すると取引先名の一覧に足します）。';
-      }
+      },
+      // 顧客一覧への登録（§3.11）。コードの文言は仕様書の表のとおり。
+      registrationCodes: Object.freeze({
+        CUSTOMER_ROOT_FOLDER_ID: '共通フォルダの場所が設定されていません。',
+        CATEGORY_FOLDER: '共通フォルダの下に「個人」フォルダが 1 つに決まりません。',
+        PARALLEL_WORK_FOLDER_ID: '作業用フォルダが設定されていません（Excel の一時コピーが顧客フォルダにできてしまうため、登録できません）。',
+        CUSTOMER_TEMPLATE_PROFILE_INDIVIDUAL: '個人用の雛形が準備されていません。',
+        PROFILE_INVALID: '個人用の雛形の設定が壊れています。',
+        CUSTOMER_ID_SOURCE_SPREADSHEET_ID: '顧客 ID の別表が設定されていません。',
+        NOT_READY: '登録の準備が済んでいません。',
+        CATEGORY_NOT_AVAILABLE: 'この区分はまだ登録できません。',
+        FOLDER_STRUCTURE: '選んだフォルダの場所が想定と違います。選び直してください。',
+        YEAR_FOLDER_NOT_FOUND: '「令和N年分」のフォルダが見つかりません。',
+        NO_CHILD_FOLDERS: 'この段にフォルダがありません。',
+        FOLDER_ALREADY_REGISTERED: 'この明細フォルダは別の顧客で登録済みです。',
+        FOLDER_OVERLAPS: 'この明細フォルダは、登録済みの顧客の明細フォルダの中にあります。',
+        CONTRACT_UNREADABLE: '顧客 ID の別表を開けません。',
+        CONTRACT_TAB_NOT_FOUND: '別表に、この年度のタブ（R{N}.契約内容）が 1 つに決まりません。',
+        CONTRACT_HEADER_NOT_FOUND: '別表のタブの B 列に「取引先コード」の見出しが見つかりません。',
+        ID_NOT_IN_CONTRACT: 'この顧客 ID は別表にありません。',
+        ID_REPEATED_IN_CONTRACT: 'この顧客 ID は別表に 2 回以上あります。別表を直してください。',
+        ID_FORMAT: 'この顧客 ID は使えない形です（英数字・ハイフン・下線だけ、32 文字まで）。',
+        ID_DUPLICATE: 'この顧客 ID は顧客一覧に登録済みです。',
+        NAME_EMPTY: '顧客名を入れてください。',
+        NAME_TOO_LONG: '顧客名は 50 文字までです。',
+        NAME_INVALID_CHAR: '顧客名に使えない文字が入っています。',
+        NAME_RESERVED_SUFFIX: '顧客名の最後を「_8桁の数字-4桁の数字」の形にはできません。',
+        NAME_DUPLICATE: '同じ顧客名が顧客一覧にあります。',
+        WRITE_VERIFY_FAILED: function(context) {
+          return '顧客マスターへの書込を確かめられませんでした。顧客マスターの ' +
+            String(context && context.rowNumber) + ' 行目は無効のまま残っています。管理者へ連絡してください。';
+        }
+      }),
+      registration: Object.freeze({
+        ownerOnly: 'この画面はオーナーだけが使えます。',
+        registered: '登録済み',
+        folderCount: function(shown, total) { return shown + ' / ' + total + ' 件'; },
+        stagePrompt: function(label) { return String(label || '') + 'を選んでください'; },
+        yearLabel: function(reiwa, fiscal) {
+          return '対象年度：令和 ' + reiwa + ' 年分（' + fiscal + ' 年）';
+        },
+        noCards: 'カードのフォルダがまだありません。登録はできますが、取込むものがありません。',
+        contractFrom: function(tabName, customerId, customerName) {
+          return '別表の ' + tabName + ' から：' + customerId + '　' + customerName;
+        },
+        contractChoose: '別表で 1 つに決まりませんでした。選んでください。',
+        confirmTitle: '顧客を登録する',
+        confirmText: function(parts) {
+          return '顧客名: ' + parts.customerName + '\n顧客 ID: ' + parts.customerId + '\n区分: 個人\n' +
+            '対象年度: 令和 ' + parts.reiwaYear + ' 年分（' + parts.fiscalYear + ' 年）\n' +
+            '明細フォルダ: ' + (parts.path || []).join(' › ') + '\n' +
+            '登録した後は顧客名を変えられません。';
+        },
+        success: function(customerName, customerId) {
+          return '「' + customerName + '」を顧客一覧に登録しました（顧客 ID ' + customerId + '）。';
+        },
+        alreadyRegistered: '既に登録されていました。',
+        codeText: function(code, context) {
+          var key = String(code === null || code === undefined ? '' : code);
+          var table = TEXT.registrationCodes;
+          var entry = Object.prototype.hasOwnProperty.call(table, key) ? table[key] : null;
+          if (typeof entry === 'function') return entry(context || {});
+          if (typeof entry === 'string') {
+            var text = entry;
+            if (context && context.reiwaYear !== undefined && context.reiwaYear !== null) {
+              text = text.replace('{N}', String(context.reiwaYear));
+            }
+            return text;
+          }
+          return 'この操作はできませんでした（' + (key || 'UNKNOWN') + '）。';
+        }
+      })
     });
 
     var state = {
@@ -616,7 +759,25 @@
       formatRequeueRemaining: false,
       formatConfirmResolve: null,
       formatMessage: null,
-      confirmPayload: null
+      confirmPayload: null,
+      // 設定（顧客一覧への登録）。呼出し中だけ registrationBusy が true。
+      isOwner: false,
+      settingsOpen: false,
+      registrationBusy: false,
+      registrationPending: 0,
+      registrationGeneration: 0,
+      registrationReady: false,
+      registrationMissing: [],
+      registrationFolders: [],
+      registrationFolderId: null,
+      registrationPicks: {},
+      registrationStage: null,
+      registrationContractChoice: null,
+      registrationContractOpen: false,
+      registrationName: '',
+      registrationNameChanged: false,
+      registrationRegistering: false,
+      registrationSubmitPending: false
     };
 
     var el = {};
@@ -642,6 +803,18 @@
       'wait-dialog', 'wait-title', 'wait-big', 'wait-desc1', 'wait-desc2', 'wait-desc3',
       'wait-run', 'wait-close'
       , 'format-panel', 'format-body', 'format-close'
+      , 'nav-import', 'nav-settings', 'settings-panel', 'settings-back'
+      , 'registration-category-individual', 'registration-category-corporate'
+      , 'registration-missing', 'registration-folders-section', 'registration-folder-search'
+      , 'registration-folder-count', 'registration-folder-list'
+      , 'registration-statement-section', 'registration-statement-path'
+      , 'registration-statement-year', 'registration-statement-cards'
+      , 'registration-statement-message', 'registration-statement-choices'
+      , 'registration-contract-section', 'registration-contract-summary'
+      , 'registration-contract-message', 'registration-contract-reselect'
+      , 'registration-contract-search', 'registration-contract-list'
+      , 'registration-name-section', 'registration-name', 'registration-name-problem'
+      , 'registration-submit'
     ].forEach(function(id) { el[id] = document.getElementById(id); });
     var activeProgressTimers = Object.create(null);
 
@@ -649,6 +822,9 @@
       return new Promise(function(resolve, reject) {
         var runner = google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);
         if (name === 'webAppBootstrap') runner.webAppBootstrap();
+        else if (name === 'webAppRegistrationStart') runner.webAppRegistrationStart();
+        else if (name === 'webAppRegistrationInspect') runner.webAppRegistrationInspect(args[0], args[1]);
+        else if (name === 'webAppRegisterCustomer') runner.webAppRegisterCustomer(args[0]);
         else if (name === 'webAppListFolder') runner.webAppListFolder(args[0], args[1]);
         else if (name === 'webAppListDestinations') runner.webAppListDestinations(args[0], args[1]);
         else if (name === 'webAppListReviews') runner.webAppListReviews(args[0], args[1], args[2]);
@@ -993,7 +1169,9 @@
       }) || null;
     }
 
-    function isMutationBusy() { return state.importBusy || state.resolveBusy || state.formatBusy; }
+    function isMutationBusy() {
+      return state.importBusy || state.resolveBusy || state.formatBusy || state.registrationBusy;
+    }
 
     function categoryLabel(value) {
       if (value === 'CORPORATE') return '法人';
@@ -4542,12 +4720,475 @@
     }
 
 
+    // -----------------------------------------------------------------------
+    // 設定「顧客一覧への登録」（§3.11）
+    // 表示はすべて textContent。フォルダ名・別表の名前・顧客名は字のまま出し、
+    // HTML として解釈させない。返事は世代（registrationGeneration）が違えば捨てる。
+    // -----------------------------------------------------------------------
+
+    function registrationNameKey(value) {
+      var text = value === null || value === undefined ? '' : String(value);
+      if (typeof text.normalize === 'function') text = text.normalize('NFKC');
+      return text.replace(/[\s　]/g, '');
+    }
+
+    /** 画面で行う名前の検査（§3.3 のうち NAME_DUPLICATE 以外。正はサーバー）。 */
+    function registrationNameProblem(name) {
+      var trimmed = String(name === null || name === undefined ? '' : name).trim();
+      if (!trimmed) return 'NAME_EMPTY';
+      if (trimmed.length > 50) return 'NAME_TOO_LONG';
+      if (/[\u0000-\u001f\u007f]/.test(trimmed)) return 'NAME_INVALID_CHAR';
+      if (/_\d{8}-\d{4}$/.test(trimmed)) return 'NAME_RESERVED_SUFFIX';
+      return null;
+    }
+
+    function registrationCodeText(code, context) {
+      return TEXT.registration.codeText(code, context);
+    }
+
+    function registrationAppendText(parent, className, text) {
+      var node = document.createElement('div');
+      node.className = className || '';
+      node.textContent = String(text === null || text === undefined ? '' : text);
+      parent.appendChild(node);
+      return node;
+    }
+
+    function registrationAppendButton(parent, className, label, onClick) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = className || '';
+      button.textContent = String(label === null || label === undefined ? '' : label);
+      button.addEventListener('click', onClick);
+      parent.appendChild(button);
+      return button;
+    }
+
+    /** 呼出し中の印。3 つの入口の呼出しが 1 つでも残っている間は true。 */
+    function registrationSetBusy(delta) {
+      state.registrationPending = Math.max(0, state.registrationPending + Number(delta));
+      state.registrationBusy = state.registrationPending > 0;
+    }
+
+    /**
+     * パネルを触れなくするのは登録の呼出しの最中だけ（§3.11 の 6）。
+     * 下調べは読むだけで、選び直すと前の返事は世代で捨てる。
+     */
+    function registrationLocked() {
+      return state.registrationRegistering === true;
+    }
+
+    function setSettingsVisible(open) {
+      document.querySelectorAll('.steps').forEach(function(node) { node.hidden = open; });
+      document.querySelectorAll('.workspace').forEach(function(node) { node.hidden = open; });
+      el['settings-panel'].hidden = !open;
+      el['nav-import'].className = open ? '' : 'active';
+      el['nav-settings'].className = open ? 'active' : '';
+    }
+
+    function resetRegistrationSelection() {
+      state.registrationGeneration += 1;
+      state.registrationFolderId = null;
+      state.registrationPicks = {};
+      state.registrationStage = null;
+      state.registrationContractChoice = null;
+      state.registrationContractOpen = false;
+      state.registrationName = '';
+      state.registrationNameChanged = false;
+      state.registrationSubmitPending = false;
+      el['registration-folder-search'].value = '';
+      el['registration-contract-search'].value = '';
+      el['registration-name'].value = '';
+    }
+
+    function openSettings() {
+      if (isMutationBusy()) return;
+      if (!state.isOwner) {
+        showNotice(TEXT.registration.ownerOnly, 'info');
+        return;
+      }
+      state.settingsOpen = true;
+      resetRegistrationSelection();
+      setSettingsVisible(true);
+      renderRegistration();
+      loadRegistrationStart();
+    }
+
+    function closeSettings() {
+      if (registrationLocked()) return;
+      if (!state.settingsOpen) return;
+      state.settingsOpen = false;
+      state.registrationGeneration += 1;
+      setSettingsVisible(false);
+    }
+
+    async function loadRegistrationStart() {
+      var generation = state.registrationGeneration;
+      registrationSetBusy(1);
+      renderRegistration();
+      try {
+        var result = await gasCall('webAppRegistrationStart', []);
+        if (generation !== state.registrationGeneration) return;
+        state.registrationReady = Boolean(result && result.ready === true);
+        state.registrationMissing = result && Array.isArray(result.missing) ? result.missing : [];
+        state.registrationFolders =
+          result && Array.isArray(result.customerFolders) ? result.customerFolders : [];
+      } catch (error) {
+        if (generation !== state.registrationGeneration) return;
+        state.registrationReady = false;
+        state.registrationMissing = [];
+        state.registrationFolders = [];
+        showNotice(failureMessage(error), 'error');
+      } finally {
+        registrationSetBusy(-1);
+        renderRegistration();
+      }
+    }
+
+    function chooseRegistrationFolder(folderId) {
+      if (registrationLocked()) return;
+      state.registrationGeneration += 1;
+      state.registrationFolderId = String(folderId);
+      state.registrationPicks = {};
+      state.registrationStage = null;
+      state.registrationContractChoice = null;
+      state.registrationContractOpen = false;
+      state.registrationName = '';
+      state.registrationNameChanged = false;
+      state.registrationSubmitPending = false;
+      renderRegistration();
+      inspectRegistration();
+    }
+
+    function chooseRegistrationStage(stage, choiceId) {
+      if (registrationLocked()) return;
+      state.registrationPicks[stage] = String(choiceId);
+      state.registrationGeneration += 1;
+      state.registrationStage = null;
+      state.registrationContractChoice = null;
+      renderRegistration();
+      inspectRegistration();
+    }
+
+    async function inspectRegistration() {
+      if (!state.settingsOpen || !state.registrationFolderId) return;
+      var generation = state.registrationGeneration;
+      var folderId = state.registrationFolderId;
+      var picks = Object.assign({}, state.registrationPicks);
+      registrationSetBusy(1);
+      renderRegistration();
+      try {
+        var result = await gasCall('webAppRegistrationInspect', [folderId, picks]);
+        if (generation !== state.registrationGeneration) return;
+        state.registrationStage = result || null;
+        if (result && result.status === 'READY') {
+          state.registrationName = String(result.proposedName || '');
+          state.registrationNameChanged = false;
+          var contract = result.contract || null;
+          state.registrationContractOpen = Boolean(contract) &&
+            (contract.status === 'NONE' || contract.status === 'MULTIPLE');
+          state.registrationContractChoice = contract && contract.status === 'MATCHED' ?
+            String(contract.matchedCustomerId) : null;
+          el['registration-name'].value = state.registrationName;
+        } else {
+          state.registrationContractChoice = null;
+          state.registrationContractOpen = false;
+        }
+      } catch (error) {
+        if (generation !== state.registrationGeneration) return;
+        state.registrationStage = null;
+        showNotice(failureMessage(error), 'error');
+      } finally {
+        registrationSetBusy(-1);
+        renderRegistration();
+      }
+    }
+
+    function chooseRegistrationCustomer(customerId) {
+      if (registrationLocked()) return;
+      state.registrationContractChoice = String(customerId);
+      state.registrationContractOpen = false;
+      renderRegistration();
+    }
+
+    function registrationStatementReady() {
+      return Boolean(state.registrationStage) && state.registrationStage.status === 'READY' &&
+        !state.registrationStage.folderProblem;
+    }
+
+    function registrationContractEntry() {
+      if (!registrationStatementReady()) return null;
+      var contract = state.registrationStage.contract;
+      if (!contract || !state.registrationContractChoice) return null;
+      var entries = contract.entries || [];
+      for (var index = 0; index < entries.length; index += 1) {
+        if (String(entries[index].customerId) === String(state.registrationContractChoice) &&
+            entries[index].usable) {
+          return entries[index];
+        }
+      }
+      return null;
+    }
+
+    function registrationCanSubmit() {
+      if (!state.settingsOpen || isMutationBusy()) return false;
+      if (!registrationStatementReady()) return false;
+      if (!registrationContractEntry()) return false;
+      if (registrationNameProblem(state.registrationName)) return false;
+      return true;
+    }
+
+    function renderRegistration() {
+      var locked = registrationLocked();
+      el['settings-back'].disabled = locked;
+      el['nav-import'].disabled = locked;
+      el['nav-settings'].disabled = locked;
+      el['registration-category-individual'].checked = true;
+      el['registration-category-individual'].disabled = locked;
+      var ready = state.registrationReady === true;
+      el['registration-missing'].hidden = ready;
+      el['registration-missing'].textContent = '';
+      if (!ready) {
+        (state.registrationMissing || []).forEach(function(code) {
+          registrationAppendText(el['registration-missing'], '', registrationCodeText(code));
+        });
+        ['registration-folders-section', 'registration-statement-section',
+          'registration-contract-section', 'registration-name-section'].forEach(function(id) {
+          el[id].hidden = true;
+        });
+        el['registration-folder-list'].textContent = '';
+        el['registration-folder-count'].textContent = '';
+        el['registration-submit'].disabled = true;
+        return;
+      }
+      el['registration-folders-section'].hidden = false;
+      el['registration-folder-search'].disabled = locked;
+      renderRegistrationFolders();
+      renderRegistrationStatement();
+      renderRegistrationContract();
+      renderRegistrationName();
+      el['registration-submit'].disabled = !registrationCanSubmit();
+    }
+
+    function renderRegistrationFolders() {
+      var query = registrationNameKey(el['registration-folder-search'].value || '');
+      var folders = state.registrationFolders || [];
+      var rows = folders.filter(function(folder) {
+        if (!query) return true;
+        return registrationNameKey(folder.displayName).indexOf(query) >= 0 ||
+          registrationNameKey(folder.folderName).indexOf(query) >= 0;
+      });
+      el['registration-folder-count'].textContent =
+        TEXT.registration.folderCount(rows.length, folders.length);
+      el['registration-folder-list'].textContent = '';
+      rows.forEach(function(folder) {
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'settings-row' +
+          (String(folder.folderId) === String(state.registrationFolderId) ? ' selected' : '');
+        button.disabled = folder.registered === true || registrationLocked();
+        var name = document.createElement('span');
+        name.className = 'settings-row-name';
+        name.textContent = String(folder.displayName === undefined ? '' : folder.displayName);
+        var meta = document.createElement('span');
+        meta.className = 'settings-row-meta muted';
+        meta.textContent = String(folder.folderName === undefined ? '' : folder.folderName) +
+          (folder.registered === true ? '・' + TEXT.registration.registered : '');
+        button.appendChild(name);
+        button.appendChild(meta);
+        button.addEventListener('click', function() { chooseRegistrationFolder(folder.folderId); });
+        el['registration-folder-list'].appendChild(button);
+      });
+    }
+
+    function renderRegistrationStatement() {
+      var stage = state.registrationStage;
+      el['registration-statement-section'].hidden = !stage;
+      el['registration-statement-path'].textContent = '';
+      el['registration-statement-year'].textContent = '';
+      el['registration-statement-cards'].textContent = '';
+      el['registration-statement-message'].textContent = '';
+      el['registration-statement-choices'].textContent = '';
+      if (!stage) return;
+      var path = stage.path || [];
+      if (path.length) el['registration-statement-path'].textContent = path.join(' › ');
+      if (stage.status === 'STOPPED') {
+        el['registration-statement-message'].textContent = registrationCodeText(stage.code,
+          {reiwaYear: stage.reiwaYear});
+        (stage.missing || []).forEach(function(code) {
+          registrationAppendText(el['registration-statement-choices'], '',
+            registrationCodeText(code));
+        });
+        (stage.childNames || []).forEach(function(name) {
+          registrationAppendText(el['registration-statement-choices'], 'muted', name);
+        });
+        return;
+      }
+      if (stage.status === 'NEED_CHOICE') {
+        el['registration-statement-message'].textContent =
+          TEXT.registration.stagePrompt(stage.stageLabel);
+        (stage.choices || []).forEach(function(choice) {
+          var button = registrationAppendButton(el['registration-statement-choices'],
+            'settings-row', choice.name, function() {
+              chooseRegistrationStage(stage.stage, choice.id);
+            });
+          button.disabled = registrationLocked();
+        });
+        return;
+      }
+      if (stage.status !== 'READY') return;
+      el['registration-statement-year'].textContent =
+        TEXT.registration.yearLabel(stage.reiwaYear, stage.fiscalYear);
+      var cards = stage.cardFolders || [];
+      if (!cards.length) {
+        el['registration-statement-cards'].textContent = TEXT.registration.noCards;
+      } else {
+        cards.forEach(function(name) {
+          registrationAppendText(el['registration-statement-cards'], 'settings-chip', name);
+        });
+      }
+      if (stage.folderProblem) {
+        el['registration-statement-message'].textContent =
+          registrationCodeText(stage.folderProblem);
+      }
+    }
+
+    function renderRegistrationContract() {
+      var stage = state.registrationStage;
+      var contract = stage && stage.status === 'READY' ? stage.contract : null;
+      var show = Boolean(contract) && registrationStatementReady();
+      el['registration-contract-section'].hidden = !show;
+      el['registration-contract-summary'].textContent = '';
+      el['registration-contract-message'].textContent = '';
+      el['registration-contract-list'].textContent = '';
+      el['registration-contract-reselect'].hidden = true;
+      el['registration-contract-search'].hidden = true;
+      if (!show) return;
+      var status = contract.status;
+      if (status === 'MATCHED' && !state.registrationContractOpen) {
+        var entry = registrationContractEntry();
+        el['registration-contract-summary'].textContent = TEXT.registration.contractFrom(
+          contract.tabName,
+          entry ? entry.customerId : contract.matchedCustomerId,
+          entry ? entry.name : '');
+        el['registration-contract-reselect'].hidden = false;
+        el['registration-contract-reselect'].disabled = registrationLocked();
+        return;
+      }
+      if (status !== 'MATCHED' && status !== 'NONE' && status !== 'MULTIPLE') {
+        el['registration-contract-message'].textContent = registrationCodeText(status,
+          {reiwaYear: stage.reiwaYear});
+        return;
+      }
+      if (status === 'NONE' || status === 'MULTIPLE') {
+        el['registration-contract-message'].textContent = TEXT.registration.contractChoose;
+      }
+      el['registration-contract-search'].hidden = false;
+      el['registration-contract-search'].disabled = registrationLocked();
+      renderRegistrationContractList(contract);
+    }
+
+    function renderRegistrationContractList(contract) {
+      var query = registrationNameKey(el['registration-contract-search'].value || '');
+      var entries = (contract.entries || []).filter(function(entry) {
+        if (!query) return true;
+        return registrationNameKey(entry.customerId).indexOf(query) >= 0 ||
+          registrationNameKey(entry.name).indexOf(query) >= 0;
+      });
+      el['registration-contract-list'].textContent = '';
+      entries.forEach(function(entry) {
+        var label = String(entry.customerId) + '　' + String(entry.name);
+        if (!entry.usable) label += '（' + registrationCodeText(entry.problem) + '）';
+        var button = registrationAppendButton(el['registration-contract-list'],
+          'settings-row' + (String(entry.customerId) === String(state.registrationContractChoice) ?
+            ' selected' : ''), label, function() {
+            chooseRegistrationCustomer(entry.customerId);
+          });
+        button.disabled = !entry.usable || registrationLocked();
+      });
+    }
+
+    function renderRegistrationName() {
+      var show = registrationStatementReady() && Boolean(registrationContractEntry());
+      el['registration-name-section'].hidden = !show;
+      el['registration-name-problem'].textContent = '';
+      if (!show) return;
+      el['registration-name'].disabled = registrationLocked();
+      if (el['registration-name'].value !== state.registrationName) {
+        el['registration-name'].value = state.registrationName;
+      }
+      var problem = registrationNameProblem(state.registrationName);
+      if (!problem && !state.registrationNameChanged && state.registrationStage &&
+          state.registrationStage.nameProblem === 'NAME_DUPLICATE') {
+        problem = 'NAME_DUPLICATE';
+      }
+      if (problem) el['registration-name-problem'].textContent = registrationCodeText(problem);
+    }
+
+    async function submitRegistration() {
+      if (!registrationCanSubmit() || state.registrationSubmitPending) return;
+      var stage = state.registrationStage;
+      var entry = registrationContractEntry();
+      var customerName = el['registration-name'].value;
+      var request = {
+        category: 'INDIVIDUAL',
+        customerFolderId: String(state.registrationFolderId),
+        statementFolderId: String(stage.statementFolderId),
+        customerId: String(entry.customerId),
+        customerName: String(customerName)
+      };
+      state.registrationSubmitPending = true;
+      var confirmed = false;
+      try {
+        confirmed = await formatConfirm(TEXT.registration.confirmTitle,
+          TEXT.registration.confirmText({customerName: customerName, customerId: entry.customerId,
+            reiwaYear: stage.reiwaYear, fiscalYear: stage.fiscalYear, path: stage.path || []}));
+      } finally {
+        if (!confirmed) {
+          state.registrationSubmitPending = false;
+          renderRegistration();
+        }
+      }
+      if (!confirmed) return;
+      var generation = state.registrationGeneration;
+      state.registrationRegistering = true;
+      registrationSetBusy(1);
+      renderRegistration();
+      try {
+        var result = await gasCall('webAppRegisterCustomer', [request]);
+        if (generation !== state.registrationGeneration) return;
+        if (result && result.ok === true) {
+          var message = TEXT.registration.success(
+            result.customerName === undefined ? customerName : result.customerName,
+            result.customerId === undefined ? entry.customerId : result.customerId);
+          if (result.alreadyRegistered) message += TEXT.registration.alreadyRegistered;
+          showNotice(message, 'success');
+          await bootstrap();
+          resetRegistrationSelection();
+          renderRegistration();
+          await loadRegistrationStart();
+        } else {
+          showNotice(registrationCodeText(result && result.code,
+            {rowNumber: result && result.rowNumber}), 'error');
+        }
+      } catch (error) {
+        if (generation === state.registrationGeneration) showNotice(failureMessage(error), 'error');
+      } finally {
+        state.registrationSubmitPending = false;
+        state.registrationRegistering = false;
+        registrationSetBusy(-1);
+        renderRegistration();
+      }
+    }
+
+
     async function bootstrap() {
       var generation = ++state.viewGeneration;
       try {
         var result = await gasCall('webAppBootstrap', []);
         if (generation !== state.viewGeneration) return;
         state.actor = result.actor || '';
+        state.isOwner = result.isOwner === true;
         state.version = result.version || '';
         state.importLanes = Number(result.importLanes) || 1;
         state.maxFilesPerImport = Number(result.maxFilesPerImport) || 6;
@@ -4626,6 +5267,23 @@
       closeWaitDialog();
       startImport();
     });
+    el['nav-settings'].addEventListener('click', openSettings);
+    el['nav-import'].addEventListener('click', closeSettings);
+    el['settings-back'].addEventListener('click', closeSettings);
+    el['registration-folder-search'].addEventListener('input', renderRegistration);
+    el['registration-contract-search'].addEventListener('input', renderRegistration);
+    el['registration-contract-reselect'].addEventListener('click', function() {
+      if (registrationLocked()) return;
+      state.registrationContractOpen = true;
+      renderRegistration();
+    });
+    el['registration-name'].addEventListener('input', function() {
+      if (registrationLocked()) return;
+      state.registrationName = el['registration-name'].value;
+      state.registrationNameChanged = true;
+      renderRegistration();
+    });
+    el['registration-submit'].addEventListener('click', submitRegistration);
     document.querySelectorAll('[data-coming-soon]').forEach(function(button) {
       button.addEventListener('click', function() { showNotice(TEXT.comingSoon, 'info'); });
     });

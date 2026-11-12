@@ -294,16 +294,6 @@ function registrationChildren_(folder) {
   return folders;
 }
 
-/** 名前・ID の順（§3.4。97 は呼ばないので同じ働きをここに書く）。 */
-function registrationDiagSortedEntries_(items) {
-  return (items || []).map(function(item) {
-    return {name: String(item.getName()), id: String(item.getId())};
-  }).sort(function(left, right) {
-    if (left.name !== right.name) return left.name < right.name ? -1 : 1;
-    return left.id < right.id ? -1 : (left.id > right.id ? 1 : 0);
-  });
-}
-
 function registrationCompareFolders_(left, right) {
   var leftName = String(left.getName());
   var rightName = String(right.getName());
@@ -317,10 +307,7 @@ function registrationSortedFolders_(folders) {
   return (folders || []).slice().sort(registrationCompareFolders_);
 }
 
-/**
- * 直下の子から 1 つ選ぶ（§3.5 と同じ考え方。97 の
- * `diagChooseChildFolder_` は呼ばない）。
- */
+/** 仕様が名前を挙げる 97 の部品と同じ考え方の小さな関数（97 は呼ばない）。 */
 function registrationDiagChooseChildFolder_(parent, folderId, pattern) {
   var children = registrationSortedFolders_(registrationChildren_(parent));
   var choices = children.map(function(folder) {
@@ -337,12 +324,6 @@ function registrationDiagChooseChildFolder_(parent, folderId, pattern) {
     chosen = matched[0];
   }
   return {chosen: chosen, children: children, matched: matched, choices: choices};
-}
-
-/** 仕様が名前を挙げる 97 の部品と同じ名前（97 が読み込まれれば 97 側が残る）。 */
-function diagSortedEntries_(items) { return registrationDiagSortedEntries_(items); }
-function diagChooseChildFolder_(parent, folderId, pattern) {
-  return registrationDiagChooseChildFolder_(parent, folderId, pattern);
 }
 
 function registrationRootFolder_() {
@@ -1014,9 +995,15 @@ function registrationAncestorNames_(folder, limit) {
   return names;
 }
 
+/**
+ * 作業用フォルダの親が顧客フォルダの中かを調べる。
+ * **分からないときは止める側**にする（F3）。返す値は `'inside'`・
+ * `'outside'`・`'unknown'`。親が 0（いちばん上に着いた）なら外、
+ * 親が 2 つ以上・`getParents` の例外・10 段で上に着かないなら分からない。
+ */
 function registrationInsideCustomerRoot_(folder) {
   var rootId = registrationTrim_(registrationProperty_(REGISTRATION_KEY_PROPERTIES_.ROOT_FOLDER));
-  if (!rootId) return false;
+  if (!rootId) return 'unknown';
   var current = folder;
   for (var depth = 0; depth < 10; depth += 1) {
     var parents = [];
@@ -1024,13 +1011,14 @@ function registrationInsideCustomerRoot_(folder) {
       var iterator = current.getParents();
       while (iterator.hasNext()) parents.push(iterator.next());
     } catch (error) {
-      return false;
+      return 'unknown';
     }
-    if (parents.length !== 1) return false;
+    if (parents.length === 0) return 'outside';
+    if (parents.length !== 1) return 'unknown';
     current = parents[0];
-    if (String(current.getId()) === rootId) return depth >= 1;
+    if (String(current.getId()) === rootId) return depth >= 1 ? 'inside' : 'outside';
   }
-  return false;
+  return 'unknown';
 }
 
 function registrationFileParent_(file) {
@@ -1211,11 +1199,13 @@ function opsPrepareCustomerRegistration(options, apply) {
     return registrationNameKey_(folder.getName()) === '作業用';
   });
   var currentWork = registrationTrim_(SETTINGS.PARALLEL_WORK_FOLDER_ID);
-  var insideCustomer = parent ? registrationInsideCustomerRoot_(parent) : false;
+  var workLocation = parent ? registrationInsideCustomerRoot_(parent) : 'unknown';
+  var insideCustomer = workLocation === 'inside';
+  var locationUnknown = workLocation === 'unknown';
   var currentMatchesWork = currentWork !== '' && workFolders.length === 1 &&
     String(workFolders[0].getId()) === currentWork;
   var workAction;
-  if (!parent || insideCustomer) workAction = 'CONFLICT';
+  if (!parent || insideCustomer || locationUnknown) workAction = 'CONFLICT';
   else if (currentWork) workAction = currentMatchesWork ? 'ALREADY_SET' : 'CONFLICT';
   else if (workFolders.length === 1) workAction = 'REUSE';
   else if (workFolders.length === 0) workAction = 'CREATE';
@@ -1228,6 +1218,7 @@ function opsPrepareCustomerRegistration(options, apply) {
     parentName: parent ? String(parent.getName()) : null,
     ancestors: parent ? registrationAncestorNames_(parent, 10) : [],
     parentInsideCustomerRoot: insideCustomer,
+    parentLocationUnknown: locationUnknown,
     workFolderCount: workFolders.length,
     currentWorkFolder: {empty: currentWork === '', matchesWorkFolder: currentMatchesWork,
       pointsElsewhere: currentWork !== '' && !currentMatchesWork},
@@ -1368,6 +1359,11 @@ function registrationAuditSetting_(actor, targetId, after) {
 }
 
 function registrationApplyPreparation_(report, opts, actor, sourceRow, master, masterId) {
+  // **写しの ID を TEST01 の雛形で代用しない（F4）。** プロファイルを CREATE
+  // するのに写しを作らない計画なら、何も書く前に例外で止める。
+  if (report.plan.profile === 'CREATE' && report.plan.template !== 'CREATE') {
+    throw registrationError_('TEMPLATE_COPY_MISSING');
+  }
   var props = PropertiesService.getScriptProperties();
   var workId = null;
 
@@ -1412,9 +1408,12 @@ function registrationApplyPreparation_(report, opts, actor, sourceRow, master, m
     report.applied = true;
   }
 
-  if (report.plan.profile === 'CREATE' && sourceRow) {
-    var profile = registrationProfileFromRow_(sourceRow,
-      templateId || String(sourceRow[REGISTRATION_COLUMN_INDEX_.F]), String(opts.sourceCustomerId || 'TEST01'));
+  if (report.plan.profile === 'CREATE') {
+    // **写しの ID を TEST01 の雛形で代用しない（F4）。** 代用すると全顧客の
+    // 登録が TEST01 の雛形を指し、§3.12 のガードが TEST01 の取込を止める。
+    if (!templateId) throw registrationError_('TEMPLATE_COPY_MISSING');
+    var profile = registrationProfileFromRow_(sourceRow, templateId,
+      String(opts.sourceCustomerId || 'TEST01'));
     registrationValidateProfile_(profile);
     var serialized = JSON.stringify(profile);
     if (registrationReportBytes_(serialized) > 8000) {
