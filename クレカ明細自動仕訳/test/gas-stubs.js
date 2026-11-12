@@ -122,6 +122,43 @@ function parseA1(a1, defaults = {}) {
 
 function cloneCellValue(value) { return value instanceof Date ? new Date(value.getTime()) : value; }
 
+/** 実 Sheets の FORMATTED_VALUE。表示形式 `0000` の 12 は '0012' になる。 */
+function formatValueForRender(value, format, renderOption) {
+  if (renderOption !== 'FORMATTED_VALUE') return value;
+  if (value === '' || value === null || value === undefined) return value;
+  if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
+  if (typeof value === 'number') {
+    const pattern = String(format || 'General');
+    if (/^0+$/.test(pattern)) {
+      const text = String(value);
+      return text.length < pattern.length ? '0'.repeat(pattern.length - text.length) + text : text;
+    }
+    return String(value);
+  }
+  return String(value);
+}
+
+function interpretUserEntered(value, valueInputOption) {
+  if (valueInputOption !== 'USER_ENTERED') return value;
+  if (typeof value !== 'string') return value;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return new Date(`${value}T00:00:00+09:00`);
+  }
+  if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value);
+  return value;
+}
+
+function trimTrailingValues(rows) {
+  const trimmed = rows.map((row) => {
+    let width = row.length;
+    while (width > 0 && (row[width - 1] === '' || row[width - 1] === null)) width -= 1;
+    return row.slice(0, width);
+  });
+  let height = trimmed.length;
+  while (height > 0 && trimmed[height - 1].length === 0) height -= 1;
+  return trimmed.slice(0, height);
+}
+
 // 実GASでは Range の読み書き・flush・Sheets APIの各呼出しが、それぞれ
 // サーバーへの往復になる（1往復およそ0.1〜1秒）。処理が6分上限に当たるか
 // どうかを決めるのは計算量ではなくこの往復回数なので、テストから見える
@@ -130,6 +167,7 @@ function cloneCellValue(value) { return value instanceof Date ? new Date(value.g
 const roundTrips = {rangeReads: 0, rangeWrites: 0, flushes: 0, _depth: 0};
 let roundTripListener = null;
   let valuesBatchUpdateListener = null;
+  let valuesUpdateListener = null;
 function countRoundTrip(kind) {
   if (roundTrips._depth !== 0) return;
   roundTrips[kind] += 1;
@@ -412,12 +450,18 @@ class MemoryDriveFile {
     this.trashed = options.trashed === true;
     this.createdTime = options.createdTime ? new Date(options.createdTime) : this.lastUpdated;
     this.revisionId = options.revisionId || null;
+    // Drive への書込を数える口（S2・reg 18）。テストの模型だけが使う。
+    this.onWrite = typeof options.onWrite === 'function' ? options.onWrite : null;
     // 一覧の File 代用品を展開しても、種類で判定するための口を引き継ぐ。
     this.getMimeType = this.getMimeType.bind(this);
   }
   getId() { return this.id; }
   getName() { return this.name; }
-  setName(name) { if (!this.renameAllowed) throw new Error('Drive rename denied'); this.name = String(name); return this; }
+  setName(name) {
+    if (!this.renameAllowed) throw new Error('Drive rename denied');
+    if (this.onWrite) this.onWrite('renameFile', this.id, {name: String(name)});
+    this.name = String(name); return this;
+  }
   getBlob() { return this.utilities.newBlob(this.bytes, this.contentType, this.name); }
   getMimeType() { return this.contentType; }
   getTargetMimeType() { return this.targetMimeType; }
@@ -449,6 +493,17 @@ function createGasStubs() {
   });
   const spreadsheets = new Map(); const files = new Map(); const folders = new Map(); const properties = new Map();
   const scriptCacheValues = new Map();
+  // Drive の操作（読取も含む）。S2・reg 18 が「書込 0・明細ファイルを開かない」を
+  // 数えるための記録であり、既存の振る舞いには影響しない。
+  const driveOps = [];
+  const openedSpreadsheetIds = [];
+  const recordDrive = (op, id, extra) => {
+    driveOps.push(Object.assign({op: String(op), id: String(id)}, extra || {}));
+  };
+  const DRIVE_WRITE_OPS_ = ['renameFile', 'copyFile', 'createFolder', 'createFile',
+    'moveFile', 'trashFile', 'updateContent', 'changeSharing'];
+  const isDriveWrite = (operation) => DRIVE_WRITE_OPS_.indexOf(String(operation.op)) >= 0;
+  let folderCounter = 0;
   let spreadsheetCopyCounter = 0;
   let sheetsBatchGetFailures = [];
   let sheetsGetFailures = [];
@@ -463,7 +518,12 @@ function createGasStubs() {
   const propertyWrites = [];
   let uiAvailable = true; const uiEvents = []; const menus = []; let promptResponses = []; let alertResponses = [];
   const htmlTemplates = new Map();
-  const openSpreadsheet = (id) => { const value = spreadsheets.get(String(id)); if (!value) throw new Error(`Spreadsheet not found: ${id}`); return value; };
+  const openSpreadsheet = (id) => {
+    openedSpreadsheetIds.push(String(id));
+    const value = spreadsheets.get(String(id));
+    if (!value) throw new Error(`Spreadsheet not found: ${id}`);
+    return value;
+  };
   const iteratorFor = (items) => {
     let index = 0;
     return {hasNext: () => index < items.length, next: () => items[index++]};
@@ -521,7 +581,10 @@ function createGasStubs() {
   const spreadsheetFileHandle = (spreadsheet) => ({
     getId: () => spreadsheet.getId(),
     getName: () => spreadsheet.getName(),
-    setName(name) { spreadsheet.name = String(name); return this; },
+    setName(name) {
+      recordDrive('renameFile', spreadsheet.getId(), {name: String(name)});
+      spreadsheet.name = String(name); return this;
+    },
     getParents: () => iteratorFor(parentFolderHandles(spreadsheet.getId())),
     getMimeType: () => 'application/vnd.google-apps.spreadsheet',
     makeCopy(name, destinationFolder) {
@@ -537,6 +600,8 @@ function createGasStubs() {
         spreadsheetCopyCounter += 1;
         copyId = `copy_${spreadsheet.getId()}_${spreadsheetCopyCounter}`;
       }
+      recordDrive('copyFile', copyId, {sourceId: spreadsheet.getId(),
+        name: copyName === undefined || copyName === null ? spreadsheet.getName() : String(copyName)});
       const copy = cloneSpreadsheet(spreadsheet, copyId,
         copyName === undefined || copyName === null ? spreadsheet.getName() : String(copyName));
       spreadsheets.set(copyId, copy);
@@ -563,6 +628,20 @@ function createGasStubs() {
     const spreadsheet = spreadsheets.get(key);
     return spreadsheet ? spreadsheetFileHandle(spreadsheet) : null;
   };
+  const newFolder = (id, options = {}) => {
+    const folder = {id: String(id), name: options.name || String(id),
+      fileIds: (options.fileIds || []).map(String),
+      subFolderIds: (options.subFolderIds || []).map(String),
+      readAllowed: options.readAllowed !== false};
+    folders.set(folder.id, folder);
+    const parentIds = options.parentIds ||
+      (options.parentId === undefined || options.parentId === null ? [] : [options.parentId]);
+    parentIds.map(String).forEach((parentId) => {
+      const parent = folders.get(parentId);
+      if (parent && parent.subFolderIds.indexOf(folder.id) < 0) parent.subFolderIds.push(folder.id);
+    });
+    return folder;
+  };
   folderHandle = (folder) => ({
     getId: () => folder.id,
     getName: () => folder.name,
@@ -570,11 +649,22 @@ function createGasStubs() {
       .filter((parent) => parent.readAllowed !== false &&
         (parent.subFolderIds || []).map(String).includes(String(folder.id)))
       .map((parent) => folderHandle(parent))),
-    getFiles: () => iteratorFor((folder.fileIds || [])
-      .map((id) => driveFileHandle(id)).filter(Boolean)),
+    getFiles: () => {
+      recordDrive('listFiles', folder.id);
+      return iteratorFor((folder.fileIds || [])
+        .map((id) => driveFileHandle(id)).filter(Boolean));
+    },
     getFolders: () => iteratorFor((folder.subFolderIds || [])
       .map((id) => folders.get(String(id))).filter((item) => item && item.readAllowed !== false)
-      .map((item) => folderHandle(item)))
+      .map((item) => folderHandle(item))),
+    createFolder(name) {
+      folderCounter += 1;
+      while (folders.has(`stub_folder_${folderCounter}`)) { folderCounter += 1; }
+      const resolvedId = `stub_folder_${folderCounter}`;
+      const child = newFolder(resolvedId, {name: String(name), parentId: folder.id});
+      recordDrive('createFolder', resolvedId, {parentId: folder.id, name: String(name)});
+      return folderHandle(child);
+    }
   });
   const sheetAndRange = (spreadsheetId, a1) => {
     const spreadsheet = openSpreadsheet(spreadsheetId); const parsed = parseA1(a1);
@@ -694,25 +784,42 @@ function createGasStubs() {
       });
     },
     Values: {
+      get(spreadsheetId, a1, options = {}) {
+        return asOneRoundTrip('rangeReads', () => this._get(spreadsheetId, a1, options));
+      },
+      _get(spreadsheetId, a1, options) {
+        apiCallCounts.batchGet += 1;
+        const {sheet, range} = sheetAndRange(spreadsheetId, a1);
+        const raw = range.getValues();
+        const values = raw.map((row, r) => row.map((value, c) =>
+          formatValueForRender(value, sheet._format(range.getRow() + r, range.getColumn() + c),
+            options.valueRenderOption)));
+        return {range: a1, majorDimension: 'ROWS',
+          values: trimTrailingValues(values)};
+      },
+      update(body, spreadsheetId, a1, options = {}) {
+        return asOneRoundTrip('rangeWrites', () => this._update(body, spreadsheetId, a1, options));
+      },
+      _update(body, spreadsheetId, a1, options) {
+        if (valuesUpdateListener) valuesUpdateListener(body, spreadsheetId, a1, options);
+        apiCallCounts.batchUpdate += 1;
+        apiCallCounts.rangesWritten += 1;
+        const {range} = sheetAndRange(spreadsheetId, a1);
+        const values = (body && body.values) || [];
+        const interpreted = values.map((row) => row.map((value) =>
+          interpretUserEntered(value, options.valueInputOption)));
+        range.setValues(interpreted);
+        const cells = interpreted.reduce((sum, row) => sum + row.length, 0);
+        apiCallCounts.cellsWritten += cells;
+        return {spreadsheetId: String(spreadsheetId), updatedRange: String(a1),
+          updatedRows: interpreted.length, updatedCells: cells};
+      },
       batchGet(spreadsheetId, request) {
         return asOneRoundTrip('rangeReads', () => this._batchGet(spreadsheetId, request));
       },
       _batchGet(spreadsheetId, request) {
         // INV-08（転記先を取引ごとに読まない）を検査できるようにする。
         apiCallCounts.batchGet += 1;
-        // 実APIは末尾の空行・空セルを返さない（トリムする）。読取量の計上も
-        // 返した実体で数える ── B2:B のような開放レンジをグリッド全高で
-        // 数えると、鍵列1本の読取がINV-25違反に見えてしまう。
-        const trimTrailing = (rows) => {
-          const trimmed = rows.map((row) => {
-            let width = row.length;
-            while (width > 0 && (row[width - 1] === '' || row[width - 1] === null)) width -= 1;
-            return row.slice(0, width);
-          });
-          let height = trimmed.length;
-          while (height > 0 && trimmed[height - 1].length === 0) height -= 1;
-          return trimmed.slice(0, height);
-        };
         if (sheetsBatchGetFailures.length) {
           const failure = sheetsBatchGetFailures.shift();
           const error = new Error(failure.message || `Sheets failure ${failure.code || failure}`);
@@ -736,9 +843,14 @@ function createGasStubs() {
           if (request.valueRenderOption === 'FORMULA') {
             const formulas = range.getFormulas(); const raw = range.getValues();
             values = formulas.map((row, r) => row.map((formula, c) => formula || raw[r][c]));
+          } else if (request.valueRenderOption === 'FORMATTED_VALUE') {
+            values = range.getValues().map((row, r) => row.map((value, c) =>
+              formatValueForRender(value,
+                sheet._format(range.getRow() + r, range.getColumn() + c),
+                request.valueRenderOption)));
           } else values = range.getValues().map((row) => row.map(serialize));
           const fullCells = range.getNumRows() * range.getNumColumns();
-          values = trimTrailing(values);
+          values = trimTrailingValues(values);
           const trimmedCells = values.reduce((sum, row) => sum + row.length, 0);
           apiCallCounts.cellsRead += trimmedCells;
           // シート側の走査量カウンタも「実APIが読んだ実体」で数え直す。
@@ -762,19 +874,11 @@ function createGasStubs() {
         // 実 Sheets の USER_ENTERED は値を**解釈して**格納する。
         // '2026-01-02' は日付セルに、'1200' は数値になる。素通しにすると、
         // 読み返しがシリアル値で返る本番の経路をどのテストも通らない。
-        const interpret = (value) => {
-          if (request.valueInputOption !== 'USER_ENTERED') return value;
-          if (typeof value !== 'string') return value;
-          if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-            return new Date(`${value}T00:00:00+09:00`);
-          }
-          if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value);
-          return value;
-        };
         let totalUpdatedCells = 0;
         for (const data of request.data || []) {
           const {range} = sheetAndRange(spreadsheetId, data.range);
-          range.setValues(data.values.map((row) => row.map(interpret)));
+          range.setValues(data.values.map((row) => row.map((value) =>
+            interpretUserEntered(value, request.valueInputOption))));
           totalUpdatedCells += range.getNumRows() * range.getNumColumns();
         }
         apiCallCounts.cellsWritten += totalUpdatedCells;
@@ -881,11 +985,13 @@ function createGasStubs() {
   }};
   const DriveApp = {
     getFileById(id) {
+      recordDrive('getFileById', id);
       const file = driveFileHandle(id);
       if (!file) throw new Error(`File not found: ${id}`);
       return file;
     },
     getFolderById(id) {
+      recordDrive('getFolderById', id);
       const folder = folders.get(String(id)); if (!folder || folder.readAllowed === false) throw new Error(`Folder not found or denied: ${id}`);
       return folderHandle(folder);
     }
@@ -1087,21 +1193,12 @@ function createGasStubs() {
   const control = {
     getTriggers: () => triggers.slice(),
     createSpreadsheet(id, options = {}) { const ss = new MemorySpreadsheet(id, options); spreadsheets.set(String(id), ss); if (!activeSpreadsheetId) activeSpreadsheetId = String(id); return ss; },
-    createFile(id, options = {}) { const file = new MemoryDriveFile(id, options, Utilities); files.set(String(id), file); return file; },
-    createFolder(id, options = {}) {
-      const folder = {id: String(id), name: options.name || String(id),
-        fileIds: (options.fileIds || []).map(String),
-        subFolderIds: (options.subFolderIds || []).map(String),
-        readAllowed: options.readAllowed !== false};
-      folders.set(folder.id, folder);
-      const parentIds = options.parentIds ||
-        (options.parentId === undefined || options.parentId === null ? [] : [options.parentId]);
-      parentIds.map(String).forEach((parentId) => {
-        const parent = folders.get(parentId);
-        if (parent && parent.subFolderIds.indexOf(folder.id) < 0) parent.subFolderIds.push(folder.id);
-      });
-      return folder;
+    createFile(id, options = {}) {
+      const file = new MemoryDriveFile(id, Object.assign({}, options,
+        {onWrite: (op, fileId, extra) => recordDrive(op, fileId, extra)}), Utilities);
+      files.set(String(id), file); return file;
     },
+    createFolder(id, options = {}) { return newFolder(id, options); },
     setDriveListFailures(failures) { driveListFailures = failures.slice(); },
     addProtection(spreadsheetId, sheetName, options = {}) {
       const sheet = openSpreadsheet(spreadsheetId).getSheetByName(sheetName);
@@ -1188,10 +1285,16 @@ function createGasStubs() {
      *  ── 書込後のセルを見るだけでは、空文字を書いたのか触れなかったのかを
      *  区別できない。 */
     onValuesBatchUpdate(fn) { valuesBatchUpdateListener = fn; },
+    /** 値の単発書込（Sheets.Values.update）を覗く。監査→行→C の順を確かめる。 */
+    onValuesUpdate(fn) { valuesUpdateListener = fn; },
+    getDriveOps: () => driveOps.map((item) => Object.assign({}, item)),
+    getDriveWrites: () => driveOps.filter(isDriveWrite).map((item) => Object.assign({}, item)),
+    getOpenedSpreadsheetIds: () => openedSpreadsheetIds.slice(),
+    resetDriveOps() { driveOps.length = 0; openedSpreadsheetIds.length = 0; },
     roundTrips() { return {rangeReads: roundTrips.rangeReads, rangeWrites: roundTrips.rangeWrites, flushes: roundTrips.flushes}; },
     resetRoundTrips() { roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; },
     resetApiCallCounts() { apiCallCounts.batchGet = 0; apiCallCounts.get = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; },
-    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptCacheValues.clear(); Object.keys(scriptCacheFailures).forEach((key) => { scriptCacheFailures[key] = []; }); scriptLock.reset(); sheetsBatchGetFailures = []; sheetsGetFailures = []; getScriptPropertiesFailures = []; spreadsheetCopyCounter = 0; htmlTemplates.clear(); activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; effectiveUserEmail = 'tester@example.com'; mailQuota = 100; mailFailures = []; sentMails.length = 0; propertyWrites.length = 0; Object.keys(propertyCallCounts).forEach((key) => { propertyCallCounts[key] = 0; }); uiAvailable = true; uiEvents.length = 0; menus.length = 0; promptResponses = []; alertResponses = []; apiCallCounts.batchGet = 0; apiCallCounts.get = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; sleepCalls.length = 0; sleepHook = null; driveListFailures = []; triggers.length = 0; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; }
+    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptCacheValues.clear(); driveOps.length = 0; openedSpreadsheetIds.length = 0; folderCounter = 0; valuesUpdateListener = null; Object.keys(scriptCacheFailures).forEach((key) => { scriptCacheFailures[key] = []; }); scriptLock.reset(); sheetsBatchGetFailures = []; sheetsGetFailures = []; getScriptPropertiesFailures = []; spreadsheetCopyCounter = 0; htmlTemplates.clear(); activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; effectiveUserEmail = 'tester@example.com'; mailQuota = 100; mailFailures = []; sentMails.length = 0; propertyWrites.length = 0; Object.keys(propertyCallCounts).forEach((key) => { propertyCallCounts[key] = 0; }); uiAvailable = true; uiEvents.length = 0; menus.length = 0; promptResponses = []; alertResponses = []; apiCallCounts.batchGet = 0; apiCallCounts.get = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; sleepCalls.length = 0; sleepHook = null; driveListFailures = []; triggers.length = 0; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; }
   };
   return {Utilities, SpreadsheetApp, Sheets, DriveApp, Drive, Logger, LockService, Session,
     PropertiesService, CacheService, ScriptApp, MailApp, HtmlService, control};

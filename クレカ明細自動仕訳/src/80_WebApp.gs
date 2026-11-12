@@ -281,6 +281,69 @@ function webAppBootstrap() {
   });
 }
 
+/**
+ * 「設定」タブの顧客登録。オーナーだけが使える。
+ * 何も書かない（準備の不足を返すだけ）。拒否の監査は既存のとおり。
+ */
+function webAppRegistrationStart() {
+  return webAppInvoke_(function() {
+    authorizeOwner('WEBAPP:顧客登録の一覧');
+    loadSettingsFromProperties();
+    var readiness = registrationReadiness_();
+    return {
+      ready: readiness.ready,
+      missing: readiness.missing,
+      categories: [
+        {key: 'INDIVIDUAL', label: '個人', enabled: true},
+        {key: 'CORPORATE', label: '法人', enabled: false}
+      ],
+      customerFolders: readiness.ready ? registrationCustomerFolders_() : []
+    };
+  });
+}
+
+/**
+ * 顧客フォルダを選んだ後の下調べ。Drive と別表を読むだけで、何も書かない。
+ */
+function webAppRegistrationInspect(customerFolderId, picks) {
+  return webAppInvoke_(function() {
+    authorizeOwner('WEBAPP:顧客登録の下調べ');
+    loadSettingsFromProperties();
+    var readiness = registrationReadiness_();
+    if (!readiness.ready) {
+      return {status: 'STOPPED', code: 'NOT_READY', missing: readiness.missing};
+    }
+    var customerFolder = registrationFindCustomerFolder_(String(customerFolderId));
+    if (!customerFolder) {
+      return {status: 'STOPPED', code: 'FOLDER_STRUCTURE'};
+    }
+    var resolved = registrationResolveStatementFolder_(customerFolder, picks || {});
+    if (resolved.status !== 'READY') return resolved;
+    var masterRows = registrationMasterRows_();
+    var proposedName = registrationDisplayName_(customerFolder.getName());
+    var nameProblem = registrationNameProblem_(proposedName, masterRows);
+    var folderProblem = registrationFolderProblem_(resolved.statementFolderId,
+      resolved.pathIds, masterRows);
+    resolved.proposedName = proposedName;
+    resolved.nameProblem = nameProblem;
+    resolved.folderProblem = folderProblem;
+    resolved.contract = registrationContractEntries_(resolved.reiwaYear,
+      registrationNameKey_(customerFolder.getName()));
+    return resolved;
+  });
+}
+
+/**
+ * 顧客マスターへ 1 行を足す。要求はサーバーで全部確かめ直す。
+ * `{ok:false, code}` は例外にしない（画面がコードで文言を出す）。
+ */
+function webAppRegisterCustomer(request) {
+  return webAppInvoke_(function() {
+    authorizeOwner('WEBAPP:顧客の登録');
+    return registerCustomer_(request);
+  });
+}
+
 /** 顧客直下のカードフォルダ、または選択したカードフォルダのファイルを返す。 */
 function webAppListFolder(customerId, folderId) {
   return webAppInvoke_(function() {

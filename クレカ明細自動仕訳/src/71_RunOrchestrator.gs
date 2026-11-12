@@ -430,6 +430,15 @@ function runImport(options) {
     var customerReport = {customerId: customer.customerId, files: [], skipped: null};
     report.customers.push(customerReport);
     try {
+      // 雛形を全顧客で共有する運用では、転記先の複製を渡さない取込が
+      // 雛形へ直接書き、顧客の取引を 1 冊に混ぜる（仕様 §3.12）。
+      if (opts.prepareOnly !== true && !opts.destinationSpreadsheetId) {
+        var templateGuard = registrationTemplateGuard_(customer.destinationSpreadsheetId);
+        if (templateGuard !== null) {
+          customerReport.skipped = templateGuard;
+          return;
+        }
+      }
       // step 7：名称変更の再試行。1件の例外で顧客ループを中断しない。
       if (opts.retryRenames !== false) {
         runStage('renames', function() { return retryPendingRenames(customer.customerId); });

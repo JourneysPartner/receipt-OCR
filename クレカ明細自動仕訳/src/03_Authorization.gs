@@ -142,6 +142,32 @@ function authorize(requiredRole, customerId, options) {
 }
 
 /**
+ * 顧客マスターへ行を足すなど、有効な顧客に依らないオーナー専用の入口。
+ *
+ * `authorize(OWNER_ADMIN, null)` は有効な顧客が 0 件だと
+ * `NO_CUSTOMER_ACCESS` で拒むため、1 人目を登録できない。ここでは
+ * 有効な顧客を数えず、実行者がマスターの所有者と一致するかだけを見る。
+ */
+function authorizeOwner(operation) {
+  var actor = resolveActor_();
+  var context = {
+    userEmail: actor.raw,
+    requiredRole: ROLE.OWNER_ADMIN,
+    actualRole: null,
+    customerId: null,
+    operation: operation === null || operation === undefined ? '' : String(operation)
+  };
+  if (!actor.normalized) {
+    throw denyAuthorization_(AUTH_REASON_.ACTOR_UNKNOWN, context);
+  }
+  var ownerEmail = masterOwnerEmail_();
+  if (!ownerEmail || ownerEmail !== actor.normalized) {
+    throw denyAuthorization_(AUTH_REASON_.ROLE_INSUFFICIENT, context);
+  }
+  return {userEmail: actor.raw, normalizedEmail: actor.normalized, ownerEmail: ownerEmail};
+}
+
+/**
  * 表示や候補絞込みでも認可入口と同じ規則を使わないと、入口では拒否される
  * 顧客を先に見せてしまうため、共通の顧客別判定を使う。
  */
