@@ -441,6 +441,28 @@ module.exports = ({test, assert}) => {
     assert.equal(allTags(w.root, []).indexOf('IMG'), -1);
     assert.equal(allTags(w.root, []).indexOf('SCRIPT'), -1);
   });
+
+  // regu 13: 確認の窓の改行
+  asyncTest('regu 13: 確認の窓は改行をそのまま出す（white-space: pre-line）', async () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', '81_WebAppUi.html'), 'utf8');
+    const style = source.slice(source.indexOf('<style>') + '<style>'.length,
+      source.indexOf('</style>'));
+    const rules = style.match(/[^{}]*\{[^{}]*\}/g) || [];
+    const rule = rules.filter((text) =>
+      /(^|[\s,>])#confirm-intro(?![-\w])/.test(text.slice(0, text.indexOf('{'))))[0];
+    assert.ok(rule, '#confirm-intro を選ぶ規則がある');
+    assert.ok(/white-space\s*:\s*pre-line\s*;/.test(rule.slice(rule.indexOf('{') + 1)),
+      'white-space: pre-line がある');
+
+    const w = world(START, READY);
+    await w.ready();
+    w.ids['registration-submit'].fire('click');
+    await tick();
+    assert.equal(w.ids['confirm-dialog'].open, true);
+    const intro = w.ids['confirm-intro'].textContent;
+    assert.ok(intro.indexOf('\n') >= 0, '改行を含む');
+    assert.ok(intro.indexOf('顧客名: 架空 太郎\n顧客 ID: K9002') >= 0, intro);
+  });
 };
 
 if (require.main === module) {

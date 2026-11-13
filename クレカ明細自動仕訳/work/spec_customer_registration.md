@@ -453,6 +453,7 @@ if (opts.prepareOnly !== true && !opts.destinationSpreadsheetId &&
 10. `ok: false` の各コードの文言。`WRITE_VERIFY_FAILED` に行番号。
 11. 古い返事：顧客フォルダ A の下調べの返事が、B を選んだ後に返ってきても画面を変えない。
 12. フォルダ名・別表の名前に `<img src=x onerror=…>` があっても字のまま出る（`innerHTML` を使っていない）。
+13. 確認の窓 `#confirm-intro` に `white-space: pre-line` があり、登録の確認文が行に分かれて出る（`\n` を含む）。
 
 ### 6.3 既存のテスト
 
@@ -484,6 +485,9 @@ if (opts.prepareOnly !== true && !opts.destinationSpreadsheetId &&
 | R18 | 画面で名前を `innerHTML` で出す | regu 12 |
 | R19 | 古い返事を捨てない | regu 11 |
 | R20 | §3.9 を外す（2 回目も書く） | reg 14 |
+| R21 | 59 に `function diagSortedEntries_(` を戻す（`97` と同じ名前） | reg 23 |
+| R22 | 下調べから D のたどる確かめを外す | reg 24 |
+| R23 | `#confirm-intro { white-space: pre-line; }` を消す | regu 13 |
 
 ---
 
@@ -534,3 +538,12 @@ if (opts.prepareOnly !== true && !opts.destinationSpreadsheetId &&
 
 1. ~~別表のタブの年~~ → **決定済み（2026-11-12 利用者「はい」）**：明細の「令和 N 年分」と同じ N のタブ（`R{N}.契約内容`）から引く。§1.1・§3.6 のとおり。
 2. **雛形の写しの他のタブ：**準備の見るだけ（§8.1 の 2）で、雛形の他のタブや入力用シートの `other` の列に中身があれば、消すかどうか。（TEST01 は実際の明細で試したので、取引先一覧などに実在の店名・人名が残っている恐れがある。全顧客の転記シートに写るので、残すなら全顧客に見える。）
+
+## 11. 実装と監査の記録（2026-11-12〜13）
+
+1. **実装は OpenCode（Go）で 3 回。**1 回目＝サーバー側（59・03・71・80・スタブ・reg 1〜22・R1〜R17・R20、`54e12cd`）。2 回目＝1 回目の直し F1〜F5 と画面（81・regu 1〜12・R18・R19・R21・R22、`b88c810`）。3 回目＝確認の窓の改行（81 の CSS 1 行・regu 13・R23）。変異 R1〜R23 はすべて赤を確かめて戻した。
+2. **1 回目の直し（Claude の監査で見つけたもの）：**F1 59 に `97` と同じ名前の関数（`diagSortedEntries_`・`diagChooseChildFolder_`）があった → 消した（reg 23）。F2 下調べは D のたどる確かめをせず、画面は READY なのに登録で `FOLDER_STRUCTURE` になりえた → 下調べも同じ確かめ（reg 24）。F3 作業用の親の場所が分からないときに「顧客フォルダの外」扱い → `CONFLICT`（reg 22b）。F4 プロファイルの雛形の ID に TEST01 の F を代用していた → 例外で止める。F5 スタブの Drive 書込の一覧に記録されない名前があった → 直した。
+3. **受け入れた仕様からの外れ：**(a) A（顧客 ID）が既にマスターにある要求は、D・B の検査をロックの中の §3.9 に任せる（書かない道だけ）。(b) プロファイルだけが壊れているときは `NOT_READY` でなく `PROFILE_INVALID` を返す。(c) 「経費の段の位置の名前が明細の型なら止める」確かめは登録と下調べの両方でする（経費の段の無い木でカードを D にさせない）。
+4. **記録だけで直さないもの（範囲外）：**`webAppBootstrap` は `authorize` を呼ぶので、有効な顧客が 0 件だと「設定」も開けない（今は TEST01 があるので起きない）。
+5. **2 回目の監査で記録した低（3 回目で直した）：**確認の窓 `#confirm-intro` に `white-space` の指定が無く、登録の確認文の改行が効かず 1 行に詰まっていた。
+6. **全テスト：**worktree（`test/fixtures/` 無し）では 2011/2108（落ちるのは fixtures が無いための ENOENT 97 件だけ）。fixtures 込みの全テストは main へ取り込んだ後に main のフォルダーで流す（fixtures を worktree へ写す操作は自動判定で拒まれるため）。
