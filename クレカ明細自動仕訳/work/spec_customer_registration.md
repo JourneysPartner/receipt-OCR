@@ -7,6 +7,7 @@
 
 改訂履歴：
 - 1.0（2026-11-12）：初版。利用者の依頼と決定（2026-11-12、§1.1）。§10 の 1（別表のタブの年）は利用者の答え「はい」で決定済み。
+- 1.1（2026-11-13）：§3.11 に「調べている間の表示」と「止まったときの文言」を足した（利用者の依頼「直して」、2026-11-13。§11 の 9）。§6.2 に regu 15〜17、§7 に R25〜R28。regu 5 の止まる段の確かめを新しい文言に替える。
 
 **この仕様書と、実装・テストには、実在の顧客名・顧客 ID・Drive の ID を書かない。**リポジトリは公開である。テストの名前と ID はすべて架空にする（例：`【代※現金シート】架空 太郎`、`K9001`）。本番の ID は実行時の引数とスクリプトプロパティにだけ置く。
 
@@ -276,7 +277,8 @@ function authorizeOwner(operation)
 2. **顧客フォルダ**：検索欄（表示名・元の名前の部分一致。照合の鍵で比べる）と一覧。行は表示名を大きく、元の名前を小さく。`registered` の行は押せず「登録済み」と出す。件数を出す。
 3. **明細フォルダ**：顧客フォルダを選ぶと `webAppRegistrationInspect(folderId, {})` を呼ぶ。
    - `NEED_CHOICE`：「<段の名前>を選んでください」と、ここまでの道・選択肢を出す。選ぶと、それまでの `picks` に足して呼び直す。
-   - `STOPPED`：コードの文言（下の表）と、返ってきた子の名前を出す。先へ進めない。
+   - `STOPPED`：下の「止まったときの文言」のとおりに出す。先へ進めない。
+   - 返事を待つ間：下の「調べている間の表示」のとおり「調べています…」を出す。
    - `READY`：道を「☆資料共有フォルダ › 令和8年分 › 経費 › クレジットカード支払い分…」の形で出し、**「対象年度：令和 N 年分（YYYY 年）」を大きく**出す。カードのフォルダ名を並べる（0 なら「カードのフォルダがまだありません。登録はできますが、取込むものがありません。」）。`folderProblem` があればその文言を出して先へ進めない。
 4. **顧客 ID**：`contract.status` が
    - `MATCHED`：「別表の <タブ名> から：<ID>　<名前>」を出す。［選び直す］で 5 の一覧を開ける。
@@ -293,6 +295,24 @@ function authorizeOwner(operation)
 **古い返事を捨てる：**`state.registrationGeneration` を、顧客フォルダを選び直す・パネルを開き直すたびに 1 増やし、返ってきた返事の世代が今と違えば捨てる。
 
 **表示は全部 `textContent`**（フォルダ名・別表の名前に `<` などがあってもそのまま字として出す。`innerHTML` に名前を入れない）。
+
+**調べている間の表示（1.1。利用者の依頼、2026-11-13）：**下調べは本番で 3〜5 秒かかり、その間に何も出ないと「選べるけど登録できない」に見えた（§11 の 9）。文言は `TEXT.registration.checking = '調べています…'` の 1 つ。
+
+1. **パネルを開いて `webAppRegistrationStart` の返事を待つ間：**`#registration-missing` を出し（`hidden = false`）、中身を「調べています…」の 1 行だけにする。2〜5 の段（`#registration-folders-section`・`#registration-statement-section`・`#registration-contract-section`・`#registration-name-section`）は隠し、`#registration-folder-list` は空、［登録する］は押せない。**前に開いたときの一覧（`state.registrationReady` が `true` のまま）でも同じ**（古い一覧を押させない）。返事か例外が来たら今までどおりの表示に戻る。
+2. **`webAppRegistrationInspect` の返事を待つ間**（顧客フォルダを選んだ後・段を選んだ後のどちらも）：`#registration-statement-section` を出し、`#registration-statement-message` を「調べています…」の 1 行だけにする（class は `muted`）。道・年度・カード・選択肢（`#registration-statement-path`・`-year`・`-cards`・`-choices`）は空。4・5 の段は隠れ、［登録する］は押せない。返事か例外が来たら今までどおりの表示に戻る（例外のときは「調べています…」を残さない）。
+3. **待っているかは世代で持つ。**`state.registrationStartingGeneration`・`state.registrationInspectingGeneration`（初めは `null`）に、呼び出したときの `state.registrationGeneration` を入れる。「調べています…」を出すのは、その値が今の `state.registrationGeneration` と同じときだけ。返事・例外の `finally` では、**値が自分の世代と同じときだけ** `null` に戻す（顧客フォルダ A の下調べ中に B を選び、A の返事が後から来ても、B の「調べています…」を消さない）。
+4. 2〜5 の段の中のボタン（顧客フォルダの一覧・段の選択肢）は、下調べの間も今までどおり押せる（選び直せる。古い返事は世代で捨てる）。
+
+**止まったときの文言（1.1。利用者の依頼、2026-11-13）：**`STOPPED` の表示だけを次に替える。`TEXT.registrationCodes` の表（下）は変えない（登録の `ok: false` など、ほかの所は今の表の文言のまま）。全部 `textContent`。
+
+1. **1 行目**（`#registration-statement-message`。`STOPPED` のときだけ class を `settings-warning` にし、ほかのときは `muted` に戻す）：
+   - `YEAR_FOLDER_NOT_FOUND`：道（`path`）が空なら「この顧客フォルダの中に「令和N年分」のフォルダがありません。」。道があれば「「<道の最後の名前>」の中に「令和N年分」のフォルダがありません。」。
+   - `NO_CHILD_FOLDERS`：道が空なら「この顧客フォルダの中にフォルダがありません。」。道があれば「「<道の最後の名前>」の中にフォルダがありません。」。
+   - ほかのコード：今の表の文言（`registrationCodeText(code, {reiwaYear})`）。
+2. **2 行目**（`childNames` が 1 つ以上のとき。`#registration-statement-choices` に `muted` の 1 行）：「直下にあるフォルダ：<名前を「、」でつないだもの>」。名前を 1 行ずつ並べる今の表示は、この 1 行に替える。
+3. **3 行目**（`YEAR_FOLDER_NOT_FOUND`・`NO_CHILD_FOLDERS` のとき。`#registration-statement-choices` に `muted` の 1 行）：「明細フォルダは、顧客フォルダの中を「（☆資料共有フォルダ ›）令和N年分 › 経費 › クレジットカード…」の順にたどって探します。この形になっていないフォルダは登録できません。」
+4. `missing`（`NOT_READY` のとき）は、今までどおり 1 つずつ文言を並べる（2 行目・3 行目より前）。
+5. 文言は `TEXT.registration` にまとめる（例：`stoppedYear(lastName)`・`stoppedNoChild(lastName)`・`childList(names)`・`stoppedHint`。`lastName` が空なら「この顧客フォルダ」の文）。
 
 **`gasCall` に 3 行足す**（`webAppRegistrationStart`・`webAppRegistrationInspect(args[0], args[1])`・`webAppRegisterCustomer(args[0])`）。
 
@@ -455,6 +475,11 @@ if (opts.prepareOnly !== true && !opts.destinationSpreadsheetId &&
 12. フォルダ名・別表の名前に `<img src=x onerror=…>` があっても字のまま出る（`innerHTML` を使っていない）。
 13. 確認の窓 `#confirm-intro` に `white-space: pre-line` があり、登録の確認文が行に分かれて出る（`\n` を含む）。
 14. CSS に `.steps[hidden]`・`.workspace[hidden]` の `display: none` があり、「設定」を開くと進み具合の帯と 3 つの欄が実際に隠れる（`display: grid` が `[hidden]` に勝つため、`hidden` の値だけでは隠れない）。
+15. **開くときの「調べています…」（1.1）：**`webAppRegistrationStart` を待たせると、`#registration-missing` が出て中身がちょうど「調べています…」、2〜5 の段が隠れ、一覧が空、［登録する］が押せない。返事で一覧が出て「調べています…」が消える。一度開いて一覧が出た後に閉じ、開き直して待たせても、前の一覧は出ず「調べています…」だけ。例外でも「調べています…」が残らない。
+16. **下調べの「調べています…」（1.1）：**下調べを待たせると、3 の段が出て `#registration-statement-message` がちょうど「調べています…」、道・年度・カード・選択肢が空、4・5 の段が隠れ、［登録する］が押せない。待っている間に別の顧客フォルダを選んで（これも待たせる）、前の返事を先に返しても「調べています…」のまま。後の返事（`READY`）で消えて道が出る。`NEED_CHOICE` で段を選んだ後の呼び直しを待たせても「調べています…」が出る。下調べが例外のときは「調べています…」が残らない。
+17. **止まったときの文言（1.1）：**`YEAR_FOLDER_NOT_FOUND`（道が空・子が 2 つ）で 1 行目がちょうど「この顧客フォルダの中に「令和N年分」のフォルダがありません。」、class が `settings-warning`、選択肢の欄に「直下にあるフォルダ：<子 1>、<子 2>」と 3 行目の文がある。道が `['☆資料共有フォルダ']` なら「「☆資料共有フォルダ」の中に「令和N年分」のフォルダがありません。」。`NO_CHILD_FOLDERS`（道が空・道が 2 つ）で「この顧客フォルダの中にフォルダがありません。」・「「<道の最後>」の中にフォルダがありません。」、子が空なら「直下にあるフォルダ：」の行は無い。`FOLDER_STRUCTURE` は表の文言で 3 行目が無い。`NOT_READY` は `missing` の文言が並ぶ。子の名前が `<img src=x onerror=…>` でも字のまま出る。どの場合も［登録する］は押せない。`STOPPED` の後に `READY` を返すと 1 行目の class が `muted` に戻る。
+
+regu 5 の止まる段の確かめ（`「令和N年分」のフォルダが見つかりません。` を探していたもの）は、regu 17 と同じ新しい文言に替える（確かめを弱めない）。
 
 ### 6.3 既存のテスト
 
@@ -490,6 +515,10 @@ if (opts.prepareOnly !== true && !opts.destinationSpreadsheetId &&
 | R22 | 下調べから D のたどる確かめを外す | reg 24 |
 | R23 | `#confirm-intro { white-space: pre-line; }` を消す | regu 13 |
 | R24 | `.steps[hidden], .workspace[hidden] { display: none; }` を消す | regu 14 |
+| R25 | 下調べの待ちの世代を入れない（「調べています…」を出さない） | regu 16 |
+| R26 | 下調べの `finally` で待ちの世代を無条件に `null` へ戻す | regu 16 |
+| R27 | 開くときの待ちで、前の一覧（`registrationReady` が `true`）を出したままにする | regu 15 |
+| R28 | 止まったときの 1 行目を表の文言に戻す | regu 17・regu 5 |
 
 ---
 
@@ -551,3 +580,4 @@ if (opts.prepareOnly !== true && !opts.destinationSpreadsheetId &&
 6. **全テスト：**worktree（`test/fixtures/` 無し）では 2011/2108（落ちるのは fixtures が無いための ENOENT 97 件だけ）。fixtures 込みの全テストは main へ取り込んだ後に main のフォルダーで流す（fixtures を worktree へ写す操作は自動判定で拒まれるため）。
 7. **本番の受入で見つけたもの（2026-11-13）：**「設定」を開いても進み具合の帯と 3 つの欄が隠れず、登録の欄がその下に出た。`setSettingsVisible` は `hidden` を付けていたが、`.steps`・`.workspace` の `display: grid` が `[hidden]` に勝っていた（regu 2 は `hidden` の値しか見ずにすり抜けた）。`.steps[hidden], .workspace[hidden] { display: none; }` を足し、regu 14・R24 で見張る（OpenCode 4 回目）。利用者の指示「設定の画面にこれは表示させる必要はない」。
 8. **記録だけ（直していない）：**読み込み（`webAppBootstrap`）が終わる前に「設定」を押すと、`state.isOwner` がまだ false なので「この画面はオーナーだけが使えます」と出る（待ってから押せば開く）。直すなら「読み込み中です」の文言にするか、読み込み後に開く。
+9. **本番の受入で見つけたもの（2026-11-13 夕）：**利用者「テスト３を選べるが登録できない」。不具合ではなかった：テスト用の顧客フォルダ 4 つは、直下にカードのフォルダがあり「令和N年分」の段が無いので、下調べが `YEAR_FOLDER_NOT_FOUND` で止まる（§3.5 のとおり。本番の下調べを読むだけで呼んで確かめた）。ただし下調べは 3〜5 秒かかり、その間に画面に何も出ず、止まった後の文言も「「令和N年分」のフォルダが見つかりません。」と子の名前の羅列だけで分かりにくかった。利用者の指示「直して」で、§3.11 の「調べている間の表示」「止まったときの文言」を足した（1.1。開くときの `webAppRegistrationStart` の待ちも同じ表示にしたのは Claude の判断：同じく数秒何も出ないため）。本番の顧客フォルダ 23 のうち、すぐ登録できる 12・ID を選ぶ 2・年度を選ぶ 3・明細フォルダを選ぶ 1・止まる 5（テスト用 4 と、「令和N年分」の無い顧客 1）。
