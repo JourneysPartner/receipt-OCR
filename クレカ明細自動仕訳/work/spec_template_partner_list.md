@@ -154,3 +154,9 @@ opsCheckTemplatePartnerList(apply, accept)
 2. 店名は正規化した形（`normalizeMerchant`）で比べる。照合がその形で引くため。
 3. 同じ店名がマスターでは別の取引先名になっている行（`DICT_DIFFERENT_PARTNER`）は、後の判断で直した跡かもしれないが、自動では決めずに止めて聞く。
 4. 行は消さず値だけ消す。タブの形（書式・列の幅）と 1 行目の見出しを残す。
+
+## 12. 実装と監査の記録（2026-11-13）
+
+1. OpenCode（Go）で 1 回（2546 秒）。`59` に `opsCheckTemplatePartnerList` と補助の関数、`gas-stubs.js` に `clearContent` を効かなくする切り替え（`setClearContentIgnored`、`reset` で戻す）、新しいテスト tpl 1〜9。worktree（fixtures 無し）で 2020/2117（落ちるのは ENOENT 97 件だけ）。T1〜T9 はすべて赤を確かめて戻した。
+2. Claude が差分を読んだ：§2.1 の確かめ 5 つが書く前・監査が消すより先・値だけ消して読み返す・辞書は `active === true` だけ・寄せ先を見る・見るだけは書かない、を確かめた。
+3. 受け入れた実装者の決め：(a) `SpreadsheetApp.openById` が失敗したら `CONFLICT`。(b) `BAD_ACCEPT` は見るだけでも検査する。(c) `WRITE_VERIFY_FAILED` は `applied: false`・`cleared: 0`（監査は書いた後）。(d) `usableRows` は重複行も含み、`usableRows + halfRows = dataRows`。(e) `ALREADY_EMPTY` は `getLastRow()` が 1（2 行目から下に値が無い）で判定。(f) 消す列は `getMaxColumns()` まで。

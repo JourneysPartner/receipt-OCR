@@ -165,6 +165,8 @@ function trimTrailingValues(rows) {
 // ように数える。`depth`はcopyToのように実機では1往復で済む操作の内側を
 // 二重に数えないための抑止。
 const roundTrips = {rangeReads: 0, rangeWrites: 0, flushes: 0, _depth: 0};
+// clearContent が効かない状況を作る切り替え（雛形の取引先一覧の読返しを検査する）。
+let clearContentIgnored = false;
 let roundTripListener = null;
   let valuesBatchUpdateListener = null;
   let valuesUpdateListener = null;
@@ -237,6 +239,7 @@ class MemoryRange {
     return this;
   }
   clearContent() {
+    if (clearContentIgnored) return this;
     const blanks = Array.from({length: this.numRows}, () => Array(this.numColumns).fill(''));
     this.sheet._write(this.row, this.column, blanks, false); this.sheet._write(this.row, this.column, blanks, true); return this;
   }
@@ -1278,6 +1281,7 @@ function createGasStubs() {
       return Object.fromEntries(Array.from(scriptCacheValues, ([key, item]) => [key, item.value]));
     },
     setSleepHook(fn) { sleepHook = typeof fn === 'function' ? fn : null; },
+    setClearContentIgnored(value) { clearContentIgnored = Boolean(value); },
     getSleepCalls() { return sleepCalls.slice(); },
     getLogs() { return logLines.slice(); },
     clearLogs() { logLines.length = 0; },
@@ -1299,7 +1303,7 @@ function createGasStubs() {
     roundTrips() { return {rangeReads: roundTrips.rangeReads, rangeWrites: roundTrips.rangeWrites, flushes: roundTrips.flushes}; },
     resetRoundTrips() { roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; },
     resetApiCallCounts() { apiCallCounts.batchGet = 0; apiCallCounts.get = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; },
-    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptCacheValues.clear(); driveOps.length = 0; openedSpreadsheetIds.length = 0; folderCounter = 0; valuesUpdateListener = null; Object.keys(scriptCacheFailures).forEach((key) => { scriptCacheFailures[key] = []; }); scriptLock.reset(); sheetsBatchGetFailures = []; sheetsGetFailures = []; getScriptPropertiesFailures = []; spreadsheetCopyCounter = 0; htmlTemplates.clear(); activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; effectiveUserEmail = 'tester@example.com'; mailQuota = 100; mailFailures = []; sentMails.length = 0; propertyWrites.length = 0; Object.keys(propertyCallCounts).forEach((key) => { propertyCallCounts[key] = 0; }); uiAvailable = true; uiEvents.length = 0; menus.length = 0; promptResponses = []; alertResponses = []; apiCallCounts.batchGet = 0; apiCallCounts.get = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; sleepCalls.length = 0; sleepHook = null; driveListFailures = []; triggers.length = 0; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; }
+    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptCacheValues.clear(); driveOps.length = 0; openedSpreadsheetIds.length = 0; folderCounter = 0; valuesUpdateListener = null; Object.keys(scriptCacheFailures).forEach((key) => { scriptCacheFailures[key] = []; }); scriptLock.reset(); sheetsBatchGetFailures = []; sheetsGetFailures = []; getScriptPropertiesFailures = []; spreadsheetCopyCounter = 0; htmlTemplates.clear(); activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; effectiveUserEmail = 'tester@example.com'; mailQuota = 100; mailFailures = []; sentMails.length = 0; propertyWrites.length = 0; Object.keys(propertyCallCounts).forEach((key) => { propertyCallCounts[key] = 0; }); uiAvailable = true; uiEvents.length = 0; menus.length = 0; promptResponses = []; alertResponses = []; apiCallCounts.batchGet = 0; apiCallCounts.get = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; sleepCalls.length = 0; sleepHook = null; clearContentIgnored = false; driveListFailures = []; triggers.length = 0; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; }
   };
   return {Utilities, SpreadsheetApp, Sheets, DriveApp, Drive, Logger, LockService, Session,
     PropertiesService, CacheService, ScriptApp, MailApp, HtmlService, control};

@@ -1462,3 +1462,328 @@ function registrationOwnedColumns_(sourceRow) {
   }
   return owned;
 }
+
+/**
+ * `work/spec_template_partner_list.md` 版 1.0。TEST01 の雛形を写した
+ * 「雛形（個人）」の取引先一覧タブを、マスター（共通の辞書と一覧）と
+ * 照らしてから空にする。既定は見るだけで、`apply === true` のときだけ
+ * 対象のタブの 2 行目から下の値を消す。認可は呼ばない（他の運用関数と同じ）。
+ */
+var TEMPLATE_PARTNER_STOP_CODES_ = Object.freeze([
+  'DICT_ONLY_SOURCE', 'DICT_DIFFERENT_PARTNER', 'DICT_MISSING',
+  'NAME_ONLY_SOURCE', 'NAME_MISSING'
+]);
+
+var TEMPLATE_PARTNER_SAMPLE_LIMIT_ = 30;
+var TEMPLATE_PARTNER_COPY_NAME_ = '雛形（個人）';
+
+function opsCheckTemplatePartnerList(apply, accept) {
+  loadSettingsFromProperties();
+  var actor = activeUserEmail_();
+  var accepted = templatePartnerListAccept_(accept);
+  var report = templatePartnerListEmptyReport_();
+
+  // 1. プロファイル。空・壊れている・検査に通らないなら何もしない。
+  var profile = null;
+  try { profile = registrationProfile_(); } catch (error) { profile = null; }
+  if (!profile) {
+    report.stoppedBy = 'PROFILE_INVALID';
+    return templatePartnerListFinish_(report);
+  }
+  var templateId = String(profile.templateId);
+  var tabName = registrationTrim_(profile.columns && profile.columns.I);
+  report.template.tabName = tabName;
+
+  // 2. 対象は profile.templateId のファイルだけ。名前の確認にも同じ口を使う。
+  var file = null;
+  try { file = DriveApp.getFileById(templateId); } catch (error) { file = null; }
+  if (!file) {
+    report.stoppedBy = 'CONFLICT';
+    return templatePartnerListFinish_(report);
+  }
+  report.template.name = String(file.getName());
+
+  // 3. TEST01 の F（元の雛形）と同じなら写しではない。元の行が 1 行に
+  //    決まらないときも、どのファイルを対象にするか決められないので止める。
+  var sourceCustomerId = registrationTrim_(profile.sourceCustomerId) || 'TEST01';
+  var sourceRows = registrationMasterRows_().filter(function(row) {
+    return String(row.values[REGISTRATION_COLUMN_INDEX_.A]) === sourceCustomerId;
+  });
+  if (sourceRows.length !== 1 ||
+      String(sourceRows[0].values[REGISTRATION_COLUMN_INDEX_.F]) === templateId) {
+    report.stoppedBy = 'CONFLICT';
+    return templatePartnerListFinish_(report);
+  }
+
+  // 4. 写しの名前。`registrationNameKey_` で比べる（【…】や空白の違いを吸収）。
+  if (registrationNameKey_(report.template.name) !==
+      registrationNameKey_(TEMPLATE_PARTNER_COPY_NAME_)) {
+    report.stoppedBy = 'CONFLICT';
+    return templatePartnerListFinish_(report);
+  }
+
+  // 5. 取引先一覧のタブ。
+  var spreadsheet = null;
+  try { spreadsheet = SpreadsheetApp.openById(templateId); } catch (error) { spreadsheet = null; }
+  if (!spreadsheet) {
+    report.stoppedBy = 'CONFLICT';
+    return templatePartnerListFinish_(report);
+  }
+  var sheet = tabName ? spreadsheet.getSheetByName(tabName) : null;
+  if (!sheet) {
+    report.stoppedBy = 'TAB_MISSING';
+    return templatePartnerListFinish_(report);
+  }
+
+  var lastRow = Number(sheet.getLastRow()) || 1;
+  report.template.lastRow = lastRow;
+  var dataRows = lastRow > 1 ? lastRow - 1 : 0;
+  report.rows.dataRows = dataRows;
+  var values = dataRows ? sheet.getRange(2, 1, dataRows, 2).getValues() : [];
+
+  // マスターは読むだけ。辞書は active === true の行だけを使う。
+  var commonDictionary = templatePartnerListGroup_(readDictionary_(true).filter(function(row) {
+    return row.active === true;
+  }));
+  var sourceDictionary = templatePartnerListGroup_(readDictionary_(false).filter(function(row) {
+    return row.active === true && String(row.customerId || '') === sourceCustomerId;
+  }));
+  var commonPartnerKeys = Object.create(null);
+  readCommonPartners_().forEach(function(partner) {
+    var key = partnerNameKey_(partner && partner.partnerName);
+    if (key) commonPartnerKeys[key] = true;
+  });
+  var partnerNames = templatePartnerListPartnerNames_(sourceCustomerId);
+
+  var seenRows = Object.create(null);
+  var seenNames = Object.create(null);
+  for (var index = 0; index < values.length; index += 1) {
+    var original = registrationTrim_(values[index][0]);
+    var partnerName = registrationTrim_(values[index][1]);
+    var normalized = normalizeMerchant(original);
+    var rowNumber = index + 2;
+    if (!original || !partnerName || !normalized) {
+      report.rows.halfRows += 1;
+      continue;
+    }
+    report.rows.usableRows += 1;
+    var duplicateKey = normalized + '\u0000' + partnerName;
+    if (Object.prototype.hasOwnProperty.call(seenRows, duplicateKey)) {
+      report.rows.duplicateRows += 1;
+      continue;
+    }
+    seenRows[duplicateKey] = true;
+
+    var partnerKey = partnerNameKey_(partnerName);
+    var names = [partnerName];
+    (partnerNames.canonical[partnerKey] || []).forEach(function(canonical) {
+      if (names.map(partnerNameKey_).indexOf(partnerNameKey_(canonical)) < 0) names.push(canonical);
+    });
+    var nameKeys = names.map(partnerNameKey_);
+
+    // 3.1 店名（辞書）。上から順に最初に当たったものだけを数える。
+    var commonMatches = (commonDictionary[normalized] || []).filter(function(row) {
+      return nameKeys.indexOf(partnerNameKey_(row.partnerName)) >= 0;
+    });
+    var sourceMatches = (sourceDictionary[normalized] || []).filter(function(row) {
+      return nameKeys.indexOf(partnerNameKey_(row.partnerName)) >= 0;
+    });
+    if (commonMatches.length) {
+      report.dictionary.inCommon += 1;
+      var clean = commonMatches.some(function(row) { return row.conflict !== true; });
+      if (!clean) report.dictionary.inCommonConflicted += 1;
+    } else if (sourceMatches.length) {
+      report.dictionary.DICT_ONLY_SOURCE += 1;
+      templatePartnerListSample_(report.samples.DICT_ONLY_SOURCE, rowNumber, original, partnerName);
+    } else if ((commonDictionary[normalized] || []).length ||
+        (sourceDictionary[normalized] || []).length) {
+      report.dictionary.DICT_DIFFERENT_PARTNER += 1;
+      templatePartnerListSample_(report.samples.DICT_DIFFERENT_PARTNER, rowNumber, original,
+        partnerName, templatePartnerListMasterPartners_(commonDictionary[normalized],
+          sourceDictionary[normalized]));
+    } else {
+      report.dictionary.DICT_MISSING += 1;
+      templatePartnerListSample_(report.samples.DICT_MISSING, rowNumber, original, partnerName);
+    }
+
+    // 3.2 取引先名（一覧）。同じ名前は 1 回だけ数える。
+    if (!Object.prototype.hasOwnProperty.call(seenNames, partnerKey)) {
+      seenNames[partnerKey] = true;
+      report.partnerNames.distinct += 1;
+      if (commonPartnerKeys[partnerKey]) {
+        report.partnerNames.inCommonList += 1;
+      } else if (templatePartnerListViaCanonical_(partnerNames.canonical[partnerKey],
+          commonPartnerKeys)) {
+        report.partnerNames.viaCanonical += 1;
+      } else if (partnerNames.active[partnerKey]) {
+        report.partnerNames.NAME_ONLY_SOURCE += 1;
+        templatePartnerListSample_(report.samples.NAME_ONLY_SOURCE, rowNumber, original, partnerName);
+      } else {
+        report.partnerNames.NAME_MISSING += 1;
+        templatePartnerListSample_(report.samples.NAME_MISSING, rowNumber, original, partnerName);
+      }
+    }
+  }
+
+  report.ok = TEMPLATE_PARTNER_STOP_CODES_.every(function(code) {
+    return templatePartnerListCount_(report, code) === 0;
+  });
+
+  if (accepted.bad) {
+    report.stoppedBy = 'BAD_ACCEPT';
+    return templatePartnerListFinish_(report);
+  }
+  if (apply === true && !report.ok) {
+    var unaccepted = TEMPLATE_PARTNER_STOP_CODES_.filter(function(code) {
+      return templatePartnerListCount_(report, code) > 0 && accepted.codes.indexOf(code) < 0;
+    });
+    if (unaccepted.length) {
+      report.stoppedBy = 'NOT_IN_MASTER';
+      return templatePartnerListFinish_(report);
+    }
+  }
+  if (apply !== true) return templatePartnerListFinish_(report);
+
+  // 4.1 使える行が 0 で、2 行目から下に値が 1 つも無ければ何もしない。
+  if (report.rows.usableRows === 0 && dataRows === 0) {
+    report.stoppedBy = 'ALREADY_EMPTY';
+    return templatePartnerListFinish_(report);
+  }
+
+  // 4.2 監査を先に書く。店名・取引先名は書かない。
+  appendAudit({
+    type: 'SETTING',
+    actor: actor,
+    targetType: 'TEMPLATE',
+    targetId: templateId,
+    before: '',
+    after: {tab: tabName, rowsCleared: dataRows, accept: accepted.codes},
+    reason: 'CLEAR_TEMPLATE_PARTNER_LIST'
+  });
+
+  // 4.3〜4.5 値だけを消し、読み返して確かめる。行・書式・1 行目は触らない。
+  var clearColumns = Math.max(1, Number(sheet.getMaxColumns()) || 1);
+  if (dataRows > 0) {
+    sheet.getRange(2, 1, dataRows, clearColumns).clearContent();
+  }
+  if (dataRows > 0 && templatePartnerListRangeHasValues_(sheet, dataRows, clearColumns)) {
+    report.stoppedBy = 'WRITE_VERIFY_FAILED';
+    return templatePartnerListFinish_(report);
+  }
+  report.cleared = dataRows;
+  report.applied = true;
+  return templatePartnerListFinish_(report);
+}
+
+function templatePartnerListEmptyReport_() {
+  return {
+    applied: false,
+    stoppedBy: null,
+    ok: false,
+    template: {name: null, tabName: null, lastRow: null},
+    rows: {dataRows: 0, usableRows: 0, halfRows: 0, duplicateRows: 0},
+    dictionary: {inCommon: 0, inCommonConflicted: 0, DICT_ONLY_SOURCE: 0,
+      DICT_DIFFERENT_PARTNER: 0, DICT_MISSING: 0},
+    partnerNames: {distinct: 0, inCommonList: 0, viaCanonical: 0,
+      NAME_ONLY_SOURCE: 0, NAME_MISSING: 0},
+    samples: {DICT_ONLY_SOURCE: [], DICT_DIFFERENT_PARTNER: [], DICT_MISSING: [],
+      NAME_ONLY_SOURCE: [], NAME_MISSING: []},
+    cleared: 0
+  };
+}
+
+function templatePartnerListFinish_(report) {
+  Logger.log(JSON.stringify(report));
+  return report;
+}
+
+function templatePartnerListAccept_(accept) {
+  if (accept === undefined || accept === null) return {codes: [], bad: false};
+  if (!Array.isArray(accept)) return {codes: [], bad: true};
+  var codes = [];
+  var bad = false;
+  accept.forEach(function(code) {
+    if (typeof code !== 'string' || TEMPLATE_PARTNER_STOP_CODES_.indexOf(code) < 0) {
+      bad = true;
+      return;
+    }
+    if (codes.indexOf(code) < 0) codes.push(code);
+  });
+  return {codes: codes, bad: bad};
+}
+
+function templatePartnerListGroup_(rows) {
+  var grouped = Object.create(null);
+  (rows || []).forEach(function(row) {
+    var normalized = String(row && row.normalized !== undefined && row.normalized !== null ?
+      row.normalized : '');
+    if (!normalized) return;
+    if (!grouped[normalized]) grouped[normalized] = [];
+    grouped[normalized].push(row);
+  });
+  return grouped;
+}
+
+/** 顧客別の一覧（TEST01 の分だけ）を、名前の鍵ごとに引ける形にする。 */
+function templatePartnerListPartnerNames_(customerId) {
+  var partnerNames = {active: Object.create(null), canonical: Object.create(null)};
+  customerPartnerRecords_(readCustomerPartnerRows_()).forEach(function(record) {
+    if (String(record.customerId || '') !== customerId) return;
+    var key = partnerNameKey_(record.partnerName);
+    if (!key) return;
+    if (record.active === true) {
+      partnerNames.active[key] = true;
+      return;
+    }
+    var canonical = String(record.canonicalName || '').trim();
+    if (!canonical) return;
+    if (!partnerNames.canonical[key]) partnerNames.canonical[key] = [];
+    if (partnerNames.canonical[key].indexOf(canonical) < 0) {
+      partnerNames.canonical[key].push(canonical);
+    }
+  });
+  return partnerNames;
+}
+
+function templatePartnerListViaCanonical_(canonicalNames, commonPartnerKeys) {
+  var names = canonicalNames || [];
+  for (var index = 0; index < names.length; index += 1) {
+    var key = partnerNameKey_(names[index]);
+    if (key && commonPartnerKeys[key]) return true;
+  }
+  return false;
+}
+
+function templatePartnerListMasterPartners_(commonRows, sourceRows) {
+  var names = [];
+  var keys = [];
+  (commonRows || []).concat(sourceRows || []).forEach(function(row) {
+    var name = String(row.partnerName || '').trim();
+    if (!name) return;
+    var key = partnerNameKey_(name);
+    if (keys.indexOf(key) >= 0) return;
+    keys.push(key);
+    if (names.length < 3) names.push(name);
+  });
+  return names;
+}
+
+function templatePartnerListSample_(list, rowNumber, original, partnerName, masterPartners) {
+  if (list.length >= TEMPLATE_PARTNER_SAMPLE_LIMIT_) return;
+  var sample = {row: rowNumber, original: original, partnerName: partnerName};
+  if (masterPartners) sample.masterPartners = masterPartners;
+  list.push(sample);
+}
+
+function templatePartnerListCount_(report, code) {
+  if (Object.prototype.hasOwnProperty.call(report.dictionary, code)) {
+    return report.dictionary[code];
+  }
+  return report.partnerNames[code] || 0;
+}
+
+function templatePartnerListRangeHasValues_(sheet, rows, columns) {
+  if (rows < 1) return false;
+  var values = sheet.getRange(2, 1, rows, Math.max(1, columns)).getValues();
+  return values.some(rowHasAnyValue_);
+}
