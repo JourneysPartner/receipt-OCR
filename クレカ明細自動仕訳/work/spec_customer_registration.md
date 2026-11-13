@@ -454,6 +454,7 @@ if (opts.prepareOnly !== true && !opts.destinationSpreadsheetId &&
 11. 古い返事：顧客フォルダ A の下調べの返事が、B を選んだ後に返ってきても画面を変えない。
 12. フォルダ名・別表の名前に `<img src=x onerror=…>` があっても字のまま出る（`innerHTML` を使っていない）。
 13. 確認の窓 `#confirm-intro` に `white-space: pre-line` があり、登録の確認文が行に分かれて出る（`\n` を含む）。
+14. CSS に `.steps[hidden]`・`.workspace[hidden]` の `display: none` があり、「設定」を開くと進み具合の帯と 3 つの欄が実際に隠れる（`display: grid` が `[hidden]` に勝つため、`hidden` の値だけでは隠れない）。
 
 ### 6.3 既存のテスト
 
@@ -488,6 +489,7 @@ if (opts.prepareOnly !== true && !opts.destinationSpreadsheetId &&
 | R21 | 59 に `function diagSortedEntries_(` を戻す（`97` と同じ名前） | reg 23 |
 | R22 | 下調べから D のたどる確かめを外す | reg 24 |
 | R23 | `#confirm-intro { white-space: pre-line; }` を消す | regu 13 |
+| R24 | `.steps[hidden], .workspace[hidden] { display: none; }` を消す | regu 14 |
 
 ---
 
@@ -547,3 +549,5 @@ if (opts.prepareOnly !== true && !opts.destinationSpreadsheetId &&
 4. **記録だけで直さないもの（範囲外）：**`webAppBootstrap` は `authorize` を呼ぶので、有効な顧客が 0 件だと「設定」も開けない（今は TEST01 があるので起きない）。
 5. **2 回目の監査で記録した低（3 回目で直した）：**確認の窓 `#confirm-intro` に `white-space` の指定が無く、登録の確認文の改行が効かず 1 行に詰まっていた。
 6. **全テスト：**worktree（`test/fixtures/` 無し）では 2011/2108（落ちるのは fixtures が無いための ENOENT 97 件だけ）。fixtures 込みの全テストは main へ取り込んだ後に main のフォルダーで流す（fixtures を worktree へ写す操作は自動判定で拒まれるため）。
+7. **本番の受入で見つけたもの（2026-11-13）：**「設定」を開いても進み具合の帯と 3 つの欄が隠れず、登録の欄がその下に出た。`setSettingsVisible` は `hidden` を付けていたが、`.steps`・`.workspace` の `display: grid` が `[hidden]` に勝っていた（regu 2 は `hidden` の値しか見ずにすり抜けた）。`.steps[hidden], .workspace[hidden] { display: none; }` を足し、regu 14・R24 で見張る（OpenCode 4 回目）。利用者の指示「設定の画面にこれは表示させる必要はない」。
+8. **記録だけ（直していない）：**読み込み（`webAppBootstrap`）が終わる前に「設定」を押すと、`state.isOwner` がまだ false なので「この画面はオーナーだけが使えます」と出る（待ってから押せば開く）。直すなら「読み込み中です」の文言にするか、読み込み後に開く。

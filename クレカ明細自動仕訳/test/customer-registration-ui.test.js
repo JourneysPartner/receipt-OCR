@@ -463,6 +463,31 @@ module.exports = ({test, assert}) => {
     assert.ok(intro.indexOf('\n') >= 0, '改行を含む');
     assert.ok(intro.indexOf('顧客名: 架空 太郎\n顧客 ID: K9002') >= 0, intro);
   });
+
+  // regu 14: 設定を開いたときに CSS でも隠れる
+  asyncTest('regu 14: 設定を開くと進み具合の帯と 3 つの欄が CSS でも隠れる（[hidden] は display: none）', async () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', '81_WebAppUi.html'), 'utf8');
+    const style = source.slice(source.indexOf('<style>') + '<style>'.length,
+      source.indexOf('</style>'));
+    const rules = style.match(/[^{}]*\{[^{}]*\}/g) || [];
+    const hides = (selector) => rules.some((text) => {
+      const selectorText = text.slice(0, text.indexOf('{'));
+      const body = text.slice(text.indexOf('{') + 1);
+      const selects = selectorText.split(',').some((part) => part.trim() === selector);
+      return selects && /display\s*:\s*none\s*(?:;|$)/.test(body);
+    });
+    assert.ok(hides('.steps[hidden]'), '.steps[hidden] を選ぶ規則に display: none がある');
+    assert.ok(hides('.workspace[hidden]'), '.workspace[hidden] を選ぶ規則に display: none がある');
+
+    const w = world();
+    await w.open();
+    assert.equal(w.stepsNode.hidden, true);
+    assert.equal(w.workspaceNode.hidden, true);
+    w.ids['settings-back'].fire('click');
+    await tick();
+    assert.equal(w.stepsNode.hidden, false);
+    assert.equal(w.workspaceNode.hidden, false);
+  });
 };
 
 if (require.main === module) {
