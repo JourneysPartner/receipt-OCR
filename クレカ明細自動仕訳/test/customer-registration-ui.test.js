@@ -235,9 +235,11 @@ module.exports = ({test, assert}) => {
     const stopped = world(START, plain({status: 'STOPPED', code: 'YEAR_FOLDER_NOT_FOUND',
       path: [], childNames: ['2026年分']}));
     await stopped.ready();
-    assert.ok(stopped.ids['registration-statement-message'].textContent
-      .indexOf('「令和N年分」のフォルダが見つかりません。') >= 0);
-    assert.ok(stopped.ids['registration-statement-choices'].textContent.indexOf('2026年分') >= 0);
+    assert.equal(stopped.ids['registration-statement-message'].textContent,
+      'この顧客フォルダの中に「令和N年分」のフォルダがありません。');
+    assert.equal(stopped.ids['registration-statement-message'].className, 'settings-warning');
+    assert.ok(stopped.ids['registration-statement-choices'].textContent
+      .indexOf('直下にあるフォルダ：2026年分') >= 0);
     assert.equal(stopped.ids['registration-submit'].disabled, true);
   });
 
@@ -487,6 +489,238 @@ module.exports = ({test, assert}) => {
     await tick();
     assert.equal(w.stepsNode.hidden, false);
     assert.equal(w.workspaceNode.hidden, false);
+  });
+
+  // regu 15: 開くときの「調べています…」
+  asyncTest('regu 15: 一覧の返事を待つ間は「調べています…」だけを出し、前の一覧も出さない', async () => {
+    const w = world(START, READY, {webAppRegistrationStart: () => ({defer: true})});
+    w.ids['nav-settings'].fire('click');
+    await tick();
+    assert.equal(w.startCalls().length, 1);
+    assert.equal(w.ids['registration-missing'].hidden, false);
+    assert.equal(w.ids['registration-missing'].textContent, w.ui.TEXT.registration.checking);
+    ['registration-folders-section', 'registration-statement-section',
+      'registration-contract-section', 'registration-name-section'].forEach((id) => {
+      assert.equal(w.ids[id].hidden, true, id);
+    });
+    assert.equal(w.ids['registration-folder-list'].children.length, 0);
+    assert.equal(w.ids['registration-folder-count'].textContent, '');
+    assert.equal(w.ids['registration-submit'].disabled, true);
+    // 返事で今までどおりになる。
+    w.pending[0].reply(plain(START));
+    await tick();
+    assert.equal(w.ids['registration-missing'].hidden, true);
+    assert.equal(w.ids['registration-missing'].textContent, '');
+    assert.equal(w.ids['registration-folder-list'].children.length, 3);
+    assert.equal(w.ids['registration-submit'].disabled, true);
+
+    // 一度開いて一覧が出た後に閉じ、開き直して待たせても、前の一覧は出さない。
+    w.ids['settings-back'].fire('click');
+    await tick();
+    assert.equal(w.ui.el['settings-panel'].hidden, true);
+    assert.equal(w.ui.state.registrationReady, true);
+    w.ids['nav-settings'].fire('click');
+    await tick();
+    assert.equal(w.startCalls().length, 2);
+    assert.equal(w.ui.state.registrationReady, true);
+    assert.equal(w.ids['registration-missing'].hidden, false);
+    assert.equal(w.ids['registration-missing'].textContent, w.ui.TEXT.registration.checking);
+    assert.equal(w.ids['registration-folders-section'].hidden, true);
+    assert.equal(w.ids['registration-folder-list'].children.length, 0);
+    assert.equal(w.ids['registration-submit'].disabled, true);
+    w.pending[1].reply(plain(START));
+    await tick();
+    assert.equal(w.ids['registration-missing'].hidden, true);
+    assert.equal(w.ids['registration-folder-list'].children.length, 3);
+
+    // 例外でも「調べています…」は残らない。
+    const failed = world(START, READY, {webAppRegistrationStart: () => ({defer: true})});
+    failed.ids['nav-settings'].fire('click');
+    await tick();
+    assert.equal(failed.ids['registration-missing'].textContent,
+      failed.ui.TEXT.registration.checking);
+    failed.pending[0].reject(new Error('x'));
+    await tick();
+    assert.equal(failed.ids['registration-missing'].textContent, '');
+    assert.equal(failed.ids['registration-folder-list'].children.length, 0);
+    assert.equal(failed.ids['registration-folders-section'].hidden, true);
+    assert.equal(failed.ids['registration-submit'].disabled, true);
+  });
+
+  // regu 16: 下調べの「調べています…」
+  asyncTest('regu 16: 下調べの返事を待つ間は「調べています…」を出し、古い返事で消さない', async () => {
+    const w = world(START, () => ({defer: true}));
+    await w.open();
+    assert.equal(w.inspectCalls().length, 0);
+    w.button('registration-folder-list', '架空 太郎').fire('click');
+    await tick();
+    assert.equal(w.inspectCalls().length, 1);
+    assert.equal(w.ids['registration-statement-section'].hidden, false);
+    assert.equal(w.ids['registration-statement-message'].textContent,
+      w.ui.TEXT.registration.checking);
+    assert.equal(w.ids['registration-statement-message'].className, 'muted');
+    ['registration-statement-path', 'registration-statement-year',
+      'registration-statement-cards', 'registration-statement-choices'].forEach((id) => {
+      assert.equal(w.ids[id].textContent, '', id);
+    });
+    assert.equal(w.ids['registration-contract-section'].hidden, true);
+    assert.equal(w.ids['registration-name-section'].hidden, true);
+    assert.equal(w.ids['registration-submit'].disabled, true);
+
+    // 待っている間に別の顧客フォルダを選び直す（これも待たせる）。
+    w.button('registration-folder-list', '花子').fire('click');
+    await tick();
+    assert.equal(w.inspectCalls().length, 2);
+    assert.equal(w.ui.state.registrationFolderId, 'f-hana');
+    // 前の返事（f-taro）を先に返しても「調べています…」は消えない。
+    w.pending[0].reply(plain(READY));
+    await tick();
+    assert.equal(w.ids['registration-statement-section'].hidden, false);
+    assert.equal(w.ids['registration-statement-message'].textContent,
+      w.ui.TEXT.registration.checking);
+    // 後の返事（READY）で消えて道が出る。
+    const hana = plain(READY);
+    hana.path = ['令和8年分', '経理', 'クレカ明細'];
+    w.pending[1].reply(hana);
+    await tick();
+    assert.equal(w.ids['registration-statement-message'].textContent, '');
+    assert.equal(w.ids['registration-statement-path'].textContent, '令和8年分 › 経理 › クレカ明細');
+    assert.equal(w.ids['registration-statement-message'].className, 'muted');
+
+    // NEED_CHOICE で段を選んだ後の呼び直しを待たせても「調べています…」が出る。
+    const again = world(START, () => ({defer: true}));
+    await again.open();
+    again.button('registration-folder-list', '架空 太郎').fire('click');
+    await tick();
+    again.pending[0].reply(plain({status: 'NEED_CHOICE', stage: 'accounting', stageLabel: '経費',
+      path: ['☆資料共有フォルダ', '令和8年分'],
+      choices: [{id: 'acc-1', name: '経費A'}, {id: 'acc-2', name: '経費B'}]}));
+    await tick();
+    assert.ok(again.button('registration-statement-choices', '経費B'));
+    again.button('registration-statement-choices', '経費B').fire('click');
+    await tick();
+    assert.equal(again.inspectCalls().length, 2);
+    assert.equal(again.ids['registration-statement-message'].textContent,
+      again.ui.TEXT.registration.checking);
+    assert.equal(again.ids['registration-statement-path'].textContent, '');
+    assert.equal(again.ids['registration-statement-choices'].textContent, '');
+    assert.equal(again.ids['registration-submit'].disabled, true);
+    again.pending[1].reply(plain(READY));
+    await tick();
+    assert.equal(again.ids['registration-statement-message'].textContent, '');
+    assert.equal(again.ids['registration-statement-path'].textContent,
+      '☆資料共有フォルダ › 令和8年分 › 経費 › クレジットカード支払い分');
+
+    // 下調べが例外のときは「調べています…」を残さない。
+    const failed = world(START, () => ({defer: true}));
+    await failed.open();
+    failed.button('registration-folder-list', '架空 太郎').fire('click');
+    await tick();
+    assert.equal(failed.ids['registration-statement-message'].textContent,
+      failed.ui.TEXT.registration.checking);
+    failed.pending[0].reject(new Error('x'));
+    await tick();
+    assert.equal(failed.ids['registration-statement-message'].textContent, '');
+    assert.equal(failed.ids['registration-statement-section'].hidden, true);
+    assert.equal(failed.ids['registration-submit'].disabled, true);
+  });
+
+  // regu 17: 止まったときの文言
+  asyncTest('regu 17: 止まったときに足りない段・直下のフォルダ・探し方を出す', async () => {
+    const HINT = '明細フォルダは、顧客フォルダの中を「（☆資料共有フォルダ ›）令和N年分 › 経費 › ' +
+      'クレジットカード…」の順にたどって探します。この形になっていないフォルダは登録できません。';
+    const lines = (w) => w.ids['registration-statement-choices'].children
+      .map((child) => child.textContent);
+
+    // 年の段が無い（道が空）。
+    const year = world(START, plain({status: 'STOPPED', code: 'YEAR_FOLDER_NOT_FOUND',
+      path: [], childNames: ['架空 第一', '架空 第二']}));
+    await year.ready();
+    assert.equal(year.ids['registration-statement-message'].textContent,
+      'この顧客フォルダの中に「令和N年分」のフォルダがありません。');
+    assert.equal(year.ids['registration-statement-message'].className, 'settings-warning');
+    assert.deepEqual(lines(year), ['直下にあるフォルダ：架空 第一、架空 第二', HINT]);
+    assert.equal(year.ids['registration-statement-choices'].children[1].className, 'muted');
+    assert.equal(year.ids['registration-submit'].disabled, true);
+
+    // 年の段が無い（道がある）。
+    const inShared = world(START, plain({status: 'STOPPED', code: 'YEAR_FOLDER_NOT_FOUND',
+      path: ['☆資料共有フォルダ'], childNames: ['架空 第一']}));
+    await inShared.ready();
+    assert.equal(inShared.ids['registration-statement-message'].textContent,
+      '「☆資料共有フォルダ」の中に「令和N年分」のフォルダがありません。');
+    assert.equal(inShared.ids['registration-statement-message'].className, 'settings-warning');
+    assert.deepEqual(lines(inShared), ['直下にあるフォルダ：架空 第一', HINT]);
+    assert.equal(inShared.ids['registration-submit'].disabled, true);
+
+    // 子が 1 つも無い（道が空・道が 2 つ）。子が空なら「直下にあるフォルダ：」の行は無い。
+    const noChild = world(START, plain({status: 'STOPPED', code: 'NO_CHILD_FOLDERS',
+      path: [], childNames: []}));
+    await noChild.ready();
+    assert.equal(noChild.ids['registration-statement-message'].textContent,
+      'この顧客フォルダの中にフォルダがありません。');
+    assert.equal(noChild.ids['registration-statement-message'].className, 'settings-warning');
+    assert.deepEqual(lines(noChild), [HINT]);
+    assert.equal(noChild.ids['registration-submit'].disabled, true);
+
+    const noChildDeep = world(START, plain({status: 'STOPPED', code: 'NO_CHILD_FOLDERS',
+      path: ['☆資料共有フォルダ', '令和8年分'], childNames: ['架空 下']}));
+    await noChildDeep.ready();
+    assert.equal(noChildDeep.ids['registration-statement-message'].textContent,
+      '「令和8年分」の中にフォルダがありません。');
+    assert.deepEqual(lines(noChildDeep), ['直下にあるフォルダ：架空 下', HINT]);
+    assert.equal(noChildDeep.ids['registration-submit'].disabled, true);
+
+    // ほかのコードは今の表の文言で、3 行目は無い。
+    const other = world(START, plain({status: 'STOPPED', code: 'FOLDER_STRUCTURE',
+      path: [], childNames: []}));
+    await other.ready();
+    assert.equal(other.ids['registration-statement-message'].textContent,
+      other.ui.TEXT.registrationCodes.FOLDER_STRUCTURE);
+    assert.equal(other.ids['registration-statement-message'].className, 'settings-warning');
+    assert.deepEqual(lines(other), []);
+    assert.equal(other.ids['registration-submit'].disabled, true);
+
+    // missing（NOT_READY）は 1 つずつ文言を並べる。
+    const notReady = world(START, plain({status: 'STOPPED', code: 'NOT_READY', path: [],
+      missing: ['CUSTOMER_ROOT_FOLDER_ID', 'PARALLEL_WORK_FOLDER_ID'], childNames: []}));
+    await notReady.ready();
+    assert.equal(notReady.ids['registration-statement-message'].textContent,
+      notReady.ui.TEXT.registrationCodes.NOT_READY);
+    assert.deepEqual(lines(notReady),
+      [notReady.ui.TEXT.registrationCodes.CUSTOMER_ROOT_FOLDER_ID,
+        notReady.ui.TEXT.registrationCodes.PARALLEL_WORK_FOLDER_ID]);
+    assert.equal(notReady.ids['registration-submit'].disabled, true);
+
+    // 子の名前が HTML でも字のまま出る。
+    const evil = '<img src=x onerror=alert(1)>';
+    const evilWorld = world(START, plain({status: 'STOPPED', code: 'YEAR_FOLDER_NOT_FOUND',
+      path: [], childNames: [evil]}));
+    await evilWorld.ready();
+    assert.equal(evilWorld.ids['registration-statement-message'].textContent,
+      'この顧客フォルダの中に「令和N年分」のフォルダがありません。');
+    assert.ok(evilWorld.ids['registration-statement-choices'].textContent
+      .indexOf('直下にあるフォルダ：' + evil) >= 0);
+    assert.equal(allTags(evilWorld.root, []).indexOf('IMG'), -1);
+    assert.equal(allTags(evilWorld.root, []).indexOf('SCRIPT'), -1);
+    assert.equal(evilWorld.ids['registration-submit'].disabled, true);
+
+    // 止まった後に READY を返すと 1 行目の class は muted に戻る。
+    let count = 0;
+    const flip = world(START, () => {
+      count += 1;
+      return count === 1 ? plain({status: 'STOPPED', code: 'YEAR_FOLDER_NOT_FOUND',
+        path: [], childNames: ['架空 第一']}) : plain(READY);
+    });
+    await flip.ready();
+    assert.equal(flip.ids['registration-statement-message'].className, 'settings-warning');
+    flip.button('registration-folder-list', '架空 太郎').fire('click');
+    await tick();
+    assert.equal(flip.ids['registration-statement-message'].className, 'muted');
+    assert.equal(flip.ids['registration-statement-message'].textContent, '');
+    assert.equal(flip.ids['registration-statement-path'].textContent,
+      '☆資料共有フォルダ › 令和8年分 › 経費 › クレジットカード支払い分');
+    assert.equal(flip.ids['registration-submit'].disabled, false);
   });
 };
 

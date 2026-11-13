@@ -652,6 +652,8 @@
       }),
       registration: Object.freeze({
         ownerOnly: 'この画面はオーナーだけが使えます。',
+        // 一覧・下調べの返事を待つ間の 1 行（§3.11 の「調べている間の表示」）。
+        checking: '調べています…',
         registered: '登録済み',
         folderCount: function(shown, total) { return shown + ' / ' + total + ' 件'; },
         stagePrompt: function(label) { return String(label || '') + 'を選んでください'; },
@@ -674,6 +676,19 @@
           return '「' + customerName + '」を顧客一覧に登録しました（顧客 ID ' + customerId + '）。';
         },
         alreadyRegistered: '既に登録されていました。',
+        // 止まったときの文言（§3.11 の「止まったときの文言」）。lastName は道の最後の名前。
+        stoppedYear: function(lastName) {
+          var where = lastName ? '「' + lastName + '」' : 'この顧客フォルダ';
+          return where + 'の中に「令和N年分」のフォルダがありません。';
+        },
+        stoppedNoChild: function(lastName) {
+          var where = lastName ? '「' + lastName + '」' : 'この顧客フォルダ';
+          return where + 'の中にフォルダがありません。';
+        },
+        childList: function(names) {
+          return '直下にあるフォルダ：' + (names || []).map(String).join('、');
+        },
+        stoppedHint: '明細フォルダは、顧客フォルダの中を「（☆資料共有フォルダ ›）令和N年分 › 経費 › クレジットカード…」の順にたどって探します。この形になっていないフォルダは登録できません。',
         codeText: function(code, context) {
           var key = String(code === null || code === undefined ? '' : code);
           var table = TEXT.registrationCodes;
@@ -768,6 +783,9 @@
       registrationBusy: false,
       registrationPending: 0,
       registrationGeneration: 0,
+      // 「調べています…」を出している間だけ、呼び出したときの世代を持つ（§3.11 の 3）。
+      registrationStartingGeneration: null,
+      registrationInspectingGeneration: null,
       registrationReady: false,
       registrationMissing: [],
       registrationFolders: [],
@@ -4748,6 +4766,16 @@
       return TEXT.registration.codeText(code, context);
     }
 
+    /**
+     * 「調べています…」を出すか（§3.11 の 3）。待ちの世代が今の世代と同じときだけ出す。
+     * 顧客フォルダを選び直すと世代が変わり、前の呼出しの待ちは表に出ない。
+     */
+    function registrationWaiting(field) {
+      var generation = state[field];
+      return generation !== null && generation !== undefined &&
+        generation === state.registrationGeneration;
+    }
+
     function registrationAppendText(parent, className, text) {
       var node = document.createElement('div');
       node.className = className || '';
@@ -4826,6 +4854,7 @@
 
     async function loadRegistrationStart() {
       var generation = state.registrationGeneration;
+      state.registrationStartingGeneration = generation;
       registrationSetBusy(1);
       renderRegistration();
       try {
@@ -4842,6 +4871,10 @@
         state.registrationFolders = [];
         showNotice(failureMessage(error), 'error');
       } finally {
+        // 選び直しなどで世代が進んでいたら、後の呼出しの「調べています…」を消さない。
+        if (state.registrationStartingGeneration === generation) {
+          state.registrationStartingGeneration = null;
+        }
         registrationSetBusy(-1);
         renderRegistration();
       }
@@ -4877,6 +4910,7 @@
       var generation = state.registrationGeneration;
       var folderId = state.registrationFolderId;
       var picks = Object.assign({}, state.registrationPicks);
+      state.registrationInspectingGeneration = generation;
       registrationSetBusy(1);
       renderRegistration();
       try {
@@ -4901,6 +4935,10 @@
         state.registrationStage = null;
         showNotice(failureMessage(error), 'error');
       } finally {
+        // 顧客フォルダ A の返事が B の後に来ても、B の「調べています…」を消さない。
+        if (state.registrationInspectingGeneration === generation) {
+          state.registrationInspectingGeneration = null;
+        }
         registrationSetBusy(-1);
         renderRegistration();
       }
@@ -4940,6 +4978,15 @@
       return true;
     }
 
+    /** 止まったときの 1 行目（§3.11 の「止まったときの文言」の 1）。 */
+    function registrationStoppedText(stage) {
+      var path = stage.path || [];
+      var lastName = path.length ? String(path[path.length - 1]) : '';
+      if (stage.code === 'YEAR_FOLDER_NOT_FOUND') return TEXT.registration.stoppedYear(lastName);
+      if (stage.code === 'NO_CHILD_FOLDERS') return TEXT.registration.stoppedNoChild(lastName);
+      return registrationCodeText(stage.code, {reiwaYear: stage.reiwaYear});
+    }
+
     function renderRegistration() {
       var locked = registrationLocked();
       el['settings-back'].disabled = locked;
@@ -4947,6 +4994,20 @@
       el['nav-settings'].disabled = locked;
       el['registration-category-individual'].checked = true;
       el['registration-category-individual'].disabled = locked;
+      // 一覧の返事を待つ間は「調べています…」だけ（前に開いた一覧も出さない。§3.11 の 1）。
+      if (registrationWaiting('registrationStartingGeneration')) {
+        el['registration-missing'].hidden = false;
+        el['registration-missing'].textContent = '';
+        registrationAppendText(el['registration-missing'], '', TEXT.registration.checking);
+        ['registration-folders-section', 'registration-statement-section',
+          'registration-contract-section', 'registration-name-section'].forEach(function(id) {
+          el[id].hidden = true;
+        });
+        el['registration-folder-list'].textContent = '';
+        el['registration-folder-count'].textContent = '';
+        el['registration-submit'].disabled = true;
+        return;
+      }
       var ready = state.registrationReady === true;
       el['registration-missing'].hidden = ready;
       el['registration-missing'].textContent = '';
@@ -5005,25 +5066,38 @@
 
     function renderRegistrationStatement() {
       var stage = state.registrationStage;
-      el['registration-statement-section'].hidden = !stage;
+      // 下調べの返事を待つ間は「調べています…」だけ（§3.11 の 2）。
+      var inspecting = registrationWaiting('registrationInspectingGeneration');
+      el['registration-statement-section'].hidden = !stage && !inspecting;
       el['registration-statement-path'].textContent = '';
       el['registration-statement-year'].textContent = '';
       el['registration-statement-cards'].textContent = '';
+      el['registration-statement-message'].className = 'muted';
       el['registration-statement-message'].textContent = '';
       el['registration-statement-choices'].textContent = '';
+      if (inspecting) {
+        el['registration-statement-message'].textContent = TEXT.registration.checking;
+        return;
+      }
       if (!stage) return;
       var path = stage.path || [];
       if (path.length) el['registration-statement-path'].textContent = path.join(' › ');
       if (stage.status === 'STOPPED') {
-        el['registration-statement-message'].textContent = registrationCodeText(stage.code,
-          {reiwaYear: stage.reiwaYear});
+        el['registration-statement-message'].className = 'settings-warning';
+        el['registration-statement-message'].textContent = registrationStoppedText(stage);
         (stage.missing || []).forEach(function(code) {
           registrationAppendText(el['registration-statement-choices'], '',
             registrationCodeText(code));
         });
-        (stage.childNames || []).forEach(function(name) {
-          registrationAppendText(el['registration-statement-choices'], 'muted', name);
-        });
+        var childNames = stage.childNames || [];
+        if (childNames.length) {
+          registrationAppendText(el['registration-statement-choices'], 'muted',
+            TEXT.registration.childList(childNames));
+        }
+        if (stage.code === 'YEAR_FOLDER_NOT_FOUND' || stage.code === 'NO_CHILD_FOLDERS') {
+          registrationAppendText(el['registration-statement-choices'], 'muted',
+            TEXT.registration.stoppedHint);
+        }
         return;
       }
       if (stage.status === 'NEED_CHOICE') {
