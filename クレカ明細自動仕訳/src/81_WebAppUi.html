@@ -4796,8 +4796,11 @@
 
     /** 呼出し中の印。3 つの入口の呼出しが 1 つでも残っている間は true。 */
     function registrationSetBusy(delta) {
+      var wasBusy = state.registrationBusy;
       state.registrationPending = Math.max(0, state.registrationPending + Number(delta));
       state.registrationBusy = state.registrationPending > 0;
+      // 印が消えた後に取込の画面を描き直す（登録の最中に描いた一覧が押せないまま残る）。
+      if (wasBusy && !state.registrationBusy) renderSelection();
     }
 
     /**

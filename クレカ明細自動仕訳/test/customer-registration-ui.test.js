@@ -722,6 +722,72 @@ module.exports = ({test, assert}) => {
       '☆資料共有フォルダ › 令和8年分 › 経費 › クレジットカード支払い分');
     assert.equal(flip.ids['registration-submit'].disabled, false);
   });
+
+  // regu 18: 登録の後に左の顧客一覧が押せる（1.2）
+  asyncTest('regu 18: 登録の後、顧客一覧のボタンが押せるようになる', async () => {
+    const customers = [
+      {customerId: 'K9101', customerName: '架空 一', customerCategory: 'INDIVIDUAL', canImport: true},
+      {customerId: 'K9102', customerName: '架空 二', customerCategory: 'INDIVIDUAL', canImport: true}
+    ];
+    const bootstrapReply = {actor: 'owner@example.invalid', isOwner: true, customers: customers,
+      importLanes: 1, maxFilesPerImport: 6, version: 'v-fake'};
+    let busyAtBootstrap = null;
+
+    // 1 つ目：登録の返事を待つ間と、その返事の後の bootstrap() の間は印が立っている。
+    const w = world(START, READY, {
+      webAppRegisterCustomer: () => ({defer: true}),
+      webAppBootstrap: () => { busyAtBootstrap = w.ui.state.registrationBusy; return plain(bootstrapReply); }
+    });
+    await w.ready();
+    w.ids['registration-submit'].fire('click');
+    await tick();
+    w.ids['confirm-submit'].fire('click');
+    await tick();
+    assert.equal(w.registerCalls().length, 1);
+    assert.equal(w.ui.state.registrationBusy, true, '登録の返事を待つ間');
+    w.pending[0].reply(plain(SUCCESS));
+    await tick();
+    assert.equal(busyAtBootstrap, true, 'bootstrap() は印の立っている間に呼ばれる');
+    assert.equal(w.ui.state.registrationBusy, false);
+    const list = w.buttons('customer-list');
+    assert.equal(list.length, 2);
+    assert.equal(list[0].disabled, false);
+    assert.equal(list[1].disabled, false);
+    // ［戻る］で取込の画面に戻り、押すとその顧客が選ばれる。
+    w.ids['settings-back'].fire('click');
+    await tick();
+    assert.equal(w.ui.el['settings-panel'].hidden, true);
+    w.button('customer-list', '架空 二').fire('click');
+    await tick();
+    assert.equal(w.ui.state.selectedCustomerId, 'K9102');
+
+    // 2 つ目：一覧の返事を待つ間に描いた取込の画面も、返事の後に押せるようになる。
+    const later = world(START, READY, {
+      webAppRegistrationStart: () => ({defer: true}),
+      webAppBootstrap: plain(bootstrapReply)
+    });
+    later.ids['nav-settings'].fire('click');
+    await tick();
+    assert.equal(later.startCalls().length, 1);
+    assert.equal(later.ui.state.registrationBusy, true);
+    later.ids['settings-back'].fire('click');
+    await tick();
+    assert.equal(later.ui.el['settings-panel'].hidden, true);
+    await later.ui.bootstrap();
+    await tick();
+    assert.equal(later.ui.state.registrationBusy, true, '一覧の返事を待つ間');
+    const busyButtons = later.buttons('customer-list');
+    assert.equal(busyButtons.length, 2);
+    assert.equal(busyButtons[0].disabled, true);
+    assert.equal(busyButtons[1].disabled, true);
+    later.pending[0].reply(plain(START));
+    await tick();
+    assert.equal(later.ui.state.registrationBusy, false);
+    const readyButtons = later.buttons('customer-list');
+    assert.equal(readyButtons.length, 2);
+    assert.equal(readyButtons[0].disabled, false);
+    assert.equal(readyButtons[1].disabled, false);
+  });
 };
 
 if (require.main === module) {
