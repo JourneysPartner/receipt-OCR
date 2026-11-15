@@ -400,7 +400,11 @@
             <button id="final-button" type="button" class="button" disabled>最終確認を表示</button>
             <button id="excel-button" type="button" class="button" disabled>Excel ダウンロード</button>
             <span id="excel-status" class="excel-status"></span>
+            <button id="freee-button" type="button" class="button" disabled>freee 取込用 Excel を作る</button>
+            <button id="freee-download" type="button" class="button" hidden>ダウンロード</button>
+            <span id="freee-status" class="excel-status"></span>
           </div>
+          <div class="muted">freee の「エクセルインポート」（振替伝票データ）には、ここで作ったファイルを使います。値だけ・データの行だけの 1 枚です。</div>
         </div>
       </div>
     </section>
@@ -703,6 +707,94 @@
           }
           return 'この操作はできませんでした（' + (key || 'UNKNOWN') + '）。';
         }
+      }),
+      // freee 取込用 Excel（仕様 §4.3〜§4.5）。本文・明細の文言は仕様の表のとおり。
+      freee: Object.freeze({
+        busy: 'freee 取込用を作っています…',
+        confirmTitle: 'freee 取込用 Excel',
+        confirmText: function(problemCount) {
+          return '最終確認で明細と一致していません（問題 ' + problemCount + ' 件）。\n' +
+            'このまま作ると、漏れや重複のある内容が freee に入るおそれがあります。\n' +
+            'それでも作りますか？';
+        },
+        created: function(rows) {
+          return 'freee 取込用ができました（' + rows + ' 行）。［ダウンロード］を押してください。';
+        },
+        emptyTaxRows: function(count) {
+          return '税区分が空の行が ' + count + ' 行あります（freee が勘定科目の税区分を使います）。';
+        },
+        unbalancedAccepted: '明細と一致しないまま作りました。',
+        downloaded: function(dateText) { return 'freee 取込用 ダウンロード ' + dateText; },
+        expired: '作ってから 30 分たちました。もう一度［freee 取込用 Excel を作る］を押してください。',
+        unknownStop: function(code) {
+          return code ? 'freee 取込用を作れませんでした（' + code + '）。' : 'freee 取込用を作れませんでした。';
+        },
+        codes: Object.freeze({
+          WORK_FOLDER_MISSING: '作業用フォルダが設定されていないため、freee 取込用を作れません。',
+          TEMPLATE_UNSUPPORTED: 'この顧客の転記シートには入金の列の設定が無いため、freee 取込用を作れません。',
+          IMPORT_SHEET_MISSING: '転記シートに「取込用」のタブがありません。',
+          HEADER_MISMATCH: function(stop) {
+            return '「取込用」の 1 行目が freee の形と違います（' + String(stop.column || '') + ' 列：「' +
+              freeeCellText(stop.expected) + '」のはずが「' + freeeCellText(stop.actual) + '」）。';
+          },
+          CARD_NAME_PLACEHOLDER: '入力用シートの B1（カード名）が「○○カード」のままか空です。freee のカードの勘定科目名を入れてください。',
+          NO_DATA_ROWS: '取り込む行がありません。',
+          ROW_PROBLEMS: function(stop) {
+            return '直す必要のある行が ' + (Number(stop.count) || 0) + ' 件あります（下の一覧）。';
+          },
+          INPUT_AMOUNT_INVALID: function(stop) {
+            var list = freeeRowList(stop.rowNumbers);
+            return '入力用シートの借方・貸方に数として読めない値があります（' +
+              (list ? list + ' 行目…' : '行は不明') + '）。';
+          },
+          ROW_COUNT_MISMATCH: function(stop) {
+            return '入力用シートの金額のある行（' + (Number(stop.inputRows) || 0) + ' 行）と、取込用の行（' +
+              (Number(stop.importRows) || 0) + ' 行）の数が合いません。' +
+              '入力用シートの 1001 行目より下にある行は取込用に出ません。';
+          },
+          AMOUNT_TOTAL_MISMATCH: function(stop) {
+            return '入力用シートの金額の合計（' + yen(stop.inputTotal) + '）と、取込用の合計（' +
+              yen(stop.importTotal) + '）が合いません。';
+          },
+          REVIEW_REMAINING: function(stop) {
+            return '要確認が ' + (Number(stop.count) || 0) + ' 件残っています（入力用シート ' +
+              (freeeRowList(stop.rowNumbers) || '不明') + ' 行目）。確定してから作ってください。';
+          },
+          WRITE_IN_PROGRESS: function(stop) {
+            return '書き込みの途中の取引が ' + (Number(stop.count) || 0) + ' 件あります（' +
+              (freeeRowList(stop.rowNumbers) || '不明') + ' 行目）。最終確認を開き直してから作ってください。';
+          },
+          FOREIGN_CUSTOMER: function(stop) {
+            return '別の顧客の取引が ' + (Number(stop.count) || 0) + ' 件入っています（' +
+              (freeeRowList(stop.rowNumbers) || '不明') + ' 行目）。この転記シートからは作れません。';
+          },
+          EXPORT_FILE_UNEXPECTED: 'freee 取込用を正しく作れませんでした。もう一度押してください。',
+          WRITE_VERIFY_FAILED: 'freee 取込用を正しく作れませんでした。もう一度押してください。'
+        }),
+        problemKinds: Object.freeze({
+          FORMULA_ERROR: function(problem) {
+            return String(problem.column || '') + ' 列が数式のエラー（' + freeeCellText(problem.value) + '）です';
+          },
+          DATE_INVALID: '日付が日付になっていません',
+          AMOUNT_INVALID: function(problem) {
+            return String(problem.column || '') + ' 列の金額が正しくありません（0・小数・文字など）';
+          },
+          DEBIT_CREDIT_MISMATCH: '借方と貸方の金額が違います（入力用シートの 1 行に借方と貸方の両方があります）',
+          ACCOUNT_EMPTY: function(problem) {
+            return String(problem.column || '') + ' 列の勘定科目が空です';
+          },
+          TAX_NAME_UNKNOWN: function(problem) {
+            return '税区分「' + freeeCellText(problem.value) + '」は freee にありません。' +
+              freeeTaxHintText(problem.hint);
+          },
+          TAX_DATE_MISMATCH: function(problem) {
+            return '税区分「' + freeeCellText(problem.value) +
+              '」はこの日付では使えません（経過措置の控除割合は日付で決まります）';
+          },
+          TAX_AMOUNT_INVALID: function(problem) {
+            return String(problem.column || '') + ' 列の税額が数ではありません';
+          }
+        })
       })
     });
 
@@ -759,6 +851,10 @@
       finalReviewedFor: null,
       finalLoading: false,
       finalRequest: 0,
+      // freee 取込用 Excel。作っている間だけ freeeBusy、作ったファイルは freeeExport。
+      freeeBusy: false,
+      freeeRequest: 0,
+      freeeExport: null,
       // このセッションで取り込んだファイル。1行も書かれなかったファイルの漏れを拾う。
       sessionFileIds: [],
       formatBusy: false,
@@ -814,7 +910,8 @@
       'select-clear', 'review-pager',
       'review-more', 'review-prev', 'review-next', 'resolve-progress', 'resolve-progress-label',
       'resolve-progress-arrows', 'resolve-progress-value', 'resolve-progress-hint', 'resolve-button',
-      'excel-button', 'excel-status', 'final-button', 'final-area', 'final-panel', 'final-sheet',
+      'excel-button', 'excel-status', 'freee-button', 'freee-download', 'freee-status',
+      'final-button', 'final-area', 'final-panel', 'final-sheet',
       'final-verdict', 'final-summary', 'final-files', 'final-problems', 'final-row-count', 'final-rows',
       'confirm-dialog', 'confirm-title', 'confirm-intro', 'confirm-new-partners',
       'confirm-new-partners-intro', 'confirm-new-partners-list', 'confirm-summary',
@@ -855,6 +952,7 @@
         else if (name === 'webAppResolveOtherReview') runner.webAppResolveOtherReview(args[0], args[1], args[2], args[3]);
         else if (name === 'webAppResolveOtherReviewsBatch') runner.webAppResolveOtherReviewsBatch(args[0], args[1], args[2]);
         else if (name === 'webAppFinalReview') runner.webAppFinalReview(args[0], args[1], args[2]);
+        else if (name === 'webAppCreateFreeeExport') runner.webAppCreateFreeeExport(args[0], args[1], args[2], args[3]);
         else if (name === 'webAppExplainUnknownFile') runner.webAppExplainUnknownFile(args[0], args[1], args[2], args[3]);
         else if (name === 'webAppPreviewFormat') runner.webAppPreviewFormat(args[0], args[1], args[2], args[3]);
         else if (name === 'webAppSaveFormat') runner.webAppSaveFormat(args[0], args[1], args[2], args[3], args[4]);
@@ -1494,6 +1592,7 @@
       state.sessionFileIds = destination.fileIds.slice();
       forgetFinalReview();
       el['excel-status'].textContent = '';
+      resetFreeeExport();
       renderDestinations();
       updateActionButtons();
       setStep();
@@ -2193,6 +2292,9 @@
       // 開いたあとに要確認を確定したら表示は古くなるので、もう一度開かせる。
       el['excel-button'].disabled = !state.lastCompletedDestinationSpreadsheetId ||
         isMutationBusy() || !finalReviewIsCurrent();
+      // freee 取込用は Excel と同じ条件に、作っている間（freeeBusy）を足す。
+      el['freee-button'].disabled = !state.lastCompletedDestinationSpreadsheetId ||
+        isMutationBusy() || !finalReviewIsCurrent() || state.freeeBusy;
       renderCustomers();
       renderDestinations();
     }
@@ -2253,6 +2355,7 @@
       forgetFinalReview();
       state.sessionFileIds = [];
       el['excel-status'].textContent = '';
+      resetFreeeExport();
       clearProgressDisplay('import-progress');
       clearProgressDisplay('resolve-progress');
       clearNotice();
@@ -2305,6 +2408,7 @@
       forgetFinalReview();
       state.sessionFileIds = [];
       el['excel-status'].textContent = '';
+      resetFreeeExport();
       clearProgressDisplay('import-progress');
       renderFolders();
       renderFiles();
@@ -2571,6 +2675,7 @@
       forgetFinalReview();
       state.sessionFileIds = [];
       el['excel-status'].textContent = '';
+      resetFreeeExport();
       clearNotice();
       clearProgressDisplay('import-progress');
       renderSelection();
@@ -3471,6 +3576,7 @@
       state.finalRequest += 1;
       el['final-panel'].hidden = true;
       showFinalSummary(null, '');
+      resetFreeeExport();
     }
 
     /**
@@ -3490,6 +3596,7 @@
     function markFinalReviewStale() {
       if (!state.finalReviewedFor) return;
       state.finalReviewedFor = null;
+      resetFreeeExport();
       el['final-verdict'].className = 'final-verdict stale';
       el['final-verdict'].textContent =
         '要確認を確定したため、この表示は古くなりました。「最終確認を表示」を押し直してください。';
@@ -3683,6 +3790,161 @@
         return;
       }
       el['excel-status'].textContent = 'Excel作成済み ' + formatDate(new Date(), true);
+    }
+
+    /**
+     * freee 取込用 Excel を作る（仕様 §4.3）。
+     *
+     * 作るとダウンロードを 2 段に分ける。サーバーの返事を待ってから
+     * `window.open` すると利用者の操作の外になり、ポップアップが止められるため。
+     * `acceptUnbalanced` は確かめの画面で「実行する」を押したときだけ true。
+     */
+    async function createFreeeExport(acceptUnbalanced) {
+      var customerId = state.selectedCustomerId;
+      var destinationId = state.lastCompletedDestinationSpreadsheetId;
+      if (!customerId || !destinationId || state.freeeBusy || isMutationBusy() ||
+          !finalReviewIsCurrent()) return;
+      state.freeeBusy = true;
+      el['freee-status'].textContent = TEXT.freee.busy;
+      el['freee-download'].hidden = true;
+      var request = ++state.freeeRequest;
+      updateActionButtons();
+      try {
+        var result = await gasCall('webAppCreateFreeeExport',
+          [customerId, destinationId, state.sessionFileIds.slice(),
+            {acceptUnbalanced: acceptUnbalanced === true}]);
+        if (request !== state.freeeRequest ||
+            String(destinationId) !== String(state.lastCompletedDestinationSpreadsheetId)) return;
+        if (result && result.ok === false && result.stage === 'CONFIRM' &&
+            acceptUnbalanced !== true) {
+          var stop = (Array.isArray(result.stops) ? result.stops[0] : null) || {};
+          state.freeeBusy = false;
+          updateActionButtons();
+          var accepted = await formatConfirm(TEXT.freee.confirmTitle,
+            TEXT.freee.confirmText(Number(stop.problemCount) || 0));
+          if (request !== state.freeeRequest ||
+              String(destinationId) !== String(state.lastCompletedDestinationSpreadsheetId)) return;
+          if (accepted) {
+            await createFreeeExport(true);
+            return;
+          }
+          el['freee-status'].textContent = '';
+          return;
+        }
+        if (!result || result.ok !== true) {
+          var notice = freeeStopNotice(result);
+          showNotice(notice.message, 'error', notice.details);
+          el['freee-status'].textContent = '';
+          return;
+        }
+        var rows = Number(result.rows) || 0;
+        state.freeeExport = {exportSpreadsheetId: result.exportSpreadsheetId,
+          destinationId: destinationId, createdAtMs: Date.now(), rows: rows};
+        var status = TEXT.freee.created(rows);
+        if (Number(result.emptyTaxRows) > 0) status += TEXT.freee.emptyTaxRows(Number(result.emptyTaxRows));
+        if (result.unbalancedAccepted === true) status += TEXT.freee.unbalancedAccepted;
+        el['freee-status'].textContent = status;
+        el['freee-download'].hidden = false;
+      } catch (error) {
+        if (request === state.freeeRequest) {
+          showNotice(failureMessage(error), 'error');
+          el['freee-status'].textContent = '';
+        }
+      } finally {
+        if (request === state.freeeRequest) {
+          state.freeeBusy = false;
+          updateActionButtons();
+        }
+      }
+    }
+
+    /** freee 取込用のダウンロード（仕様 §4.4）。押した処理の中で `window.open` する。 */
+    function downloadFreeeExport() {
+      var info = state.freeeExport;
+      var destinationId = state.lastCompletedDestinationSpreadsheetId;
+      if (!info || String(info.destinationId) !== String(destinationId)) {
+        el['freee-download'].hidden = true;
+        return;
+      }
+      if (Date.now() - Number(info.createdAtMs) > 30 * 60 * 1000) {
+        showNotice(TEXT.freee.expired, 'warning');
+        el['freee-download'].hidden = true;
+        state.freeeExport = null;
+        return;
+      }
+      var opened = window.open('https://docs.google.com/spreadsheets/d/' +
+        encodeURIComponent(info.exportSpreadsheetId) + '/export?format=xlsx', '_blank');
+      if (opened === null) {
+        showNotice(TEXT.exportBlocked, 'warning');
+        return;
+      }
+      el['freee-status'].textContent = TEXT.freee.downloaded(formatDate(new Date(), true));
+    }
+
+    /** 最終確認が古くなった・選び直したときの取り消し（仕様 §4.6）。 */
+    function resetFreeeExport() {
+      state.freeeExport = null;
+      state.freeeRequest += 1;
+      // 作っている途中で転記先や最終確認が変わったら、遅れて来る返事は捨てる。
+      state.freeeBusy = false;
+      el['freee-download'].hidden = true;
+      el['freee-status'].textContent = '';
+    }
+
+    function freeeCellText(value) {
+      return value === null || value === undefined ? '' : String(value);
+    }
+
+    function freeeRowList(rowNumbers) {
+      return (Array.isArray(rowNumbers) ? rowNumbers : []).map(String).join('・');
+    }
+
+    /** `TAX_NAME_UNKNOWN` の hint の文言（§3.6・§4.5）。値は直さない。 */
+    function freeeTaxHintText(hint) {
+      if (!hint || !hint.code) return '';
+      if (hint.code === 'SPACE') return '前後に空白があります。';
+      if (hint.code === 'WIDTH') return '全角・半角が違います。正しくは「' + freeeCellText(hint.suggestion) + '」です。';
+      if (hint.code === 'ALIAS') return 'freee では「' + freeeCellText(hint.suggestion) + '」です。';
+      if (hint.code === 'RATE_MISSING') {
+        var suggestions = Array.isArray(hint.suggestions) ? hint.suggestions : [];
+        return '率がありません（率の無い名前は 5% の税区分です）。「' + freeeCellText(suggestions[0]) +
+          '」か「' + freeeCellText(suggestions[1]) + '」にしてください。';
+      }
+      return '';
+    }
+
+    function freeeStopText(stop) {
+      var code = stop && stop.code ? String(stop.code) : '';
+      var entry = TEXT.freee.codes[code];
+      if (typeof entry === 'function') return entry(stop || {});
+      if (typeof entry === 'string') return entry;
+      return TEXT.freee.unknownStop(code);
+    }
+
+    /** `ROW_PROBLEMS` の明細（§4.5）。1 行ずつ「取込用 N 行目（…）：種類の文言」。 */
+    function freeeProblemDetails(result) {
+      var problems = result && Array.isArray(result.rowProblems) ? result.rowProblems : [];
+      var details = problems.map(function(problem) {
+        var date = problem.date ? String(problem.date) : '日付なし';
+        var amount = problem.amount === null || problem.amount === undefined ?
+          '金額なし' : yen(problem.amount);
+        var description = problem.description ? String(problem.description) : '摘要なし';
+        var describe = TEXT.freee.problemKinds[problem.kind];
+        var text = typeof describe === 'function' ? describe(problem) :
+          (typeof describe === 'string' ? describe : String(problem.kind || ''));
+        return '取込用 ' + String(problem.importRow) + ' 行目（' + date + '・' + amount + '・' +
+          description + '）：' + text;
+      });
+      var count = Number(result && result.rowProblemCount) || 0;
+      if (count > problems.length) details.push('ほか ' + (count - problems.length) + ' 件');
+      return details;
+    }
+
+    function freeeStopNotice(result) {
+      var stops = result && Array.isArray(result.stops) ? result.stops : [];
+      var message = stops.map(freeeStopText).join('\n');
+      if (!message) message = TEXT.freee.unknownStop(result && result.code);
+      return {message: message, details: freeeProblemDetails(result)};
     }
 
     function formatActionOrder(customerSide) {
@@ -5316,6 +5578,8 @@
     });
     el['final-button'].addEventListener('click', loadFinalReview);
     el['excel-button'].addEventListener('click', downloadExcel);
+    el['freee-button'].addEventListener('click', function() { return createFreeeExport(false); });
+    el['freee-download'].addEventListener('click', downloadFreeeExport);
     el['confirm-cancel'].addEventListener('click', function() {
       if (state.formatConfirmResolve) {
         var resolve = state.formatConfirmResolve;

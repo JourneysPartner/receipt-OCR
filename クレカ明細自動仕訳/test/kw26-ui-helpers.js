@@ -116,6 +116,9 @@ const vm = require('node:vm');
     };
     const calls = [];
     const pending = [];
+    // window.open の呼出しを記録し、返す値（null で止められる）を切り替えられるようにする。
+    const openedWindows = [];
+    let windowOpenResult = options.windowOpenResult === undefined ? {} : options.windowOpenResult;
     const runner = {
       withSuccessHandler(success) { this.success = success; return this; },
       withFailureHandler(failure) { this.failure = failure; return this; }
@@ -125,7 +128,7 @@ const vm = require('node:vm');
       'webAppSaveFormat', 'webAppRequeueFormatFiles', 'webAppReturnFileToCustomer',
       'webAppPrepareImport', 'webAppWithdrawFormat', 'webAppRunImport', 'webAppResolveReviews',
       'webAppRecheckCustomerFixFile', 'webAppRegistrationStart', 'webAppRegistrationInspect',
-      'webAppRegisterCustomer']) {
+      'webAppRegisterCustomer', 'webAppCreateFreeeExport']) {
       runner[name] = (...args) => {
         calls.push({name, args});
         const success = runner.success, failure = runner.failure;
@@ -142,8 +145,12 @@ const vm = require('node:vm');
     const source = fs.readFileSync(path.join(__dirname, '..', 'src', '81_WebAppUi.html'), 'utf8');
     const script = /<script>([\s\S]*?)<\/script>/.exec(source)[1].replace(
       '    bootstrap();',
-      '    globalThis.__ui = {state, el, startImport, startProgressTimer, TEXT, bootstrap, renderSelection, renderFiles, renderFormatPanel, previewFormat, saveFormat, returnFormatToCustomer, openFormat, chooseFolder, chooseCustomer, loadFinalReview, formatSetBusy, recheckCustomerFix: typeof recheckCustomerFix === "function" ? recheckCustomerFix : null, openSettings, closeSettings, loadRegistrationStart, inspectRegistration, chooseRegistrationFolder, chooseRegistrationStage, chooseRegistrationCustomer, submitRegistration, renderRegistration, registrationCanSubmit, registrationNameProblem, registrationCodeText};');
-    const sandbox = {document, Promise: ObservedPromise, google: {script: {run: runner}}, window: {open() { return {}; }},
+      '    globalThis.__ui = {state, el, startImport, startProgressTimer, TEXT, bootstrap, renderSelection, renderFiles, renderFormatPanel, previewFormat, saveFormat, returnFormatToCustomer, openFormat, chooseFolder, chooseCustomer, loadFinalReview, formatSetBusy, recheckCustomerFix: typeof recheckCustomerFix === "function" ? recheckCustomerFix : null, openSettings, closeSettings, loadRegistrationStart, inspectRegistration, chooseRegistrationFolder, chooseRegistrationStage, chooseRegistrationCustomer, submitRegistration, renderRegistration, registrationCanSubmit, registrationNameProblem, registrationCodeText, createFreeeExport, downloadFreeeExport, resetFreeeExport, chooseDestination, forgetFinalReview, markFinalReviewStale};');
+    const sandbox = {document, Promise: ObservedPromise, google: {script: {run: runner}},
+      window: {open(...args) {
+        openedWindows.push(args);
+        return typeof windowOpenResult === 'function' ? windowOpenResult(...args) : windowOpenResult;
+      }},
       setTimeout, clearTimeout, setInterval(fn) { const id = nextIntervalId++; intervals.set(id, fn); return id; },
       clearInterval(id) { intervals.delete(id); }, console,
       Date: options.clock === true ? FakeDate : RealDate};
@@ -153,7 +160,8 @@ const vm = require('node:vm');
       Array.from(intervals.values()).forEach((fn) => fn());
     }
     return {ui: sandbox.__ui, document, calls, pending, ids, root, Node, promiseGroups,
-      intervals, advance, setNow(ms) { nowValue = Number(ms); }};
+      intervals, advance, setNow(ms) { nowValue = Number(ms); }, openedWindows,
+      setWindowOpenResult(value) { windowOpenResult = value; }};
   }
 
 module.exports = {browserWorld};
