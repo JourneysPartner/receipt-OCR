@@ -417,6 +417,8 @@ class MemorySpreadsheet {
   constructor(id, options = {}) {
     this.id = String(id); this.name = options.name || this.id; this.sheets = [];
     this.ownerEmail = options.ownerEmail || null; this.activeSheet = null;
+    this.appProperties = options.appProperties || null;
+    this.createdTime = options.createdTime ? new Date(options.createdTime) : null;
     this.counters = {rangeReads: 0, cellsRead: 0};
     for (const spec of options.sheets || []) this.insertSheet(spec.name, spec);
   }
@@ -453,6 +455,7 @@ class MemoryDriveFile {
     this.trashed = options.trashed === true;
     this.createdTime = options.createdTime ? new Date(options.createdTime) : this.lastUpdated;
     this.revisionId = options.revisionId || null;
+    this.appProperties = options.appProperties || null;
     // Drive への書込を数える口（S2・reg 18）。テストの模型だけが使う。
     this.onWrite = typeof options.onWrite === 'function' ? options.onWrite : null;
     // 一覧の File 代用品を展開しても、種類で判定するための口を引き継ぐ。
@@ -513,6 +516,14 @@ function createGasStubs() {
   const isDriveWrite = (operation) => DRIVE_WRITE_OPS_.indexOf(String(operation.op)) >= 0;
   let folderCounter = 0;
   let spreadsheetCopyCounter = 0;
+  let stubClock = null;
+  let driveCreateCounter = 0;
+  const driveRemovedIds = [];
+  let driveRemoveFailures = [];
+  let freeeExportCorruptCell = null;
+  let sheetsBatchUpdateListener = null;
+  const sheetsBatchUpdateRequests = [];
+  const stubNow = () => stubClock === null ? new Date() : new Date(stubClock);
   let sheetsBatchGetFailures = [];
   let sheetsGetFailures = [];
   let getScriptPropertiesFailures = [];
@@ -788,7 +799,8 @@ function createGasStubs() {
         const names = (request.ranges || []).map(name => String(name).replace(/^'|'$/g, '').replace(/''/g, "'"));
         return {sheets: openSpreadsheet(spreadsheetId).getSheets()
           .filter(sheet => !names.length || names.includes(sheet.getName()))
-          .map(sheet => ({properties: {title: sheet.getName(), gridProperties: {rowCount: sheet.maxRows}}}))};
+          .map(sheet => ({properties: {title: sheet.getName(), sheetId: sheet.getSheetId(),
+            gridProperties: {rowCount: sheet.maxRows, columnCount: sheet.maxColumns}}}))};
       });
     },
     Values: {
@@ -894,6 +906,12 @@ function createGasStubs() {
       }
     },
     batchUpdate(request, spreadsheetId) {
+      if (sheetsBatchUpdateListener) sheetsBatchUpdateListener(request, spreadsheetId);
+      try {
+        sheetsBatchUpdateRequests.push(JSON.parse(JSON.stringify(request || {})));
+      } catch (ignored) {
+        sheetsBatchUpdateRequests.push(request);
+      }
       const spreadsheet = openSpreadsheet(spreadsheetId); const replies = [];
       const items = (request && request.requests) || [];
       // GridRange（0 始まり・終端は含まない）を、スタブの行・列（1 始まり）へ。
@@ -914,6 +932,11 @@ function createGasStubs() {
         return {sheet, row: startRowIndex + 1, column: startColumnIndex + 1,
           rows: endRowIndex - startRowIndex, columns: endColumnIndex - startColumnIndex};
       };
+      const sheetById = (sheetId) => spreadsheet.getSheets()
+        .find((candidate) => candidate.getSheetId() === Number(sheetId));
+      // 同じ batch の updateSheetProperties を反映した、適用後のグリッド。
+      const grids = new Map(spreadsheet.getSheets().map((sheet) =>
+        [sheet.getSheetId(), {rows: sheet.maxRows, columns: sheet.maxColumns}]));
       // **全部を確かめてから適用する。**知らない要求が 1 つでもあれば何も変えない。
       items.forEach((item) => {
         if (item.addSheet) {
@@ -943,6 +966,68 @@ function createGasStubs() {
           if (source.rows !== destination.rows || source.columns !== destination.columns) {
             throw new Error('copyPaste source and destination must be the same size');
           }
+        } else if (item.updateSheetProperties) {
+          const properties = item.updateSheetProperties.properties || {};
+          const sheet = sheetById(properties.sheetId);
+          if (!sheet) throw new Error(`Unknown sheetId: ${properties.sheetId}`);
+          if (properties.title !== undefined) {
+            const title = String(properties.title);
+            if (!title) throw new Error('updateSheetProperties requires a non-empty title');
+            const other = spreadsheet.getSheetByName(title);
+            if (other && other !== sheet) throw new Error(`Sheet already exists: ${title}`);
+          }
+          const gridState = grids.get(sheet.getSheetId());
+          if (properties.gridProperties) {
+            if (properties.gridProperties.rowCount !== undefined) {
+              const rowCount = Number(properties.gridProperties.rowCount);
+              if (!Number.isInteger(rowCount) || rowCount < 1) {
+                throw new Error('Invalid grid rowCount');
+              }
+              gridState.rows = rowCount;
+            }
+            if (properties.gridProperties.columnCount !== undefined) {
+              const columnCount = Number(properties.gridProperties.columnCount);
+              if (!Number.isInteger(columnCount) || columnCount < 1) {
+                throw new Error('Invalid grid columnCount');
+              }
+              gridState.columns = columnCount;
+            }
+          }
+        } else if (item.updateCells) {
+          const update = item.updateCells;
+          const start = update.start;
+          if (!start) throw new Error('updateCells requires start');
+          const sheet = sheetById(start.sheetId);
+          if (!sheet) throw new Error(`Unknown sheetId: ${start.sheetId}`);
+          const startRow = Number(start.rowIndex); const startColumn = Number(start.columnIndex);
+          if (!Number.isInteger(startRow) || !Number.isInteger(startColumn) ||
+              startRow < 0 || startColumn < 0 || !Array.isArray(update.rows)) {
+            throw new Error('Invalid updateCells request');
+          }
+          let width = 0;
+          update.rows.forEach((row) => {
+            if (!row || !Array.isArray(row.values)) throw new Error('updateCells rows require values');
+            width = Math.max(width, row.values.length);
+            row.values.forEach((cell) => {
+              const value = cell && cell.userEnteredValue;
+              if (!value) return;
+              if (value.stringValue === undefined && value.numberValue === undefined &&
+                  value.boolValue === undefined) {
+                throw new Error(`Unsupported userEnteredValue: ${JSON.stringify(cell)}`);
+              }
+            });
+          });
+          const gridState = grids.get(sheet.getSheetId());
+          if (startRow + update.rows.length > gridState.rows ||
+              startColumn + width > gridState.columns) {
+            // 実 Sheets はグリッドの外への updateCells を拒否する。
+            throw new Error('updateCells writes outside the grid');
+          }
+        } else if (item.repeatCell) {
+          grid(item.repeatCell.range);
+          if (!item.repeatCell.cell || !item.repeatCell.cell.userEnteredFormat) {
+            throw new Error('repeatCell requires cell.userEnteredFormat');
+          }
         } else {
           throw new Error(`Unsupported Sheets.batchUpdate request: ${JSON.stringify(item)}`);
         }
@@ -961,6 +1046,76 @@ function createGasStubs() {
           if (item.insertDimension) sheet.insertRowsAfter(range.startIndex, range.endIndex - range.startIndex);
           else sheet.deleteRows(range.startIndex + 1, range.endIndex - range.startIndex);
           replies.push({});
+        } else if (item.updateSheetProperties) {
+          const properties = item.updateSheetProperties.properties || {};
+          const sheet = sheetById(properties.sheetId);
+          if (properties.title !== undefined) sheet.name = String(properties.title);
+          if (properties.gridProperties) {
+            if (properties.gridProperties.rowCount !== undefined) {
+              const rowCount = Number(properties.gridProperties.rowCount);
+              while (sheet.values.length > rowCount) { sheet.values.pop(); sheet.formulas.pop(); }
+              while (sheet.values.length < rowCount) {
+                sheet.values.push(Array(sheet.maxColumns).fill(''));
+                sheet.formulas.push(Array(sheet.maxColumns).fill(''));
+              }
+              sheet.maxRows = rowCount;
+            }
+            if (properties.gridProperties.columnCount !== undefined) {
+              const columnCount = Number(properties.gridProperties.columnCount);
+              if (columnCount > sheet.maxColumns) {
+                const extra = columnCount - sheet.maxColumns;
+                sheet.values.forEach((row) => row.push(...Array(extra).fill('')));
+                sheet.formulas.forEach((row) => row.push(...Array(extra).fill('')));
+              } else if (columnCount < sheet.maxColumns) {
+                sheet.values.forEach((row) => { row.length = columnCount; });
+                sheet.formulas.forEach((row) => { row.length = columnCount; });
+              }
+              sheet.maxColumns = columnCount;
+            }
+          }
+          replies.push({updateSheetProperties: {
+            properties: {title: sheet.getName(), sheetId: sheet.getSheetId()}
+          }});
+        } else if (item.updateCells) {
+          const update = item.updateCells;
+          const sheet = sheetById(update.start.sheetId);
+          const startRow = Number(update.start.rowIndex); const startColumn = Number(update.start.columnIndex);
+          let width = 0;
+          update.rows.forEach((row) => { width = Math.max(width, row.values.length); });
+          sheet._ensureSize(startRow + update.rows.length, startColumn + width);
+          update.rows.forEach((row, rowOffset) => row.values.forEach((cell, columnOffset) => {
+            const value = cell && cell.userEnteredValue;
+            let resolved = '';
+            if (value) {
+              if (value.stringValue !== undefined) resolved = String(value.stringValue);
+              else if (value.numberValue !== undefined) resolved = Number(value.numberValue);
+              else if (value.boolValue !== undefined) resolved = Boolean(value.boolValue);
+            }
+            const rowNumber = startRow + rowOffset;
+            const columnNumber = startColumn + columnOffset;
+            sheet.values[rowNumber][columnNumber] = resolved;
+            sheet.formulas[rowNumber][columnNumber] = '';
+          }));
+          // 読み返しを崩す切り替え（fx 20）。書込の後に 1 セルだけ書き換える。
+          if (freeeExportCorruptCell && !freeeExportCorruptCell.used) {
+            freeeExportCorruptCell.used = true;
+            const row = freeeExportCorruptCell.row;
+            const column = freeeExportCorruptCell.column;
+            sheet._ensureSize(row, column);
+            sheet.values[row - 1][column - 1] = freeeExportCorruptCell.value;
+            sheet.formulas[row - 1][column - 1] = '';
+          }
+          replies.push({updateCells: {}});
+        } else if (item.repeatCell) {
+          const range = grid(item.repeatCell.range);
+          const numberFormat = item.repeatCell.cell.userEnteredFormat.numberFormat || {};
+          const text = numberFormat.pattern || numberFormat.type || 'General';
+          for (let row = 0; row < range.rows; row += 1) {
+            for (let column = 0; column < range.columns; column += 1) {
+              range.sheet._setFormat(range.row + row, range.column + column, text);
+            }
+          }
+          replies.push({repeatCell: {}});
         } else {
           const copy = item.copyPaste;
           const source = grid(copy.source);
@@ -1007,14 +1162,57 @@ function createGasStubs() {
   // Drive Advanced Service（v3）。copy はXLSX→Googleシート変換だけを模す。
   let driveCopyCounter = 0;
   let driveListFailures = [];
+  const parentIdsOf = (id) => Array.from(folders.values())
+    .filter((folder) => (folder.fileIds || []).map(String).indexOf(String(id)) >= 0)
+    .map((folder) => folder.id);
   const driveFileMeta = (file) => ({
     id: file.id, name: file.name, mimeType: file.contentType,
     createdTime: (file.createdTime || file.lastUpdated).toISOString ?
       (file.createdTime || file.lastUpdated).toISOString() : String(file.createdTime || file.lastUpdated),
     modifiedTime: file.lastUpdated.toISOString(),
-    size: file.bytes.length, headRevisionId: file.revisionId || 'rev-1'
+    size: file.bytes.length, headRevisionId: file.revisionId || 'rev-1',
+    parents: parentIdsOf(file.id),
+    appProperties: file.appProperties || undefined
   });
+  /** 高度な Drive API が作った Google スプレッドシートの一覧用の形。 */
+  const spreadsheetFileMeta = (spreadsheet) => {
+    const created = spreadsheet.createdTime || stubNow();
+    return {
+      id: spreadsheet.getId(), name: spreadsheet.getName(),
+      mimeType: 'application/vnd.google-apps.spreadsheet',
+      createdTime: created.toISOString(), modifiedTime: created.toISOString(),
+      parents: parentIdsOf(spreadsheet.getId()),
+      appProperties: spreadsheet.appProperties || undefined
+    };
+  };
   const Drive = {Files: {
+    create(resource, media, options) {
+      const request = resource || {};
+      driveCreateCounter += 1;
+      const id = `drive_created_${driveCreateCounter}`;
+      const parents = (request.parents || []).map(String);
+      const createdTime = stubNow();
+      const spreadsheet = new MemorySpreadsheet(id, {
+        name: request.name || id,
+        sheets: [{name: 'シート1', maxRows: 1000, maxColumns: 26}],
+        appProperties: request.appProperties || null,
+        createdTime: createdTime
+      });
+      spreadsheet.createdTime = createdTime;
+      spreadsheets.set(id, spreadsheet);
+      parents.forEach((parentId) => {
+        const folder = folders.get(parentId);
+        if (folder && folder.fileIds.map(String).indexOf(id) < 0) folder.fileIds.push(id);
+      });
+      recordDrive('createFile', id, {name: String(request.name || id), parents: parents});
+      return {
+        id: id, name: String(request.name || id),
+        mimeType: String(request.mimeType || 'application/vnd.google-apps.spreadsheet'),
+        parents: parents.slice(),
+        appProperties: request.appProperties || undefined,
+        createdTime: createdTime.toISOString()
+      };
+    },
     list(request) {
       if (driveListFailures.length) {
         const failure = driveListFailures.shift();
@@ -1026,7 +1224,12 @@ function createGasStubs() {
       if (!folder || folder.readAllowed === false) throw new Error(`Folder not found or denied: ${match[1]}`);
       const items = []
         .concat((folder.subFolderIds || []).map((id) => ({id, name: (folders.get(String(id)) || {}).name || id, mimeType: 'application/vnd.google-apps.folder'})))
-        .concat(folder.fileIds.map((id) => files.get(id)).filter(Boolean).map(driveFileMeta));
+        .concat(folder.fileIds.map((id) => {
+          const file = files.get(id);
+          if (file) return driveFileMeta(file);
+          const spreadsheet = spreadsheets.get(id);
+          return spreadsheet ? spreadsheetFileMeta(spreadsheet) : null;
+        }).filter(Boolean));
       // Google のファイルにはバイナリの headRevisionId がない。
       items.forEach(item => {
         if (item.mimeType === 'application/vnd.google-apps.spreadsheet') delete item.headRevisionId;
@@ -1060,9 +1263,15 @@ function createGasStubs() {
       spreadsheets.set(tempId, new MemorySpreadsheet(tempId, {sheets: file.xlsxSheets}));
       return {id: tempId, mimeType: resource && resource.mimeType};
     },
-    remove(fileId) {
+    remove(fileId, options) {
+      if (driveRemoveFailures.length) {
+        const failure = driveRemoveFailures.shift();
+        const error = new Error(`Drive remove failure ${failure}`);
+        error.code = Number(failure); throw error;
+      }
       const id = String(fileId);
       if (!spreadsheets.delete(id) && !files.delete(id)) throw new Error(`File not found: ${id}`);
+      driveRemovedIds.push(id);
     }
   }};
   const logLines = [];
@@ -1200,7 +1409,7 @@ function createGasStubs() {
   };
   const control = {
     getTriggers: () => triggers.slice(),
-    createSpreadsheet(id, options = {}) { const ss = new MemorySpreadsheet(id, options); spreadsheets.set(String(id), ss); if (!activeSpreadsheetId) activeSpreadsheetId = String(id); return ss; },
+    createSpreadsheet(id, options = {}) { const ss = new MemorySpreadsheet(id, options); if (!ss.createdTime) ss.createdTime = stubNow(); spreadsheets.set(String(id), ss); if (!activeSpreadsheetId) activeSpreadsheetId = String(id); return ss; },
     createFile(id, options = {}) {
       const file = new MemoryDriveFile(id, Object.assign({}, options,
         {onWrite: (op, fileId, extra) => recordDrive(op, fileId, extra)}), Utilities);
@@ -1208,6 +1417,18 @@ function createGasStubs() {
     },
     createFolder(id, options = {}) { return newFolder(id, options); },
     setDriveListFailures(failures) { driveListFailures = failures.slice(); },
+    setDriveRemoveFailures(failures) { driveRemoveFailures = (failures || []).slice(); },
+    setClock(value) { stubClock = value === null || value === undefined ? null : new Date(value); },
+    getDriveCreateCount: () => driveCreateCounter,
+    getDriveRemovedIds: () => driveRemovedIds.slice(),
+    setFreeeExportCorruptCell(spec) {
+      freeeExportCorruptCell = spec ? {
+        row: Number(spec.row), column: Number(spec.column), value: spec.value
+      } : null;
+    },
+    onSheetsBatchUpdate(fn) { sheetsBatchUpdateListener = typeof fn === 'function' ? fn : null; },
+    getSheetsBatchUpdateRequests: () => JSON.parse(JSON.stringify(sheetsBatchUpdateRequests)),
+    clearSheetsBatchUpdateRequests() { sheetsBatchUpdateRequests.length = 0; },
     addProtection(spreadsheetId, sheetName, options = {}) {
       const sheet = openSpreadsheet(spreadsheetId).getSheetByName(sheetName);
       if (!sheet) throw new Error(`Sheet not found: ${sheetName}`);
@@ -1303,7 +1524,7 @@ function createGasStubs() {
     roundTrips() { return {rangeReads: roundTrips.rangeReads, rangeWrites: roundTrips.rangeWrites, flushes: roundTrips.flushes}; },
     resetRoundTrips() { roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; },
     resetApiCallCounts() { apiCallCounts.batchGet = 0; apiCallCounts.get = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; },
-    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptCacheValues.clear(); driveOps.length = 0; openedSpreadsheetIds.length = 0; folderCounter = 0; valuesUpdateListener = null; Object.keys(scriptCacheFailures).forEach((key) => { scriptCacheFailures[key] = []; }); scriptLock.reset(); sheetsBatchGetFailures = []; sheetsGetFailures = []; getScriptPropertiesFailures = []; spreadsheetCopyCounter = 0; htmlTemplates.clear(); activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; effectiveUserEmail = 'tester@example.com'; mailQuota = 100; mailFailures = []; sentMails.length = 0; propertyWrites.length = 0; Object.keys(propertyCallCounts).forEach((key) => { propertyCallCounts[key] = 0; }); uiAvailable = true; uiEvents.length = 0; menus.length = 0; promptResponses = []; alertResponses = []; apiCallCounts.batchGet = 0; apiCallCounts.get = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; sleepCalls.length = 0; sleepHook = null; clearContentIgnored = false; driveListFailures = []; triggers.length = 0; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; }
+    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptCacheValues.clear(); driveOps.length = 0; openedSpreadsheetIds.length = 0; folderCounter = 0; valuesUpdateListener = null; Object.keys(scriptCacheFailures).forEach((key) => { scriptCacheFailures[key] = []; }); scriptLock.reset(); sheetsBatchGetFailures = []; sheetsGetFailures = []; getScriptPropertiesFailures = []; spreadsheetCopyCounter = 0; htmlTemplates.clear(); activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; effectiveUserEmail = 'tester@example.com'; mailQuota = 100; mailFailures = []; sentMails.length = 0; propertyWrites.length = 0; Object.keys(propertyCallCounts).forEach((key) => { propertyCallCounts[key] = 0; }); uiAvailable = true; uiEvents.length = 0; menus.length = 0; promptResponses = []; alertResponses = []; apiCallCounts.batchGet = 0; apiCallCounts.get = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; sleepCalls.length = 0; sleepHook = null; clearContentIgnored = false; driveListFailures = []; triggers.length = 0; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; stubClock = null; driveCreateCounter = 0; driveRemovedIds.length = 0; driveRemoveFailures = []; freeeExportCorruptCell = null; sheetsBatchUpdateListener = null; sheetsBatchUpdateRequests.length = 0; }
   };
   return {Utilities, SpreadsheetApp, Sheets, DriveApp, Drive, Logger, LockService, Session,
     PropertiesService, CacheService, ScriptApp, MailApp, HtmlService, control};

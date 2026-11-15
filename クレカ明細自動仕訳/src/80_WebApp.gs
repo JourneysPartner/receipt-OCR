@@ -2186,6 +2186,29 @@ function webAppFinalReview(customerId, destinationSpreadsheetId, fileIds) {
 }
 
 /**
+ * **freee 取込用 Excel を作る**（サーバーの入口）。
+ *
+ * 認可と転記先の確かめが通るまで、転記シートを読まない（§3.1・S11）。
+ * 本体は `46_FreeeExport.gs` の `freeeExportCreate_`。
+ *
+ * @param {string} customerId
+ * @param {string} destinationSpreadsheetId このセッションの転記先
+ * @param {Array<string>=} fileIds このセッションで取り込んだファイル
+ * @param {{acceptUnbalanced: boolean}=} options 不一致を承知したときだけ `true`
+ */
+function webAppCreateFreeeExport(customerId, destinationSpreadsheetId, fileIds, options) {
+  return webAppInvoke_(function() {
+    webAppAuthorizeCustomer_(customerId, 'WEBAPP:freee取込用');
+    var base = getCustomerById(String(customerId));
+    var destinationId = webAppValidateDestination_(base, destinationSpreadsheetId);
+    var customer = Object.assign({}, base, {destinationSpreadsheetId: destinationId});
+    return freeeExportCreate_(customer, destinationId,
+      Array.isArray(fileIds) ? fileIds : [],
+      Boolean(options && options.acceptUnbalanced === true));
+  });
+}
+
+/**
  * 転記先シートの見出しと、システムが書いた行（取引IDを持つ行）を読む。
  *
  * 表示用（`FORMATTED_VALUE`）と計算用（`UNFORMATTED_VALUE`）で2回読む。
