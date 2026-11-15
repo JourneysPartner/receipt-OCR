@@ -743,9 +743,19 @@
             return '直す必要のある行が ' + (Number(stop.count) || 0) + ' 件あります（下の一覧）。';
           },
           INPUT_AMOUNT_INVALID: function(stop) {
-            var list = freeeRowList(stop.rowNumbers);
-            return '入力用シートの借方・貸方に数として読めない値があります（' +
-              (list ? list + ' 行目…' : '行は不明') + '）。';
+            var rows = Array.isArray(stop.rows) ? stop.rows : [];
+            if (!rows.length) {
+              return '入力用シートの借方・貸方に数として読めない値があります（行は不明）。';
+            }
+            // 仕様 §3.7・§4.5：入力用の行と列。`rows` は最大 30 件、`count` は総数。
+            var list = rows.map(function(row) {
+              return freeeCellText(row && row.inputRow) + ' 行目（' +
+                freeeCellText(row && row.column) + ' 列）';
+            }).join('・');
+            var rest = (Number(stop.count) || 0) - rows.length;
+            if (rest > 0) list += '・ほか ' + rest + ' 件';
+            else list += '…';
+            return '入力用シートの借方・貸方に数として読めない値があります（' + list + '）。';
           },
           ROW_COUNT_MISMATCH: function(stop) {
             return '入力用シートの金額のある行（' + (Number(stop.inputRows) || 0) + ' 行）と、取込用の行（' +

@@ -329,6 +329,32 @@ module.exports = ({test, assert}) => {
     assert.equal(w.ids['freee-status'].textContent, '');
     assert.equal(w.freeeCalls().length, 0);
   });
+
+  // fxu 10
+  asyncTest('fxu 10: 入力用の金額が読めない止めは、行と列を出す', async () => {
+    const stopReply = {
+      ok: false, created: false, stage: 'CONTENT', code: 'INPUT_AMOUNT_INVALID',
+      stops: [{code: 'INPUT_AMOUNT_INVALID', count: 3,
+        rows: [{inputRow: 12, column: 'M'}, {inputRow: 15, column: 'L'}]}],
+      rowProblems: [], rowProblemCount: 0, destinationSpreadsheetId: DEST
+    };
+    const w = world({webAppCreateFreeeExport: plain(stopReply)});
+    w.ui.renderSelection();
+    await w.openFinal();
+    await w.pressFreee();
+
+    assert.equal(w.freeeCalls().length, 1);
+    assert.equal(w.ids.notice.className.indexOf('error') >= 0, true);
+    const message = w.ids.notice.children[0].textContent;
+    assert.ok(message.indexOf('12 行目（M 列）') >= 0, message);
+    assert.ok(message.indexOf('15 行目（L 列）') >= 0, message);
+    assert.ok(message.indexOf('ほか 1 件') >= 0, message);
+    assert.equal(message.indexOf('行は不明'), -1);
+    assert.equal(w.noticeItems().length, 0);
+    assert.equal(w.ids['freee-download'].hidden, true);
+    assert.equal(w.ids['freee-status'].textContent, '');
+    assert.equal(w.ui.state.freeeBusy, false);
+  });
 };
 
 if (require.main === module) {
