@@ -607,6 +607,13 @@ function freeeExportCreate_(customer, destinationId, fileIds, acceptUnbalanced) 
   var cardText = freeeEmptyValue_(cardName) ? '' : String(cardName);
   if (freeeEmptyValue_(cardName) || cardText.indexOf('○') >= 0 || cardText.indexOf('〇') >= 0) {
     stops.push(freeeStopEntry_('CARD_NAME_PLACEHOLDER'));
+  } else {
+    // §3.10 CSV を登録した顧客では、B1 が CSV の勘定科目に無ければ止める。
+    // B1 が `○○カード` のままなら、ここへ来ない（表を読まない）。
+    var cardRow = freeeCardNamesRowFor_(customer.customerId);
+    if (cardRow && cardRow.accountNames.indexOf(String(cardName)) < 0) {
+      stops.push(freeeStopEntry_('CARD_NAME_NOT_IN_FREEE', {cardName: String(cardName)}));
+    }
   }
   if (!dataRows.length) stops.push(freeeStopEntry_('NO_DATA_ROWS'));
   if (rowProblems.length) {

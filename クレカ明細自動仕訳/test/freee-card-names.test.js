@@ -110,9 +110,12 @@ module.exports = ({test, assert, gas}) => {
     gas.stubs.createSpreadsheet('fcn-snap', {sheets: []});
     gas.stubs.createFolder('fcn-corpus', {fileIds: []});
 
-    const templateValues = Array.from({length: HEADER_ROW}, () => blank(10));
-    templateValues[0][1] = '○○カード';
-    templateValues[HEADER_ROW - 1] = ['', '利用日', 'freee取引先名', '摘要', '金額',
+    const customerHeaderRow = options.headerRow === undefined ? HEADER_ROW : Number(options.headerRow);
+    const templateHeaderRow = options.templateHeaderRow === undefined ?
+      HEADER_ROW : Number(options.templateHeaderRow);
+    const templateValues = Array.from({length: Math.max(templateHeaderRow, 1)}, () => blank(10));
+    if (templateHeaderRow >= 2) templateValues[0][1] = '○○カード';
+    templateValues[templateHeaderRow - 1] = ['', '利用日', 'freee取引先名', '摘要', '金額',
       'メモ', '内部ID', '税区分', '勘定科目', '消費税'];
     gas.stubs.createSpreadsheet(TEMPLATE_ID, {
       name: CUSTOMER_NAME + '_雛形',
@@ -121,9 +124,45 @@ module.exports = ({test, assert, gas}) => {
         {name: '取引先一覧', values: [['元店名', '取引先名'], ['既知店', '株式会社既知店']]}
       ]
     });
+    gas.stubs.createFolder('fcn-dest-parent', {fileIds: [TEMPLATE_ID]});
     call('registerTestCustomer', [{
       customerId: CUSTOMER_ID,
       customerName: CUSTOMER_NAME,
+      active: true,
+      sourceFolderId: SOURCE,
+      destinationSpreadsheetId: TEMPLATE_ID,
+      destinationSheetName: INPUT_SHEET,
+      partnerListSheetName: '取引先一覧',
+      columns: {B: 2, F: 3, I: 4, K: 5, M: 6, txId: 7, G: 8},
+      headerRow: customerHeaderRow,
+      dataStartRow: customerHeaderRow + 1,
+      rowScanLastColumn: 10,
+      rowScanExcludedColumns: [8, 9, 10],
+      reviewers: OWNER,
+      admins: OWNER
+    }]);
+
+    const folderSpecs = [
+      ['fcn-card-test', 'テストカード'],
+      ['fcn-card-a', '架空カードA'],
+      ['fcn-card-b', '架空カード B ']
+    ].concat(options.extraFolders || []);
+    gas.stubs.createFolder(SOURCE, {name: '架空明細', subFolderIds: []});
+    const createdFolders = [];
+    folderSpecs.forEach(([id, name]) => {
+      createdFolders.push(gas.stubs.createFolder(id, {name: name, parentId: SOURCE}));
+    });
+    gas.stubs.resetApiCallCounts();
+    gas.stubs.resetRoundTrips();
+    gas.stubs.resetWriteLog();
+    return {folders: folderSpecs, folderObjects: createdFolders};
+  }
+
+  /** fcn 27 用：もう 1 人の架空の顧客を、同じ雛形・同じ明細フォルダで登録する。 */
+  function registerOtherCustomer(customerId) {
+    call('registerTestCustomer', [{
+      customerId: customerId,
+      customerName: '架空 次郎',
       active: true,
       sourceFolderId: SOURCE,
       destinationSpreadsheetId: TEMPLATE_ID,
@@ -137,20 +176,6 @@ module.exports = ({test, assert, gas}) => {
       reviewers: OWNER,
       admins: OWNER
     }]);
-
-    const folderSpecs = [
-      ['fcn-card-test', 'テストカード'],
-      ['fcn-card-a', '架空カードA'],
-      ['fcn-card-b', '架空カード B ']
-    ].concat(options.extraFolders || []);
-    gas.stubs.createFolder(SOURCE, {name: '架空明細', subFolderIds: []});
-    folderSpecs.forEach(([id, name]) => {
-      gas.stubs.createFolder(id, {name: name, parentId: SOURCE});
-    });
-    gas.stubs.resetApiCallCounts();
-    gas.stubs.resetRoundTrips();
-    gas.stubs.resetWriteLog();
-    return {folders: folderSpecs};
   }
 
   function seedTable(rows, options = {}) {
@@ -467,7 +492,10 @@ module.exports = ({test, assert, gas}) => {
       accountRow('visaカード', '未払金'),
       accountRow('架空経費', '経費')
     ];
-    const result = uploadBytes(getShiftJisEncoder()(csvText(rows)),
+    const bytes = getShiftJisEncoder()(csvText(rows));
+    const newSha = crypto.createHash('sha256')
+      .update(Buffer.from(bytes.map((byte) => (Number(byte) + 256) & 0xff))).digest('hex');
+    const result = uploadBytes(bytes,
       {fileName: 'new.csv', expectedVersion: 1});
     assert.equal(result.ok, true);
     assert.equal(result.version, 2);
@@ -479,12 +507,25 @@ module.exports = ({test, assert, gas}) => {
       {'テストカード': 'テストカード', '架空カードA': '架空カードA'}, '保存済みの対応が消えた');
     assert.equal(row.version, 2);
     assert.equal(row.fileName, 'new.csv');
+    assert.equal(row.sha256, newSha, 'F（SHA-256）が新しい値になっていない');
+    assert.notEqual(row.sha256, 'b'.repeat(64));
     assert.deepEqual(row.accountNames, ['テストカード', 'visaカード', '架空経費']);
     assert.deepEqual(row.candidates, ['テストカード', 'visaカード']);
     assert.notEqual(row.uploadedAt, '2026-02-01T00:00:00+09:00');
     assert.equal(row.uploadedBy, OWNER);
     assert.equal(row.mappingUpdatedAt, '2026-02-02T00:00:00+09:00', 'I が変わった');
     assert.equal(row.mappingUpdatedBy, 'map@example.com', 'J が変わった');
+
+    // L2 差し替えの監査の before・after に勘定科目名を書かない。
+    const audits = auditOf('FREEE_CARD_CSV');
+    const audit = audits[audits.length - 1];
+    const before = String(audit[9]);
+    const after = String(audit[10]);
+    ['テストカード', 'visaカード', '架空経費', '架空カードA'].forEach((name) => {
+      assert.ok(before.indexOf(name) < 0, '監査の before に勘定科目名がある');
+      assert.ok(after.indexOf(name) < 0, '監査の after に勘定科目名がある');
+    });
+    assert.ok(after.indexOf(newSha) >= 0, '監査の after に新しい SHA-256 が無い');
   });
 
   // ================= fcn 8 =================
@@ -645,7 +686,8 @@ module.exports = ({test, assert, gas}) => {
       mappings: {
         'テストカード': 'テストカード',
         '架空カードA': '架空カードA',
-        '昔のカード': 'テストカード'
+        '昔のカード': 'テストカード',
+        '変えないカード': '架空カードA'
       },
       mappingUpdatedAt: '2026-03-01T00:00:00+09:00',
       mappingUpdatedBy: 'old@example.com',
@@ -665,7 +707,8 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(result.changed, 4);
 
     const row = tableRowObject(2);
-    assert.deepEqual(row.mappings, {'テストカード': 'visaカード', 'ＶＩＳＡカード': 'visaカード'});
+    assert.deepEqual(row.mappings, {'テストカード': 'visaカード', '変えないカード': '架空カードA',
+      'ＶＩＳＡカード': 'visaカード'}, '今回変えない鍵が消えた');
     assert.equal(row.version, 2);
     assert.notEqual(row.mappingUpdatedAt, '2026-03-01T00:00:00+09:00');
     assert.equal(row.mappingUpdatedBy, OWNER);
@@ -692,6 +735,11 @@ module.exports = ({test, assert, gas}) => {
       '昔のカード': null,
       'ＶＩＳＡカード': 'visaカード'
     });
+    // L1 保存済みで今回変えない鍵は、監査の before・after に書かない。
+    assert.equal(Object.prototype.hasOwnProperty.call(before.mappings, '変えないカード'), false,
+      '監査の before に変えない鍵がある');
+    assert.equal(Object.prototype.hasOwnProperty.call(after.mappings, '変えないカード'), false,
+      '監査の after に変えない鍵がある');
 
     const log = gas.stubs.getWriteLog();
     const auditIndex = writeIndex(log, '監査ログ');
@@ -854,5 +902,655 @@ module.exports = ({test, assert, gas}) => {
     wrongHeaders[0] = '違う見出し';
     seedTable([tableRow()], {headers: wrongHeaders});
     expectInvalid();
+  });
+
+  // ================= 記帳・freee 取込用の組み立て（fcn 18〜26） =================
+
+  /** 取込がファイルを見つけられるようにする、カード形式マスターの 1 行。 */
+  function cardFormatRow() {
+    const row = blank(34);
+    Object.assign(row, {
+      0: 'smbc_family', 1: '三井住友系', 2: 'active', 3: 'TRUE', 4: '["csv"]',
+      5: JSON.stringify({allOf: [{maxRow: 1,
+        keywords: ['利用日', '利用店名', '金額', '使用用途'], minMatch: 4}]}),
+      6: 1, 7: 2, 8: 'A', 9: 'B', 10: 'C', 11: 'D', 12: '',
+      14: JSON.stringify({excludeRowRanges: [{from: 1, to: 1}],
+        excludeWhenDateAndAmountEmpty: true, rules: []}),
+      16: JSON.stringify({sources: [{id: 'fn', kind: 'fileName',
+        pattern: '(20\\d{2})(0[1-9]|1[0-2])', groups: {year: 1, month: 2},
+        yearDigits: 4, means: 'payment', offsetMonths: 1}]}),
+      17: 'generic', 18: 1, 19: OWNER,
+      21: '2026-01-01T00:00:00+09:00', 29: 'NEW', 33: '2026-01-01T00:00:00+09:00'
+    });
+    return row;
+  }
+
+  function buildImportWorld(options = {}) {
+    const built = buildWorld(options);
+    master().getSheetByName('カード形式マスター').appendRow(cardFormatRow());
+    gas.stubs.resetApiCallCounts();
+    gas.stubs.resetRoundTrips();
+    gas.stubs.resetWriteLog();
+    return built;
+  }
+
+  function folderNamed(world, name) {
+    return world.folderObjects.find((folder) => folder.name === name);
+  }
+
+  function addCardFile(world, folderName, fileId, options = {}) {
+    const folder = folderNamed(world, folderName);
+    assert.ok(folder, 'カードフォルダが無い: ' + folderName);
+    gas.stubs.createFile(fileId, {
+      name: options.name || ('三井住友カード202601_' + fileId + '.csv'),
+      bytes: Buffer.from(options.content ||
+        '利用日,利用店名,金額,使用用途\n2025/12/10,未登録店,1000,仕入れ\n', 'utf8'),
+      contentType: 'text/csv',
+      lastUpdated: new Date(Date.now() - 60 * 60 * 1000),
+      createdTime: '2026-08-01T00:00:00Z'
+    });
+    folder.fileIds.push(fileId);
+    return fileId;
+  }
+
+  function importFolder(folderName, options = {}) {
+    const folder = [['テストカード', 'fcn-card-test'],
+      ['架空カードA', 'fcn-card-a'], ['架空カード B ', 'fcn-card-b']]
+      .find((pair) => pair[0] === folderName);
+    return call('webAppRunImport', [CUSTOMER_ID, folder[1], options]);
+  }
+
+  function snapshotSheets(spreadsheetId) {
+    const spreadsheet = gas.stubs.getSpreadsheet(spreadsheetId);
+    const result = {};
+    spreadsheet.getSheets().forEach((sheet) => {
+      const range = sheet.getDataRange();
+      result[sheet.getName()] = {
+        values: plain(range.getValues()),
+        formulas: plain(range.getFormulas())
+      };
+    });
+    return result;
+  }
+
+  /** B1 だけを空にして、転記シートのほかのセル・タブを比べられるようにする。 */
+  function cloneSnapshot(spreadsheetId) {
+    const snapshot = snapshotSheets(spreadsheetId);
+    if (snapshot[INPUT_SHEET] && snapshot[INPUT_SHEET].values[0]) {
+      snapshot[INPUT_SHEET].values[0][1] = '';
+    }
+    return snapshot;
+  }
+
+  function destinationB1(spreadsheetId) {
+    return gas.stubs.getSpreadsheet(spreadsheetId).getSheetByName(INPUT_SHEET).getRange(1, 2);
+  }
+
+  function withBatchGetLog(fn) {
+    const real = gas.context.Sheets.Spreadsheets.Values.batchGet;
+    const calls = [];
+    gas.context.Sheets.Spreadsheets.Values.batchGet = function(spreadsheetId, request) {
+      calls.push({spreadsheetId: String(spreadsheetId),
+        ranges: ((request && request.ranges) || []).map(String)});
+      return real.call(this, spreadsheetId, request);
+    };
+    try {
+      return {result: fn(), calls: calls};
+    } finally {
+      gas.context.Sheets.Spreadsheets.Values.batchGet = real;
+    }
+  }
+
+  function tableReadsIn(calls) {
+    return calls.filter((call) => call.spreadsheetId === MASTER &&
+      call.ranges.some((range) => range.indexOf(TABLE) >= 0)).length;
+  }
+
+  // ================= fcn 18 =================
+  test('fcn 18: 記帳の 1 本の道で、複製の B1 だけにカード名を RAW で書く', () => {
+    const mapped = buildImportWorld();
+    seedTable([tableRow({mappings: {'テストカード': '架空カードA'}})]);
+    addCardFile(mapped, 'テストカード', 'fcn-import-file-1');
+    gas.stubs.resetWriteLog();
+    const written = importFolder('テストカード');
+    assert.equal(written.schemaValidation.ok, true);
+    const cloneId = written.destinationSpreadsheetId;
+    assert.notEqual(cloneId, TEMPLATE_ID);
+    assert.deepEqual(written.cardName,
+      {status: 'WRITTEN', folderName: 'テストカード', accountName: '架空カードA'});
+    assert.equal(destinationB1(cloneId).getValue(), '架空カードA');
+    assert.equal(destinationB1(TEMPLATE_ID).getValue(), '○○カード', '雛形の B1 を変えている');
+
+    const b1Writes = gas.stubs.getWriteLog().filter((entry) =>
+      entry.kind === 'values.update' && entry.spreadsheetId === cloneId &&
+      String(entry.a1).indexOf('!B1') >= 0);
+    assert.equal(b1Writes.length, 1, 'B1 の書込が 1 回でない');
+    assert.equal(b1Writes[0].valueInputOption, 'RAW');
+    assert.equal(b1Writes[0].numRows, 1);
+    assert.equal(b1Writes[0].numColumns, 1);
+
+    // 対応の無い同じ記帳と比べる（B1 以外は同じ）。
+    const unmapped = buildImportWorld();
+    addCardFile(unmapped, 'テストカード', 'fcn-import-file-1');
+    const untouched = importFolder('テストカード');
+    assert.equal(untouched.schemaValidation.ok, true);
+    assert.equal(untouched.cardName.status, 'NO_CSV');
+    assert.deepEqual(cloneSnapshot(cloneId), cloneSnapshot(untouched.destinationSpreadsheetId),
+      'B1 以外のセル・タブが対応の無い記帳と違う');
+    assert.equal(written.done, untouched.done, '書いた取引の数が違う');
+    assert.equal(written.total, untouched.total);
+    assert.equal(written.stoppedBy, untouched.stoppedBy);
+
+    // `=1+1` も文字列のまま（式にしない）。
+    const formulaWorld = buildImportWorld();
+    seedTable([tableRow({
+      accountNames: ['=1+1', '架空経費'],
+      candidates: ['=1+1'],
+      mappings: {'テストカード': '=1+1'}
+    })]);
+    addCardFile(formulaWorld, 'テストカード', 'fcn-import-file-2');
+    const formulaResult = importFolder('テストカード');
+    assert.equal(formulaResult.cardName.status, 'WRITTEN');
+    const cell = destinationB1(formulaResult.destinationSpreadsheetId);
+    assert.equal(cell.getValue(), '=1+1', '文字列になっていない');
+    assert.equal(cell.getFormula(), '', '式になっている');
+  });
+
+  // ================= fcn 19 =================
+  test('fcn 19: 表が無い・対応が無い・候補に無いときも、記帳は止めず B1 を書かない', () => {
+    const baselineWorld = buildImportWorld();
+    seedTable([tableRow({mappings: {'テストカード': '架空カードA'}})]);
+    addCardFile(baselineWorld, 'テストカード', 'fcn-import-file-3');
+    const baseline = importFolder('テストカード');
+
+    const noCsvWorld = buildImportWorld();
+    addCardFile(noCsvWorld, 'テストカード', 'fcn-import-file-3');
+    const noCsv = importFolder('テストカード');
+    assert.equal(noCsv.schemaValidation.ok, true);
+    assert.equal(noCsv.cardName.status, 'NO_CSV');
+    assert.equal(destinationB1(noCsv.destinationSpreadsheetId).getValue(), '○○カード');
+    assert.equal(noCsv.done, baseline.done, '記帳が止まっている');
+    assert.equal(noCsv.total, baseline.total);
+    assert.equal(noCsv.stoppedBy, baseline.stoppedBy);
+    assert.deepEqual(cloneSnapshot(noCsv.destinationSpreadsheetId),
+      cloneSnapshot(baseline.destinationSpreadsheetId));
+
+    const notSetWorld = buildImportWorld();
+    seedTable([tableRow({mappings: {}})]);
+    addCardFile(notSetWorld, 'テストカード', 'fcn-import-file-4');
+    const notSet = importFolder('テストカード');
+    assert.equal(notSet.cardName.status, 'NOT_SET');
+    assert.equal(destinationB1(notSet.destinationSpreadsheetId).getValue(), '○○カード');
+
+    const notInCsvWorld = buildImportWorld();
+    seedTable([tableRow({candidates: ['架空カードA'],
+      mappings: {'テストカード': '架空経費'}})]);
+    addCardFile(notInCsvWorld, 'テストカード', 'fcn-import-file-5');
+    const notInCsv = importFolder('テストカード');
+    assert.deepEqual(notInCsv.cardName,
+      {status: 'NOT_IN_CSV', folderName: 'テストカード', accountName: '架空経費'});
+    assert.equal(destinationB1(notInCsv.destinationSpreadsheetId).getValue(), '○○カード');
+    assert.equal(notInCsv.done, baseline.done);
+  });
+
+  // ================= fcn 20 =================
+  test('fcn 20: 転記先を渡された呼出し・並列の道では、B1 を書かず cardName も付けない', () => {
+    const world = buildImportWorld();
+    seedTable([tableRow({mappings: {'テストカード': '架空カードA'}})]);
+    addCardFile(world, 'テストカード', 'fcn-import-file-6');
+    const first = importFolder('テストカード');
+    assert.equal(first.cardName.status, 'WRITTEN');
+
+    addCardFile(world, 'テストカード', 'fcn-import-file-7');
+    destinationB1(first.destinationSpreadsheetId).setValue('そのまま');
+    gas.stubs.resetWriteLog();
+    const second = importFolder('テストカード',
+      {destinationSpreadsheetId: first.destinationSpreadsheetId});
+    assert.equal(second.destinationSpreadsheetId, first.destinationSpreadsheetId);
+    assert.equal(Object.prototype.hasOwnProperty.call(second, 'cardName'), false);
+    assert.equal(destinationB1(first.destinationSpreadsheetId).getValue(), 'そのまま',
+      '転記先を渡された呼出しで B1 を書いている');
+    assert.equal(gas.stubs.getWriteLog().filter((entry) =>
+      entry.kind === 'values.update' && String(entry.a1).indexOf('!B1') >= 0).length, 0);
+
+    // 並列の道（isLane）。
+    const laneFile = addCardFile(world, 'テストカード', 'fcn-import-file-8');
+    const priorLanes = gas.evaluate('WEBAPP_IMPORT_LANES_');
+    gas.evaluate('WEBAPP_IMPORT_LANES_=2;');
+    let lane;
+    try {
+      lane = call('webAppRunImport', [CUSTOMER_ID, 'fcn-card-test', {
+        lane: 0,
+        destinationSpreadsheetId: first.destinationSpreadsheetId,
+        fileIds: [laneFile]
+      }]);
+    } finally {
+      gas.evaluate('WEBAPP_IMPORT_LANES_=' + priorLanes + ';');
+    }
+    assert.equal(Object.prototype.hasOwnProperty.call(lane, 'cardName'), false);
+    assert.equal(destinationB1(first.destinationSpreadsheetId).getValue(), 'そのまま');
+  });
+
+  // ================= fcn 21 =================
+  test('fcn 21: 準備の道でも複製の B1 を書き、preparationResult に cardName を返す', () => {
+    const world = buildImportWorld();
+    seedTable([tableRow({mappings: {'テストカード': '架空カードA'}})]);
+    addCardFile(world, 'テストカード', 'fcn-import-file-9');
+    const priorLanes = gas.evaluate('WEBAPP_IMPORT_LANES_');
+    gas.evaluate('WEBAPP_IMPORT_LANES_=2;');
+    let prepared;
+    try {
+      prepared = call('webAppPrepareImport', [CUSTOMER_ID, 'fcn-card-test']);
+    } finally {
+      gas.evaluate('WEBAPP_IMPORT_LANES_=' + priorLanes + ';');
+    }
+    assert.equal(prepared.schemaValidation.ok, true);
+    assert.deepEqual(prepared.cardName,
+      {status: 'WRITTEN', folderName: 'テストカード', accountName: '架空カードA'});
+    assert.equal(destinationB1(prepared.destinationSpreadsheetId).getValue(), '架空カードA');
+  });
+
+  // ================= fcn 22 =================
+  test('fcn 22: B1 の書込の例外・読み返しの違いは FAILED で、記帳は止めずログに名前を出さない', () => {
+    function runWithBrokenWrite(mode) {
+      const world = buildImportWorld();
+      seedTable([tableRow({mappings: {'テストカード': '架空カードA'}})]);
+      addCardFile(world, 'テストカード', 'fcn-import-file-10');
+      const realUpdate = gas.context.Sheets.Spreadsheets.Values.update;
+      const realBatchGet = gas.context.Sheets.Spreadsheets.Values.batchGet;
+      let thrown = false;
+      if (mode === 'throw') {
+        gas.context.Sheets.Spreadsheets.Values.update = function(body, spreadsheetId, a1, options) {
+          if (!thrown && String(a1).indexOf('!B1') >= 0 && String(spreadsheetId) !== TEMPLATE_ID) {
+            thrown = true;
+            const error = new Error('fcn B1 write failure');
+            error.code = 503;
+            throw error;
+          }
+          return realUpdate.call(this, body, spreadsheetId, a1, options);
+        };
+      } else {
+        gas.context.Sheets.Spreadsheets.Values.batchGet = function(spreadsheetId, request) {
+          const response = realBatchGet.call(this, spreadsheetId, request);
+          const ranges = (request && request.ranges) || [];
+          if (String(spreadsheetId) !== TEMPLATE_ID && response &&
+              response.valueRanges && response.valueRanges[0] &&
+              ranges.some((range) => String(range).indexOf('!B1') >= 0)) {
+            response.valueRanges[0].values = [['違う値']];
+          }
+          return response;
+        };
+      }
+      try {
+        return {result: importFolder('テストカード'), logs: gas.stubs.getLogLines().slice()};
+      } finally {
+        gas.context.Sheets.Spreadsheets.Values.update = realUpdate;
+        gas.context.Sheets.Spreadsheets.Values.batchGet = realBatchGet;
+      }
+    }
+
+    const failedWrite = runWithBrokenWrite('throw');
+    assert.equal(failedWrite.result.schemaValidation.ok, true);
+    assert.equal(failedWrite.result.cardName.status, 'FAILED');
+    assert.equal(destinationB1(failedWrite.result.destinationSpreadsheetId).getValue(), '○○カード');
+    assert.equal(failedWrite.result.done, 1, '記帳が止まっている');
+    assert.equal(failedWrite.result.total, 1);
+    const writeLines = failedWrite.logs
+      .filter((line) => line.indexOf('FREEE_CARD_NAME_WRITE_FAILED') === 0);
+    assert.equal(writeLines.length, 1, '書込の例外のログが 1 件でない');
+
+    const failedRead = runWithBrokenWrite('read');
+    assert.equal(failedRead.result.cardName.status, 'FAILED');
+    assert.equal(failedRead.result.done, 1);
+    const lines = failedRead.logs
+      .filter((line) => line.indexOf('FREEE_CARD_NAME_WRITE_FAILED') === 0)
+      .concat(writeLines);
+    lines.forEach((line) => {
+      assert.ok(line.indexOf('架空カードA') < 0, 'ログにカード名がある');
+      assert.ok(line.indexOf('テストカード') < 0, 'ログにフォルダ名がある');
+    });
+  });
+
+  // ================= fcn 23 =================
+  test('fcn 23: headerRow が 2 より小さい顧客は TEMPLATE_UNSUPPORTED で書かない', () => {
+    const world = buildImportWorld({headerRow: 1});
+    seedTable([tableRow({mappings: {'テストカード': '架空カードA'}})]);
+    addCardFile(world, 'テストカード', 'fcn-import-file-11');
+    gas.stubs.resetWriteLog();
+    const result = importFolder('テストカード');
+    assert.equal(result.cardName.status, 'TEMPLATE_UNSUPPORTED');
+    assert.equal(result.done, 1, '記帳が止まっている');
+    assert.equal(gas.stubs.getWriteLog().filter((entry) =>
+      entry.kind === 'values.update' && String(entry.a1).indexOf('!B1') >= 0).length, 0);
+  });
+
+  // ================= fcn 24 =================
+  test('fcn 24: フォルダ名の前後の空白を外した鍵で対応を引く', () => {
+    const world = buildImportWorld();
+    seedTable([tableRow({mappings: {'架空カード B': '架空カードA'}})]);
+    addCardFile(world, '架空カード B ', 'fcn-import-file-12');
+    const result = importFolder('架空カード B ');
+    assert.deepEqual(result.cardName,
+      {status: 'WRITTEN', folderName: '架空カード B', accountName: '架空カードA'});
+    assert.equal(destinationB1(result.destinationSpreadsheetId).getValue(), '架空カードA');
+  });
+
+  // ================= freee 取込用（fcn 25 の組み立て） =================
+  const EXPORT_TEMPLATE = 'fcn-export-template';
+  const EXPORT_DESTINATION = 'fcn-export-destination';
+  const EXPORT_WORK = 'fcn-export-work';
+  const EXPORT_INPUT_HEADER = (() => {
+    const header = blank(12);
+    header[1] = '利用日'; header[2] = '取引先'; header[3] = '摘要';
+    header[4] = 'メモ'; header[5] = '支出金額'; header[6] = '相手税区分';
+    header[7] = '勘定科目'; header[8] = '収入金額'; header[9] = '内部取引ID';
+    header[10] = 'freee取引先名'; header[11] = '備考';
+    return header;
+  })();
+  const EXPORT_IMPORT_HEADERS = [
+    '日付', '伝票番号', '決算整理仕訳',
+    '借方勘定科目', '借方科目コード', '借方補助科目', '借方取引先',
+    '借方取引先コード', '借方部門', '借方品目', '借方メモタグ',
+    '借方セグメント1', '借方セグメント2', '借方セグメント3',
+    '借方金額', '借方税区分', '借方税額',
+    '貸方勘定科目', '貸方科目コード', '貸方補助科目', '貸方取引先',
+    '貸方取引先コード', '貸方部門', '貸方品目', '貸方メモタグ',
+    '貸方セグメント1', '貸方セグメント2', '貸方セグメント3',
+    '貸方金額', '貸方税区分', '貸方税額', '摘要'
+  ];
+
+  function exportSerial(iso) {
+    const parts = String(iso).split('-').map(Number);
+    return Math.round((Date.UTC(parts[0], parts[1] - 1, parts[2]) -
+      Date.UTC(1899, 11, 30)) / 86400000);
+  }
+
+  function exportInputRow(spec) {
+    const row = blank(12);
+    row[1] = exportSerial('2026-11-01');
+    row[2] = '架空取引先';
+    row[3] = '架空の摘要';
+    row[4] = 'メモ';
+    row[5] = spec.expense === undefined ? '' : spec.expense;
+    row[6] = '';
+    row[7] = '架空経費';
+    row[8] = '';
+    row[9] = spec.txId === undefined ? '' : spec.txId;
+    row[10] = '架空店';
+    row[11] = '';
+    return row;
+  }
+
+  function exportImportRow(spec) {
+    const row = blank(32);
+    row[0] = exportSerial('2026-11-01');
+    row[1] = '1';
+    row[3] = '架空経費';
+    row[9] = '架空品目';
+    row[14] = spec.amount;
+    row[15] = '課対仕入10%';
+    row[17] = 'テストカード';
+    row[28] = spec.amount;
+    row[29] = '対象外';
+    row[31] = '架空の摘要';
+    return row;
+  }
+
+  function buildExportWorld(options = {}) {
+    gas.stubs.reset();
+    gas.stubs.createSpreadsheet(MASTER, {sheets: [{name: '仮', values: [['x']]}]});
+    gas.stubs.setActiveSpreadsheet(MASTER);
+    call('setMasterSpreadsheetId', [MASTER]);
+    call('provisionMasterSheets');
+    gas.stubs.setSpreadsheetOwner(MASTER, OWNER);
+    gas.stubs.setActiveUser(OWNER);
+    gas.evaluate(
+      "SETTINGS.TX_INDEX_SPREADSHEET_ID='fcn-txidx';" +
+      "SETTINGS.SNAPSHOT_SPREADSHEET_ID='fcn-snap';" +
+      "SETTINGS.EXECUTION_TIMEOUT_SECONDS=300;" +
+      "SETTINGS.SAFETY_MARGIN_SECONDS=60;" +
+      "SETTINGS.PARALLEL_WORK_FOLDER_ID='" + EXPORT_WORK + "';" +
+      "SETTINGS.SAMPLE_CORPUS_FOLDER_ID='fcn-corpus';");
+    gas.stubs.createSpreadsheet('fcn-txidx', {sheets: []});
+    gas.stubs.createSpreadsheet('fcn-snap', {sheets: []});
+    gas.stubs.createFolder('fcn-corpus', {fileIds: []});
+    gas.stubs.createFolder(EXPORT_WORK, {fileIds: []});
+    gas.stubs.createFolder('fcn-export-parent', {fileIds: [EXPORT_TEMPLATE, EXPORT_DESTINATION]});
+    gas.stubs.createFolder('fcn-export-card', {fileIds: []});
+    gas.stubs.createFolder(SOURCE, {subFolderIds: ['fcn-export-card']});
+
+    const inputValues = Array.from({length: HEADER_ROW + 1}, () => blank(12));
+    inputValues[0][1] = options.cardName === undefined ? 'テストカード' : options.cardName;
+    inputValues[HEADER_ROW - 1] = EXPORT_INPUT_HEADER.slice();
+    inputValues[HEADER_ROW] = exportInputRow({txId: 'TX-001', expense: 1000});
+    const importValues = [EXPORT_IMPORT_HEADERS.slice(), exportImportRow({amount: 1000})];
+
+    const templateValues = Array.from({length: HEADER_ROW}, () => blank(12));
+    templateValues[HEADER_ROW - 1] = EXPORT_INPUT_HEADER.slice();
+    gas.stubs.createSpreadsheet(EXPORT_TEMPLATE, {
+      name: CUSTOMER_NAME + '_雛形',
+      sheets: [{name: INPUT_SHEET, values: templateValues, maxRows: 20, maxColumns: 12}]
+    });
+    gas.stubs.createSpreadsheet(EXPORT_DESTINATION, {
+      name: CUSTOMER_NAME + '_20261115-1000',
+      sheets: [
+        {name: INPUT_SHEET, values: inputValues, maxRows: 50, maxColumns: 12},
+        {name: '取込用', values: importValues, maxRows: 50, maxColumns: 40}
+      ]
+    });
+    call('registerTestCustomer', [{
+      customerId: CUSTOMER_ID,
+      customerName: CUSTOMER_NAME,
+      active: true,
+      sourceFolderId: SOURCE,
+      destinationSpreadsheetId: EXPORT_TEMPLATE,
+      destinationSheetName: INPUT_SHEET,
+      columns: {B: 2, F: 3, I: 4, K: 11, M: 6, txId: 10, G: 7, L: 9},
+      headerRow: HEADER_ROW,
+      dataStartRow: HEADER_ROW + 1,
+      rowScanLastColumn: 12,
+      reviewers: OWNER,
+      admins: OWNER
+    }]);
+    const txRow = gas.call('makeTransactionRow_', [{
+      fullTxId: 'TX-001', customerId: CUSTOMER_ID, fileId: 'fcn-export-file',
+      sourceRow: 1, originalAmount: 1000, originalMerchant: '架空店',
+      planned: {m: 1000}
+    }, 'RUN_TEST', '2026-11-15T00:00:00+09:00']);
+    txRow[9] = 'COMMITTED';
+    gas.stubs.getSpreadsheet(MASTER).getSheetByName('クレカ取引ログ').appendRow(txRow);
+    gas.stubs.resetApiCallCounts();
+    gas.stubs.resetRoundTrips();
+    gas.stubs.resetWriteLog();
+  }
+
+  function createExport() {
+    return call('webAppCreateFreeeExport',
+      [CUSTOMER_ID, EXPORT_DESTINATION, ['fcn-export-file'], {}]);
+  }
+
+  function expectExportStop(result, code) {
+    assert.equal(result.ok, false, '止まるはずが通っている');
+    assert.equal(result.created, false);
+    assert.equal(result.code, code);
+    assert.equal(result.stops[0].code, code);
+  }
+
+  // ================= fcn 25 =================
+  test('fcn 25: freee 取込用は、CSV に無い B1 だけを止め、○○カードなら表を読まない', () => {
+    // CSV にあり（表あり）→ 新しい止めなし。
+    buildExportWorld();
+    seedTable([tableRow()]);
+    assert.equal(createExport().ok, true, 'CSV にある名前で止まっている');
+
+    // CSV に無い（後ろに空白 1 つでも）→ CARD_NAME_NOT_IN_FREEE・何も作らない。
+    buildExportWorld({cardName: 'テストカード '});
+    seedTable([tableRow()]);
+    const missing = createExport();
+    expectExportStop(missing, 'CARD_NAME_NOT_IN_FREEE');
+    assert.equal(missing.stops[0].cardName, 'テストカード ');
+    assert.equal(gas.stubs.getDriveCreateCount(), 0, '作ってしまっている');
+
+    // B1 が ○○カード のまま → 今の止めだけ。表は読まない。
+    buildExportWorld({cardName: '○○カード'});
+    seedTable([tableRow()]);
+    const watched = withBatchGetLog(() => createExport());
+    expectExportStop(watched.result, 'CARD_NAME_PLACEHOLDER');
+    assert.equal(tableReadsIn(watched.calls), 0, 'B1 が ○○カード なのに表を読んでいる');
+
+    // CSV を登録していない顧客 → 今のまま。
+    buildExportWorld();
+    assert.equal(createExport().ok, true, 'CSV なしで止まっている');
+
+    // 表が壊れている → 失敗で返り、何も作らない。
+    buildExportWorld();
+    const broken = seedTable([tableRow({accountNames: 'not json'})]);
+    assert.ok(broken);
+    const error = caught(() => createExport());
+    assert.ok(error, '例外になっていない');
+    assert.equal(error.code, 'FREEE_CARD_TABLE_INVALID');
+    assert.equal(gas.stubs.getDriveCreateCount(), 0, '壊れた表で作っている');
+  });
+
+  // ================= fcn 26 =================
+  test('fcn 26: 表の読取は開く・複製とも 1 回で、往復の見積りは 167', () => {
+    assert.equal(gas.evaluate('WEBAPP_IMPORT_BASE_TRIPS_'), 167);
+
+    buildImportWorld();
+    seedTable([tableRow()]);
+    const opened = withBatchGetLog(() => start());
+    assert.equal(opened.result.ok, true);
+    assert.equal(tableReadsIn(opened.calls), 1, '開くで表を 1 回読んでいない');
+
+    const world = buildImportWorld();
+    seedTable([tableRow({mappings: {'テストカード': '架空カードA'}})]);
+    addCardFile(world, 'テストカード', 'fcn-import-file-13');
+    const imported = withBatchGetLog(() => importFolder('テストカード'));
+    const result = imported.result;
+    assert.equal(result.cardName.status, 'WRITTEN');
+    assert.equal(tableReadsIn(imported.calls), 1, '複製で表を 1 回読んでいない');
+    const b1Reads = imported.calls.filter((item) =>
+      item.spreadsheetId === result.destinationSpreadsheetId &&
+      item.ranges.some((range) => /!B1$/.test(range))).length;
+    assert.equal(b1Reads, 1, 'B1 の読み返しが 1 回でない');
+  });
+
+  // ================= fcn 27 =================
+  test('fcn 27: ほかの顧客の行があっても、新しい行は末尾に足し、ほかの行は変えない', () => {
+    buildWorld();
+    const other2 = tableRow({customerId: 'K9002'});
+    const other4 = tableRow({customerId: 'K9003'});
+    seedTable([other2, blank(11), other4]);
+    registerOtherCustomer('K9002');
+    const before = plain(tableSheet().getRange(2, 1, 3, 11).getValues());
+
+    const uploaded = uploadBytes(getShiftJisEncoder()(csvText(defaultCsvRows())),
+      {expectedVersion: 0});
+    assert.equal(uploaded.ok, true);
+    assert.equal(uploaded.version, 1);
+    assert.equal(tableRowValues(5)[0], CUSTOMER_ID, 'K9001 が 5 行目に入っていない');
+    assert.deepEqual(plain(tableSheet().getRange(2, 1, 3, 11).getValues()), before,
+      'ほかの顧客の行・空の行が変わった');
+
+    const row2 = tableRowValues(2);
+    const row3 = plain(tableSheet().getRange(3, 1, 1, 11).getValues()[0]);
+    const row4 = tableRowValues(4);
+    const row5 = tableRowValues(5);
+    const saved = call('webAppFreeeCardNamesSave', ['K9002',
+      [{folderName: 'テストカード', accountName: 'テストカード'}], 1]);
+    assert.equal(saved.ok, true);
+    assert.equal(saved.version, 2);
+    assert.deepEqual(tableRowValues(2).slice(0, 3), row2.slice(0, 3));
+    assert.equal(tableRowObject(2).mappings['テストカード'], 'テストカード');
+    assert.deepEqual(plain(tableSheet().getRange(3, 1, 1, 11).getValues()[0]), row3);
+    assert.deepEqual(tableRowValues(4), row4);
+    assert.deepEqual(tableRowValues(5), row5);
+    assert.equal(tableRowValues(5)[0], 'K9001');
+  });
+
+  // ================= fcn 28 =================
+  test('fcn 28: 見出しの書込が 1 回失敗しても、もう一度で表は見出しと 1 行になる', () => {
+    buildWorld();
+    let failed = false;
+    const realUpdate = gas.context.Sheets.Spreadsheets.Values.update;
+    gas.context.Sheets.Spreadsheets.Values.update = function(body, spreadsheetId, a1, options) {
+      if (!failed && String(spreadsheetId) === MASTER &&
+          String(a1).indexOf('!A1:K1') >= 0) {
+        failed = true;
+        const error = new Error('Sheets failure 503');
+        error.code = 503;
+        throw error;
+      }
+      return realUpdate.call(this, body, spreadsheetId, a1, options);
+    };
+    let first;
+    try {
+      first = uploadBytes(getShiftJisEncoder()(csvText(defaultCsvRows())),
+        {expectedVersion: 0});
+    } finally {
+      gas.context.Sheets.Spreadsheets.Values.update = realUpdate;
+    }
+    assert.equal(first.ok, false);
+    assert.equal(first.code, 'WRITE_VERIFY_FAILED');
+    assert.ok(tableSheet(), 'タブが残っていない');
+
+    const second = uploadBytes(getShiftJisEncoder()(csvText(defaultCsvRows())),
+      {expectedVersion: 0});
+    assert.equal(second.ok, true);
+    const values = plain(tableSheet().getDataRange().getValues());
+    assert.equal(values.length, 2, '見出しと 1 行になっていない');
+    assert.deepEqual(values[0].slice(0, 11), TABLE_HEADERS);
+    assert.equal(values[1][0], CUSTOMER_ID);
+
+    const opened = start();
+    assert.equal(opened.ok, true, '見出しの無いタブが TABLE_INVALID になっている');
+    assert.equal(opened.version, 1);
+  });
+
+  // ================= fcn 29 =================
+  test('fcn 29: 読み返しの A 列に同じ顧客が 2 行あれば WRITE_VERIFY_FAILED', () => {
+    buildWorld();
+    const real = gas.context.Sheets.Spreadsheets.Values.batchGet;
+    gas.context.Sheets.Spreadsheets.Values.batchGet = function(spreadsheetId, request) {
+      const response = real.call(this, spreadsheetId, request);
+      const ranges = (request && request.ranges) || [];
+      if (String(spreadsheetId) === MASTER &&
+          ranges.some((range) => String(range).indexOf('!A:A') >= 0) &&
+          response && response.valueRanges && response.valueRanges[0] &&
+          response.valueRanges[0].values) {
+        response.valueRanges[0].values.push([CUSTOMER_ID]);
+      }
+      return response;
+    };
+    let result;
+    try {
+      result = uploadBytes(getShiftJisEncoder()(csvText(defaultCsvRows())),
+        {expectedVersion: 0});
+    } finally {
+      gas.context.Sheets.Spreadsheets.Values.batchGet = real;
+    }
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'WRITE_VERIFY_FAILED');
+    const failed = auditOf('FREEE_CARD_CSV').filter((row) => String(row[11]) === 'WEBAPP_FAILED');
+    assert.equal(failed.length, 1);
+  });
+
+  // ================= fcn 30 =================
+  test('fcn 30: 行の条件（C・D・K・B）を 1 つでも外せば TABLE_INVALID', () => {
+    const cases = [
+      {label: 'C に B に無い名前', row: {candidates: ['無い候補']}},
+      {label: 'D が配列', row: {mappings: '[]'}},
+      {label: 'K が 0', row: {version: 0}},
+      {label: 'K が 1.5', row: {version: 1.5}},
+      {label: 'B に重なり', row: {accountNames: ['架空カードA', '架空カードA']}},
+      {label: 'B に改行', row: {accountNames: ['架空\nカード']}}
+    ];
+    cases.forEach((item) => {
+      buildWorld();
+      seedTable([tableRow(item.row)]);
+      const opened = start();
+      assert.equal(opened.ok, false, item.label + ' を通している');
+      assert.equal(opened.code, 'TABLE_INVALID', item.label + ' のコードが違う');
+    });
   });
 };

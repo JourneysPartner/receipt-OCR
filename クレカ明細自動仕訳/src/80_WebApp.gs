@@ -18,7 +18,8 @@
 var WEBAPP_MAX_DECISIONS_ = 500;
 var WEBAPP_MAX_PER_CALL_ = 500;
 var WEBAPP_REVIEW_LIST_LIMIT_ = 500;
-var WEBAPP_IMPORT_BASE_TRIPS_ = 164;
+var WEBAPP_IMPORT_BASE_TRIPS_ = 167;
+// 2026-11-16 freee のカード名：複製に 3 往復（表の読取 1・B1 の書込 1・読み返し 1）。
 var WEBAPP_IMPORT_TRIPS_PER_REVIEW_ = 7;
 var WEBAPP_CLONE_TRIPS_ = 3;
 var WEBAPP_TRIP_WORST_MS_ = 400;
@@ -1048,13 +1049,17 @@ function webAppImportCall_(customerId, folderId, options, prepare) {
         var prepared = !preparationStop && preparationCustomer && preparationCustomer.prepared || [];
         var preparationResult = webAppImportResult_(0, prepared.length, null, [], preparationStop, null);
         if (prepared.length) {
-          var preparedClone = measureStage('clone', function() { return webAppCloneDestination_(customer, now); });
+          var preparedClone = measureStage('clone', function() {
+            return webAppCloneDestination_(customer, now, folderData.folder.getName());
+          });
           preparationResult.schemaValidation = preparedClone.schemaValidation;
           if (!preparedClone.schemaValidation.ok) {
             preparationResult.stoppedBy = preparedClone.schemaValidation.code || 'DESTINATION_SCHEMA_MISMATCH';
             prepared = [];
           } else {
             preparationResult.destinationSpreadsheetId = preparedClone.destinationSpreadsheetId;
+            // §3.8 準備の道も、複製したときだけ `cardName` を返す（記帳は止めない）。
+            preparationResult.cardName = preparedClone.cardName;
           }
         }
         preparationResult.fileIds = prepared;
@@ -1071,9 +1076,10 @@ function webAppImportCall_(customerId, folderId, options, prepare) {
 
       var destinationSpreadsheetId = suppliedDestinationId;
       var schemaValidation = null;
+      var cardName = null;
       if (!destinationSpreadsheetId) {
         var clone = measureStage('clone', function() {
-          return webAppCloneDestination_(customer, now);
+          return webAppCloneDestination_(customer, now, folderData.folder.getName());
         });
         schemaValidation = clone.schemaValidation;
         if (!schemaValidation.ok) {
@@ -1081,6 +1087,7 @@ function webAppImportCall_(customerId, folderId, options, prepare) {
             schemaValidation.code || 'DESTINATION_SCHEMA_MISMATCH', schemaValidation);
         }
         destinationSpreadsheetId = clone.destinationSpreadsheetId;
+        cardName = clone.cardName;
       }
 
       report = measureStage('runImport', function() {
@@ -1138,6 +1145,10 @@ function webAppImportCall_(customerId, folderId, options, prepare) {
       }
       var importResult = webAppImportResult_(done, total, destinationSpreadsheetId,
         fileResults, stoppedBy, schemaValidation);
+      // §3.8 この呼出しで複製したときだけ。転記先を渡された呼出し・並列の道には付けない。
+      if (!prepare && !isLane && !suppliedDestinationId && cardName) {
+        importResult.cardName = cardName;
+      }
       if (!prepare && !isLane && waitingFiles) importResult.waitingFiles = waitingFiles;
       return importResult;
     });
@@ -2133,7 +2144,7 @@ function webAppValidateDestination_(customer, destinationSpreadsheetId) {
 }
 
 /** 雛形を同じフォルダへ複製し、システム所有の列（6 列、空き判定が見るなら相手税区分も）だけを空にする。 */
-function webAppCloneDestination_(customer, now) {
+function webAppCloneDestination_(customer, now, cardFolderName) {
   var templateFile = DriveApp.getFileById(customer.destinationSpreadsheetId);
   var parents = webAppIteratorToArray_(templateFile.getParents());
   if (parents.length !== 1) {
@@ -2185,9 +2196,13 @@ function webAppCloneDestination_(customer, now) {
   if (!schemaValidation.ok) {
     return {schemaValidation: schemaValidation};
   }
+  // §3.7 この呼出しで複製した転記シートの B1 にだけ書く（雛形には書かない）。
+  // `customer` は引数そのもの（雛形の ID を持つもの）を渡す。
+  var cardName = freeeCardWriteCardName_(customer, destinationSpreadsheetId, cardFolderName);
   return {
     destinationSpreadsheetId: destinationSpreadsheetId,
-    schemaValidation: schemaValidation
+    schemaValidation: schemaValidation,
+    cardName: cardName
   };
 }
 

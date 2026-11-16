@@ -4,9 +4,9 @@
  * 入力用シートの B1（freee のカード名）を、勘定科目 CSV とカードフォルダの
  * 対応から自動で入れる（`work/spec_freee_card_names.md` 版 1.0）。
  *
- * このファイルは仕様の §2.3・§3.1〜§3.6 を担当する。表「freeeカード科目」の
- * 読み書き・勘定科目 CSV の読み取り・Web アプリの 3 つの入口の本体である。
- * 複製した転記シートの B1 に書く処理（§3.7）は次の回で足す。
+ * このファイルは仕様の §2.3・§3.1〜§3.7 を担当する。表「freeeカード科目」の
+ * 読み書き・勘定科目 CSV の読み取り・Web アプリの 3 つの入口の本体・複製した
+ * 転記シートの B1 に書く処理である。
  *
  * **監査を先に書く。** 監査が書けないときは表に 1 セルも書かず、タブも作らない
  * （§3.2・S4）。表への書込は読み返して確かめ、外れたら `WRITE_VERIFY_FAILED`
@@ -225,13 +225,17 @@ function freeeCardNamesReadTable_(sheet) {
   var header = padRowValues_(values[0] || [], FREEE_CARD_NAMES_WIDTH_);
   var rows = [];
   var lastRowNumber = 1;
-  for (var index = 1; index < values.length; index += 1) {
+  var anyValue = false;
+  for (var index = 0; index < values.length; index += 1) {
+    if (!anyValue && rowHasAnyValue_(values[index])) anyValue = true;
+    if (index === 0) continue;
     var padded = padRowValues_(values[index] || [], FREEE_CARD_NAMES_WIDTH_);
     if (!rowHasAnyValue_(padded)) continue;
     rows.push({rowNumber: index + 1, values: padded});
     lastRowNumber = index + 1;
   }
-  return {header: header, rows: rows, lastRowNumber: lastRowNumber};
+  // 中身が全部空のタブは、タブが無いのと同じに扱う（監査 M1）。
+  return {header: header, rows: rows, lastRowNumber: lastRowNumber, empty: !anyValue};
 }
 
 /**
@@ -242,6 +246,7 @@ function freeeCardNamesRowFor_(customerId) {
   var sheet = masterSpreadsheet_().getSheetByName(FREEE_CARD_NAMES_SHEET_NAME_);
   if (!sheet) return null;
   var table = freeeCardNamesReadTable_(sheet);
+  if (table.empty) return null;
   freeeCardNamesAssertHeader_(table.header);
   var wanted = freeeCardNamesTrim_(customerId);
   var matches = table.rows.filter(function(row) {
@@ -263,6 +268,7 @@ function freeeCardNamesNextRowNumber_() {
   var sheet = masterSpreadsheet_().getSheetByName(FREEE_CARD_NAMES_SHEET_NAME_);
   if (!sheet) return 2;
   var table = freeeCardNamesReadTable_(sheet);
+  if (table.empty) return 2;
   freeeCardNamesAssertHeader_(table.header);
   return table.lastRowNumber + 1;
 }
@@ -297,10 +303,9 @@ function freeeCardNamesWriteRow_(auth, customerId, newRow, existingRow, audit) {
   var masterId = String(master.getId());
   var sheetName = FREEE_CARD_NAMES_SHEET_NAME_;
   var rowNumber = existingRow && Number.isInteger(existingRow.rowNumber) &&
-    existingRow.rowNumber > 0 ? existingRow.rowNumber : freeeCardNamesNextRowNumber_();
+    existingRow.rowNumber > 0 ? existingRow.rowNumber : 0;
   var actor = auth && auth.userEmail ? String(auth.userEmail) : '';
   var targetId = String(customerId);
-  var range = quoteSheetName_(sheetName) + '!A' + rowNumber + ':K' + rowNumber;
 
   // **監査を先に書く。** 書けなければ表には 1 セルも書かず、タブも作らない（S4）。
   try {
@@ -313,9 +318,29 @@ function freeeCardNamesWriteRow_(auth, customerId, newRow, existingRow, audit) {
 
   try {
     var sheet = master.getSheetByName(sheetName);
-    if (!sheet) {
-      sheet = master.insertSheet(sheetName);
+    var needsHeader = false;
+    if (!rowNumber) {
+      if (!sheet) {
+        rowNumber = 2;
+        needsHeader = true;
+      } else {
+        // 中身が全部空のタブは、タブが無いのと同じに扱う（監査 M1）。
+        var table = freeeCardNamesReadTable_(sheet);
+        if (table.empty) {
+          rowNumber = 2;
+          needsHeader = true;
+        } else {
+          freeeCardNamesAssertHeader_(table.header);
+          rowNumber = table.lastRowNumber + 1;
+        }
+      }
+    }
+    var range = quoteSheetName_(sheetName) + '!A' + rowNumber + ':K' + rowNumber;
+    if (!sheet) sheet = master.insertSheet(sheetName);
+    if (needsHeader) {
       ensureSheetWidth_(sheet, FREEE_CARD_NAMES_WIDTH_);
+      // 見出しを Sheets API で書く前に、作ったタブを確定させる（監査 M1）。
+      SpreadsheetApp.flush();
       Sheets.Spreadsheets.Values.update({values: [FREEE_CARD_NAMES_HEADERS_.slice()]},
         masterId, quoteSheetName_(sheetName) + '!A1:K1', {valueInputOption: 'RAW'});
     }
@@ -779,4 +804,59 @@ function freeeCardNamesSave_(auth, customer, changes, expectedVersion) {
     if (!written.ok) return written;
     return {ok: true, version: current.version + 1, changed: changedKeys.length};
   });
+}
+
+/**
+ * §3.7 複製した転記シートの入力用シートの B1 に、対応のカード名を書く。
+ *
+ * **この関数は例外を投げない。** 中で起きた例外は全部 `FAILED` にし、カード名・
+ * フォルダ名を入れずにログへ残す。書くのは B1 の 1 セルだけ・RAW。読み返して
+ * 同じでなければ `FAILED`（S9・S11）。
+ *
+ * @param {!Object} customer `destinationSpreadsheetId` が雛形の ID の顧客
+ * @param {string} destinationSpreadsheetId この呼出しで複製した転記先
+ * @param {string} cardFolderName カードフォルダの名前（鍵は前後の空白を外して作る）
+ * @return {{status: string, folderName: string, accountName: (string|undefined)}}
+ */
+function freeeCardWriteCardName_(customer, destinationSpreadsheetId, cardFolderName) {
+  var folderName = freeeCardNamesFolderKey_(cardFolderName);
+  var customerId = customer && customer.customerId !== undefined ?
+    String(customer.customerId) : '';
+  try {
+    if (String(destinationSpreadsheetId) === String(customer.destinationSpreadsheetId)) {
+      return {status: 'FAILED', folderName: folderName};
+    }
+    if (Number(customer.headerRow) < 2) {
+      return {status: 'TEMPLATE_UNSUPPORTED', folderName: folderName};
+    }
+    var row = freeeCardNamesRowFor_(customer.customerId);
+    if (!row) return {status: 'NO_CSV', folderName: folderName};
+    var mapped = freeeCardNamesHasOwn_(row.mappings, folderName) ?
+      String(row.mappings[folderName]) : null;
+    if (mapped === null) return {status: 'NOT_SET', folderName: folderName};
+    if (row.candidates.indexOf(mapped) < 0) {
+      return {status: 'NOT_IN_CSV', folderName: folderName, accountName: mapped};
+    }
+    var range = quoteSheetName_(customer.destinationSheetName) + '!' + FREEE_CARD_NAME_CELL_;
+    Sheets.Spreadsheets.Values.update({values: [[mapped]]},
+      String(destinationSpreadsheetId), range, {valueInputOption: 'RAW'});
+    var verify = sheetsReadWithRetry_(function() {
+      return sheetsBatchGetPaced_(String(destinationSpreadsheetId), {
+        ranges: [range],
+        valueRenderOption: 'UNFORMATTED_VALUE',
+        majorDimension: 'ROWS'
+      });
+    });
+    var values = verify && verify.valueRanges && verify.valueRanges[0] &&
+      verify.valueRanges[0].values;
+    var actual = values && values[0] ? values[0][0] : undefined;
+    if (actual !== mapped) return {status: 'FAILED', folderName: folderName};
+    return {status: 'WRITTEN', folderName: folderName, accountName: mapped};
+  } catch (error) {
+    Logger.log('FREEE_CARD_NAME_WRITE_FAILED ' + JSON.stringify({
+      customerId: customerId,
+      code: (error && (error.code || error.name)) || 'Error'
+    }));
+    return {status: 'FAILED', folderName: folderName};
+  }
 }
