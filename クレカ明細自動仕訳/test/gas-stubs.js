@@ -70,6 +70,14 @@ function createUtilitiesStub(onSleep) {
       });
     },
     formatDate,
+    base64Decode(base64) {
+      if (typeof base64 !== 'string') throw new TypeError('base64Decode requires a string');
+      const text = base64.replace(/\s+/g, '');
+      if (!/^[A-Za-z0-9+/]*={0,2}$/.test(text) || text.length % 4 !== 0) {
+        throw new Error('Invalid base64 input');
+      }
+      return signedBytes(Buffer.from(text, 'base64'));
+    },
     getUuid: () => crypto.randomUUID(),
     sleep: (milliseconds) => {
       if (typeof onSleep === 'function') onSleep(Number(milliseconds) || 0);
@@ -165,6 +173,13 @@ function trimTrailingValues(rows) {
 // ように数える。`depth`はcopyToのように実機では1往復で済む操作の内側を
 // 二重に数えないための抑止。
 const roundTrips = {rangeReads: 0, rangeWrites: 0, flushes: 0, _depth: 0};
+// 書込の順をテストから見るための控え。セルを書く経路（Range.setValues と
+// Sheets.Values.update）を、呼ばれた順に 1 件ずつ残す。値そのものは残さない。
+const writeLog = [];
+function recordWrite(kind, sheetName, spreadsheetId, detail) {
+  writeLog.push(Object.assign({kind: String(kind), sheetName: sheetName === null ? null : String(sheetName),
+    spreadsheetId: String(spreadsheetId)}, detail || {}));
+}
 // clearContent が効かない状況を作る切り替え（雛形の取引先一覧の読返しを検査する）。
 let clearContentIgnored = false;
 let roundTripListener = null;
@@ -204,6 +219,8 @@ class MemoryRange {
       throw new RangeError('setValues dimensions do not match range');
     }
     countRoundTrip('rangeWrites');
+    recordWrite('range.setValues', this.sheet.getName(), this.sheet.getParent().getId(),
+      {row: this.row, column: this.column, numRows: this.numRows, numColumns: this.numColumns});
     // setValuesでの追記も、appendRowと同じ入れ子実行の仕掛けを通す。
     if (this.sheet.beforeAppendHook && this.row > this.sheet._lastContentRow()) {
       const hook = this.sheet.beforeAppendHook; this.sheet.beforeAppendHook = null; hook();
@@ -826,6 +843,10 @@ function createGasStubs() {
         apiCallCounts.rangesWritten += 1;
         const {range} = sheetAndRange(spreadsheetId, a1);
         const values = (body && body.values) || [];
+        recordWrite('values.update', range.sheet.getName(), spreadsheetId,
+          {a1: String(a1), valueInputOption: options.valueInputOption === undefined ?
+            null : String(options.valueInputOption),
+          numRows: values.length, numColumns: values.length ? values[0].length : 0});
         const interpreted = values.map((row) => row.map((value) =>
           interpretUserEntered(value, options.valueInputOption)));
         range.setValues(interpreted);
@@ -1517,6 +1538,9 @@ function createGasStubs() {
     onValuesBatchUpdate(fn) { valuesBatchUpdateListener = fn; },
     /** 値の単発書込（Sheets.Values.update）を覗く。監査→行→C の順を確かめる。 */
     onValuesUpdate(fn) { valuesUpdateListener = fn; },
+    /** 書込の順（Range.setValues と Values.update）を、呼ばれた順に返す。 */
+    getWriteLog: () => writeLog.map((item) => Object.assign({}, item)),
+    resetWriteLog() { writeLog.length = 0; },
     getDriveOps: () => driveOps.map((item) => Object.assign({}, item)),
     getDriveWrites: () => driveOps.filter(isDriveWrite).map((item) => Object.assign({}, item)),
     getOpenedSpreadsheetIds: () => openedSpreadsheetIds.slice(),
@@ -1524,7 +1548,7 @@ function createGasStubs() {
     roundTrips() { return {rangeReads: roundTrips.rangeReads, rangeWrites: roundTrips.rangeWrites, flushes: roundTrips.flushes}; },
     resetRoundTrips() { roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; },
     resetApiCallCounts() { apiCallCounts.batchGet = 0; apiCallCounts.get = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; },
-    reset() { spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptCacheValues.clear(); driveOps.length = 0; openedSpreadsheetIds.length = 0; folderCounter = 0; valuesUpdateListener = null; Object.keys(scriptCacheFailures).forEach((key) => { scriptCacheFailures[key] = []; }); scriptLock.reset(); sheetsBatchGetFailures = []; sheetsGetFailures = []; getScriptPropertiesFailures = []; spreadsheetCopyCounter = 0; htmlTemplates.clear(); activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; effectiveUserEmail = 'tester@example.com'; mailQuota = 100; mailFailures = []; sentMails.length = 0; propertyWrites.length = 0; Object.keys(propertyCallCounts).forEach((key) => { propertyCallCounts[key] = 0; }); uiAvailable = true; uiEvents.length = 0; menus.length = 0; promptResponses = []; alertResponses = []; apiCallCounts.batchGet = 0; apiCallCounts.get = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; sleepCalls.length = 0; sleepHook = null; clearContentIgnored = false; driveListFailures = []; triggers.length = 0; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; stubClock = null; driveCreateCounter = 0; driveRemovedIds.length = 0; driveRemoveFailures = []; freeeExportCorruptCell = null; sheetsBatchUpdateListener = null; sheetsBatchUpdateRequests.length = 0; }
+    reset() { writeLog.length = 0; spreadsheets.clear(); files.clear(); folders.clear(); properties.clear(); scriptCacheValues.clear(); driveOps.length = 0; openedSpreadsheetIds.length = 0; folderCounter = 0; valuesUpdateListener = null; Object.keys(scriptCacheFailures).forEach((key) => { scriptCacheFailures[key] = []; }); scriptLock.reset(); sheetsBatchGetFailures = []; sheetsGetFailures = []; getScriptPropertiesFailures = []; spreadsheetCopyCounter = 0; htmlTemplates.clear(); activeSpreadsheetId = null; activeUserEmail = 'tester@example.com'; effectiveUserEmail = 'tester@example.com'; mailQuota = 100; mailFailures = []; sentMails.length = 0; propertyWrites.length = 0; Object.keys(propertyCallCounts).forEach((key) => { propertyCallCounts[key] = 0; }); uiAvailable = true; uiEvents.length = 0; menus.length = 0; promptResponses = []; alertResponses = []; apiCallCounts.batchGet = 0; apiCallCounts.get = 0; apiCallCounts.cellsRead = 0; apiCallCounts.batchUpdate = 0; apiCallCounts.rangesWritten = 0; apiCallCounts.cellsWritten = 0; logLines.length = 0; sleepCalls.length = 0; sleepHook = null; clearContentIgnored = false; driveListFailures = []; triggers.length = 0; roundTrips.rangeReads = 0; roundTrips.rangeWrites = 0; roundTrips.flushes = 0; roundTrips._depth = 0; stubClock = null; driveCreateCounter = 0; driveRemovedIds.length = 0; driveRemoveFailures = []; freeeExportCorruptCell = null; sheetsBatchUpdateListener = null; sheetsBatchUpdateRequests.length = 0; }
   };
   return {Utilities, SpreadsheetApp, Sheets, DriveApp, Drive, Logger, LockService, Session,
     PropertiesService, CacheService, ScriptApp, MailApp, HtmlService, control};

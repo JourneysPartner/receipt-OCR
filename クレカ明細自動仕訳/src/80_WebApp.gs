@@ -352,6 +352,58 @@ function webAppRegisterCustomer(request) {
   });
 }
 
+/** 「設定」→「freee のカード名」の 3 つの入口（本体は 47）。 */
+function webAppFreeeCardNamesStart(customerId) {
+  return webAppInvoke_(function() {
+    var auth = authorizeOwner('WEBAPP:freeeカード名');
+    loadSettingsFromProperties();
+    var customer = getCustomerById(String(customerId));
+    if (customer.isActive !== true) return {ok: false, code: 'CUSTOMER_INACTIVE'};
+    try {
+      return freeeCardNamesStart_(auth, customer);
+    } catch (error) {
+      if (error && error.code === 'FREEE_CARD_TABLE_INVALID') {
+        return {ok: false, code: 'TABLE_INVALID'};
+      }
+      throw error;
+    }
+  });
+}
+
+function webAppFreeeCardNamesUploadCsv(customerId, fileName, base64, expectedVersion) {
+  return webAppInvoke_(function() {
+    var auth = authorizeOwner('WEBAPP:freeeカード名');
+    loadSettingsFromProperties();
+    var customer = getCustomerById(String(customerId));
+    if (customer.isActive !== true) return {ok: false, code: 'CUSTOMER_INACTIVE'};
+    try {
+      return freeeCardNamesUploadCsv_(auth, customer, fileName, base64, expectedVersion);
+    } catch (error) {
+      if (error && error.code === 'FREEE_CARD_TABLE_INVALID') {
+        return {ok: false, code: 'TABLE_INVALID'};
+      }
+      throw error;
+    }
+  });
+}
+
+function webAppFreeeCardNamesSave(customerId, changes, expectedVersion) {
+  return webAppInvoke_(function() {
+    var auth = authorizeOwner('WEBAPP:freeeカード名');
+    loadSettingsFromProperties();
+    var customer = getCustomerById(String(customerId));
+    if (customer.isActive !== true) return {ok: false, code: 'CUSTOMER_INACTIVE'};
+    try {
+      return freeeCardNamesSave_(auth, customer, changes, expectedVersion);
+    } catch (error) {
+      if (error && error.code === 'FREEE_CARD_TABLE_INVALID') {
+        return {ok: false, code: 'TABLE_INVALID'};
+      }
+      throw error;
+    }
+  });
+}
+
 /** 顧客直下のカードフォルダ、または選択したカードフォルダのファイルを返す。 */
 function webAppListFolder(customerId, folderId) {
   return webAppInvoke_(function() {
