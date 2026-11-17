@@ -440,6 +440,11 @@
       <button id="settings-back" type="button" class="button">クレカ取込・記帳へ戻る</button>
     </div>
     <div class="panel-body">
+      <div class="settings-switch" role="group" aria-label="設定の種類">
+        <button id="settings-view-registration" type="button" class="button" aria-pressed="true">顧客一覧への登録</button>
+        <button id="settings-view-freee-card" type="button" class="button" aria-pressed="false">freee のカード名</button>
+      </div>
+      <div id="registration-view">
       <section class="settings-step" aria-labelledby="registration-category-heading">
         <h3 id="registration-category-heading" class="subheading">1. 区分</h3>
         <label><input id="registration-category-individual" type="radio" name="registration-category" checked> 個人</label>
@@ -478,6 +483,36 @@
       </section>
       <div class="action-row">
         <button id="registration-submit" type="button" class="button primary" disabled>登録する</button>
+      </div>
+      <div id="registration-next" hidden>
+        <button id="registration-next-freee-card" type="button" class="button">続けて freee のカード名を設定</button>
+      </div>
+      </div>
+      <div id="freee-card-view" hidden>
+        <section id="freee-card-customer-section" class="settings-step" aria-labelledby="freee-card-customer-heading">
+          <h3 id="freee-card-customer-heading" class="subheading">1. 顧客</h3>
+          <select id="freee-card-customer"></select>
+        </section>
+        <section id="freee-card-csv-section" class="settings-step" aria-labelledby="freee-card-csv-heading" hidden>
+          <h3 id="freee-card-csv-heading" class="subheading">2. 勘定科目 CSV</h3>
+          <div id="freee-card-csv-status"></div>
+          <div class="muted">freee の［設定］→［勘定科目］→［エクスポート］で書き出した CSV を、そのまま選んでください。</div>
+          <input id="freee-card-csv-file" type="file" accept=".csv,text/csv">
+          <button id="freee-card-csv-upload" type="button" class="button" disabled>この CSV を登録する</button>
+          <div id="freee-card-csv-warning" class="settings-warning" hidden></div>
+        </section>
+        <section id="freee-card-map-section" class="settings-step" aria-labelledby="freee-card-map-heading" hidden>
+          <h3 id="freee-card-map-heading" class="subheading">3. カードフォルダと freee のカード名</h3>
+          <div id="freee-card-map" class="table-wrap"></div>
+        </section>
+        <section id="freee-card-orphans" class="settings-step" aria-labelledby="freee-card-orphans-heading" hidden>
+          <h3 id="freee-card-orphans-heading" class="subheading">今の明細フォルダに無いカードフォルダの対応</h3>
+          <div id="freee-card-orphans-list"></div>
+        </section>
+        <div class="action-row">
+          <button id="freee-card-save" type="button" class="button primary" disabled>保存する</button>
+        </div>
+        <div class="muted">ここで保存した対応は、次に［記帳を実行］して作る転記シートから、入力用シートの B1 に入ります。今ある転記シートの B1 は変わりません（手で直してください）。</div>
       </div>
     </div>
   </section>
@@ -708,6 +743,86 @@
           return 'この操作はできませんでした（' + (key || 'UNKNOWN') + '）。';
         }
       }),
+      // freee のカード名（仕様 §4.6・§4.8）。本文は仕様の表のとおり。
+      freeeCard: Object.freeze({
+        codes: Object.freeze({
+          CUSTOMER_INACTIVE: 'この顧客は有効ではありません。',
+          TABLE_INVALID: 'freee のカード名の表を読めません。管理者に連絡してください。',
+          CSV_SIZE: 'CSV が空か、大きすぎます（1 MB まで）。',
+          CSV_DECODE: 'CSV の文字を読めませんでした。freee から書き出したファイルを、そのまま選んでください。',
+          CSV_ENCODING: 'CSV の文字を読めませんでした。freee から書き出したファイルを、そのまま選んでください。',
+          CSV_HEADER: 'freee の勘定科目 CSV の形ではありません（「勘定科目」と「表示名（決算書）」の列が要ります）。',
+          CSV_EMPTY: '勘定科目が 1 行もありません。',
+          CSV_ROW_INVALID: function(detail) {
+            var row = detail && detail.row;
+            if (typeof row === 'number' && isFinite(row)) {
+              return String(row) + ' 行目の勘定科目が空か、使えない文字（改行・タブなど）を含んでいます。';
+            }
+            return 'CSV の形が壊れています（引用符が閉じていないなど）。freee から書き出したファイルを、そのまま選んでください。';
+          },
+          CSV_DUPLICATE: function(detail) {
+            var rows = detail && Array.isArray(detail.rows) ? detail.rows : [];
+            return '勘定科目「' + freeeCardText(detail && detail.name) + '」が 2 回以上あります（' +
+              freeeCardText(rows[0]) + ' 行目・' + freeeCardText(rows[1]) + ' 行目）。';
+          },
+          CSV_TOO_MANY: '勘定科目が多すぎて登録できません。',
+          CSV_TOO_LARGE: '勘定科目が多すぎて登録できません。',
+          STALE: 'ほかの画面で先に変わりました。顧客を選び直してから、もう一度してください。',
+          NO_CSV: '先に勘定科目 CSV を登録してください。',
+          MAPPING_INVALID: function(detail) {
+            var folderName = detail && typeof detail.folderName === 'string' ? detail.folderName : null;
+            var changes = detail && Array.isArray(detail.sentChanges) ? detail.sentChanges : [];
+            var index = detail && detail.index;
+            if (folderName === null && typeof index === 'number' && changes[index]) {
+              folderName = String(changes[index].folderName);
+            }
+            if (folderName === null) {
+              return '対応を保存できません（候補に無い名前か、今の明細フォルダに無いカードフォルダです）。顧客を選び直してください。';
+            }
+            return '「' + folderName +
+              '」の対応を保存できません（候補に無い名前か、今の明細フォルダに無いカードフォルダです）。顧客を選び直してください。';
+          },
+          WRITE_VERIFY_FAILED: '保存を確かめられませんでした。顧客を選び直して、保存されたかを見てください。',
+          REQUIRED_LOG_WRITE_FAILED: '監査ログに書けなかったため、保存しませんでした。'
+        }),
+        codeText: function(code, detail, sentChanges) {
+          var key = String(code === null || code === undefined ? '' : code);
+          var table = TEXT.freeeCard.codes;
+          var entry = Object.prototype.hasOwnProperty.call(table, key) ? table[key] : null;
+          var context = Object.assign({}, detail || {});
+          context.sentChanges = Array.isArray(sentChanges) ? sentChanges : [];
+          if (typeof entry === 'function') return entry(context);
+          if (typeof entry === 'string') return entry;
+          return 'freee のカード名の操作ができませんでした（コード：' + (key || 'UNKNOWN') + '）。';
+        },
+        resultText: function(result, sentChanges) {
+          return TEXT.freeeCard.codeText(result && result.code, result && result.detail, sentChanges);
+        },
+        warning: function(cardName) {
+          if (!cardName || typeof cardName !== 'object') return null;
+          var status = String(cardName.status || '');
+          if (status === 'WRITTEN') return null;
+          var folder = cardName.folderName === null || cardName.folderName === undefined ?
+            '' : String(cardName.folderName);
+          var fixed = '今の転記シートは B1 を手で直してください。「設定」→「freee のカード名」で設定すると、次の記帳から自動で入ります。';
+          if (status === 'NO_CSV') {
+            return '「' + folder + '」の freee のカード名がまだ設定されていないため（勘定科目 CSV が未登録）、' +
+              '入力用シートの B1 は「○○カード」のままです。' + fixed;
+          }
+          if (status === 'NOT_SET') {
+            return '「' + folder + '」に freee のカード名が対応づけられていないため、' +
+              '入力用シートの B1 は「○○カード」のままです。' + fixed;
+          }
+          if (status === 'NOT_IN_CSV') {
+            return '「' + folder + '」に当てた「' + freeeCardText(cardName.accountName) +
+              '」が今の勘定科目 CSV に無いため、B1 に入れませんでした。' + fixed;
+          }
+          if (status === 'TEMPLATE_UNSUPPORTED') {
+            return 'この顧客の転記シートの形では B1 にカード名を入れられません。B1 を手で直してください。';
+          }
+          return '入力用シートの B1 に freee のカード名を入れられませんでした。B1 を手で直してください。';
+        }
+      }),
       // freee 取込用 Excel（仕様 §4.3〜§4.5）。本文・明細の文言は仕様の表のとおり。
       freee: Object.freeze({
         busy: 'freee 取込用を作っています…',
@@ -738,6 +853,10 @@
               freeeCellText(stop.expected) + '」のはずが「' + freeeCellText(stop.actual) + '」）。';
           },
           CARD_NAME_PLACEHOLDER: '入力用シートの B1（カード名）が「○○カード」のままか空です。freee のカードの勘定科目名を入れてください。',
+          CARD_NAME_NOT_IN_FREEE: function(stop) {
+            return '入力用シートの B1（カード名）「' + freeeCellText(stop && stop.cardName) +
+              '」は、登録した勘定科目 CSV にありません。freee の勘定科目名と同じにしてください（前後の空白・全角半角も同じに）。';
+          },
           NO_DATA_ROWS: '取り込む行がありません。',
           ROW_PROBLEMS: function(stop) {
             return '直す必要のある行が ' + (Number(stop.count) || 0) + ' 件あります（下の一覧）。';
@@ -886,6 +1005,16 @@
       // 設定（顧客一覧への登録）。呼出し中だけ registrationBusy が true。
       isOwner: false,
       settingsOpen: false,
+      settingsView: 'registration',
+      // freee のカード名（§4.3）。freeeCardBusy は 3 つの入口の呼出しの数。
+      freeeCard: null,
+      freeeCardCustomerId: '',
+      freeeCardGeneration: 0,
+      freeeCardBusy: 0,
+      freeeCardLoading: false,
+      freeeCardMutating: false,
+      freeeCardSelections: {},
+      freeeCardRemovals: new Set(),
       registrationBusy: false,
       registrationPending: 0,
       registrationGeneration: 0,
@@ -903,7 +1032,9 @@
       registrationName: '',
       registrationNameChanged: false,
       registrationRegistering: false,
-      registrationSubmitPending: false
+      registrationSubmitPending: false,
+      // 登録が終わった顧客。次の「freee のカード名」のボタンに使う（§4.7）。
+      registrationNextCustomerId: null
     };
 
     var el = {};
@@ -930,7 +1061,7 @@
       'wait-dialog', 'wait-title', 'wait-big', 'wait-desc1', 'wait-desc2', 'wait-desc3',
       'wait-run', 'wait-close'
       , 'format-panel', 'format-body', 'format-close'
-      , 'nav-import', 'nav-settings', 'settings-panel', 'settings-back'
+      , 'nav-import', 'nav-settings', 'settings-panel', 'settings-back', 'settings-heading'
       , 'registration-category-individual', 'registration-category-corporate'
       , 'registration-missing', 'registration-folders-section', 'registration-folder-search'
       , 'registration-folder-count', 'registration-folder-list'
@@ -941,7 +1072,13 @@
       , 'registration-contract-message', 'registration-contract-reselect'
       , 'registration-contract-search', 'registration-contract-list'
       , 'registration-name-section', 'registration-name', 'registration-name-problem'
-      , 'registration-submit'
+      , 'registration-submit', 'registration-next', 'registration-next-freee-card'
+      , 'settings-view-registration', 'settings-view-freee-card', 'registration-view'
+      , 'freee-card-view', 'freee-card-customer-section', 'freee-card-customer'
+      , 'freee-card-csv-section', 'freee-card-csv-status', 'freee-card-csv-file'
+      , 'freee-card-csv-upload', 'freee-card-csv-warning'
+      , 'freee-card-map-section', 'freee-card-map'
+      , 'freee-card-orphans', 'freee-card-orphans-list', 'freee-card-save'
     ].forEach(function(id) { el[id] = document.getElementById(id); });
     var activeProgressTimers = Object.create(null);
 
@@ -952,6 +1089,9 @@
         else if (name === 'webAppRegistrationStart') runner.webAppRegistrationStart();
         else if (name === 'webAppRegistrationInspect') runner.webAppRegistrationInspect(args[0], args[1]);
         else if (name === 'webAppRegisterCustomer') runner.webAppRegisterCustomer(args[0]);
+        else if (name === 'webAppFreeeCardNamesStart') runner.webAppFreeeCardNamesStart(args[0]);
+        else if (name === 'webAppFreeeCardNamesUploadCsv') runner.webAppFreeeCardNamesUploadCsv(args[0], args[1], args[2], args[3]);
+        else if (name === 'webAppFreeeCardNamesSave') runner.webAppFreeeCardNamesSave(args[0], args[1], args[2]);
         else if (name === 'webAppListFolder') runner.webAppListFolder(args[0], args[1]);
         else if (name === 'webAppListDestinations') runner.webAppListDestinations(args[0], args[1]);
         else if (name === 'webAppListReviews') runner.webAppListReviews(args[0], args[1], args[2]);
@@ -2580,6 +2720,12 @@
         .filter(Boolean);
     }
 
+    /** 記帳の終わりに出す、B1 のカード名の 1 行（§4.8）。 */
+    function freeeCardNameWarningLines(cardName) {
+      var line = TEXT.freeeCard.warning(cardName);
+      return line ? [line] : [];
+    }
+
     /** 返ってきた未開始分も同じ待ち行列へ戻す。停止後は実行中の返事だけ待つ。 */
     async function startParallelImport(customerId, folderId, progressTimer, isCurrent) {
       var mark = progressTimer.beginCall();
@@ -2591,7 +2737,8 @@
         state.activeImportDestinationSpreadsheetId = String(preparation.destinationSpreadsheetId);
         state.lastCompletedDestinationSpreadsheetId = state.activeImportDestinationSpreadsheetId;
       }
-      var warnings = schemaValidationLines(preparation);
+      var warnings = schemaValidationLines(preparation)
+        .concat(freeeCardNameWarningLines(preparation.cardName));
       if (preparation.stoppedBy) {
         showNotice(stoppedByMessage(preparation.stoppedBy), 'warning', warnings);
         return;
@@ -2722,6 +2869,7 @@
           }
           collectSessionFiles(result.fileResults);
           warnings = warnings.concat(customerFixNoticeLines(result.fileResults));
+          warnings = warnings.concat(freeeCardNameWarningLines(result.cardName));
           var done = Number(result.done || 0);
           var remaining = Number(result.remaining || 0);
           cumulativeDone += done;
@@ -5038,6 +5186,476 @@
       return TEXT.registration.codeText(code, context);
     }
 
+    // -----------------------------------------------------------------------
+    // 設定「freee のカード名」（§4.1〜§4.9）
+    // 文字はすべて textContent。古い返事は freeeCardGeneration で捨てる。
+    // -----------------------------------------------------------------------
+
+    function freeeCardText(value) {
+      return value === null || value === undefined ? '' : String(value);
+    }
+
+    function freeeCardFailureText(error) {
+      var code = error && error.code;
+      var table = TEXT.freeeCard.codes;
+      if (code !== null && code !== undefined &&
+          Object.prototype.hasOwnProperty.call(table, String(code))) {
+        return TEXT.freeeCard.codeText(String(code), null, []);
+      }
+      return failureMessage(error);
+    }
+
+    function freeeCardSetBusy(delta) {
+      state.freeeCardBusy = Math.max(0,
+        Number(state.freeeCardBusy || 0) + Number(delta || 0));
+    }
+
+    /** 同じ鍵（前後の空白を外した名前）のフォルダを 1 行にまとめる。 */
+    function freeeCardGroups() {
+      var data = state.freeeCard;
+      if (!data || !Array.isArray(data.folders)) return [];
+      var groups = [];
+      var byKey = Object.create(null);
+      data.folders.forEach(function(folder) {
+        var name = folder && folder.folderName !== null && folder.folderName !== undefined ?
+          String(folder.folderName) : '';
+        var key = name.trim();
+        if (!Object.prototype.hasOwnProperty.call(byKey, key)) {
+          byKey[key] = {key: key, folders: [], first: folder};
+          groups.push(byKey[key]);
+        }
+        byKey[key].folders.push(folder);
+      });
+      return groups;
+    }
+
+    function freeeCardSelectionFor(group) {
+      if (Object.prototype.hasOwnProperty.call(state.freeeCardSelections, group.key)) {
+        return String(state.freeeCardSelections[group.key] || '');
+      }
+      var first = group.first || {};
+      if (first.savedValid === true && typeof first.savedAccountName === 'string') {
+        return first.savedAccountName;
+      }
+      if (typeof first.suggestion === 'string') return first.suggestion;
+      return '';
+    }
+
+    function freeeCardStatusFor(group) {
+      var first = group.first || {};
+      var value = freeeCardSelectionFor(group);
+      var saved = typeof first.savedAccountName === 'string' ? first.savedAccountName : null;
+      var savedValid = first.savedValid === true;
+      var suggestion = typeof first.suggestion === 'string' ? first.suggestion : null;
+      if (saved !== null && savedValid && value === saved) return '保存済み';
+      if (suggestion !== null && value === suggestion) return '同じ名前の候補（まだ保存していません）';
+      if (saved !== null && !savedValid) {
+        return '保存済みの「' + saved + '」は今の CSV にありません（選び直すか、このまま保存すると外れます）';
+      }
+      if (value !== (saved === null ? '' : saved)) return '変更あり（まだ保存していません）';
+      return '未設定';
+    }
+
+    /** 送るのは変わった所だけ（§4.5）。同じ鍵につき 1 つ。 */
+    function freeeCardChanges() {
+      var changes = [];
+      var seen = Object.create(null);
+      freeeCardGroups().forEach(function(group) {
+        var first = group.first || {};
+        var saved = typeof first.savedAccountName === 'string' ? first.savedAccountName : null;
+        var value = freeeCardSelectionFor(group);
+        if (value === (saved === null ? '' : saved)) return;
+        changes.push({folderName: group.key, accountName: value === '' ? null : value});
+        seen[group.key] = true;
+      });
+      var orphans = state.freeeCard && Array.isArray(state.freeeCard.orphans) ?
+        state.freeeCard.orphans : [];
+      orphans.forEach(function(orphan) {
+        var key = freeeCardText(orphan && orphan.folderName).trim();
+        if (!key || !state.freeeCardRemovals.has(key)) return;
+        if (seen[key]) return;
+        changes.push({folderName: key, accountName: null});
+        seen[key] = true;
+      });
+      return changes;
+    }
+
+    function freeeCardSelectedFile() {
+      var files = el['freee-card-csv-file'].files || [];
+      return files.length ? files[0] : null;
+    }
+
+    /** ファイルの選択を空にする。`files` は環境によっては代入できないので、失敗は無視する。 */
+    function freeeCardClearFileSelection() {
+      var input = el['freee-card-csv-file'];
+      input.value = '';
+      try { input.files = []; } catch (error) { /* FileList は代入できない環境がある */ }
+    }
+
+    function renderSettingsChrome() {
+      var locked = registrationLocked() || state.freeeCardBusy > 0;
+      var registrationView = state.settingsView !== 'freee-card';
+      el['settings-heading'].textContent = registrationView ? '顧客一覧への登録' : 'freee のカード名';
+      el['settings-view-registration'].setAttribute('aria-pressed',
+        registrationView ? 'true' : 'false');
+      el['settings-view-freee-card'].setAttribute('aria-pressed',
+        registrationView ? 'false' : 'true');
+      el['settings-view-registration'].disabled = locked;
+      el['settings-view-freee-card'].disabled = locked;
+      el['registration-view'].hidden = !registrationView;
+      el['freee-card-view'].hidden = registrationView;
+    }
+
+    function renderFreeeCardCustomerSelect() {
+      var select = el['freee-card-customer'];
+      select.textContent = '';
+      var placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = '（選んでください）';
+      select.appendChild(placeholder);
+      (state.customers || []).forEach(function(customer) {
+        var option = document.createElement('option');
+        option.value = String(customer.customerId);
+        option.textContent = String(customer.customerName) + '（' + String(customer.customerId) + '）';
+        select.appendChild(option);
+      });
+      select.value = state.freeeCardCustomerId || '';
+      select.disabled = state.freeeCardMutating === true;
+    }
+
+    function renderFreeeCardMap() {
+      var data = state.freeeCard;
+      var groups = freeeCardGroups();
+      el['freee-card-map'].textContent = '';
+      if (!groups.length) {
+        var empty = document.createElement('div');
+        empty.className = 'muted';
+        empty.textContent = 'この顧客の明細フォルダにカードフォルダがありません。';
+        el['freee-card-map'].appendChild(empty);
+        return;
+      }
+      var candidates = Array.isArray(data.candidates) ? data.candidates : [];
+      var busy = state.freeeCardBusy > 0 || state.freeeCardMutating === true;
+      var table = document.createElement('table');
+      var head = document.createElement('thead');
+      var headRow = document.createElement('tr');
+      ['カードフォルダ', 'freee のカード名', '状態'].forEach(function(label) {
+        var th = document.createElement('th');
+        th.textContent = label;
+        headRow.appendChild(th);
+      });
+      head.appendChild(headRow);
+      table.appendChild(head);
+      var body = document.createElement('tbody');
+      groups.forEach(function(group) {
+        var row = document.createElement('tr');
+        var nameCell = document.createElement('td');
+        var first = group.first || {};
+        if (group.folders.length > 1) {
+          nameCell.textContent = group.key + '（同じ名前のフォルダが ' +
+            group.folders.length + ' 個あります）';
+        } else {
+          nameCell.textContent = first.folderName === null || first.folderName === undefined ?
+            group.key : String(first.folderName);
+        }
+        row.appendChild(nameCell);
+        var selectCell = document.createElement('td');
+        var select = document.createElement('select');
+        var blank = document.createElement('option');
+        blank.value = '';
+        blank.textContent = '（未設定）';
+        select.appendChild(blank);
+        candidates.forEach(function(name) {
+          var option = document.createElement('option');
+          option.value = String(name);
+          option.textContent = String(name);
+          select.appendChild(option);
+        });
+        select.value = freeeCardSelectionFor(group);
+        select.disabled = busy;
+        select.addEventListener('change', function() {
+          if (state.freeeCardBusy > 0 || state.freeeCardMutating === true) return;
+          state.freeeCardSelections[group.key] = select.value;
+          renderFreeeCard();
+        });
+        selectCell.appendChild(select);
+        row.appendChild(selectCell);
+        var statusCell = document.createElement('td');
+        statusCell.textContent = freeeCardStatusFor(group);
+        row.appendChild(statusCell);
+        body.appendChild(row);
+      });
+      table.appendChild(body);
+      el['freee-card-map'].appendChild(table);
+    }
+
+    function renderFreeeCardOrphans() {
+      var data = state.freeeCard;
+      var orphans = data && Array.isArray(data.orphans) ? data.orphans : [];
+      var show = Boolean(data) && orphans.length > 0;
+      el['freee-card-orphans'].hidden = !show;
+      el['freee-card-orphans-list'].textContent = '';
+      if (!show) return;
+      var busy = state.freeeCardBusy > 0 || state.freeeCardMutating === true;
+      orphans.forEach(function(orphan) {
+        var key = freeeCardText(orphan && orphan.folderName).trim();
+        var row = document.createElement('div');
+        row.className = 'settings-orphan-row';
+        var text = document.createElement('span');
+        text.textContent = freeeCardText(orphan && orphan.folderName) + ' → ' +
+          freeeCardText(orphan && orphan.accountName);
+        row.appendChild(text);
+        var label = document.createElement('label');
+        var check = document.createElement('input');
+        check.type = 'checkbox';
+        check.checked = state.freeeCardRemovals.has(key);
+        check.disabled = busy;
+        check.addEventListener('change', function() {
+          if (state.freeeCardBusy > 0 || state.freeeCardMutating === true) return;
+          if (check.checked) state.freeeCardRemovals.add(key);
+          else state.freeeCardRemovals.delete(key);
+          renderFreeeCard();
+        });
+        label.appendChild(check);
+        var labelText = document.createElement('span');
+        labelText.textContent = '外す';
+        label.appendChild(labelText);
+        row.appendChild(label);
+        el['freee-card-orphans-list'].appendChild(row);
+      });
+    }
+
+    function renderFreeeCard() {
+      renderSettingsChrome();
+      renderFreeeCardCustomerSelect();
+      var data = state.freeeCard;
+      var hasCustomer = Boolean(state.freeeCardCustomerId);
+      var hasCsv = Boolean(data && data.csv);
+      var busy = state.freeeCardBusy > 0 || state.freeeCardMutating === true;
+      var status = el['freee-card-csv-status'];
+      el['freee-card-csv-section'].hidden = !hasCustomer;
+      el['freee-card-csv-file'].disabled = busy;
+      el['freee-card-csv-upload'].disabled = busy || !freeeCardSelectedFile();
+      el['freee-card-csv-upload'].textContent = hasCsv ?
+        'この CSV に差し替える' : 'この CSV を登録する';
+      status.textContent = '';
+      if (hasCustomer && state.freeeCardLoading) {
+        status.textContent = '読み込んでいます…';
+      } else if (hasCustomer && data) {
+        if (hasCsv) {
+          var csv = data.csv;
+          status.textContent = 'ファイル名：' + freeeCardText(csv.fileName) +
+            '・登録日時：' + formatDate(csv.uploadedAt, true) +
+            '・登録した人：' + freeeCardText(csv.uploadedBy) +
+            '・勘定科目 ' + (Number(csv.accountCount) || 0) + ' 件' +
+            '・カードの候補 ' + (Number(csv.candidateCount) || 0) + ' 件';
+        } else {
+          status.textContent = 'まだ登録していません。';
+        }
+      }
+      var warning = el['freee-card-csv-warning'];
+      var noCandidates = Boolean(data && data.csv) &&
+        !(Array.isArray(data.candidates) && data.candidates.length);
+      warning.hidden = !noCandidates;
+      warning.textContent = noCandidates ?
+        'この CSV には、表示名（決算書）が『未払金』の科目がありません。freee にカードを登録してから、もう一度書き出してください。' : '';
+      el['freee-card-map-section'].hidden = !hasCsv;
+      el['freee-card-map'].textContent = '';
+      if (hasCsv) renderFreeeCardMap();
+      renderFreeeCardOrphans();
+      var changes = freeeCardChanges();
+      el['freee-card-save'].disabled = busy || !hasCsv || changes.length === 0;
+    }
+
+    function switchSettingsView(view) {
+      if (registrationLocked() || state.freeeCardBusy > 0) return;
+      state.settingsView = view === 'freee-card' ? 'freee-card' : 'registration';
+      renderRegistration();
+      renderFreeeCard();
+    }
+
+    function resetFreeeCardState() {
+      state.freeeCard = null;
+      state.freeeCardCustomerId = '';
+      state.freeeCardSelections = {};
+      state.freeeCardRemovals = new Set();
+      state.freeeCardLoading = false;
+      state.freeeCardMutating = false;
+      freeeCardClearFileSelection();
+      state.freeeCardGeneration += 1;
+    }
+
+    async function loadFreeeCardStart(customerId) {
+      var wanted = String(customerId);
+      var generation = ++state.freeeCardGeneration;
+      state.freeeCardCustomerId = wanted;
+      state.freeeCard = null;
+      state.freeeCardSelections = {};
+      state.freeeCardRemovals = new Set();
+      state.freeeCardLoading = true;
+      freeeCardSetBusy(1);
+      renderFreeeCard();
+      try {
+        var result = await gasCall('webAppFreeeCardNamesStart', [wanted]);
+        if (generation !== state.freeeCardGeneration ||
+            wanted !== state.freeeCardCustomerId) return;
+        if (!result || result.ok === false) {
+          state.freeeCard = null;
+          showNotice(TEXT.freeeCard.resultText(result, []), 'error');
+          return;
+        }
+        state.freeeCard = result;
+      } catch (error) {
+        if (generation !== state.freeeCardGeneration) return;
+        state.freeeCard = null;
+        showNotice(freeeCardFailureText(error), 'error');
+      } finally {
+        if (generation === state.freeeCardGeneration) state.freeeCardLoading = false;
+        freeeCardSetBusy(-1);
+        renderFreeeCard();
+      }
+    }
+
+    function onFreeeCardCustomerChanged() {
+      if (state.freeeCardMutating === true) return;
+      var customerId = el['freee-card-customer'].value;
+      if (!customerId) {
+        resetFreeeCardState();
+        renderFreeeCard();
+        return;
+      }
+      loadFreeeCardStart(customerId);
+    }
+
+    function freeeCardReadFile(file) {
+      return new Promise(function(resolve, reject) {
+        try {
+          var reader = new FileReader();
+          reader.onload = function() {
+            var text = String(reader.result === null || reader.result === undefined ?
+              '' : reader.result);
+            var comma = text.indexOf(',');
+            resolve(comma >= 0 ? text.slice(comma + 1) : '');
+          };
+          reader.onerror = function() {
+            var error = new Error('CSV_DECODE');
+            error.code = 'CSV_DECODE';
+            reject(error);
+          };
+          reader.readAsDataURL(file);
+        } catch (error) {
+          error.code = 'CSV_DECODE';
+          reject(error);
+        }
+      });
+    }
+
+    async function uploadFreeeCardCsv() {
+      if (state.freeeCardBusy > 0 || state.freeeCardMutating === true) return;
+      var file = freeeCardSelectedFile();
+      if (!file || !state.freeeCard) return;
+      var size = Number(file.size);
+      if (!(size > 0) || size > 1048576) {
+        showNotice(TEXT.freeeCard.codes.CSV_SIZE, 'error');
+        return;
+      }
+      var customerId = state.freeeCardCustomerId;
+      var customerName = freeeCardText(state.freeeCard.customerName);
+      var message = '「' + freeeCardText(file.name) + '」を、' + customerName +
+        ' の勘定科目 CSV として登録します。';
+      if (state.freeeCard.csv) {
+        message += '\n今の CSV は置き換わります。保存済みの対応はそのまま残ります。';
+      }
+      if (!await formatConfirm('勘定科目 CSV', message)) {
+        renderFreeeCard();
+        return;
+      }
+      var generation = state.freeeCardGeneration;
+      state.freeeCardMutating = true;
+      freeeCardSetBusy(1);
+      renderFreeeCard();
+      try {
+        var base64 = await freeeCardReadFile(file);
+        var version = state.freeeCard.version;
+        var result = await gasCall('webAppFreeeCardNamesUploadCsv',
+          [customerId, freeeCardText(file.name), base64, version]);
+        if (generation !== state.freeeCardGeneration) return;
+        if (result && result.ok === true) {
+          var csv = result.csv || {};
+          var details = (Array.isArray(result.invalidMappings) ? result.invalidMappings : [])
+            .map(function(item) {
+              return '「' + freeeCardText(item && item.folderName) + '」に当てていた「' +
+                freeeCardText(item && item.accountName) + '」は新しい CSV にありません。選び直してください。';
+            });
+          showNotice('勘定科目 CSV を登録しました（勘定科目 ' +
+            (Number(csv.accountCount) || 0) + ' 件・カードの候補 ' +
+            (Number(csv.candidateCount) || 0) + ' 件）。', 'success', details);
+          freeeCardClearFileSelection();
+          await loadFreeeCardStart(customerId);
+        } else {
+          showNotice(TEXT.freeeCard.resultText(result, []), 'error');
+        }
+      } catch (error) {
+        if (generation === state.freeeCardGeneration) {
+          showNotice(freeeCardFailureText(error), 'error');
+        }
+      } finally {
+        state.freeeCardMutating = false;
+        freeeCardSetBusy(-1);
+        renderFreeeCard();
+      }
+    }
+
+    async function saveFreeeCardMappings() {
+      if (state.freeeCardBusy > 0 || state.freeeCardMutating === true) return;
+      var changes = freeeCardChanges();
+      if (!changes.length || !state.freeeCard || !state.freeeCard.csv) return;
+      var customerId = state.freeeCardCustomerId;
+      var generation = state.freeeCardGeneration;
+      var version = state.freeeCard.version;
+      state.freeeCardMutating = true;
+      freeeCardSetBusy(1);
+      renderFreeeCard();
+      try {
+        var result = await gasCall('webAppFreeeCardNamesSave',
+          [customerId, changes, version]);
+        if (generation !== state.freeeCardGeneration) return;
+        if (result && result.ok === true) {
+          var changed = Number(result.changed) || 0;
+          showNotice(changed > 0 ?
+            'freee のカード名の対応を保存しました（' + changed + ' 件）。' :
+            '変更はありませんでした。', 'success');
+          await loadFreeeCardStart(customerId);
+        } else {
+          showNotice(TEXT.freeeCard.resultText(result, changes), 'error');
+        }
+      } catch (error) {
+        if (generation === state.freeeCardGeneration) {
+          showNotice(freeeCardFailureText(error), 'error');
+        }
+      } finally {
+        state.freeeCardMutating = false;
+        freeeCardSetBusy(-1);
+        renderFreeeCard();
+      }
+    }
+
+    function openFreeeCardForRegisteredCustomer() {
+      if (registrationLocked() || state.freeeCardBusy > 0) return;
+      var customerId = state.registrationNextCustomerId;
+      state.settingsView = 'freee-card';
+      var exists = (state.customers || []).some(function(customer) {
+        return String(customer.customerId) === String(customerId);
+      });
+      if (customerId && exists) {
+        state.freeeCardCustomerId = String(customerId);
+        loadFreeeCardStart(customerId);
+        return;
+      }
+      resetFreeeCardState();
+      renderFreeeCard();
+    }
+
     /**
      * 「調べています…」を出すか（§3.11 の 3）。待ちの世代が今の世代と同じときだけ出す。
      * 顧客フォルダを選び直すと世代が変わり、前の呼出しの待ちは表に出ない。
@@ -5101,6 +5719,7 @@
       state.registrationName = '';
       state.registrationNameChanged = false;
       state.registrationSubmitPending = false;
+      state.registrationNextCustomerId = null;
       el['registration-folder-search'].value = '';
       el['registration-contract-search'].value = '';
       el['registration-name'].value = '';
@@ -5108,22 +5727,28 @@
 
     function openSettings() {
       if (isMutationBusy()) return;
+      if (state.freeeCardBusy > 0) return;
       if (!state.isOwner) {
         showNotice(TEXT.registration.ownerOnly, 'info');
         return;
       }
       state.settingsOpen = true;
+      state.settingsView = 'registration';
       resetRegistrationSelection();
+      resetFreeeCardState();
       setSettingsVisible(true);
       renderRegistration();
+      renderFreeeCard();
       loadRegistrationStart();
     }
 
     function closeSettings() {
       if (registrationLocked()) return;
+      if (state.freeeCardBusy > 0) return;
       if (!state.settingsOpen) return;
       state.settingsOpen = false;
       state.registrationGeneration += 1;
+      state.freeeCardGeneration += 1;
       setSettingsVisible(false);
     }
 
@@ -5158,6 +5783,7 @@
     function chooseRegistrationFolder(folderId) {
       if (registrationLocked()) return;
       state.registrationGeneration += 1;
+      state.registrationNextCustomerId = null;
       state.registrationFolderId = String(folderId);
       state.registrationPicks = {};
       state.registrationStage = null;
@@ -5264,9 +5890,12 @@
 
     function renderRegistration() {
       var locked = registrationLocked();
-      el['settings-back'].disabled = locked;
+      renderSettingsChrome();
+      el['settings-back'].disabled = locked || state.freeeCardBusy > 0;
       el['nav-import'].disabled = locked;
       el['nav-settings'].disabled = locked;
+      el['registration-next'].hidden = !state.registrationNextCustomerId;
+      el['registration-next-freee-card'].disabled = locked || state.freeeCardBusy > 0;
       el['registration-category-individual'].checked = true;
       el['registration-category-individual'].disabled = locked;
       // 一覧の返事を待つ間は「調べています…」だけ（前に開いた一覧も出さない。§3.11 の 1）。
@@ -5518,6 +6147,9 @@
           resetRegistrationSelection();
           renderRegistration();
           await loadRegistrationStart();
+          state.registrationNextCustomerId = String(result.customerId === undefined ?
+            entry.customerId : result.customerId);
+          renderRegistration();
         } else {
           showNotice(registrationCodeText(result && result.code,
             {rowNumber: result && result.rowNumber}), 'error');
@@ -5637,6 +6269,17 @@
       renderRegistration();
     });
     el['registration-submit'].addEventListener('click', submitRegistration);
+    el['registration-next-freee-card'].addEventListener('click', openFreeeCardForRegisteredCustomer);
+    el['settings-view-registration'].addEventListener('click', function() {
+      switchSettingsView('registration');
+    });
+    el['settings-view-freee-card'].addEventListener('click', function() {
+      switchSettingsView('freee-card');
+    });
+    el['freee-card-customer'].addEventListener('change', onFreeeCardCustomerChanged);
+    el['freee-card-csv-file'].addEventListener('change', renderFreeeCard);
+    el['freee-card-csv-upload'].addEventListener('click', uploadFreeeCardCsv);
+    el['freee-card-save'].addEventListener('click', saveFreeeCardMappings);
     document.querySelectorAll('[data-coming-soon]').forEach(function(button) {
       button.addEventListener('click', function() { showNotice(TEXT.comingSoon, 'info'); });
     });

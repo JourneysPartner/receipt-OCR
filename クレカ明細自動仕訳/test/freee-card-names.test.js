@@ -1553,4 +1553,92 @@ module.exports = ({test, assert, gas}) => {
       assert.equal(opened.code, 'TABLE_INVALID', item.label + ' のコードが違う');
     });
   });
+
+  // ================= fcn 31 =================
+  test('fcn 31: 複製のフォルダ名が読めなくても記帳を止めず、表を読まず FAILED', () => {
+    function runWithFolderNameFailure(mode) {
+      const world = buildImportWorld();
+      seedTable([tableRow({mappings: {'テストカード': '架空カードA'}})]);
+      addCardFile(world, 'テストカード', 'fcn-import-file-13');
+      const realGetFolderById = gas.context.DriveApp.getFolderById;
+      let thrown = false;
+      let logs = [];
+      gas.context.DriveApp.getFolderById = function(id) {
+        const handle = realGetFolderById.call(this, id);
+        if (String(id) !== SOURCE) return handle;
+        const originalGetFolders = handle.getFolders;
+        handle.getFolders = function() {
+          const iterator = originalGetFolders.call(handle);
+          return {
+            hasNext() { return iterator.hasNext(); },
+            next() {
+              const folder = iterator.next();
+              if (String(folder.getId()) !== 'fcn-card-test' || thrown) return folder;
+              thrown = true;
+              const copy = Object.assign({}, folder);
+              copy.getName = function() {
+                const error = new Error('fcn folder name failure');
+                error.code = 503;
+                throw error;
+              };
+              return copy;
+            }
+          };
+        };
+        return handle;
+      };
+      try {
+        const logged = withBatchGetLog(function() {
+          if (mode === 'prepare') {
+            const priorLanes = gas.evaluate('WEBAPP_IMPORT_LANES_');
+            gas.evaluate('WEBAPP_IMPORT_LANES_=2;');
+            try {
+              return call('webAppPrepareImport', [CUSTOMER_ID, 'fcn-card-test']);
+            } finally {
+              gas.evaluate('WEBAPP_IMPORT_LANES_=' + priorLanes + ';');
+            }
+          }
+          return importFolder('テストカード');
+        });
+        logs = gas.stubs.getLogLines().slice();
+        return {result: logged.result, calls: logged.calls, logs: logs};
+      } finally {
+        gas.context.DriveApp.getFolderById = realGetFolderById;
+      }
+    }
+
+    // 例外の無い同じ記帳。
+    const baselineWorld = buildImportWorld();
+    seedTable([tableRow({mappings: {'テストカード': '架空カードA'}})]);
+    addCardFile(baselineWorld, 'テストカード', 'fcn-import-file-13');
+    const baseline = importFolder('テストカード');
+    assert.equal(baseline.cardName.status, 'WRITTEN');
+
+    const failed = runWithFolderNameFailure('run');
+    assert.equal(failed.result.schemaValidation.ok, true);
+    assert.equal(failed.result.done, baseline.done, '記帳が止まっている');
+    assert.equal(failed.result.total, baseline.total);
+    assert.equal(failed.result.stoppedBy, baseline.stoppedBy);
+    assert.deepEqual(failed.result.cardName, {status: 'FAILED', folderName: ''});
+    const cloneId = failed.result.destinationSpreadsheetId;
+    assert.equal(destinationB1(cloneId).getValue(), '○○カード');
+    assert.deepEqual(cloneSnapshot(cloneId),
+      cloneSnapshot(baseline.destinationSpreadsheetId), 'B1 以外が同じ記帳と違う');
+    assert.equal(tableReadsIn(failed.calls), 0, 'フォルダ名が読めないのに表を読んでいる');
+    failed.logs.forEach((line) => {
+      assert.ok(line.indexOf('テストカード') < 0, 'ログにフォルダ名がある');
+      assert.ok(line.indexOf('架空カードA') < 0, 'ログにカード名がある');
+    });
+
+    // 準備の道でも同じ（記帳は止まらない・B1 は ○○カード・表を読まない）。
+    const prepared = runWithFolderNameFailure('prepare');
+    assert.equal(prepared.result.schemaValidation.ok, true);
+    assert.equal(prepared.result.total, 1);
+    assert.deepEqual(prepared.result.cardName, {status: 'FAILED', folderName: ''});
+    assert.equal(destinationB1(prepared.result.destinationSpreadsheetId).getValue(), '○○カード');
+    assert.equal(tableReadsIn(prepared.calls), 0, '準備の道で表を読んでいる');
+    prepared.logs.forEach((line) => {
+      assert.ok(line.indexOf('テストカード') < 0, 'ログにフォルダ名がある');
+    });
+  });
 };

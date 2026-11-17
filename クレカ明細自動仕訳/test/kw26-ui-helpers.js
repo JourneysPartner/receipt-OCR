@@ -29,7 +29,8 @@ const vm = require('node:vm');
     class Node {
       constructor(tag = 'div') {
         this.tagName = tag.toUpperCase(); this.children = []; this.parentNode = null;
-        this.listeners = {}; this._text = ''; this.value = ''; this.checked = false;
+        this.listeners = {}; this._text = ''; this._value = ''; this.checked = false;
+        this.selected = false; this.files = [];
         this.disabled = false; this.hidden = false; this.className = '';
         this.dataset = {}; this.attributes = {};
       }
@@ -43,6 +44,30 @@ const vm = require('node:vm');
         }
       }
       get textContent() { return this._text + this.children.map((child) => child.textContent).join(''); }
+      get options() { return this.children.filter((child) => child.tagName === 'OPTION'); }
+      get value() {
+        if (this.tagName === 'SELECT') {
+          const selected = this.children.find((child) =>
+            child.tagName === 'OPTION' && child.selected);
+          if (selected) return selected.value;
+        }
+        return this._value;
+      }
+      set value(value) {
+        if (this.tagName === 'SELECT') {
+          const text = value === null || value === undefined ? '' : String(value);
+          let matched = false;
+          this.children.forEach((child) => {
+            if (child.tagName === 'OPTION') {
+              child.selected = String(child.value) === text;
+              if (child.selected) matched = true;
+            }
+          });
+          this._value = matched ? text : '';
+          return;
+        }
+        this._value = value;
+      }
       appendChild(child) { child.parentNode = this; this.children.push(child); return child; }
       removeChild(child) {
         const index = this.children.indexOf(child);
@@ -116,6 +141,22 @@ const vm = require('node:vm');
     };
     const calls = [];
     const pending = [];
+    // FileReader は readAsDataURL だけを模す。失敗に切り替えられる（§4.4 の CSV_DECODE）。
+    let fileReaderFailure = options.fileReaderFailure === true;
+    class FakeFileReader {
+      readAsDataURL(file) {
+        if (fileReaderFailure) {
+          if (typeof this.onerror === 'function') this.onerror({target: this});
+          return;
+        }
+        const base64 = file && file.base64 !== undefined ? String(file.base64) :
+          Buffer.from(String(file && file.content !== undefined ? file.content : ''), 'utf8')
+            .toString('base64');
+        const contentType = file && file.contentType ? String(file.contentType) : 'text/csv';
+        this.result = 'data:' + contentType + ';base64,' + base64;
+        if (typeof this.onload === 'function') this.onload({target: this});
+      }
+    }
     // window.open の呼出しを記録し、返す値（null で止められる）を切り替えられるようにする。
     const openedWindows = [];
     let windowOpenResult = options.windowOpenResult === undefined ? {} : options.windowOpenResult;
@@ -128,7 +169,8 @@ const vm = require('node:vm');
       'webAppSaveFormat', 'webAppRequeueFormatFiles', 'webAppReturnFileToCustomer',
       'webAppPrepareImport', 'webAppWithdrawFormat', 'webAppRunImport', 'webAppResolveReviews',
       'webAppRecheckCustomerFixFile', 'webAppRegistrationStart', 'webAppRegistrationInspect',
-      'webAppRegisterCustomer', 'webAppCreateFreeeExport']) {
+      'webAppRegisterCustomer', 'webAppCreateFreeeExport', 'webAppFreeeCardNamesStart',
+      'webAppFreeeCardNamesUploadCsv', 'webAppFreeeCardNamesSave']) {
       runner[name] = (...args) => {
         calls.push({name, args});
         const success = runner.success, failure = runner.failure;
@@ -145,12 +187,13 @@ const vm = require('node:vm');
     const source = fs.readFileSync(path.join(__dirname, '..', 'src', '81_WebAppUi.html'), 'utf8');
     const script = /<script>([\s\S]*?)<\/script>/.exec(source)[1].replace(
       '    bootstrap();',
-      '    globalThis.__ui = {state, el, startImport, startProgressTimer, TEXT, bootstrap, renderSelection, renderFiles, renderFormatPanel, previewFormat, saveFormat, returnFormatToCustomer, openFormat, chooseFolder, chooseCustomer, loadFinalReview, formatSetBusy, recheckCustomerFix: typeof recheckCustomerFix === "function" ? recheckCustomerFix : null, openSettings, closeSettings, loadRegistrationStart, inspectRegistration, chooseRegistrationFolder, chooseRegistrationStage, chooseRegistrationCustomer, submitRegistration, renderRegistration, registrationCanSubmit, registrationNameProblem, registrationCodeText, createFreeeExport, downloadFreeeExport, resetFreeeExport, chooseDestination, forgetFinalReview, markFinalReviewStale};');
+      '    globalThis.__ui = {state, el, startImport, startProgressTimer, TEXT, bootstrap, renderSelection, renderFiles, renderFormatPanel, previewFormat, saveFormat, returnFormatToCustomer, openFormat, chooseFolder, chooseCustomer, loadFinalReview, formatSetBusy, recheckCustomerFix: typeof recheckCustomerFix === "function" ? recheckCustomerFix : null, openSettings, closeSettings, loadRegistrationStart, inspectRegistration, chooseRegistrationFolder, chooseRegistrationStage, chooseRegistrationCustomer, submitRegistration, renderRegistration, registrationCanSubmit, registrationNameProblem, registrationCodeText, createFreeeExport, downloadFreeeExport, resetFreeeExport, chooseDestination, forgetFinalReview, markFinalReviewStale, switchSettingsView, loadFreeeCardStart, onFreeeCardCustomerChanged, renderFreeeCard, freeeCardChanges, freeeCardGroups, freeeCardStatusFor, uploadFreeeCardCsv, saveFreeeCardMappings, openFreeeCardForRegisteredCustomer, freeeCardFailureText, freeeStopText};');
     const sandbox = {document, Promise: ObservedPromise, google: {script: {run: runner}},
       window: {open(...args) {
         openedWindows.push(args);
         return typeof windowOpenResult === 'function' ? windowOpenResult(...args) : windowOpenResult;
       }},
+      FileReader: FakeFileReader,
       setTimeout, clearTimeout, setInterval(fn) { const id = nextIntervalId++; intervals.set(id, fn); return id; },
       clearInterval(id) { intervals.delete(id); }, console,
       Date: options.clock === true ? FakeDate : RealDate};
@@ -161,7 +204,8 @@ const vm = require('node:vm');
     }
     return {ui: sandbox.__ui, document, calls, pending, ids, root, Node, promiseGroups,
       intervals, advance, setNow(ms) { nowValue = Number(ms); }, openedWindows,
-      setWindowOpenResult(value) { windowOpenResult = value; }};
+      setWindowOpenResult(value) { windowOpenResult = value; },
+      setFileReaderFailure(value) { fileReaderFailure = value === true; }};
   }
 
 module.exports = {browserWorld};

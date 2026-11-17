@@ -263,16 +263,6 @@ function freeeCardNamesRowFor_(customerId) {
   return freeeCardNamesParseRow_(matches[0].values, matches[0].rowNumber);
 }
 
-/** 新しい行の行番号（§3.2 の 1）。タブが無い・行が無ければ 2。 */
-function freeeCardNamesNextRowNumber_() {
-  var sheet = masterSpreadsheet_().getSheetByName(FREEE_CARD_NAMES_SHEET_NAME_);
-  if (!sheet) return 2;
-  var table = freeeCardNamesReadTable_(sheet);
-  if (table.empty) return 2;
-  freeeCardNamesAssertHeader_(table.header);
-  return table.lastRowNumber + 1;
-}
-
 function freeeCardNamesSameCell_(expected, actual) {
   var left = expected === undefined || expected === null ? '' : expected;
   var right = actual === undefined || actual === null ? '' : actual;
@@ -819,9 +809,20 @@ function freeeCardNamesSave_(auth, customer, changes, expectedVersion) {
  * @return {{status: string, folderName: string, accountName: (string|undefined)}}
  */
 function freeeCardWriteCardName_(customer, destinationSpreadsheetId, cardFolderName) {
-  var folderName = freeeCardNamesFolderKey_(cardFolderName);
   var customerId = customer && customer.customerId !== undefined ?
     String(customer.customerId) : '';
+  var folderName = '';
+  if (typeof cardFolderName === 'string') {
+    try {
+      folderName = freeeCardNamesFolderKey_(cardFolderName);
+    } catch (error) {
+      folderName = '';
+    }
+  }
+  // フォルダ名が読めないときは、表を読まずに FAILED（S10）。
+  if (typeof cardFolderName !== 'string' || folderName === '') {
+    return {status: 'FAILED', folderName: ''};
+  }
   try {
     if (String(destinationSpreadsheetId) === String(customer.destinationSpreadsheetId)) {
       return {status: 'FAILED', folderName: folderName};

@@ -18,8 +18,8 @@
 var WEBAPP_MAX_DECISIONS_ = 500;
 var WEBAPP_MAX_PER_CALL_ = 500;
 var WEBAPP_REVIEW_LIST_LIMIT_ = 500;
-var WEBAPP_IMPORT_BASE_TRIPS_ = 167;
 // 2026-11-16 freee のカード名：複製に 3 往復（表の読取 1・B1 の書込 1・読み返し 1）。
+var WEBAPP_IMPORT_BASE_TRIPS_ = 167;
 var WEBAPP_IMPORT_TRIPS_PER_REVIEW_ = 7;
 var WEBAPP_CLONE_TRIPS_ = 3;
 var WEBAPP_TRIP_WORST_MS_ = 400;
@@ -1050,7 +1050,8 @@ function webAppImportCall_(customerId, folderId, options, prepare) {
         var preparationResult = webAppImportResult_(0, prepared.length, null, [], preparationStop, null);
         if (prepared.length) {
           var preparedClone = measureStage('clone', function() {
-            return webAppCloneDestination_(customer, now, folderData.folder.getName());
+            return webAppCloneDestination_(customer, now,
+              webAppCardFolderNameSafe_(folderData.folder));
           });
           preparationResult.schemaValidation = preparedClone.schemaValidation;
           if (!preparedClone.schemaValidation.ok) {
@@ -1079,7 +1080,8 @@ function webAppImportCall_(customerId, folderId, options, prepare) {
       var cardName = null;
       if (!destinationSpreadsheetId) {
         var clone = measureStage('clone', function() {
-          return webAppCloneDestination_(customer, now, folderData.folder.getName());
+          return webAppCloneDestination_(customer, now,
+            webAppCardFolderNameSafe_(folderData.folder));
         });
         schemaValidation = clone.schemaValidation;
         if (!schemaValidation.ok) {
@@ -1995,6 +1997,20 @@ function webAppDirectChildFolder_(customer, folderId) {
     if (String(folder.getId()) === wanted) return folder;
   }
   throw new AuthorizationError('選択されたフォルダはこの顧客の直下にありません。');
+}
+
+/**
+ * カードフォルダの名前を、例外を外へ出さずに読む（§S10）。
+ * Drive がここで例外を出しても記帳を止めないため、読めなければ `null` を返す。
+ * フォルダ名はログに書かない。
+ */
+function webAppCardFolderNameSafe_(folder) {
+  try {
+    if (!folder || typeof folder.getName !== 'function') return null;
+    return folder.getName();
+  } catch (error) {
+    return null;
+  }
 }
 
 /** カード名が引けなくても要確認を止めないよう、表示分だけをファイル単位で補う。 */
