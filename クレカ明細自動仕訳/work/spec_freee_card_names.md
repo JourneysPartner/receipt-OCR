@@ -1,12 +1,13 @@
 # 入力用シートの B1（freee のカード名）を、勘定科目 CSV とカードフォルダの対応から自動で入れる 仕様書
 
 作成日：2026-11-16
-版：1.0
+版：1.1
 読者：本仕様だけを読んで実装する実装者（AI を含む）。書いてあることは変えない。書いていないことは安全側で決め、決めたことは全部報告する。
 前提：freee 取込用 Excel（`spec_freee_export.md` 1.1、`src/46_FreeeExport.gs`）・顧客登録（`spec_customer_registration.md`、`src/59_CustomerRegistration.gs`）・転記シートの複製（`src/80_WebApp.gs` の `webAppCloneDestination_`）。
 
 改訂履歴：
 - 1.0（2026-11-16）：初版。利用者の依頼と決定（2026-11-15・16、§1.1）。
+- 1.1（2026-11-17）：実装と監査で決めたことを書き足した（Claude の判断。利用者の決定ではない）。中身が全部空のタブ（§2.3・§3.2）、フォルダ名が読めないとき（§3.7）、画面の細部（§4.3〜§4.6）、テスト fcn 27〜31・fcnu 12〜14（§6）、変異 R24〜R29（§7）、記録（§11）。
 
 **この仕様書と、実装・テストには、実在の顧客名・顧客 ID・Drive の ID・カード名・勘定科目 CSV の中身を書かない。**リポジトリは公開である。テストの値はすべて架空にする（例：`K9001`・`架空 太郎`・`テストカード`・`架空カードA`）。
 
@@ -101,6 +102,7 @@
 
 **顧客の行を引く `freeeCardNamesRowFor_(customerId)`**：
 - タブが無い → `null`（読取 0 回）。
+- （1.1）**中身が全部空のタブ（1 回の読取で値が 1 つも無い）は、タブが無いのと同じに扱う**（`null`）。タブを作った直後に見出しの書込が失敗して空のタブが残っても、全顧客が `FREEE_CARD_TABLE_INVALID` にならないため（§3.2 の 3）。中身が 1 つでもあって見出しが違えば、今どおり `FREEE_CARD_TABLE_INVALID`。
 - `readSheetRows_(sheet, 11)` で 1 回読み、A が `customerId` と同じ行（前後の空白を外して完全一致）を探す。0 行 → `null`。**2 行以上 → `FREEE_CARD_TABLE_INVALID`**（どちらが正しいか決めない）。その 1 行を `freeeCardNamesParseRow_` で読む（読めなければ例外）。
 - 1 行目（見出し）が §2.3 の 11 個と違えば `FREEE_CARD_TABLE_INVALID`（`readSheetRows_` とは別に、同じ 1 回の読取の中で確かめてよい。読取を 2 回にしない。方法は実装者が決めて報告する）。
 
@@ -123,9 +125,9 @@ webAppFreeeCardNamesSave(customerId, changes, expectedVersion)
 
 ### 3.2 表に書く（`freeeCardNamesWriteRow_(auth, customerId, newRow, existingRow, audit)`、`withScriptLock_` の中で呼ぶ）
 
-1. 行番号：既にある行ならその行。無ければ「読んだ行のうち最後の行番号 + 1」（タブが無い・行が無ければ 2）。
+1. 行番号：既にある行ならその行。無ければ「読んだ行のうち最後の行番号 + 1」（タブが無い・中身が全部空・行が無ければ 2）。
 2. **監査を先に書く**（`appendAuditRowsUnlocked_([...])` → `SpreadsheetApp.flush()`）。書けなければ `REQUIRED_LOG_WRITE_FAILED` の例外を投げ、表には 1 セルも書かない・**タブも作らない**（`59` の `registerCustomer_` と同じ形）。監査の中身は §3.5・§3.6。
-3. タブが無ければ作る：`masterSpreadsheet_().insertSheet(FREEE_CARD_NAMES_SHEET_NAME_)`、`ensureSheetWidth_(sheet, 11)`、1 行目に §2.3 の見出しを `Sheets.Spreadsheets.Values.update(..., {valueInputOption: 'RAW'})` で書く。続いて `ensureRowExists_(sheet, rowNumber)`。
+3. タブが無ければ作る：`masterSpreadsheet_().insertSheet(FREEE_CARD_NAMES_SHEET_NAME_)`、`ensureSheetWidth_(sheet, 11)`、（1.1）`SpreadsheetApp.flush()`（Sheets API の書込の前に、作ったタブを確定させる）。**タブが無かったか、中身が全部空なら**、1 行目に §2.3 の見出しを `Sheets.Spreadsheets.Values.update(..., {valueInputOption: 'RAW'})` で書く。続いて `ensureRowExists_(sheet, rowNumber)`。
 4. 行 `A{r}:K{r}` を `Sheets.Spreadsheets.Values.update({values: [row]}, masterId, range, {valueInputOption: 'RAW'})` で 1 回で書く。**RAW**（`USER_ENTERED` は `001` を数に、`=1+1` を式にする）。
 5. 読み返し：`sheetsReadWithRetry_` ＋ `sheetsBatchGetPaced_(masterId, {ranges: ["'freeeカード科目'!A:A", range], valueRenderOption: 'UNFORMATTED_VALUE', majorDimension: 'ROWS'})` を 1 回。A 列でこの顧客 ID の行が**ちょうど 1 つでその行番号**であること、行の 11 セルが書いた値と同じ（文字列は `===`。K は数値で返ってもよい）であること、`freeeCardNamesParseRow_` で読めること。外れたら `WRITE_VERIFY_FAILED`。
 6. 4・5 で失敗したら、失敗の監査（`reason: 'WEBAPP_FAILED'`、`after: {row, failed: code}`）を書こうとし（書けなくても元の失敗を返す）、`{ok: false, code: 'WRITE_VERIFY_FAILED', rowNumber}` を返す。
@@ -203,6 +205,7 @@ webAppFreeeCardNamesSave(customerId, changes, expectedVersion)
 
 **この関数は例外を投げない。**中で起きた例外は全部 `FAILED` にし、`Logger.log('FREEE_CARD_NAME_WRITE_FAILED ' + JSON.stringify({customerId, code: エラーの code か name}))` に残す（カード名・フォルダ名はログに書かない）。返す値は `{status, folderName, accountName?}`（`folderName` はフォルダの鍵）。
 
+0. （1.1）`cardFolderName` が文字列でないか、フォルダの鍵が空 → 表を読まずに `{status: 'FAILED', folderName: ''}`。鍵を作る所も例外を外へ出さない。
 1. `String(destinationSpreadsheetId) === String(customer.destinationSpreadsheetId)`（雛形）→ `FAILED`（書かない）。
 2. `Number(customer.headerRow) < 2` → `TEMPLATE_UNSUPPORTED`。
 3. `row = freeeCardNamesRowFor_(customer.customerId)`。例外 → `FAILED`。`null` → `NO_CSV`。
@@ -212,7 +215,7 @@ webAppFreeeCardNamesSave(customerId, changes, expectedVersion)
 7. `WRITTEN`（`accountName: mapped`）。
 
 **`80` の `webAppCloneDestination_(customer, now, cardFolderName)`：**
-- 3 つ目の引数を足す。呼んでいる 2 か所（`webAppImportCall_` の準備の道と、1 本の道）は、どちらも `folderData.folder.getName()` を渡す。
+- 3 つ目の引数を足す。呼んでいる 2 か所（`webAppImportCall_` の準備の道と、1 本の道）は、どちらも `webAppCardFolderNameSafe_(folderData.folder)` を渡す（1.1。中で `getName()` を読み、例外なら `null`。フォルダ名はログに書かない。`getName()` を `freeeCardWriteCardName_` の外で直に読むと、Drive の例外で記帳が止まり S10 に反するため）。
 - `schemaValidation.ok` が真のときだけ、返す直前に `cardName = freeeCardWriteCardName_(customer, destinationSpreadsheetId, cardFolderName)` を呼び、返す値に `cardName` を足す。**`customer` は `webAppCloneDestination_` の引数そのもの**（`destinationSpreadsheetId` が雛形の ID のもの。`newCustomer` ではない。§3.7 の 1 の確かめが効くように）。`schemaValidation` が偽のときは呼ばない（今の返し方のまま）。
 - 今している、システム列を空にする処理・`validateDestinationSchema` は 1 文字も変えない。
 
@@ -272,6 +275,9 @@ webAppFreeeCardNamesSave(customerId, changes, expectedVersion)
 - `state.freeeCard`（`null` か §3.4 の返事）・`state.freeeCardCustomerId`・`state.freeeCardGeneration`（古い返事を捨てる番号）・`state.freeeCardBusy`（数）・`state.freeeCardSelections`（フォルダの鍵 → 選んだ値）・`state.freeeCardRemovals`（外す鍵の集合）。
 - 顧客を選んだら：番号を 1 増やし、`state.freeeCard = null`、`gasCall('webAppFreeeCardNamesStart', [customerId])`。返事のときに番号か顧客が変わっていれば捨てる。`ok: false` なら `showNotice(§4.6 の文言, 'error')`。待っている間は欄に「読み込んでいます…」。
 - `gasCall` に 3 つの入口の枝を足す（引数はそれぞれ 1・4・3 個）。
+- （1.1）作業中の数 `state.freeeCardBusy` は、3 つの入口の呼出し（開く・送る・保存）のどれでも 1 増やし、`finally` で必ず 1 減らす（古い返事を捨てるときも）。**顧客の `<select>` は、送る・保存の間だけ押せなくする**（開くの返事を待つ間は選び直せる）。
+- （1.1）`openSettings()` は登録の側を開き、freee のカード名の側を初めに戻す（`state.freeeCard = null`・顧客の選択を `''`・選んだ値と「外す」を空・ファイルの選択を空・番号を 1 増やす）。
+- （1.1）**表の行はフォルダの鍵ごとに 1 行。**サーバーの `folders` の `folderName` は Drive の名前そのまま。鍵が同じフォルダが 2 つ以上あれば 1 行にし、「カードフォルダ」の欄に鍵と「（同じ名前のフォルダが N 個あります）」を出す。その行の `savedAccountName`・`savedValid`・`suggestion` は、まとめたうちの最初のもの。`changes` は 1 つの鍵につき 1 つ（サーバーは同じ鍵が 2 つあると `MAPPING_INVALID` で何も書かない）。
 
 ### 4.4 CSV を送る
 
@@ -279,7 +285,7 @@ webAppFreeeCardNamesSave(customerId, changes, expectedVersion)
 2. `file.size` が 0 か 1,048,576 より大きい → `showNotice(TEXT.freeeCard.codes.CSV_SIZE, 'error')`（サーバーを呼ばない）。
 3. `formatConfirm('勘定科目 CSV', '「ファイル名」を、顧客名 の勘定科目 CSV として登録します。' + 差し替えなら '\n今の CSV は置き換わります。保存済みの対応はそのまま残ります。')`。「戻る」なら終わる。
 4. `FileReader.readAsDataURL` で読み、`,` の後ろ（base64）を取る。
-5. `gasCall('webAppFreeeCardNamesUploadCsv', [customerId, file.name, base64, state.freeeCard.version])`（**ちょうど 4 つ**）。
+5. `gasCall('webAppFreeeCardNamesUploadCsv', [customerId, file.name, base64, state.freeeCard.version])`（**ちょうど 4 つ**。版はサーバーの返事の数値のまま送る。サーバーは数値の整数だけを受ける）。`FileReader` が失敗したら `CSV_DECODE` の文言を出し、サーバーを呼ばない（1.1）。
 6. `ok: true`：`showNotice('勘定科目 CSV を登録しました（勘定科目 N 件・カードの候補 M 件）。', 'success', 明細)`。明細は `invalidMappings` があれば 1 件ずつ「『フォルダ名』に当てていた『X』は新しい CSV にありません。選び直してください。」。続けて §4.3 の読み直し。ファイルの選択を空にする。
 7. `ok: false`：§4.6 の文言。
 
@@ -309,6 +315,13 @@ webAppFreeeCardNamesSave(customerId, changes, expectedVersion)
 | `MAPPING_INVALID` | 「X」の対応を保存できません（候補に無い名前か、今の明細フォルダに無いカードフォルダです）。顧客を選び直してください。 |
 | `WRITE_VERIFY_FAILED` | 保存を確かめられませんでした。顧客を選び直して、保存されたかを見てください。 |
 | `REQUIRED_LOG_WRITE_FAILED` | 監査ログに書けなかったため、保存しませんでした。 |
+
+文字の差し込み（1.1）：
+- `CSV_ROW_INVALID`：`detail.row` が数なら上の文言（N＝その数）。数でない（サーバーが引用符の閉じていない CSV などで行を決められず `row: null`）なら「CSV の形が壊れています（引用符が閉じていないなど）。freee から書き出したファイルを、そのまま選んでください。」
+- `CSV_DUPLICATE`：X＝`detail.name`、N・M＝`detail.rows` の 2 つ。
+- `MAPPING_INVALID`：X＝`detail.folderName`。無ければ、送った `changes[detail.index]` の `folderName`。どちらも無ければ「対応を保存できません（…）。顧客を選び直してください。」（「X」の を付けない）。
+- 表に無いコード：「freee のカード名の操作ができませんでした（コード：<コード>）。」
+- 呼出しの失敗（サーバーが例外を投げた）：`error.code` が表にあればその文言、無ければ今の `failureMessage(error)`。
 
 文字はすべて `textContent`（フォルダ名・勘定科目名・ファイル名に `<` などがあっても、そのまま文字として出す）。
 
@@ -397,6 +410,12 @@ webAppFreeeCardNamesSave(customerId, changes, expectedVersion)
 24. フォルダ名の後ろの空白：フォルダ `架空カード B `・対応の鍵 `架空カード B` → `WRITTEN`。
 25. freee 取込用：CSV ありで B1 が勘定科目にある → 新しい止めなし（今の fx 1 と同じに作れる）／B1 が勘定科目に無い（後ろに空白 1 つでも）→ `CARD_NAME_NOT_IN_FREEE`（`cardName` 付き）・何も作らない／B1 が `○○カード` → `CARD_NAME_PLACEHOLDER` だけ・**表を読まない**（読取の記録で確かめる）／CSV なし → 今のまま／表が壊れている → 失敗で返り、何も作らない。
 26. 読取の数：開く（表あり）で表の読取は 1 回。複製で対応があるとき、表の読取 1・B1 の読み返し 1（マスターと複製への `batchGet` を記録して数える）。`WEBAPP_IMPORT_BASE_TRIPS_ === 167`。
+27. （1.1）ほかの顧客の行（2 行目・空の 3 行目・4 行目）がある表で、初めての登録 → 5 行目に入り 2〜4 行目は同じ。続いてほかの顧客の対応の保存 → その行だけが変わる。
+28. （1.1）初めての登録で見出しの書込を 1 回だけ失敗させる → `WRITE_VERIFY_FAILED` → もう一度登録すると通り、表は見出し＋1 行。開くも `TABLE_INVALID` にならない。
+29. （1.1）読み返しの A 列で同じ顧客 ID が別の行にもある → `WRITE_VERIFY_FAILED`。
+30. （1.1）§2.3 の行の条件：C に B に無い名前・D が配列・K が 0・K が 1.5・B に重なり・B に改行を含む名前 → それぞれ開くが `TABLE_INVALID`。
+31. （1.1）記帳で、複製のときのカードフォルダの `getName()` だけが例外 → 記帳は止まらない・`cardName.status === 'FAILED'`・B1 は `○○カード`・表を読まない・ログにフォルダ名が無い。準備の道も同じ。
+- fcn 7 に、差し替えの監査に勘定科目名が無いこと・F が新しい値になったことを、fcn 12 に、変えない鍵が監査の before・after に無いことを足した（1.1）。
 
 ### 6.2 画面（`fcnu N: …`、新しいファイル `test/freee-card-names-ui.test.js`。`kw26-ui-helpers.js` の `browserWorld` を使う）
 
@@ -411,6 +430,12 @@ webAppFreeeCardNamesSave(customerId, changes, expectedVersion)
 9. 登録の成功の後に `registration-next-freee-card` が出る → 押すと freee のカード名の側・その顧客が選ばれ・`webAppFreeeCardNamesStart` が呼ばれる。顧客フォルダを選び直すと隠れる。
 10. 記帳の終わり：1 本の道の返事 `cardName: {status: 'NOT_SET', folderName: 'テストカード'}` → 最後の知らせの明細に `NOT_SET` の 1 行（フォルダ名入り）。`WRITTEN` → その行なし。準備の道の返事の `cardName` も同じく出る。
 11. freee 取込用の止め `CARD_NAME_NOT_IN_FREEE`（`cardName: '架空カードZ'`）→ §4.9 の本文（名前入り）。
+12. （1.1）鍵が同じフォルダ 2 つ（後ろに空白の有無）→ 表は 1 行・「（同じ名前のフォルダが 2 個あります）」・保存の `changes` にその鍵が 1 つだけ。
+13. （1.1）§4.6 の差し込み：`CSV_ROW_INVALID` の `row: null` と数・`CSV_DUPLICATE`・`MAPPING_INVALID` の `index` から名前・表に無いコード・呼出しの失敗の `error.code`。
+14. （1.1）送る版が `number`、`changes` が配列。
+15. （1.1）確かめの窓が画面を塞がない道で、窓の間に顧客を変える → 「実行する」でも送らない。
+16. （1.1）顧客を選び直すと、ファイルの選択が空になり送るが押せない。
+17. （1.1）失敗の道（開く・送る・保存の `ok: false` と例外、`FileReader` の失敗）の後、作業中の数が 0 に戻り、設定を閉じられる。開くに失敗した後は送るが押せない。
 
 ### 6.3 既存のテスト
 
@@ -447,6 +472,17 @@ webAppFreeeCardNamesSave(customerId, changes, expectedVersion)
 | R21 | 画面で、フォルダ名を `innerHTML` で出す | fcnu 8 |
 | R22 | 画面で、作業中も設定を閉じられる | fcnu 7 |
 | R23 | 画面で、`cardName` の知らせを出さない | fcnu 10 |
+| R24 | （1.1）新しい行を常に 2 行目に書く | fcn 27 |
+| R25 | （1.1）中身が全部空のタブを `TABLE_INVALID` にする | fcn 28 |
+| R26 | （1.1）読み返しの「ちょうど 1 つ・その行番号」を外す | fcn 29 |
+| R27 | （1.1）`webAppCardFolderNameSafe_` の例外の受け止めを外す | fcn 31 |
+| R28 | （1.1）画面で、同じ鍵のフォルダを 1 行にまとめない | fcnu 12 |
+| R29 | （1.1）画面で、版を文字列にして送る | fcnu 14 |
+| R30 | （1.1）B1 の書込の後に、同じタブの C1 へも書く | fcn 18 |
+| R31 | （1.1）画面の保存で、作業中の数を `finally` でなく成功の枝で戻す | fcnu 17 |
+| R32 | （1.1）画面の CSV を送るで、同じ | fcnu 17 |
+| R33 | （1.1）画面で、確かめの窓の後に顧客・番号を確かめ直さない | fcnu 15 |
+| R34 | （1.1）画面で、顧客を変えてもファイルの選択を残す | fcnu 16 |
 
 ---
 
@@ -498,4 +534,27 @@ webAppFreeeCardNamesSave(customerId, changes, expectedVersion)
 
 ## 11. 実装と監査の記録
 
-（実装の後に書く）
+実装は OpenCode + Go（DeepSeek）が worktree（ブランチ `go/freee-card-names`、`e37e483` から）で 4 回に分けて行った。Claude が毎回差分を読み、sbx で全テストを回して受け入れた。worktree には `test/fixtures/` が無いので、それを読む 97 件は ENOENT で落ちる（直さない）。
+
+| 回 | コミット | 中身 | テスト（worktree） |
+|---|---|---|---|
+| 1（11-16） | `8c06ae2` | 47 の表・CSV・入口 3 つ（§2.3・§3.1〜§3.6）、fcn 1〜17、R1〜R10・R17・R18 | 2079/2176 |
+| 2（11-16） | `03e914d` | 複製の B1・記帳の結果・定数・46（§3.7〜§3.10）、1 回目の監査の直し、fcn 18〜30、R11〜R16・R24〜R26 | 2092/2189 |
+| 3（11-17） | `d798a83` | 画面（§4）、フォルダ名を安全に読む（§3.7）、使われない関数を消す、fcn 31・fcnu 1〜14、R19〜R23・R27〜R29 | 2107/2204 |
+| 直し（11-17） | `4d9d1ef` | 3 回目の監査の直し、fcnu 15〜17、R30〜R34 | 2110/2207 |
+
+変異は全部、赤になるテストがあることを確かめて元に戻した（R1〜R29 は §7 の表のとおり）。1.1 の直しで足したもの：R30（B1 の後に C1 へも書く）は fcn 18・19・31、R31・R32（失敗の道で作業中の数を戻さない）は fcnu 17、R33（確かめの窓の後に確かめ直さない）は fcnu 15、R34（顧客を変えてもファイルの選択を残す）は fcnu 16。既存のテストは 1 つも直していない（§6.3 の場合も無かった）。
+
+**監査（Opus 5.5 xhigh、読むだけ）：**
+- 1 回目の後：Critical/High 0。M1（中）タブを作った直後に見出しの書込が失敗すると見出しの無いタブが残り、全顧客が `TABLE_INVALID` → 2 回目で直した（§2.3・§3.2 の 1.1）。M2（中）ほかの顧客の行を変えないテストが無い → fcn 27。L1・L2（テストの弱さ）→ fcn 7・12 に足し、R24〜R26。L3（新しい行で表をもう 1 回読む）は記録だけ（1 回の保存で 1 往復増えるだけ）。L4（`row: null` の文言）→ §4.6 の 1.1。
+- 3 回目の後（2 回目のテストも）：Critical/High 0。
+  - M1（中）fcn 18・19・31 の「B1 以外は同じ」が空振り：テストの世界を作り直すとスタブの複製の番号が 0 に戻り、2 つ目の世界の複製を自分自身と比べていた → 記帳の直後に写しを取って比べる形に直した（R30 で確かめ）。
+  - M2（中）失敗の道で作業中の数が 0 に戻るかのテストが無い → fcnu 17（7 つの失敗の道）。
+  - L1 確かめの窓の前と後で読む版が混ざる（窓が画面を塞がない道だけ）→ 窓の前に顧客・番号・版を取り、窓の後に変わっていれば送らない（fcnu 15）。L2 顧客を変えてもファイルの選択が残る → fcnu 16。L3 ［戻る］・ナビの押せる・押せないが登録の側でしか決まらない → `renderSettingsChrome` で両方の作業中から決める。L4 開くに失敗した後も送るが押せる → 直した。L5 B1 のログで例外が出うる・フォルダ名が読めない道でログが無い → `try` で包み、`FOLDER_NAME_UNREADABLE` を残す。L6 テストの弱さ（fcn 20・22、fcnu 1・2・6・9）→ 強めた。
+  - **L7（記録だけ）：**記帳の途中の呼出しが例外になると、`warnings` ごと B1 の知らせが出ない。今ある警告（要修正・形の警告）と同じ作りで、B1 の知らせだけを変えると作りがずれるため、直さない。B1 は転記シートを開けば見える。
+
+**Claude の判断（1.1 で足したもの。利用者の決定ではない）：**
+- フォルダ名が読めないときは `FAILED`（「未設定」ではない）。読めないのは例外で、§3.7 の「例外は全部 `FAILED`」に合う。
+- `WEBAPP_CLONE_TRIPS_`（`80`）は本仕様より前からある使われていない定数なので、触らない。
+
+**main への取り込み（11-17）：**`git merge --ff-only` で main＝`4d9d1ef`。fixtures のある main のフォルダーで全テスト **2207/2207**。取り込みで CRLF になった 8 ファイルは LF に戻し、`git show HEAD:` とバイト単位で同じことを確かめた。本番の反映（§9.1 の 2）は、利用者の許可を得てから（この節の後に追記する）。
