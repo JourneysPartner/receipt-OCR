@@ -198,6 +198,8 @@ const vm = require('node:vm');
       clearInterval(id) { intervals.delete(id); }, console,
       Date: options.clock === true ? FakeDate : RealDate};
     vm.runInNewContext(script, sandbox);
+    // `confirmModal: false` のときは、確かめの窓が画面を塞がない道（showModal が無い）にする。
+    if (options.confirmModal === false) ids['confirm-dialog'].showModal = undefined;
     function advance(ms) {
       nowValue += Number(ms) || 0;
       Array.from(intervals.values()).forEach((fn) => fn());

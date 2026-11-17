@@ -111,7 +111,7 @@ module.exports = ({test, assert}) => {
     invalidMappings: [{folderName: '架空カードB', accountName: '架空経費'}]
   };
 
-  function world(extra) {
+  function world(extra, options) {
     const responses = Object.assign({
       webAppBootstrap: plain(BOOTSTRAP),
       webAppRegistrationStart: plain(REG_START),
@@ -125,7 +125,7 @@ module.exports = ({test, assert}) => {
       webAppListReviews: {reviews: [], partnerTotal: 0, otherReviews: [], otherTotal: 0},
       webAppPartnerNames: {active: [], retired: []}
     }, extra || {});
-    const w = browserWorld(responses);
+    const w = browserWorld(responses, options || {});
     const steps = new w.Node('div');
     steps.className = 'steps';
     w.root.appendChild(steps);
@@ -213,11 +213,31 @@ module.exports = ({test, assert}) => {
     assert.equal(w.ids['settings-view-freee-card'].getAttribute('aria-pressed'), 'false');
     assert.equal(w.ui.el['registration-view'].hidden, false);
     assert.equal(w.ui.el['freee-card-view'].hidden, true);
-    assert.ok(source.indexOf('<div id="registration-view">') >= 0);
-    ['registration-category-heading', 'registration-folder-search', 'registration-folder-list',
-      'registration-statement-section', 'registration-contract-section',
-      'registration-name-section', 'registration-submit'].forEach((id) => {
-      assert.ok(source.indexOf('id="' + id + '"') >= 0, id);
+    const regionStart = source.indexOf('<div id="registration-view">');
+    const regionEnd = source.indexOf('<div id="freee-card-view"', regionStart);
+    assert.ok(regionStart >= 0, 'registration-view が無い');
+    assert.ok(regionEnd > regionStart, 'freee-card-view が後に無い');
+    const region = source.slice(regionStart, regionEnd);
+    const registrationIds = [
+      'registration-category-heading', 'registration-category-individual',
+      'registration-category-corporate', 'registration-missing',
+      'registration-folders-section', 'registration-folder-search',
+      'registration-folder-count', 'registration-folder-list',
+      'registration-statement-section', 'registration-statement-path',
+      'registration-statement-year', 'registration-statement-cards',
+      'registration-statement-message', 'registration-statement-choices',
+      'registration-contract-section', 'registration-contract-summary',
+      'registration-contract-message', 'registration-contract-reselect',
+      'registration-contract-search', 'registration-contract-list',
+      'registration-name-section', 'registration-name', 'registration-name-problem',
+      'registration-submit'
+    ];
+    let previousAt = -1;
+    registrationIds.forEach((id) => {
+      const at = region.indexOf('id="' + id + '"');
+      assert.ok(at >= 0, 'registration-view の中に ' + id + ' が無い');
+      assert.ok(at > previousAt, id + ' の順が今と違う');
+      previousAt = at;
     });
 
     w.ids['settings-view-freee-card'].fire('click');
@@ -256,6 +276,41 @@ module.exports = ({test, assert}) => {
     assert.equal(w.ids['freee-card-orphans'].hidden, false);
     assert.ok(w.ids['freee-card-orphans-list'].textContent.indexOf('架空カードZ') >= 0);
     assert.ok(w.ids['freee-card-orphans-list'].textContent.indexOf('テストカード') >= 0);
+
+    // 状態の 4 つの文字を、それぞれの行で確かめる。
+    const states = world({webAppFreeeCardNamesStart: plain(startReply({
+      folders: [
+        {folderId: 'f-1', folderName: 'テストカード',
+          savedAccountName: '架空カードA', savedValid: true, suggestion: null},
+        {folderId: 'f-2', folderName: '架空カードA',
+          savedAccountName: null, savedValid: false, suggestion: '架空カードA'},
+        {folderId: 'f-3', folderName: '架空カードB',
+          savedAccountName: '架空経費', savedValid: false, suggestion: null},
+        {folderId: 'f-4', folderName: '架空カードC',
+          savedAccountName: null, savedValid: false, suggestion: null},
+        {folderId: 'f-5', folderName: '架空カードD',
+          savedAccountName: '架空カードA', savedValid: true, suggestion: null}
+      ],
+      orphans: []
+    }))});
+    await states.freee();
+    await states.choose('K9001');
+    const statusOf = (folderName) => {
+      const row = states.mapRows().find((item) =>
+        item.children[0].textContent.indexOf(folderName) >= 0);
+      assert.ok(row, folderName + ' の行が無い');
+      return row.children[2].textContent;
+    };
+    assert.equal(statusOf('テストカード'), '保存済み');
+    assert.equal(statusOf('架空カードA'), '同じ名前の候補（まだ保存していません）');
+    assert.equal(statusOf('架空カードB'),
+      '保存済みの「架空経費」は今の CSV にありません（選び直すか、このまま保存すると外れます）');
+    assert.equal(statusOf('架空カードC'), '未設定');
+    const changed = states.selectFor('架空カードD');
+    changed.value = 'visaカード';
+    changed.fire('change');
+    await tick();
+    assert.equal(statusOf('架空カードD'), '変更あり（まだ保存していません）');
   });
 
   // fcnu 3
@@ -392,21 +447,43 @@ module.exports = ({test, assert}) => {
   asyncTest('fcnu 6: コードを §4.6 の本文にする', async () => {
     const w = world();
     const codes = w.ui.TEXT.freeeCard.codes;
+    // 仕様 §4.6 の表の文字そのもの（TEXT 自身とは比べない）。
     assert.equal(codes.CUSTOMER_INACTIVE, 'この顧客は有効ではありません。');
     assert.equal(codes.TABLE_INVALID, 'freee のカード名の表を読めません。管理者に連絡してください。');
     assert.equal(codes.CSV_SIZE, 'CSV が空か、大きすぎます（1 MB まで）。');
+    assert.equal(codes.CSV_DECODE,
+      'CSV の文字を読めませんでした。freee から書き出したファイルを、そのまま選んでください。');
+    assert.equal(codes.CSV_ENCODING,
+      'CSV の文字を読めませんでした。freee から書き出したファイルを、そのまま選んでください。');
+    assert.equal(codes.CSV_HEADER,
+      'freee の勘定科目 CSV の形ではありません（「勘定科目」と「表示名（決算書）」の列が要ります）。');
+    assert.equal(codes.CSV_EMPTY, '勘定科目が 1 行もありません。');
+    assert.equal(codes.CSV_ROW_INVALID({row: 7}),
+      '7 行目の勘定科目が空か、使えない文字（改行・タブなど）を含んでいます。');
+    assert.equal(codes.CSV_DUPLICATE({name: 'テストカード', rows: [3, 9]}),
+      '勘定科目「テストカード」が 2 回以上あります（3 行目・9 行目）。');
+    assert.equal(codes.CSV_TOO_MANY, '勘定科目が多すぎて登録できません。');
+    assert.equal(codes.CSV_TOO_LARGE, '勘定科目が多すぎて登録できません。');
     assert.equal(codes.STALE, 'ほかの画面で先に変わりました。顧客を選び直してから、もう一度してください。');
+    assert.equal(codes.NO_CSV, '先に勘定科目 CSV を登録してください。');
+    assert.equal(codes.MAPPING_INVALID({folderName: '架空カードB'}),
+      '「架空カードB」の対応を保存できません（候補に無い名前か、今の明細フォルダに無いカードフォルダです）。顧客を選び直してください。');
+    assert.equal(codes.WRITE_VERIFY_FAILED,
+      '保存を確かめられませんでした。顧客を選び直して、保存されたかを見てください。');
+    assert.equal(codes.REQUIRED_LOG_WRITE_FAILED, '監査ログに書けなかったため、保存しませんでした。');
 
     const failed = world({webAppFreeeCardNamesStart: {ok: false, code: 'TABLE_INVALID'}});
     await failed.freee();
     await failed.choose('K9001');
-    assert.equal(failed.notice(), codes.TABLE_INVALID);
+    assert.equal(failed.notice(),
+      'freee のカード名の表を読めません。管理者に連絡してください。');
 
     const saveFailed = world({webAppFreeeCardNamesSave: {ok: false, code: 'CSV_HEADER'}});
     await saveFailed.freee();
     await saveFailed.choose('K9001');
     await saveFailed.save();
-    assert.equal(saveFailed.notice(), codes.CSV_HEADER);
+    assert.equal(saveFailed.notice(),
+      'freee の勘定科目 CSV の形ではありません（「勘定科目」と「表示名（決算書）」の列が要ります）。');
   });
 
   // fcnu 7
@@ -417,6 +494,9 @@ module.exports = ({test, assert}) => {
     w.ids['freee-card-customer'].fire('change');
     await tick();
     assert.equal(w.ui.state.freeeCardBusy, 1);
+    assert.equal(w.ids['settings-back'].disabled, true, 'freee 側の作業中に［戻る］が押せる');
+    assert.equal(w.ids['nav-import'].disabled, true);
+    assert.equal(w.ids['nav-settings'].disabled, true);
     w.ids['settings-back'].fire('click');
     await tick();
     assert.equal(w.ui.state.settingsOpen, true);
@@ -429,6 +509,9 @@ module.exports = ({test, assert}) => {
     w.pending[0].reply(plain(startReply()));
     await tick();
     assert.equal(w.ui.state.freeeCardBusy, 0);
+    assert.equal(w.ids['settings-back'].disabled, false, '終わっても［戻る］が押せない');
+    assert.equal(w.ids['nav-import'].disabled, false);
+    assert.equal(w.ids['nav-settings'].disabled, false);
     assert.equal(w.ids['freee-card-csv-upload'].disabled, true, 'ファイルを選ぶ前');
 
     const saving = world({
@@ -445,6 +528,7 @@ module.exports = ({test, assert}) => {
     await tick();
     assert.equal(saving.saveCalls().length, 1);
     assert.equal(saving.ui.state.freeeCardBusy, 1);
+    assert.equal(saving.ids['settings-back'].disabled, true, '保存中に［戻る］が押せる');
     assert.equal(saving.ids['freee-card-customer'].disabled, true, '保存中に顧客を選べる');
     saving.ids['settings-back'].fire('click');
     await tick();
@@ -455,6 +539,7 @@ module.exports = ({test, assert}) => {
     saving.pending[0].reply({ok: true, changed: 1, version: 4});
     await tick();
     assert.equal(saving.ui.state.freeeCardBusy, 0);
+    assert.equal(saving.ids['settings-back'].disabled, false, '保存の後も［戻る］が押せない');
   });
 
   // fcnu 8
@@ -517,6 +602,29 @@ module.exports = ({test, assert}) => {
     hidden.button('registration-folder-list', '架空 太郎').fire('click');
     await tick();
     assert.equal(hidden.ids['registration-next'].hidden, true);
+
+    // 登録した顧客が state.customers に無いときは、顧客を選ばずに freee 側を開く。
+    const absent = world({
+      webAppBootstrap: plain(Object.assign({}, BOOTSTRAP, {
+        customers: [BOOTSTRAP.customers[1]]
+      }))
+    });
+    await absent.open();
+    absent.button('registration-folder-list', '架空 太郎').fire('click');
+    await tick();
+    absent.ids['registration-submit'].fire('click');
+    await tick();
+    absent.ids['confirm-submit'].fire('click');
+    await tick();
+    await tick();
+    await tick();
+    assert.equal(absent.ids['registration-next'].hidden, false);
+    absent.ids['registration-next-freee-card'].fire('click');
+    await tick();
+    assert.equal(absent.ui.state.settingsView, 'freee-card');
+    assert.equal(absent.ui.state.freeeCardCustomerId, '');
+    assert.equal(absent.ids['freee-card-customer'].value, '');
+    assert.equal(absent.freeeStartCalls().length, 0, '居ない顧客で開くを呼んでいる');
   });
 
   // fcnu 10
@@ -646,6 +754,126 @@ module.exports = ({test, assert}) => {
     assert.equal(Array.isArray(save[1]), true);
     assert.equal(typeof save[2], 'number');
     assert.equal(save[2], 3);
+  });
+
+  // fcnu 15
+  asyncTest('fcnu 15: 確かめの窓の間に顧客が変わったら、サーバーを呼ばずにやめる', async () => {
+    const w = world({
+      webAppFreeeCardNamesStart: (customerId) => customerId === 'K9001' ?
+        plain(startReply()) :
+        plain(startReply({customerId: 'K9002', customerName: '架空 花子', version: 9}))
+    }, {confirmModal: false});
+    await w.freee();
+    await w.choose('K9001');
+    w.setFile('勘定科目.csv', 8, 'a,b\nx,y\n');
+    w.ids['freee-card-csv-upload'].fire('click');
+    await tick();
+    // showModal の無い道（窓が画面を塞がない）で開いている。
+    assert.equal(w.ids['confirm-dialog'].getAttribute('open'), 'open', '確かめの窓が開いていない');
+    assert.equal(w.uploadCalls().length, 0);
+
+    await w.choose('K9002');
+    assert.equal(w.ui.state.freeeCardCustomerId, 'K9002');
+    assert.equal(w.ui.state.freeeCard.version, 9);
+    w.ids['confirm-submit'].fire('click');
+    await tick();
+    await tick();
+    await tick();
+    assert.equal(w.uploadCalls().length, 0, '窓の間に顧客が変わったのに送っている');
+    assert.equal(w.ui.state.freeeCardCustomerId, 'K9002');
+    assert.equal(w.ui.state.freeeCard.version, 9);
+    assert.equal(w.ui.state.freeeCardBusy, 0);
+    assert.equal(w.ui.state.freeeCardMutating, false);
+  });
+
+  // fcnu 16
+  asyncTest('fcnu 16: 顧客を選び直すと、選んだファイルは残らない', async () => {
+    const w = world();
+    await w.freee();
+    await w.choose('K9001');
+    w.setFile('勘定科目.csv', 8, 'a,b\nx,y\n');
+    assert.equal(w.ids['freee-card-csv-upload'].disabled, false, 'ファイルを選んでも送れない');
+
+    await w.choose('K9002');
+    assert.equal(w.ids['freee-card-csv-file'].files.length, 0, '前の顧客のファイルが残っている');
+    assert.equal(w.ids['freee-card-csv-file'].value, '');
+    assert.equal(w.ids['freee-card-csv-upload'].disabled, true, 'ファイルが無いのに送れる');
+  });
+
+  // fcnu 17
+  asyncTest('fcnu 17: 失敗の道の後は、作業中の数が 0 に戻り、設定を閉じられる', async () => {
+    const expectIdle = (w) => {
+      assert.equal(w.ui.state.freeeCardBusy, 0, '作業中の数が 0 に戻っていない');
+      assert.equal(w.ui.state.freeeCardMutating, false, '作業中の印が残っている');
+    };
+    const expectClosable = async (w) => {
+      expectIdle(w);
+      w.ui.closeSettings();
+      await tick();
+      assert.equal(w.ids['settings-panel'].hidden, true, '設定が閉じない');
+    };
+
+    // 開くの ok: false（その後は、ファイルを選んでも送れない）。
+    const openFailed = world({webAppFreeeCardNamesStart: {ok: false, code: 'TABLE_INVALID'}});
+    await openFailed.freee();
+    await openFailed.choose('K9001');
+    expectIdle(openFailed);
+    openFailed.setFile('勘定科目.csv', 8, 'a,b\nx,y\n');
+    assert.equal(openFailed.ids['freee-card-csv-upload'].disabled, true,
+      '開くのに失敗した後も送れる');
+    await expectClosable(openFailed);
+
+    // 開くの reject。
+    const openRejected = world({webAppFreeeCardNamesStart: new Error('fcn start failure')});
+    await openRejected.freee();
+    await openRejected.choose('K9001');
+    await expectClosable(openRejected);
+
+    // 送るの FileReader の失敗。
+    const unreadable = world();
+    await unreadable.freee();
+    await unreadable.choose('K9001');
+    unreadable.setFile('勘定科目.csv', 8, 'a,b\nx,y\n');
+    unreadable.setFileReaderFailure(true);
+    await unreadable.upload();
+    assert.equal(unreadable.uploadCalls().length, 0, '読めない CSV でサーバーを呼んでいる');
+    await expectClosable(unreadable);
+
+    // 送るの ok: false。
+    const uploadFailed = world({webAppFreeeCardNamesUploadCsv: {ok: false, code: 'CSV_HEADER'}});
+    await uploadFailed.freee();
+    await uploadFailed.choose('K9001');
+    uploadFailed.setFile('勘定科目.csv', 8, 'a,b\nx,y\n');
+    await uploadFailed.upload();
+    assert.equal(uploadFailed.uploadCalls().length, 1);
+    await expectClosable(uploadFailed);
+
+    // 送るの reject。
+    const uploadRejected = world({
+      webAppFreeeCardNamesUploadCsv: new Error('fcn upload failure')
+    });
+    await uploadRejected.freee();
+    await uploadRejected.choose('K9001');
+    uploadRejected.setFile('勘定科目.csv', 8, 'a,b\nx,y\n');
+    await uploadRejected.upload();
+    assert.equal(uploadRejected.uploadCalls().length, 1);
+    await expectClosable(uploadRejected);
+
+    // 保存の ok: false。
+    const saveFailed = world({webAppFreeeCardNamesSave: {ok: false, code: 'STALE'}});
+    await saveFailed.freee();
+    await saveFailed.choose('K9001');
+    await saveFailed.save();
+    assert.equal(saveFailed.saveCalls().length, 1);
+    await expectClosable(saveFailed);
+
+    // 保存の reject。
+    const saveRejected = world({webAppFreeeCardNamesSave: new Error('fcn save failure')});
+    await saveRejected.freee();
+    await saveRejected.choose('K9001');
+    await saveRejected.save();
+    assert.equal(saveRejected.saveCalls().length, 1);
+    await expectClosable(saveRejected);
   });
 };
 

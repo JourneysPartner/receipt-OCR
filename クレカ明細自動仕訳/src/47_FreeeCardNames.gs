@@ -821,6 +821,12 @@ function freeeCardWriteCardName_(customer, destinationSpreadsheetId, cardFolderN
   }
   // フォルダ名が読めないときは、表を読まずに FAILED（S10）。
   if (typeof cardFolderName !== 'string' || folderName === '') {
+    try {
+      Logger.log('FREEE_CARD_NAME_WRITE_FAILED ' + JSON.stringify({
+        customerId: customerId,
+        code: 'FOLDER_NAME_UNREADABLE'
+      }));
+    } catch (ignored) { /* ログで例外が出ても外へ出さない */ }
     return {status: 'FAILED', folderName: ''};
   }
   try {
@@ -854,10 +860,12 @@ function freeeCardWriteCardName_(customer, destinationSpreadsheetId, cardFolderN
     if (actual !== mapped) return {status: 'FAILED', folderName: folderName};
     return {status: 'WRITTEN', folderName: folderName, accountName: mapped};
   } catch (error) {
-    Logger.log('FREEE_CARD_NAME_WRITE_FAILED ' + JSON.stringify({
-      customerId: customerId,
-      code: (error && (error.code || error.name)) || 'Error'
-    }));
+    try {
+      Logger.log('FREEE_CARD_NAME_WRITE_FAILED ' + JSON.stringify({
+        customerId: customerId,
+        code: String((error && (error.code || error.name)) || 'Error')
+      }));
+    } catch (ignored) { /* ログで例外が出ても外へ出さない */ }
     return {status: 'FAILED', folderName: folderName};
   }
 }

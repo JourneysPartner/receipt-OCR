@@ -982,6 +982,20 @@ module.exports = ({test, assert, gas}) => {
     return snapshot;
   }
 
+  /**
+   * 記帳の直後、次の世界（`buildImportWorld()`）を作る前に写し取る（M1）。
+   * 世界を作り直すと複製の ID が同じに戻るので、後から読むと自分自身と比べてしまう。
+   */
+  function captureImport(result) {
+    return {
+      cloneId: result.destinationSpreadsheetId,
+      snapshot: cloneSnapshot(result.destinationSpreadsheetId),
+      done: result.done,
+      total: result.total,
+      stoppedBy: result.stoppedBy
+    };
+  }
+
   function destinationB1(spreadsheetId) {
     return gas.stubs.getSpreadsheet(spreadsheetId).getSheetByName(INPUT_SHEET).getRange(1, 2);
   }
@@ -1020,6 +1034,7 @@ module.exports = ({test, assert, gas}) => {
       {status: 'WRITTEN', folderName: 'テストカード', accountName: '架空カードA'});
     assert.equal(destinationB1(cloneId).getValue(), '架空カードA');
     assert.equal(destinationB1(TEMPLATE_ID).getValue(), '○○カード', '雛形の B1 を変えている');
+    const writtenImport = captureImport(written);
 
     const b1Writes = gas.stubs.getWriteLog().filter((entry) =>
       entry.kind === 'values.update' && entry.spreadsheetId === cloneId &&
@@ -1035,11 +1050,12 @@ module.exports = ({test, assert, gas}) => {
     const untouched = importFolder('テストカード');
     assert.equal(untouched.schemaValidation.ok, true);
     assert.equal(untouched.cardName.status, 'NO_CSV');
-    assert.deepEqual(cloneSnapshot(cloneId), cloneSnapshot(untouched.destinationSpreadsheetId),
+    const untouchedImport = captureImport(untouched);
+    assert.deepEqual(writtenImport.snapshot, untouchedImport.snapshot,
       'B1 以外のセル・タブが対応の無い記帳と違う');
-    assert.equal(written.done, untouched.done, '書いた取引の数が違う');
-    assert.equal(written.total, untouched.total);
-    assert.equal(written.stoppedBy, untouched.stoppedBy);
+    assert.equal(writtenImport.done, untouchedImport.done, '書いた取引の数が違う');
+    assert.equal(writtenImport.total, untouchedImport.total);
+    assert.equal(writtenImport.stoppedBy, untouchedImport.stoppedBy);
 
     // `=1+1` も文字列のまま（式にしない）。
     const formulaWorld = buildImportWorld();
@@ -1062,6 +1078,7 @@ module.exports = ({test, assert, gas}) => {
     seedTable([tableRow({mappings: {'テストカード': '架空カードA'}})]);
     addCardFile(baselineWorld, 'テストカード', 'fcn-import-file-3');
     const baseline = importFolder('テストカード');
+    const baselineImport = captureImport(baseline);
 
     const noCsvWorld = buildImportWorld();
     addCardFile(noCsvWorld, 'テストカード', 'fcn-import-file-3');
@@ -1069,28 +1086,37 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(noCsv.schemaValidation.ok, true);
     assert.equal(noCsv.cardName.status, 'NO_CSV');
     assert.equal(destinationB1(noCsv.destinationSpreadsheetId).getValue(), '○○カード');
-    assert.equal(noCsv.done, baseline.done, '記帳が止まっている');
-    assert.equal(noCsv.total, baseline.total);
-    assert.equal(noCsv.stoppedBy, baseline.stoppedBy);
-    assert.deepEqual(cloneSnapshot(noCsv.destinationSpreadsheetId),
-      cloneSnapshot(baseline.destinationSpreadsheetId));
+    const noCsvImport = captureImport(noCsv);
+    assert.equal(noCsvImport.done, baselineImport.done, '記帳が止まっている');
+    assert.equal(noCsvImport.total, baselineImport.total);
+    assert.equal(noCsvImport.stoppedBy, baselineImport.stoppedBy);
+    assert.deepEqual(noCsvImport.snapshot, baselineImport.snapshot);
 
     const notSetWorld = buildImportWorld();
     seedTable([tableRow({mappings: {}})]);
-    addCardFile(notSetWorld, 'テストカード', 'fcn-import-file-4');
+    addCardFile(notSetWorld, 'テストカード', 'fcn-import-file-3');
     const notSet = importFolder('テストカード');
     assert.equal(notSet.cardName.status, 'NOT_SET');
     assert.equal(destinationB1(notSet.destinationSpreadsheetId).getValue(), '○○カード');
+    const notSetImport = captureImport(notSet);
+    assert.equal(notSetImport.done, baselineImport.done, '記帳が止まっている');
+    assert.equal(notSetImport.total, baselineImport.total);
+    assert.equal(notSetImport.stoppedBy, baselineImport.stoppedBy);
+    assert.deepEqual(notSetImport.snapshot, baselineImport.snapshot);
 
     const notInCsvWorld = buildImportWorld();
     seedTable([tableRow({candidates: ['架空カードA'],
       mappings: {'テストカード': '架空経費'}})]);
-    addCardFile(notInCsvWorld, 'テストカード', 'fcn-import-file-5');
+    addCardFile(notInCsvWorld, 'テストカード', 'fcn-import-file-3');
     const notInCsv = importFolder('テストカード');
     assert.deepEqual(notInCsv.cardName,
       {status: 'NOT_IN_CSV', folderName: 'テストカード', accountName: '架空経費'});
     assert.equal(destinationB1(notInCsv.destinationSpreadsheetId).getValue(), '○○カード');
-    assert.equal(notInCsv.done, baseline.done);
+    const notInCsvImport = captureImport(notInCsv);
+    assert.equal(notInCsvImport.done, baselineImport.done);
+    assert.equal(notInCsvImport.total, baselineImport.total);
+    assert.equal(notInCsvImport.stoppedBy, baselineImport.stoppedBy);
+    assert.deepEqual(notInCsvImport.snapshot, baselineImport.snapshot);
   });
 
   // ================= fcn 20 =================
@@ -1128,6 +1154,10 @@ module.exports = ({test, assert, gas}) => {
       gas.evaluate('WEBAPP_IMPORT_LANES_=' + priorLanes + ';');
     }
     assert.equal(Object.prototype.hasOwnProperty.call(lane, 'cardName'), false);
+    // 並列の道の呼出しが成功していることを先に確かめる（止まった呼出しで空振りしない）。
+    assert.equal(lane.done, 1, '並列の道で 1 件を取り込めていない');
+    assert.equal(lane.total, 1);
+    assert.equal(lane.stoppedBy, null, '並列の道が止まっている');
     assert.equal(destinationB1(first.destinationSpreadsheetId).getValue(), 'そのまま');
   });
 
@@ -1202,10 +1232,10 @@ module.exports = ({test, assert, gas}) => {
     const failedRead = runWithBrokenWrite('read');
     assert.equal(failedRead.result.cardName.status, 'FAILED');
     assert.equal(failedRead.result.done, 1);
-    const lines = failedRead.logs
-      .filter((line) => line.indexOf('FREEE_CARD_NAME_WRITE_FAILED') === 0)
-      .concat(writeLines);
-    lines.forEach((line) => {
+    // 名前が無いことは、FREEE_CARD_NAME_WRITE_FAILED で始まる行だけでなく全部の行で見る（M1・L6）。
+    const allLogs = failedWrite.logs.concat(failedRead.logs);
+    assert.ok(allLogs.length > 0, 'ログが 1 行も無い');
+    allLogs.forEach((line) => {
       assert.ok(line.indexOf('架空カードA') < 0, 'ログにカード名がある');
       assert.ok(line.indexOf('テストカード') < 0, 'ログにフォルダ名がある');
     });
@@ -1613,32 +1643,56 @@ module.exports = ({test, assert, gas}) => {
     addCardFile(baselineWorld, 'テストカード', 'fcn-import-file-13');
     const baseline = importFolder('テストカード');
     assert.equal(baseline.cardName.status, 'WRITTEN');
+    const baselineImport = captureImport(baseline);
 
     const failed = runWithFolderNameFailure('run');
     assert.equal(failed.result.schemaValidation.ok, true);
-    assert.equal(failed.result.done, baseline.done, '記帳が止まっている');
-    assert.equal(failed.result.total, baseline.total);
-    assert.equal(failed.result.stoppedBy, baseline.stoppedBy);
+    assert.equal(failed.result.done, baselineImport.done, '記帳が止まっている');
+    assert.equal(failed.result.total, baselineImport.total);
+    assert.equal(failed.result.stoppedBy, baselineImport.stoppedBy);
     assert.deepEqual(failed.result.cardName, {status: 'FAILED', folderName: ''});
     const cloneId = failed.result.destinationSpreadsheetId;
     assert.equal(destinationB1(cloneId).getValue(), '○○カード');
-    assert.deepEqual(cloneSnapshot(cloneId),
-      cloneSnapshot(baseline.destinationSpreadsheetId), 'B1 以外が同じ記帳と違う');
+    const failedImport = captureImport(failed.result);
+    assert.deepEqual(failedImport.snapshot, baselineImport.snapshot,
+      'B1 以外が同じ記帳と違う');
     assert.equal(tableReadsIn(failed.calls), 0, 'フォルダ名が読めないのに表を読んでいる');
+    assert.ok(failed.logs.some((line) => line.indexOf('FOLDER_NAME_UNREADABLE') >= 0),
+      'FOLDER_NAME_UNREADABLE のログが無い');
     failed.logs.forEach((line) => {
       assert.ok(line.indexOf('テストカード') < 0, 'ログにフォルダ名がある');
       assert.ok(line.indexOf('架空カードA') < 0, 'ログにカード名がある');
     });
 
     // 準備の道でも同じ（記帳は止まらない・B1 は ○○カード・表を読まない）。
+    // 比べる相手は、フォルダ名が読める同じ準備の道の複製（準備は取引を書かない）。
+    const prepareBaselineWorld = buildImportWorld();
+    seedTable([tableRow({mappings: {'テストカード': '架空カードA'}})]);
+    addCardFile(prepareBaselineWorld, 'テストカード', 'fcn-import-file-13');
+    const priorPrepareLanes = gas.evaluate('WEBAPP_IMPORT_LANES_');
+    let prepareBaseline;
+    gas.evaluate('WEBAPP_IMPORT_LANES_=2;');
+    try {
+      prepareBaseline = call('webAppPrepareImport', [CUSTOMER_ID, 'fcn-card-test']);
+    } finally {
+      gas.evaluate('WEBAPP_IMPORT_LANES_=' + priorPrepareLanes + ';');
+    }
+    const prepareBaselineImport = captureImport(prepareBaseline);
+
     const prepared = runWithFolderNameFailure('prepare');
     assert.equal(prepared.result.schemaValidation.ok, true);
     assert.equal(prepared.result.total, 1);
     assert.deepEqual(prepared.result.cardName, {status: 'FAILED', folderName: ''});
     assert.equal(destinationB1(prepared.result.destinationSpreadsheetId).getValue(), '○○カード');
+    const preparedImport = captureImport(prepared.result);
+    assert.deepEqual(preparedImport.snapshot, prepareBaselineImport.snapshot,
+      'B1 以外が同じ準備の道と違う');
+    assert.equal(preparedImport.total, prepareBaselineImport.total);
+    assert.equal(preparedImport.stoppedBy, prepareBaselineImport.stoppedBy);
     assert.equal(tableReadsIn(prepared.calls), 0, '準備の道で表を読んでいる');
     prepared.logs.forEach((line) => {
       assert.ok(line.indexOf('テストカード') < 0, 'ログにフォルダ名がある');
+      assert.ok(line.indexOf('架空カードA') < 0, 'ログにカード名がある');
     });
   });
 };

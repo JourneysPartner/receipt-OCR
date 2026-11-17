@@ -5302,6 +5302,9 @@
         registrationView ? 'false' : 'true');
       el['settings-view-registration'].disabled = locked;
       el['settings-view-freee-card'].disabled = locked;
+      el['settings-back'].disabled = locked;
+      el['nav-import'].disabled = locked;
+      el['nav-settings'].disabled = locked;
       el['registration-view'].hidden = !registrationView;
       el['freee-card-view'].hidden = registrationView;
     }
@@ -5435,7 +5438,8 @@
       var status = el['freee-card-csv-status'];
       el['freee-card-csv-section'].hidden = !hasCustomer;
       el['freee-card-csv-file'].disabled = busy;
-      el['freee-card-csv-upload'].disabled = busy || !freeeCardSelectedFile();
+      el['freee-card-csv-upload'].disabled = busy || !freeeCardSelectedFile() ||
+        !state.freeeCard || state.freeeCardLoading === true;
       el['freee-card-csv-upload'].textContent = hasCsv ?
         'この CSV に差し替える' : 'この CSV を登録する';
       status.textContent = '';
@@ -5488,6 +5492,7 @@
     async function loadFreeeCardStart(customerId) {
       var wanted = String(customerId);
       var generation = ++state.freeeCardGeneration;
+      freeeCardClearFileSelection();
       state.freeeCardCustomerId = wanted;
       state.freeeCard = null;
       state.freeeCardSelections = {};
@@ -5561,6 +5566,9 @@
       }
       var customerId = state.freeeCardCustomerId;
       var customerName = freeeCardText(state.freeeCard.customerName);
+      // 確かめの窓の前後で読む値が混ざらないよう、窓の前に決めておく（L1）。
+      var generation = state.freeeCardGeneration;
+      var version = state.freeeCard.version;
       var message = '「' + freeeCardText(file.name) + '」を、' + customerName +
         ' の勘定科目 CSV として登録します。';
       if (state.freeeCard.csv) {
@@ -5570,13 +5578,19 @@
         renderFreeeCard();
         return;
       }
-      var generation = state.freeeCardGeneration;
+      // 窓の間に顧客・版が変わった、または作業中なら、サーバーを呼ばずにやめる。
+      if (generation !== state.freeeCardGeneration ||
+          customerId !== state.freeeCardCustomerId ||
+          !state.freeeCard ||
+          state.freeeCardBusy > 0 || state.freeeCardMutating === true) {
+        renderFreeeCard();
+        return;
+      }
       state.freeeCardMutating = true;
       freeeCardSetBusy(1);
       renderFreeeCard();
       try {
         var base64 = await freeeCardReadFile(file);
-        var version = state.freeeCard.version;
         var result = await gasCall('webAppFreeeCardNamesUploadCsv',
           [customerId, freeeCardText(file.name), base64, version]);
         if (generation !== state.freeeCardGeneration) return;
@@ -5891,9 +5905,6 @@
     function renderRegistration() {
       var locked = registrationLocked();
       renderSettingsChrome();
-      el['settings-back'].disabled = locked || state.freeeCardBusy > 0;
-      el['nav-import'].disabled = locked;
-      el['nav-settings'].disabled = locked;
       el['registration-next'].hidden = !state.registrationNextCustomerId;
       el['registration-next-freee-card'].disabled = locked || state.freeeCardBusy > 0;
       el['registration-category-individual'].checked = true;
