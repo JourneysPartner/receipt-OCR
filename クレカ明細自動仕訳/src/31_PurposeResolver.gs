@@ -1,5 +1,23 @@
 'use strict';
 
+/**
+ * 「仕入れ専用」の明細で全行に置く用途（§2.2）。勘定科目の用途辞書
+ * （39_AccountSeed の `仕入`）に部分一致し、相手科目は 712（仕入高）になる。
+ */
+var PURCHASE_ONLY_PURPOSE_ = '仕入れ';
+
+/**
+ * ファイル名に「仕入れ専用」（または「仕入専用」）を含むか（§2.1）。
+ *
+ * 純粋な関数。31 はほかのファイルの関数に頼らない（`normalize` は String の
+ * 標準）。頭の状態の印（`【処理中】` など）は含んでいても判定は変わらない。
+ * @param {*} fileName
+ * @return {boolean}
+ */
+function isPurchaseOnlyFileName_(fileName) {
+  return /仕入れ?\s*専用/.test(String(fileName || '').normalize('NFKC'));
+}
+
 /** @param {!Object} rule @return {*} */
 function purposeRuleEnabled_(rule) {
   return rule.enabled !== undefined ? rule.enabled : rule.active;
@@ -55,6 +73,18 @@ function findMatchingRules(fileNameOriginal, rules) {
 function resolvePurposes(txs, fileNameOriginal, rules) {
   if (!Array.isArray(txs)) {
     throw new TypeError('resolvePurposes requires transactions');
+  }
+  // §4：「仕入れ専用」のファイルは、書いてある行も含めて全行の用途を
+  // `仕入れ` にする。使用用途補完マスター（rules）は使わない。
+  if (isPurchaseOnlyFileName_(fileNameOriginal)) {
+    var purchaseOutput = txs.map(function(original) {
+      var tx = Object.assign({}, original);
+      tx.purpose = PURCHASE_ONLY_PURPOSE_;
+      tx.purposeInferred = true;
+      tx.purposeInferenceRuleId = 'PURCHASE_ONLY_FILE';
+      return tx;
+    });
+    return {txs: purchaseOutput, unresolvedCount: 0};
   }
   var matches = findMatchingRules(fileNameOriginal, rules || []);
   var distinct = [];

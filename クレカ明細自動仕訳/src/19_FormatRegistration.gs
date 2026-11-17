@@ -212,14 +212,12 @@ function formatActiveDefinitions_() {
 }
 
 function formatDetectRead_(definitions, read, fileName, fileId) {
-  var detections = read.sheets.map(function(sheet) {
-    return {sheetName: sheet.name,
-      candidates: detectFormatWith(definitions, sheet, read.fileType, fileName)};
-  });
   var permanent = getPermanentFileIndexRecord_(fileId);
   var targetSheetName = permanent ? String(permanent.values[12] || '') : '';
-  return aggregateSheetDetections(detections, {origin: 'FILE', fileName: fileName,
-    fileType: read.fileType, targetSheetName: targetSheetName || null, sourceId: fileId});
+  return detectFileFormat_(definitions, read.sheets, read.fileType, fileName, {
+    origin: 'FILE', fileName: fileName, fileType: read.fileType,
+    targetSheetName: targetSheetName || null, sourceId: fileId
+  });
 }
 
 function formatPurposeGap_(base, gap, sheet) {
@@ -332,15 +330,18 @@ function formatFolderHistory_(folder, targetFileId, customerId) {
 
 function formatExplainUnknown_(context, baseFormatId) {
   var defs = formatActiveDefinitions_();
+  var purchaseOnly = isPurchaseOnlyFileName_(context.fileName);
   var read = readFile(context.fileId, context.fileName,
     {expectedKeywords: detectionKeywordUnion_(defs)});
   var aggregated = formatDetectRead_(defs, read, context.fileName, context.fileId);
   var basic = {ok: true, reviewId: context.review.reviewId,
-    fileId: context.fileId, fileName: context.fileName, fileType: read.fileType};
+    fileId: context.fileId, fileName: context.fileName, fileType: read.fileType,
+    purchaseOnly: purchaseOnly};
   if (aggregated.status === 'RESOLVED') {
     var matched = defs.filter(function(def) { return def.formatId === aggregated.formatId; })[0];
     basic.verdict = 'MATCHES_ACTIVE';
     basic.matched = {formatId: matched.formatId, formatName: matched.formatName};
+    if (aggregated.purposeColumnAbsent) basic.purposeColumnAbsent = true;
     return basic;
   }
   if (aggregated.status === 'AMBIGUOUS_CARD_FORMAT' ||
@@ -384,7 +385,11 @@ function formatExplainUnknown_(context, baseFormatId) {
   }
   var proposal = formatProposal_(sheet, read.fileType, context.folder.getName(),
     base, referenceSheet, loadFormatDefinitions({}));
-  var purposeGap = base ? formatPurposeGap_(base, selected.gap, sheet) : null;
+  // 「仕入れ専用」のファイルは全行が `仕入れ` になるので、顧客に用途の列を
+  // 足してもらう必要が無い（§5.1）。用途の列を選んで見出しが `使用用途` で
+  // ないときの扱いは `formatPreview_` のまま。
+  var purposeGap = base && !purchaseOnly ?
+    formatPurposeGap_(base, selected.gap, sheet) : null;
   basic.verdict = base ? 'NEAR' : 'BLANK';
   basic.sheetName = sheet.name;
   basic.width = detectorTableWidth_(sheet.rows, proposal.headerRow,
@@ -602,6 +607,7 @@ function formatPreview_(context, answers) {
     block('DEFINITION_INVALID', '土台の形式が候補にありません');
   }
   var base = selected ? selected.def : null;
+  var purchaseOnly = isPurchaseOnlyFileName_(context.fileName);
   var reference = base && history[base.formatId] && history[base.formatId].reference;
   var referenceSheet = null;
   if (reference) {
@@ -618,7 +624,8 @@ function formatPreview_(context, answers) {
   }
   var proposal = formatProposal_(sheet, read.fileType, context.folder.getName(),
     base, referenceSheet, loadFormatDefinitions({}));
-  var purposeGap = base ? formatPurposeGap_(base, formatGap_(base, sheet, read.fileType), sheet) : null;
+  var purposeGap = base && !purchaseOnly ?
+    formatPurposeGap_(base, formatGap_(base, sheet, read.fileType), sheet) : null;
   var derived = formatDerivedSpec_(context, read, sheet, answers, base, proposal, purposeGap);
   var spec = derived.spec;
   var row = cardFormatRowValues_(spec, 1, nowIso_(), context.actor);
@@ -644,7 +651,7 @@ function formatPreview_(context, answers) {
       used[columns[role]] + '/' + role);
     if (columns[role]) used[columns[role]] = role;
   });
-  if (!columns.purpose) block('PURPOSE_COLUMN_REQUIRED');
+  if (!columns.purpose && !purchaseOnly) block('PURPOSE_COLUMN_REQUIRED');
   if (spec.keywordRule.allOf[0].keywords.length < 2) block('TOO_FEW_KEYWORDS');
   if (derived.droppedRules.length) warn('RULES_NOT_INHERITED', derived.droppedRules);
   if (derived.foreignDropped) warn('FOREIGN_NOT_INHERITED');

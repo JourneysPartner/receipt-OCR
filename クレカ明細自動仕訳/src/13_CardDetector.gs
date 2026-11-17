@@ -626,6 +626,217 @@ function detectFormat(sheet, fileType, fileName) {
 }
 
 /**
+ * A1 表記の列を0起算へ。読めなければ -1。
+ * @param {*} cell
+ * @return {number}
+ */
+function purposeAbsentA1Column_(cell) {
+  var match = String(cell || '').match(/^([A-Za-z]+)\d+$/);
+  return match ? detectorColumnIndex_(match[1]) : -1;
+}
+
+/**
+ * 列記号（または空）が用途の列より左にあるか（§2.3 の条件4）。
+ * 空は見ない。読めない列記号・用途の列以上は false。
+ */
+function purposeAbsentColumnLeft_(value, purposeIndex) {
+  if (value === null || value === undefined || value === '') return true;
+  var index = detectorColumnIndex_(value);
+  return index >= 0 && index < purposeIndex;
+}
+
+/**
+ * 用途の列以外の列指定がすべて用途の列より左か（§2.3 の条件4）。
+ * @param {!Object} def
+ * @param {number} purposeIndex 0起算
+ * @return {boolean}
+ */
+function purposeAbsentColumnsAreLeft_(def, purposeIndex) {
+  var fields = ['dateColumn', 'dateAltColumn', 'merchantColumn', 'amountColumn',
+    'amountFallbackColumn', 'foreignCurrencyColumn', 'foreignAmountColumn',
+    'exchangeRateColumn'];
+  for (var fieldIndex = 0; fieldIndex < fields.length; fieldIndex += 1) {
+    if (!purposeAbsentColumnLeft_(def[fields[fieldIndex]], purposeIndex)) return false;
+  }
+  // 列構造の標本列（必須・任意を問わず、指定されたすべて）。
+  var profileColumns = def.columnProfile && Array.isArray(def.columnProfile.columns) ?
+    def.columnProfile.columns : [];
+  for (var columnIndex = 0; columnIndex < profileColumns.length; columnIndex += 1) {
+    var column = profileColumns[columnIndex];
+    if (!column || !Number.isInteger(column.index) || column.index < 0 ||
+        column.index >= purposeIndex) return false;
+  }
+  // 除外のセル規則。
+  var rules = def.exclusionRule && Array.isArray(def.exclusionRule.rules) ?
+    def.exclusionRule.rules : [];
+  for (var ruleIndex = 0; ruleIndex < rules.length; ruleIndex += 1) {
+    var rule = rules[ruleIndex];
+    if (!rule || rule.target !== 'cell') continue;
+    var ruleColumn = detectorColumnIndex_(rule.column);
+    if (ruleColumn < 0 || ruleColumn >= purposeIndex) return false;
+  }
+  // 件数・合計のセル（A1）と見出し行のラベル・値の列。
+  var countTotal = def.countTotalRule || null;
+  var countKeys = ['count', 'total'];
+  for (var keyIndex = 0; keyIndex < countKeys.length; keyIndex += 1) {
+    var item = countTotal ? countTotal[countKeys[keyIndex]] : null;
+    if (!item) continue;
+    if (item.source === 'cell') {
+      var cellColumn = purposeAbsentA1Column_(item.cell);
+      if (cellColumn < 0 || cellColumn >= purposeIndex) return false;
+    }
+    if (item.source === 'labeledRow') {
+      if (!purposeAbsentColumnLeft_(item.labelColumn, purposeIndex) ||
+          !purposeAbsentColumnLeft_(item.valueColumn, purposeIndex)) return false;
+    }
+  }
+  // カード名のセル取得元（column は1起算）。
+  var cardSources = def.cardNameRule && Array.isArray(def.cardNameRule.sources) ?
+    def.cardNameRule.sources : [];
+  for (var sourceIndex = 0; sourceIndex < cardSources.length; sourceIndex += 1) {
+    var source = cardSources[sourceIndex];
+    if (!source || source.kind !== 'cell') continue;
+    if (!Number.isInteger(source.column) || source.column < 1 ||
+        source.column - 1 >= purposeIndex) return false;
+  }
+  return true;
+}
+
+/**
+ * 判定キーワードから `使用用途` を除く（§2.3 の条件6）。
+ * allOf の条件が空になったら null（作らない）。anyOf の空条件は外す。
+ * @param {*} keywordRule
+ * @return {?Object}
+ */
+function purposeAbsentKeywordRule_(keywordRule) {
+  if (!keywordRule || typeof keywordRule !== 'object') return null;
+  var purposeWord = normalizeMerchant('使用用途');
+  function transform(kind) {
+    var conditions = keywordRule[kind];
+    if (!Array.isArray(conditions)) return undefined;
+    var output = [];
+    for (var index = 0; index < conditions.length; index += 1) {
+      var condition = conditions[index];
+      if (!condition || !Array.isArray(condition.keywords) ||
+          !Number.isInteger(condition.minMatch)) return null;
+      var words = condition.keywords.filter(function(word) {
+        return normalizeMerchant(String(word)) !== purposeWord;
+      });
+      if (!words.length) {
+        if (kind === 'allOf') return null;
+        continue;
+      }
+      output.push(Object.assign({}, condition, {
+        keywords: words,
+        minMatch: Math.min(condition.minMatch, words.length)
+      }));
+    }
+    return output;
+  }
+  var allOf = transform('allOf');
+  if (allOf === null) return null;
+  var anyOf = transform('anyOf');
+  if (anyOf === null) return null;
+  var result = {};
+  // 空の anyOf を残すと `detectorEvaluateKeywords_` が不成立にするので外す。
+  if (allOf && allOf.length) result.allOf = allOf;
+  if (anyOf && anyOf.length) result.anyOf = anyOf;
+  if (!result.allOf && !result.anyOf) return null;
+  return result;
+}
+
+/**
+ * 右端の用途の列を1つ除いた予備の形（§2.3）。作れなければ null。
+ *
+ * 元の定義と、その中の物は書き換えない。違いは次だけ：
+ * `purposeColumn: null`・`columnProfile` の幅を1つ狭める・`keywordRule` から
+ * `使用用途` を除く・`purposeAbsentOf` の印。`formatId`・`version` は同じ。
+ *
+ * @param {*} def
+ * @return {?Object}
+ */
+function purposeAbsentVariant_(def) {
+  if (!def || def.valid !== true || !def.purposeColumn) return null;
+  var profile = def.columnProfile;
+  if (!profile || !Number.isInteger(profile.minColumns) ||
+      !Number.isInteger(profile.maxColumns) ||
+      profile.minColumns !== profile.maxColumns ||
+      profile.maxColumns - 1 < 1) return null;
+  var purposeIndex = detectorColumnIndex_(def.purposeColumn);
+  if (purposeIndex < 0 || purposeIndex !== profile.maxColumns - 1) return null;
+  if (!purposeAbsentColumnsAreLeft_(def, purposeIndex)) return null;
+  if (def.sectionBreakRule) return null;
+  var keywordRule = purposeAbsentKeywordRule_(def.keywordRule);
+  if (!keywordRule) return null;
+  var narrowed = profile.maxColumns - 1;
+  return Object.assign({}, def, {
+    purposeColumn: null,
+    columnProfile: Object.assign({}, profile, {
+      minColumns: narrowed,
+      maxColumns: narrowed
+    }),
+    keywordRule: keywordRule,
+    purposeAbsentOf: def.formatId
+  });
+}
+
+/** 見出し行に `使用用途` のセルが1つも無いこと（§2.3 の当たる条件）。 */
+function purposeAbsentHeaderClean_(sheet, headerRow) {
+  var rows = sheet && Array.isArray(sheet.rows) ? sheet.rows : [];
+  var rowNumber = Number(headerRow);
+  if (!Number.isInteger(rowNumber) || rowNumber < 1 || rowNumber > rows.length) return false;
+  var header = rows[rowNumber - 1];
+  if (!Array.isArray(header)) return false;
+  var wanted = normalizeMerchant('使用用途');
+  return !header.some(function(cell) {
+    return normalizeMerchant(cell === null || cell === undefined ? '' : String(cell)) === wanted;
+  });
+}
+
+/**
+ * ファイル単位の判定（§3.1）。普通の判定が形式不明で、ファイル名が
+ * 「仕入れ専用」のときだけ、右端の用途の列を除いた予備の形でもう一度判定する。
+ * 予備がちょうど1つの形式・1つのシートに決まったときだけ `purposeColumnAbsent`
+ * を足して返す。それ以外は普通の判定の結果をそのまま返す。
+ *
+ * @param {!Array<!Object>} definitions
+ * @param {!Array<!Object>} sheets
+ * @param {string} fileType
+ * @param {string} fileName
+ * @param {!Object} context
+ * @return {!Object}
+ */
+function detectFileFormat_(definitions, sheets, fileType, fileName, context) {
+  var list = Array.isArray(sheets) ? sheets : [];
+  function detectionsFor(defs) {
+    return list.map(function(sheet) {
+      return {
+        sheetName: sheet.name,
+        candidates: detectFormatWith(defs, sheet, fileType, fileName)
+      };
+    });
+  }
+  var normal = aggregateSheetDetections(detectionsFor(definitions), context);
+  if (normal.status !== 'UNKNOWN_CARD_FORMAT' ||
+      !isPurchaseOnlyFileName_(fileName)) return normal;
+  var variants = (Array.isArray(definitions) ? definitions : [])
+    .map(purposeAbsentVariant_)
+    .filter(Boolean);
+  if (!variants.length) return normal;
+  var variantDetections = list.map(function(sheet) {
+    var candidates = detectFormatWith(variants, sheet, fileType, fileName)
+      .filter(function(candidate) {
+        return purposeAbsentHeaderClean_(sheet, candidate.formatRow &&
+          candidate.formatRow.headerRow);
+      });
+    return {sheetName: sheet.name, candidates: candidates};
+  });
+  var fallback = aggregateSheetDetections(variantDetections, context);
+  if (fallback.status !== 'RESOLVED') return normal;
+  return Object.assign({}, fallback, {purposeColumnAbsent: true});
+}
+
+/**
  * シート集約の判定（4.11の表）。
  * @param {!Array<!Object>} detections [{sheetName, candidates}]
  * @param {!Object} context A-19の判定文脈 {origin, fileName, fileType, targetSheetName, sourceId}

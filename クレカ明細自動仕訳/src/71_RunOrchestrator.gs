@@ -703,16 +703,13 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
       // 読み直しても同じ値である。
       var permanent = registered.permanent;
       var targetSheetName = permanent ? String(permanent.values[12] || '') : '';
-      var detections = read.sheets.map(function(sheet) {
-        return {
-          sheetName: sheet.name,
-          candidates: detectFormatWith(validDefinitions, sheet, read.fileType, fileName)
-        };
-      });
-      var aggregated = aggregateSheetDetections(detections, {
-        origin: 'FILE', fileName: fileName, fileType: read.fileType,
-        targetSheetName: targetSheetName || null, sourceId: fileId
-      });
+      // §3.1：ファイル単位の判定。「仕入れ専用」で形式不明のときだけ、
+      // 右端の用途の列を除いた予備の形でもう一度判定する。
+      var aggregated = detectFileFormat_(validDefinitions, read.sheets, read.fileType,
+        fileName, {
+          origin: 'FILE', fileName: fileName, fileType: read.fileType,
+          targetSheetName: targetSheetName || null, sourceId: fileId
+        });
       if (invalidDefinitions.length) {
         recordError(fileId, {code: 'CARD_FORMAT_DEFINITION_INVALID',
           detail: invalidDefinitions.map(function(row) { return row.formatId; }).join(',')});
@@ -724,6 +721,11 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
       } else {
         validation.format = {ok: true, code: null};
         cardFormat = pinFormatVersion(aggregated.formatId, aggregated.formatVersion);
+        if (aggregated.purposeColumnAbsent) {
+          // §3.3：予備で決まったときは用途の列を読まない（表の外を読まない）。
+          // 以後の抽出・年補完・件数照合・前年の検査・転記はこの形を使う。
+          cardFormat = Object.assign({}, cardFormat, {purposeColumn: null});
+        }
         resolvedSheet = read.sheets.filter(function(sheet) {
           return sheet.name === aggregated.sheetName;
         })[0] || read.sheets[0];
