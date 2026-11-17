@@ -651,7 +651,19 @@ function formatPreview_(context, answers) {
       used[columns[role]] + '/' + role);
     if (columns[role]) used[columns[role]] = role;
   });
-  if (!columns.purpose && !purchaseOnly) block('PURPOSE_COLUMN_REQUIRED');
+  if (!columns.purpose) {
+    // 「仕入れ専用」でも、シートの見出し（`spec.headerRow`）に `使用用途` の
+    // セルがあるなら用途の列を選ばせない。見出しにあるのに選ばないまま
+    // 登録すると、その列を読まない形式ができてしまう。見出しに無ければ
+    // 今までどおり「仕入れ専用」だけ用途の列なしで登録できる。
+    var purposeHeaderLabel = normalizeMerchant('使用用途');
+    var headerCells = sheet.rows[spec.headerRow - 1];
+    var headerHasPurpose = Array.isArray(headerCells) && headerCells.some(function(cell) {
+      return normalizeMerchant(cell === null || cell === undefined ? '' : String(cell)) ===
+        purposeHeaderLabel;
+    });
+    if (!purchaseOnly || headerHasPurpose) block('PURPOSE_COLUMN_REQUIRED');
+  }
   if (spec.keywordRule.allOf[0].keywords.length < 2) block('TOO_FEW_KEYWORDS');
   if (derived.droppedRules.length) warn('RULES_NOT_INHERITED', derived.droppedRules);
   if (derived.foreignDropped) warn('FOREIGN_NOT_INHERITED');

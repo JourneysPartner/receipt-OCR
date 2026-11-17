@@ -283,7 +283,7 @@
     }
     @media (max-width: 1120px) {
       body { min-width: 760px; }
-      .workspace { grid-template-columns: 220px minmax(340px, 1fr); }
+      .workspace { grid-template-columns: 220px minmax(340px, 1fr); grid-template-rows: auto auto 1fr; }
       .panel.customers { grid-column: 1; grid-row: 1; }
       .panel.drive { grid-column: 2; grid-row: 1; }
       .panel.files { grid-column: 1 / -1; grid-row: 2; }
@@ -4790,8 +4790,8 @@
       }
       formatAppendLine(body, d.verdict === 'MATCHES_ACTIVE' || d.verdict === 'AMBIGUOUS' ?
         d.fileName : d.fileName + ' ／ ' + (d.sheetName || '') + ' ／ ' + (d.width || '') + ' 列');
-      if (d.purchaseOnly)
-        formatAppendLine(body, '「仕入れ専用」のファイルです。使用用途の列は選ばなくても登録できます。取り込むと全行の使用用途が「仕入れ」になります。');
+      if (d.purchaseOnly && (d.verdict === 'NEAR' || d.verdict === 'BLANK'))
+        formatAppendLine(body, '「仕入れ専用」のファイルです。使用用途の列が無い明細は、使用用途の列を選ばずに登録できます。取り込むと全行の使用用途が「仕入れ」になります。');
       if (d.verdict === 'MATCHES_ACTIVE') {
         formatAppendLine(body, 'このファイルは、登録済みの形式「' + d.matched.formatName +
           '」で読めます（止まった後に形式が足されたか、判定が直りました）。');

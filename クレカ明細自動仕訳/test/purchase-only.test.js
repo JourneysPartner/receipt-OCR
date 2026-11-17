@@ -53,6 +53,28 @@ module.exports = ({test, assert, gas}) => {
     return rows;
   }
 
+  // 同じ形で 11 列（末尾 K が `使用用途` の見出し・値は空）。F1 の見出しの
+  // 確認に使う。
+  function ucsRowsShiftedDateWithPurpose() {
+    const rows = [UCS_HEADER_11.slice()];
+    for (let index = 0; index < 5; index += 1) {
+      rows.push(['01', '1回', '架空日付', '架空ストア', 1000 + index * 100,
+        1000 + index * 100, '', '', '', 20251201 + index, '']);
+    }
+    return rows;
+  }
+
+  // 三井住友系の 6 列（A 日付・B 文字・C 数）。1 行目に `様` があるので、
+  // `smbc_family_x7` の用途の列（G）を外した予備の幅 6 に当たってしまう形。
+  function smbcRows6() {
+    const rows = [['ご利用日', '架空 太郎 様', 'ご利用金額', '当月支払額', '備考', 'メモ']];
+    for (let index = 0; index < 5; index += 1) {
+      rows.push([20251201 + index, '架空ストア', 1000 + index * 100,
+        1000 + index * 100, '', '']);
+    }
+    return rows;
+  }
+
   function annotated(id) {
     const list = plain(gas.evaluate('ANNOTATED_FORMAT_SPECS_'));
     return list.filter((spec) => spec.formatId === id)[0];
@@ -90,9 +112,9 @@ module.exports = ({test, assert, gas}) => {
     }, overrides || {});
   }
 
-  function detect(sheets, fileName, definitions) {
+  function detect(sheets, fileName, definitions, targetSheetName) {
     const context = {origin: 'FILE', fileName: fileName, fileType: 'xlsx',
-      targetSheetName: null, sourceId: 'fictional_file'};
+      targetSheetName: targetSheetName || null, sourceId: 'fictional_file'};
     return plain(gas.call('detectFileFormat_', [definitions,
       sheets.map((rows) => ({name: rows.name, rows: rows.rows})), 'xlsx', fileName, context]));
   }
@@ -185,11 +207,38 @@ module.exports = ({test, assert, gas}) => {
           {index: 10, type: 'text', required: false}])})}),
       'カード名のセルが用途の列': Object.assign({}, ucs, {cardNameRule: {sources: [
         {kind: 'folderName'}, {kind: 'cell', row: 1, column: 11}]}}),
+      '件数のセルが用途の列': Object.assign({}, ucs, {countTotalRule: {
+        count: {source: 'cell', cell: 'K1'}, total: {source: 'none'}, totalScope: 'all'}}),
+      '合計の見出し行の値が用途の列': Object.assign({}, ucs, {countTotalRule: {
+        count: {source: 'labeledRow', label: '件数', labelColumn: 'A', valueColumn: 'K'},
+        total: {source: 'none'}, totalScope: 'all'}}),
+      '海外通貨の列が用途の列': Object.assign({}, ucs, {foreignCurrencyColumn: 'K'}),
+      '予備の日付が用途の列': Object.assign({}, ucs, {dateAltColumn: 'K'}),
       '定義が不正': Object.assign({}, ucs, {valid: false})
     };
     for (const label of Object.keys(cases)) {
       assert.equal(gas.call('purposeAbsentVariant_', [cases[label]]), null, label);
     }
+  });
+
+  test('pso 3d: 判定の語が少ない形式（smbc_family_x7 の 様 だけ）は予備を作らない', () => {
+    assert.equal(gas.call('purposeAbsentVariant_', [defFromSpec(annotated('smbc_family_x7'))]),
+      null, '語が 1 つだけの形式は予備を作らない');
+    assert.ok(gas.call('purposeAbsentVariant_', [jcbDef()]),
+      'jcb_family（除いた後 4 語）の予備は今どおり作る');
+  });
+
+  test('pso 3e: 語を除いていない条件の minMatch は元のまま写す', () => {
+    const spec = syntheticSpec('fake_minmatch', {keywordRule: {allOf: [
+      {maxRow: 1, keywords: ['使用用途', '架空甲', '架空乙'], minMatch: 2},
+      {maxRow: 1, keywords: ['架空丙', '架空丁'], minMatch: 3}]}});
+    const variant = plain(gas.call('purposeAbsentVariant_', [defFromSpec(spec)]));
+    assert.ok(variant);
+    assert.deepEqual(variant.keywordRule.allOf[0].keywords, ['架空甲', '架空乙']);
+    assert.equal(variant.keywordRule.allOf[0].minMatch, 2, '語を除いた条件は下げる');
+    assert.deepEqual(variant.keywordRule.allOf[1].keywords, ['架空丙', '架空丁']);
+    assert.equal(variant.keywordRule.allOf[1].minMatch, 3,
+      '語を除いていない条件の minMatch は元のまま（語の数に切り下げない）');
   });
 
   // ---- pso 4 ------------------------------------------------------------
@@ -285,6 +334,36 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(result.purposeColumnAbsent, true);
   });
 
+  test('pso 4k: 判定の語が 様 だけの形式は予備を作らないので形式不明のまま', () => {
+    const result = detect([{name: '明細', rows: smbcRows6()}],
+      '架空カード仕入れ専用_202601.xlsx', [defFromSpec(annotated('smbc_family_x7'))]);
+    assert.equal(result.status, 'UNKNOWN_CARD_FORMAT');
+    assert.equal('purposeColumnAbsent' in result, false);
+  });
+
+  test('pso 4l: 普通の判定が MULTI_SHEET_AMBIGUOUS ならそのまま返す', () => {
+    const eleven = [{name: '明細A', rows: ucsRows(true)}, {name: '明細B', rows: ucsRows(true)}];
+    const result = detect(eleven, '架空カード仕入れ専用_202601.xlsx', [ucsDef()]);
+    assert.equal(result.status, 'MULTI_SHEET_AMBIGUOUS');
+    assert.equal('purposeColumnAbsent' in result, false);
+  });
+
+  test('pso 4m: 予備が2シートに当たるときは形式不明のまま', () => {
+    const ten = [{name: '明細A', rows: ucsRows(false)}, {name: '明細B', rows: ucsRows(false)}];
+    const result = detect(ten, '架空カード仕入れ専用_202601.xlsx', [ucsDef()]);
+    assert.equal(result.status, 'UNKNOWN_CARD_FORMAT');
+    assert.equal('purposeColumnAbsent' in result, false);
+  });
+
+  test('pso 4n: 対象シートがあれば予備でもそのシートで決まる', () => {
+    const ten = [{name: '明細A', rows: ucsRows(false)}, {name: '明細B', rows: ucsRows(false)}];
+    const result = detect(ten, '架空カード仕入れ専用_202601.xlsx', [ucsDef()], '明細B');
+    assert.equal(result.status, 'RESOLVED');
+    assert.equal(result.sheetName, '明細B');
+    assert.equal(result.formatId, 'ucs_family');
+    assert.equal(result.purposeColumnAbsent, true);
+  });
+
   // ---- 取込の往復（pso 5・pso 9）---------------------------------------
 
   function customerRow() {
@@ -356,6 +435,34 @@ module.exports = ({test, assert, gas}) => {
     gas.stubs.getFile(fileId).name = name;
   }
 
+  // `parseFile` に渡った `cardFormat` と、そのときの取引・除外を控える。
+  // 取込（`71`）が予備で読むときに用途の列を外しているか（R12）を、
+  // 転記の見た目ではなく呼出しの引数と取引の数で直接確かめる。
+  function watchParseFile() {
+    gas.evaluate(`
+      if (typeof __psoParseFile !== 'function') {
+        __psoParseFile = parseFile;
+        __psoParseSeen = [];
+        parseFile = function(sheet, format, context) {
+          var parsed = __psoParseFile(sheet, format, context);
+          __psoParseSeen.push(JSON.stringify({
+            purposeColumn: format && format.purposeColumn !== undefined ?
+              format.purposeColumn : 'MISSING',
+            txCount: parsed.txs.length,
+            ruleIds: parsed.excludedRows.map(function(item) { return item.ruleId; })
+          }));
+          return parsed;
+        };
+      }
+      __psoParseSeen.length = 0;
+    `);
+  }
+
+  function seenParses() {
+    return JSON.parse(gas.evaluate('JSON.stringify(__psoParseSeen)'))
+      .map((text) => JSON.parse(text));
+  }
+
   const destSheet = () => gas.stubs.getSpreadsheet('dest1').getSheetByName('入力用シート');
   const writtenRows = () => destSheet().getDataRange().getValues().slice(1)
     .filter((row) => row[6] !== '');
@@ -375,10 +482,25 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(rows.length, 5);
     assert.deepEqual(rows.map((row) => row[3]), ['仕入れ', '仕入れ', '仕入れ', '仕入れ', '仕入れ']);
     assert.equal(gas.call('getProcessLogRecord_', [fileId]).values[14], 'ucs_family');
-    const cells = destSheet().getDataRange().getValues()
-      .reduce((all, row) => all.concat(row.map(String)), []);
-    assert.equal(cells.indexOf('架空の外側'), -1, 'K の位置を読んで転記しない');
-    assert.equal(cells.indexOf('架空金額メモ'), -1, '取引でない行は転記しない');
+    assert.equal(plain(gas.call('openReviews', [{}])).length, 0,
+      'K の位置の文字がある行で要確認を立てない');
+  });
+
+  test('pso 5c: 予備で読むときは parseFile に渡す用途の列を外す（K の文字で取引にしない）', () => {
+    const fileId = importSetup(gas.call('cardFormatRowValues_',
+      [fullSpec(annotated('ucs_family')), 1, NOW, 'admin@example.com']));
+    renameSource(fileId, '架空カード仕入れ専用_202601.xlsx');
+    watchParseFile();
+    const report = plain(gas.call('runImport', [{}]));
+    assert.equal(report.stoppedBy, null, JSON.stringify(report));
+    const seen = seenParses();
+    assert.equal(seen.length, 1, '取込 1 本で parseFile は 1 回');
+    assert.equal(seen[0].purposeColumn, null,
+      '用途の列を読まない（purposeColumn: null を渡す）');
+    assert.equal(seen[0].txCount, 5, 'K の位置に文字がある行を取引にしない');
+    assert.ok(seen[0].ruleIds.indexOf('_noTransactionValue') >= 0, JSON.stringify(seen[0]));
+    assert.equal(report.customers[0].files[0].outcome, 'WRITTEN');
+    assert.equal(report.customers[0].files[0].written, 5);
   });
 
   test('pso 5b: 名前に「仕入れ専用」が無ければ今どおり形式不明になる', () => {
@@ -590,5 +712,24 @@ module.exports = ({test, assert, gas}) => {
       ['C001', 'card', 'target', answers]));
     assert.ok(preview.blocking.some((item) => item.code === 'ACK_CUSTOMER_SIDE_REQUIRED'));
     assert.ok(preview.warnings.some((item) => item.code === 'PURPOSE_HEADER_NOT_STANDARD'));
+  });
+
+  test('pso 8d: 見出しに使用用途がある「仕入れ専用」は用途の列を選ばないと登録できない', () => {
+    const {card} = webSetup();
+    putUnknown(card, 'target', '架空カード仕入れ専用_202601.xlsx',
+      ucsRowsShiftedDateWithPurpose());
+    const d = plain(gas.call('webAppExplainUnknownFile', ['C001', 'card', 'target']));
+    const answers = previewAnswers(d, 'J');
+    const preview = plain(gas.call('webAppPreviewFormat',
+      ['C001', 'card', 'target', answers]));
+    assert.ok(preview.blocking.some((item) => item.code === 'PURPOSE_COLUMN_REQUIRED'),
+      JSON.stringify(preview.blocking.map((item) => item.code)));
+
+    const withPurpose = previewAnswers(d, 'J');
+    withPurpose.columns.purpose = 'K';
+    const ok = plain(gas.call('webAppPreviewFormat',
+      ['C001', 'card', 'target', withPurpose]));
+    assert.equal(ok.blocking.some((item) => item.code === 'PURPOSE_COLUMN_REQUIRED'), false,
+      JSON.stringify(ok.blocking.map((item) => item.code)));
   });
 };

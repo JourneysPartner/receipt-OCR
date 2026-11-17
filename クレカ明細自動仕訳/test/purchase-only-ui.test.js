@@ -9,8 +9,8 @@ const path = require('node:path');
 const {browserWorld} = require('./kw26-ui-helpers');
 
 module.exports = ({test, assert}) => {
-  const PURCHASE_LINE = '「仕入れ専用」のファイルです。使用用途の列は選ばなくても登録できます。' +
-    '取り込むと全行の使用用途が「仕入れ」になります。';
+  const PURCHASE_LINE = '「仕入れ専用」のファイルです。使用用途の列が無い明細は、' +
+    '使用用途の列を選ばずに登録できます。取り込むと全行の使用用途が「仕入れ」になります。';
   const ABSENT_LINE = '「仕入れ専用」のファイルなので、使用用途の列が無くても読めます。' +
     '取り込むと全行の使用用途が「仕入れ」になります。';
 
@@ -55,12 +55,22 @@ module.exports = ({test, assert}) => {
       .filter((node) => node.textContent.includes('仕入れ専用'));
   }
 
-  test('psou 1: the purchase-only line appears only when the diagnosis is purchase only', () => {
-    const yes = mounted({purchaseOnly: true});
-    assert.ok(yes.ids['format-body'].textContent.includes(PURCHASE_LINE));
-    assert.equal(lines(yes).filter((node) => node.textContent === PURCHASE_LINE).length, 1);
-    const no = mounted({purchaseOnly: false});
-    assert.equal(no.ids['format-body'].textContent.includes('仕入れ専用'), false);
+  test('psou 1: the purchase-only line appears only for near or blank purchase-only diagnoses', () => {
+    for (const verdict of ['NEAR', 'BLANK']) {
+      const yes = mounted({purchaseOnly: true, verdict,
+        nearest: [{formatName: '架空の近い形式', gapText: '幅が違います'}]});
+      assert.ok(yes.ids['format-body'].textContent.includes(PURCHASE_LINE), verdict);
+      assert.equal(lines(yes).filter((node) => node.textContent === PURCHASE_LINE).length, 1, verdict);
+    }
+    for (const verdict of ['MATCHES_ACTIVE', 'AMBIGUOUS']) {
+      const no = mounted({purchaseOnly: true, verdict,
+        matched: {formatId: 'fictional_active', formatName: '架空の登録済み形式', sheetName: '明細'}});
+      assert.equal(no.ids['format-body'].textContent.includes(PURCHASE_LINE), false, verdict);
+      assert.equal(no.ids['format-body'].textContent.includes('使用用途の列が無い明細'), false, verdict);
+    }
+    const off = mounted({purchaseOnly: false, verdict: 'NEAR',
+      nearest: [{formatName: '架空の近い形式', gapText: '幅が違います'}]});
+    assert.equal(off.ids['format-body'].textContent.includes('仕入れ専用'), false);
   });
 
   test('psou 2: the absent purpose column line follows the matched format line only when flagged', () => {
@@ -83,18 +93,26 @@ module.exports = ({test, assert}) => {
     const panel = /function renderFormatPanel\(\) \{[\s\S]*?(?=\n    function )/.exec(source);
     assert.ok(panel, 'renderFormatPanel が必要');
     assert.doesNotMatch(panel[0], /innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
-    const world = mounted({verdict: 'MATCHES_ACTIVE', purchaseOnly: true, purposeColumnAbsent: true,
-      matched: {formatId: 'fictional_active', formatName: '架空の登録済み形式', sheetName: '明細'}});
-    for (const property of ['innerHTML', 'outerHTML', 'innerText'])
-      Object.defineProperty(world.Node.prototype, property,
-        {set() { assert.fail('文字の代入は textContent を使う'); }});
-    world.ui.renderFormatPanel();
-    const rendered = lines(world);
-    assert.equal(rendered.length, 2);
-    rendered.forEach((node) => {
-      assert.equal(node.children.length, 1);
-      assert.equal(node.firstChild.tagName, '#TEXT');
-      assert.equal(node.querySelectorAll('img').length, 0);
-    });
+    // 1 行目（NEAR）と 2 行目（MATCHES_ACTIVE・purposeColumnAbsent）を、
+    // それぞれ 1 行ずつ確かめる。
+    const worlds = [
+      mounted({verdict: 'NEAR', purchaseOnly: true,
+        nearest: [{formatName: '架空の近い形式', gapText: '幅が違います'}]}),
+      mounted({verdict: 'MATCHES_ACTIVE', purchaseOnly: true, purposeColumnAbsent: true,
+        matched: {formatId: 'fictional_active', formatName: '架空の登録済み形式', sheetName: '明細'}})
+    ];
+    for (const world of worlds) {
+      for (const property of ['innerHTML', 'outerHTML', 'innerText'])
+        Object.defineProperty(world.Node.prototype, property,
+          {set() { assert.fail('文字の代入は textContent を使う'); }});
+      world.ui.renderFormatPanel();
+      const rendered = lines(world);
+      assert.equal(rendered.length, 1);
+      rendered.forEach((node) => {
+        assert.equal(node.children.length, 1);
+        assert.equal(node.firstChild.tagName, '#TEXT');
+        assert.equal(node.querySelectorAll('img').length, 0);
+      });
+    }
   });
 };

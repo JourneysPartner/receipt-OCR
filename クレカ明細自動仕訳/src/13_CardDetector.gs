@@ -719,17 +719,21 @@ function purposeAbsentKeywordRule_(keywordRule) {
       var condition = conditions[index];
       if (!condition || !Array.isArray(condition.keywords) ||
           !Number.isInteger(condition.minMatch)) return null;
+      var removed = 0;
       var words = condition.keywords.filter(function(word) {
-        return normalizeMerchant(String(word)) !== purposeWord;
+        if (normalizeMerchant(String(word)) !== purposeWord) return true;
+        removed += 1;
+        return false;
       });
       if (!words.length) {
         if (kind === 'allOf') return null;
         continue;
       }
-      output.push(Object.assign({}, condition, {
-        keywords: words,
-        minMatch: Math.min(condition.minMatch, words.length)
-      }));
+      // 語を除いた条件だけ `minMatch` を下げる。除いていない条件の
+      // `minMatch` は元のまま写す（条件ごとの要求を勝手に緩めない）。
+      var next = Object.assign({}, condition, {keywords: words});
+      if (removed > 0) next.minMatch = Math.min(condition.minMatch, words.length);
+      output.push(next);
     }
     return output;
   }
@@ -768,6 +772,24 @@ function purposeAbsentVariant_(def) {
   if (def.sectionBreakRule) return null;
   var keywordRule = purposeAbsentKeywordRule_(def.keywordRule);
   if (!keywordRule) return null;
+  // 判定の語が少ない形式では予備を作らない。`使用用途` を除いた後の語が
+  // 3 語未満（`様` だけの形式など）だと、用途の列を外した形が何にでも当たり、
+  // 別のカードの明細を黙って読んでしまう。
+  var distinct = Object.create(null);
+  var wordCount = 0;
+  ['allOf', 'anyOf'].forEach(function(kind) {
+    var conditions = keywordRule[kind];
+    if (!Array.isArray(conditions)) return;
+    conditions.forEach(function(condition) {
+      condition.keywords.forEach(function(word) {
+        var normalized = normalizeMerchant(String(word));
+        if (!normalized || distinct[normalized]) return;
+        distinct[normalized] = true;
+        wordCount += 1;
+      });
+    });
+  });
+  if (wordCount < 3) return null;
   var narrowed = profile.maxColumns - 1;
   return Object.assign({}, def, {
     purposeColumn: null,

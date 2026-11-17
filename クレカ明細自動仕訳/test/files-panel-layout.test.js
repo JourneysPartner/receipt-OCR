@@ -90,6 +90,8 @@ module.exports = ({test, assert}) => {
       assert.ok(declarations.includes(column + ';'), selector + ': ' + column);
       assert.ok(declarations.includes(row + ';'), selector + ': ' + row);
     }
+    assert.match(styleBlock(narrow, '.workspace'), /grid-template-columns: 220px minmax\(340px, 1fr\);/);
+    assert.match(styleBlock(narrow, '.workspace'), /grid-template-rows: auto auto 1fr;/);
     assert.match(styleBlock(narrow, '.panel.files'), /grid-column: 1 \/ -1; grid-row: 2;/);
     assert.match(styleBlock(narrow, '.panel.reviews'), /grid-column: 1 \/ -1; grid-row: 3;/);
   });
