@@ -90,11 +90,16 @@
     .workspace {
       display: grid;
       grid-template-columns: minmax(210px, .72fr) minmax(360px, 1.25fr) minmax(500px, 1.7fr);
+      grid-template-rows: auto 1fr;
       gap: 12px;
       padding: 12px 22px 24px;
       min-height: calc(100vh - 165px);
     }
     .steps[hidden], .workspace[hidden] { display: none; }
+    .panel.customers { grid-column: 1; grid-row: 1 / span 2; }
+    .panel.drive { grid-column: 2; grid-row: 1 / span 2; }
+    .panel.files { grid-column: 3; grid-row: 1; }
+    .panel.reviews { grid-column: 3; grid-row: 2; }
     .panel {
       min-width: 0;
       border: 1px solid var(--line);
@@ -279,7 +284,10 @@
     @media (max-width: 1120px) {
       body { min-width: 760px; }
       .workspace { grid-template-columns: 220px minmax(340px, 1fr); }
-      .panel.reviews { grid-column: 1 / -1; }
+      .panel.customers { grid-column: 1; grid-row: 1; }
+      .panel.drive { grid-column: 2; grid-row: 1; }
+      .panel.files { grid-column: 1 / -1; grid-row: 2; }
+      .panel.reviews { grid-column: 1 / -1; grid-row: 3; }
     }
   </style>
 </head>
@@ -328,7 +336,15 @@
         <div id="drive-content" hidden>
           <h3 class="subheading">カードフォルダ</h3>
           <div id="folder-list" class="folder-list"></div>
-          <h3 class="subheading">ファイル一覧</h3>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel files" aria-labelledby="files-heading">
+      <div class="panel-header"><h2 id="files-heading">ファイル一覧</h2></div>
+      <div class="panel-body">
+        <div id="files-empty" class="empty">左の一覧から顧客を選んでください。</div>
+        <div id="files-content" hidden>
           <div id="file-list"></div>
           <div id="import-progress" class="status-line" aria-live="polite">
             <span id="import-progress-label"></span><span id="import-progress-arrows" class="progress-arrows" aria-hidden="true" hidden><span>→</span><span>→</span><span>→</span></span><span id="import-progress-value"></span>
@@ -1041,6 +1057,7 @@
     [
       'actor', 'version', 'notice', 'customer-search', 'customer-count', 'customer-list',
       'selected-customer-name', 'drive-empty', 'drive-content', 'folder-list', 'file-list', 'destination-list',
+      'files-empty', 'files-content',
       'import-progress', 'import-progress-label', 'import-progress-arrows',
       'import-progress-value', 'import-progress-hint', 'import-disabled-reason', 'import-button', 'review-total',
       'review-window', 'review-empty', 'review-content', 'other-reviews', 'review-table',
@@ -2410,6 +2427,8 @@
       el['selected-customer-name'].textContent = hasCustomer ? customer.customerName : '';
       el['drive-empty'].hidden = hasCustomer;
       el['drive-content'].hidden = !hasCustomer;
+      el['files-empty'].hidden = hasCustomer;
+      el['files-content'].hidden = !hasCustomer;
       el['review-empty'].hidden = hasCustomer;
       el['review-content'].hidden = !hasCustomer;
       el['final-area'].hidden = !hasCustomer;
@@ -4771,9 +4790,13 @@
       }
       formatAppendLine(body, d.verdict === 'MATCHES_ACTIVE' || d.verdict === 'AMBIGUOUS' ?
         d.fileName : d.fileName + ' ／ ' + (d.sheetName || '') + ' ／ ' + (d.width || '') + ' 列');
+      if (d.purchaseOnly)
+        formatAppendLine(body, '「仕入れ専用」のファイルです。使用用途の列は選ばなくても登録できます。取り込むと全行の使用用途が「仕入れ」になります。');
       if (d.verdict === 'MATCHES_ACTIVE') {
         formatAppendLine(body, 'このファイルは、登録済みの形式「' + d.matched.formatName +
           '」で読めます（止まった後に形式が足されたか、判定が直りました）。');
+        if (d.purposeColumnAbsent)
+          formatAppendLine(body, '「仕入れ専用」のファイルなので、使用用途の列が無くても読めます。取り込むと全行の使用用途が「仕入れ」になります。');
         body.appendChild(formatButton('登録済みの形式で再検査する', function() {
           requeueFormat([d.fileId]);
         }, true));

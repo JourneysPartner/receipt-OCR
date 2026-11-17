@@ -4099,11 +4099,17 @@ module.exports = ({test, assert, gas}) => {
     assert.equal((html.match(/id="destination-list"/g) || []).length, 1);
     assert.doesNotMatch(drive[0], /id="destination-list"/);
   });
-  test('move 3: drive folders files progress and import keep their order', () => {
-    const drive = /<section class="panel drive"[\s\S]*?(?=<section class="panel|<\/main>)/.exec(dlMoveHtml());
+  test('move 3: folders stay in the drive panel and files, progress and import move to the files panel', () => {
+    const html = dlMoveHtml();
+    const drive = /<section class="panel drive"[\s\S]*?(?=<section class="panel|<\/main>)/.exec(html);
     assert.ok(drive);
-    const positions = ['folder-list', 'file-list', 'import-progress', 'import-button']
-      .map((id) => drive[0].indexOf('id="' + id + '"'));
+    assert.ok(drive[0].indexOf('id="folder-list"') >= 0);
+    for (const id of ['file-list', 'import-progress', 'import-button'])
+      assert.equal(drive[0].indexOf('id="' + id + '"'), -1, id);
+    const files = /<section class="panel files"[\s\S]*?(?=<section class="panel|<\/main>)/.exec(html);
+    assert.ok(files);
+    const positions = ['file-list', 'import-progress', 'import-button']
+      .map((id) => files[0].indexOf('id="' + id + '"'));
     assert.ok(positions.every((position) => position >= 0));
     for (let i = 1; i < positions.length; i++) assert.ok(positions[i - 1] < positions[i]);
   });
