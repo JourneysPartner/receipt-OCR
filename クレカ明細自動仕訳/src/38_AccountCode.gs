@@ -30,6 +30,27 @@ function usageWordKey_(value) {
   return partnerNameKey_(value).replace(/\s+/g, '');
 }
 
+/**
+ * 店名に当たる規則を返す（`work/spec_account_by_merchant.md` §3.1。純粋な
+ * 関数）。
+ *
+ * 店名の全体が規則の店名と同じ鍵のときだけ当たる（含む・前方一致では当て
+ * ない ── 「ｍａｊｉｃａチャージ返金」のような別の取引まで同じ科目にしない）。
+ * 当たらなければ null。
+ *
+ * @param {*} merchant 取引の店名（K 列の元店名）
+ * @return {?Object} `MERCHANT_ACCOUNT_RULES_` の規則
+ */
+function merchantAccountRule_(merchant) {
+  var key = usageWordKey_(merchant);
+  if (!key) return null;
+  var rules = MERCHANT_ACCOUNT_RULES_ || [];
+  for (var index = 0; index < rules.length; index += 1) {
+    if (usageWordKey_(rules[index].merchant) === key) return rules[index];
+  }
+  return null;
+}
+
 /** マスターの科目コード。数と数字の文字だけを整数として読む。 */
 function accountCodeValue_(value) {
   if (typeof value === 'number') {
@@ -590,4 +611,46 @@ function resolveAccountCode_(purpose, customer, masters, sheetList) {
   }
   return {status: ACCOUNT_RESOLUTION_STATUS_.MATCHED, code: code,
     word: finalists[0].row.word};
+}
+
+/**
+ * 店名の規則から相手科目コードを決める（`work/spec_account_by_merchant.md`
+ * §3.2）。用途の言葉は見ない。守りは `resolveAccountCode_` の手順 8〜10 と
+ * 同じである。
+ *
+ * @param {!Object} rule `merchantAccountRule_` の戻り値
+ * @param {!Object} customer 顧客マスターの行
+ * @param {!Object} masters {accounts, words}
+ * @param {?Map<number,string>|?Object} sheetList 転記シートの科目一覧
+ * @return {{status:string, code:?number, word:?string, name:?string}}
+ */
+function resolveMerchantAccountCode_(rule, customer, masters, sheetList) {
+  var status = ACCOUNT_RESOLUTION_STATUS_;
+  if (!rule || !rule.codes) return {status: status.INVALID_ENTRY, code: null, word: null};
+  var category = customer && customer.customerCategory === CUSTOMER_CATEGORY.INDIVIDUAL ?
+    'INDIVIDUAL' : 'CORPORATE';
+  var code = rule.codes[category];
+  if (!Number.isInteger(code)) {
+    return {status: status.INVALID_ENTRY, code: null, word: null};
+  }
+  // 勘定科目一覧に、有効で、顧客の区分に合うそのコードの行がちょうど 1 つ
+  // あること（個人に法人だけの科目を書かない）。
+  var customerCategory = accountCustomerCategory_(customer);
+  var accounts = masters && masters.accounts || [];
+  var matches = accounts.filter(function(row) {
+    return row.code === code && row.valid && row.active &&
+      accountCategoryFitsCustomer_(row.category, customerCategory);
+  });
+  if (matches.length !== 1) {
+    return {status: status.INVALID_ENTRY, code: null, word: null};
+  }
+  var verdict = accountListVerdict_(sheetList, code, matches[0].name);
+  if (verdict.status === status.NEEDS_LIST_ENTRY) {
+    return {status: status.NEEDS_LIST_ENTRY, code: code, word: rule.merchant,
+      name: matches[0].name};
+  }
+  if (verdict.status !== status.MATCHED) {
+    return {status: status.NOT_IN_SHEET_LIST, code: null, word: null};
+  }
+  return {status: status.MATCHED, code: code, word: rule.merchant};
 }

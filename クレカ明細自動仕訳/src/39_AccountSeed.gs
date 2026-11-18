@@ -50,6 +50,22 @@ var ACCOUNT_SEED_ACCOUNTS_ = Object.freeze([
   {code: 362, name: '役員借入金', category: '法人だけ'}
 ]);
 
+/**
+ * 店名で相手科目コード（C 列）を決める規則（`work/spec_account_by_merchant.md`
+ * §2）。凍結した読み取り専用の材料である。
+ *
+ * `merchant` は店名の全体（§3.1 の鍵で同じときだけ当たる）。`codes` は顧客の
+ * 区分ごとのコード。`withoutPartner` が true なら取引先を立てない。
+ * 鍵が同じ規則を 2 つ以上置かない（テスト mca 9 が見る）。
+ */
+var MERCHANT_ACCOUNT_RULES_ = Object.freeze([
+  Object.freeze({
+    merchant: 'ｍａｊｉｃａチャージ',
+    codes: Object.freeze({INDIVIDUAL: 294, CORPORATE: 362}),
+    withoutPartner: true
+  })
+]);
+
 var ACCOUNT_SEED_WORDS_ = Object.freeze([
   // 共通・優先なし（66 行）
   {word: '仕入', code: 712, category: '共通', priority: false},
