@@ -128,6 +128,42 @@ const TAX_SMALL_AMOUNT_ = Object.freeze({
   limit: 10000
 });
 
+/**
+ * G を空にできる顧客か（§2.3 の 1・§7。純粋な関数）。
+ *
+ * `columnMapping.G` が 1 以上の整数で、`rowScanExcludedColumns`（AL 列）に
+ * 入っていないことだけを見る。表の有る無し・C の有る無しには関係しない。
+ *
+ * @param {*} customer
+ * @return {boolean}
+ */
+function taxColumnClearable_(customer) {
+  var mapping = customer && customer.columnMapping ? customer.columnMapping : null;
+  if (!mapping) return false;
+  var column = Number(mapping.G);
+  if (!Number.isInteger(column) || column < 1) return false;
+  var excluded = (customer.rowScanExcludedColumns || []).map(Number);
+  return excluded.indexOf(column) < 0;
+}
+
+/**
+ * 本仕様が効く顧客か（§2.3。純粋な関数）。
+ *
+ * G を空にできる（§2.3 の 1）うえで、`columnMapping.C` が 1 以上の整数で
+ * `accountListRange` が空でない（§2.3 の 2）こと。マスターの 2 つの表の
+ * 有る無しはここでは見ない（表が無ければ取込は今のままに動く）。
+ *
+ * @param {*} customer
+ * @return {boolean}
+ */
+function taxCategoryConfigured_(customer) {
+  if (!taxColumnClearable_(customer)) return false;
+  var mapping = customer.columnMapping || {};
+  var codeColumn = Number(mapping.C);
+  if (!Number.isInteger(codeColumn) || codeColumn < 1) return false;
+  return accountTextValue_(customer.accountListRange) !== '';
+}
+
 /** 見出しの比較用。無いセルは `''`。空白は外さない（§4.3）。 */
 function taxHeaderText_(value) {
   return value === undefined || value === null ? '' : String(value);

@@ -141,6 +141,7 @@ function expandTemplateRows(customer, sheet, shortage, templateSourceRow, contex
     customer.columnMapping.M, customer.columnMapping.txId];
   if (customer.columnMapping.L) ownedColumns.push(customer.columnMapping.L);
   if (customer.columnMapping.C) ownedColumns.push(customer.columnMapping.C);
+  if (taxColumnClearable_(customer)) ownedColumns.push(Number(customer.columnMapping.G));
   added.forEach(function(rowNumber) {
     ownedColumns.forEach(function(column) {
       sheet.getRange(rowNumber, column).clearContent();
@@ -161,6 +162,7 @@ function systemOwnedColumnsAreEmpty_(customer, values) {
     customer.columnMapping.K, customer.columnMapping.M, customer.columnMapping.txId];
   if (customer.columnMapping.L) columns.push(customer.columnMapping.L);
   if (customer.columnMapping.C) columns.push(customer.columnMapping.C);
+  if (taxColumnClearable_(customer)) columns.push(Number(customer.columnMapping.G));
   return columns.every(function(column) {
       var value = values[column - 1];
       return value === '' || value === null || value === undefined;
@@ -278,6 +280,7 @@ function clearTransactionRows(customer, rowNumbers, leaseId, fileId) {
       var keys = ['txId', 'b', 'f', 'i', 'k', 'm'];
       if (customer.columnMapping.L) keys.push('l');
       if (customer.columnMapping.C) keys.push('c');
+      if (taxColumnClearable_(customer)) keys.push('g');
       keys.forEach(function(key) {
         data.push({
           range: a1Range_(customer.destinationSheetName, rowNumber, writeColumnNumber_(customer, key), writeColumnNumber_(customer, key)),

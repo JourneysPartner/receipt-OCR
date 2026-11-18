@@ -1357,6 +1357,19 @@
             file.accountCode.missing + ' 行は相手科目コードを入れていません（' +
             accountParts.join('・') + '）。C 列に手で入れてください');
         }
+        if (file.taxCategory && file.taxCategory.missing > 0) {
+          var taxParts = [];
+          if (file.taxCategory.noAccount > 0) taxParts.push('科目が決まっていない ' + file.taxCategory.noAccount + ' 行');
+          if (file.taxCategory.notInTable > 0) taxParts.push('表に無い科目 ' + file.taxCategory.notInTable + ' 行');
+          if (file.taxCategory.words > 0) taxParts.push('決めない用途 ' + file.taxCategory.words + ' 行');
+          if (file.taxCategory.dateAmount > 0) taxParts.push('日付か金額 ' + file.taxCategory.dateAmount + ' 行');
+          if (file.taxCategory.marks > 0) taxParts.push('取引先の印の誤り ' + file.taxCategory.marks + ' 行');
+          if (file.taxCategory.other > 0) taxParts.push('その他 ' + file.taxCategory.other + ' 行');
+          lines.push('【税区分】' + (file.fileName || file.fileId || '') + '：' +
+            file.taxCategory.missing + ' 行は相手税区分を入れていません（' +
+            taxParts.join('・') + '）。G 列は空のままでも freee 取込用は作れます' +
+            '（freee が勘定科目の税区分を使います）');
+        }
         if (file.accountCode && Array.isArray(file.accountCode.listAdded) &&
             file.accountCode.listAdded.length) {
           lines.push('【科目一覧】' + (file.fileName || file.fileId || '') + '：' +

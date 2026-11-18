@@ -1,5 +1,9 @@
 'use strict';
 
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+
 /**
  * 相手税区分（G 列）の第 1 段（`work/spec_tax_category.md` §13 の gt 1・
  * gt 2・gt 3・gt 14）。
@@ -609,5 +613,561 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(none.values.g, undefined);
     const narrowed = call('buildRowWrite', [2, {planned: {g: '対象外'}, columns: ['g']}]);
     assert.deepEqual(plain(narrowed.values), {g: '対象外'});
+  });
+
+  // ================================================================
+  // 2 回目：取込（gt 4・5）・行を空ける（gt 9）・知らせ（gt 10）・
+  // 値を出さない（gt 11）・回数（gt 13）。材料の組み立ては mca（店名で C）・
+  // ac（用途で C）と同じ形にした。値はすべて架空である。
+  // ================================================================
+
+  const blank = (n) => Array(n).fill('');
+  const master = (name) => gas.stubs.getSpreadsheet('master').getSheetByName(name);
+  const destSheet = (id = 'dest1') => gas.stubs.getSpreadsheet(id).getSheetByName('入力用シート');
+  const cell = (row, column, id = 'dest1') => destSheet(id).getRange(row, column).getValue();
+
+  const GT_ACCOUNTS = [
+    [712, '仕入高', '共通'], [852, '消耗品費', '共通'], [843, '通信費', '共通']
+  ];
+
+  function priorityCell(word) {
+    if (word.priority === undefined) return '';
+    return word.priority === true ? true : (word.priority === false ? '' : word.priority);
+  }
+
+  function activeCell(word) {
+    return word.active === undefined ? true : word.active;
+  }
+
+  function setupMaster() {
+    gas.stubs.reset();
+    gas.stubs.createSpreadsheet('master', {sheets: [{name: '仮', values: [['x']]}]});
+    gas.stubs.setActiveSpreadsheet('master');
+    call('setMasterSpreadsheetId', ['master']);
+    call('provisionMasterSheets', []);
+    gas.stubs.createSpreadsheet('txidx', {sheets: []});
+    gas.stubs.createSpreadsheet('snap', {sheets: []});
+    gas.evaluate(`
+      SETTINGS.EXECUTION_TIMEOUT_SECONDS = 300;
+      SETTINGS.SAFETY_MARGIN_SECONDS = 60;
+      SETTINGS.TX_INDEX_SPREADSHEET_ID = 'txidx';
+      SETTINGS.SNAPSHOT_SPREADSHEET_ID = 'snap';
+      SETTINGS.SAMPLE_CORPUS_FOLDER_ID = 'corpus';
+      SETTINGS.PARALLEL_WORK_FOLDER_ID = '';
+      SETTINGS.FAULT_INJECTION = null;
+    `);
+    gas.stubs.setActiveUser('tester@example.com');
+  }
+
+  function addAccounts(accounts) {
+    const sheet = master('勘定科目一覧');
+    accounts.forEach((account) => {
+      const active = account.length > 3 ? account[3] : true;
+      sheet.appendRow([account[0], account[1], account[2], active, '']);
+    });
+  }
+
+  function addWords(words) {
+    const sheet = master('用途科目辞書');
+    words.forEach((word) => sheet.appendRow([word.word, word.code, word.category || '共通',
+      word.customerId || '', priorityCell(word), activeCell(word), '', '', '']));
+  }
+
+  function formatRow() {
+    const row = blank(37);
+    Object.assign(row, {
+      0: 'gt_fake_format', 1: '架空形式', 2: 'active', 3: true, 4: '["csv"]',
+      5: JSON.stringify({allOf: [{maxRow: 1, keywords: ['利用日', '利用店名', '金額', '使用用途'], minMatch: 4}]}),
+      6: 1, 7: 2, 8: 'A', 9: 'B', 10: 'C', 11: 'D',
+      14: JSON.stringify({excludeRowRanges: [{from: 1, to: 1}], excludeWhenDateAndAmountEmpty: true, rules: []}),
+      16: JSON.stringify({sources: [{id: 'fn', kind: 'fileName', pattern: '(20\\d{2})(0[1-9]|1[0-2])',
+        groups: {year: 1, month: 2}, yearDigits: 4, means: 'payment', offsetMonths: 1}]}),
+      17: 'generic', 18: 1, 19: 'tester@example.com', 21: '2026-01-01T00:00:00+09:00',
+      29: 'NEW', 33: '2026-01-01T00:00:00+09:00'
+    });
+    return row;
+  }
+
+  /** [店名, 取引先名] か店名だけ。店名だけのときは架空取引先に当てる。 */
+  function addDictionary(entries) {
+    const sheet = master('共通取引先辞書');
+    entries.forEach((entry, index) => {
+      const merchant = Array.isArray(entry) ? entry[0] : entry;
+      const partner = Array.isArray(entry) ? entry[1] : '架空取引先';
+      const row = blank(18);
+      Object.assign(row, {
+        0: 'GT_DICT_' + index, 1: merchant, 2: call('normalizeMerchant', [merchant]),
+        3: partner, 4: 'exact_original', 5: 1, 9: true, 10: 'tester@example.com',
+        12: '2026-01-01', 13: 1, 14: true, 15: false
+      });
+      sheet.appendRow(row);
+    });
+  }
+
+  /** 税の 2 つのタブ（§4.1・§4.2）。`only` で片方だけ作れる。 */
+  function addTaxTabs(option) {
+    if (!option) return;
+    const spreadsheet = gas.stubs.getSpreadsheet('master');
+    const headers = option.headers || {};
+    if (option.only !== 'flags') {
+      spreadsheet.insertSheet('取引先の税の印', {values: [
+        (headers.marks || MARK_HEADERS).slice()].concat(option.marks || [])});
+    }
+    if (option.only !== 'marks') {
+      spreadsheet.insertSheet('顧客の税の設定', {values: [
+        (headers.flags || FLAG_HEADERS).slice()].concat(option.flags || [])});
+    }
+  }
+
+  function setupWorld(options = {}) {
+    setupMaster();
+    const destinationId = 'dest1';
+    const header = blank(15);
+    Object.assign(header, {1: '利用日', 2: '相手科目コード', 3: '相手勘定科目',
+      5: '取引先', 6: '相手税区分', 8: 'メモ', 10: '摘要', 11: '借方', 12: '貸方', 14: '取引ID'});
+    const values = [blank(15), blank(15), header, Object.assign(blank(15), {0: '区切り'}), blank(15)];
+    const list = options.sheetEntries || [];
+    list.forEach((entry, index) => {
+      values[4 + index] = values[4 + index] || blank(15);
+      const row = values[4 + index];
+      row[16] = entry[0];
+      row[17] = entry[1];
+    });
+    gas.stubs.createSpreadsheet(destinationId, {sheets: [
+      {name: '入力用シート', values: values, maxRows: 30, maxColumns: 30},
+      {name: '取引先一覧', values: [['元店名', '取引先名']]}
+    ]});
+    gas.stubs.createFolder('parent', {fileIds: [destinationId]});
+    gas.stubs.createFolder('folder1', {fileIds: []});
+    master('カード形式マスター').appendRow(formatRow());
+    if (options.accounts !== false) addAccounts(options.accounts || GT_ACCOUNTS);
+    if (options.words) addWords(options.words);
+    if (options.dictionary) addDictionary(options.dictionary);
+    const columns = {B: 2, F: 6, I: 9, K: 11, L: 12, M: 13, txId: 15};
+    if (options.gColumn !== false) columns.G = 7;
+    if (options.accountColumn !== false) columns.C = 3;
+    const config = {
+      customerId: options.customerId || 'C001', customerName: '架空顧客',
+      sourceFolderId: 'folder1', destinationSpreadsheetId: destinationId,
+      destinationSheetName: '入力用シート', partnerListSheetName: '取引先一覧',
+      headerRow: 3, dataStartRow: 5, rowScanLastColumn: 15,
+      customerCategory: options.category || 'CORPORATE',
+      columns: columns,
+      reviewers: 'tester@example.com', admins: 'tester@example.com'
+    };
+    if (options.accountColumn !== false) config.accountListRange = options.listRange || 'Q5:R12';
+    if (options.excludedColumns) config.rowScanExcludedColumns = options.excludedColumns;
+    if (options.cashbackMerchants) config.cashbackMerchants = options.cashbackMerchants;
+    call('registerTestCustomer', [config]);
+    const registered = call('getCustomerById', [config.customerId]);
+    addTaxTabs(options.taxTabs);
+    const fileIds = [];
+    function addFile(fileId, rows, name = '架空カード202610.csv') {
+      const csv = ['利用日,利用店名,金額,使用用途'].concat(rows).join('\n');
+      gas.stubs.createFile(fileId, {name: name, bytes: Buffer.from(csv, 'utf8'),
+        contentType: 'text/csv', lastUpdated: new Date(Date.now() - 3600000),
+        createdTime: '2026-08-01T00:00:00Z'});
+      fileIds.push(fileId);
+      gas.stubs.createFolder('folder1', {fileIds: fileIds.slice()});
+    }
+    function lease(fileId = 'lease-file') {
+      gas.stubs.createFile(fileId, {name: '架空.csv', data: 'fake'});
+      call('createOrUpdateProcessLog', ['RUN_LEASE', registered, {id: fileId, name: '架空.csv',
+        binaryHash: 'b'.repeat(64), contentHash: 'c'.repeat(64), hashVersion: '3', state: 'WRITING'}]);
+      return call('acquireLease', [registered.customerId, fileId, 'RUN_LEASE',
+        'tester@example.com', 'PROCESS']);
+    }
+    return {customer: registered, destinationId: destinationId, addFile: addFile, lease: lease};
+  }
+
+  function importReport(world) {
+    const report = plain(call('runImport', [{}]));
+    assert.equal(report.stoppedBy, null, JSON.stringify(report));
+    return report;
+  }
+
+  function transactionsFor(fileId) {
+    return call('getTransactionsForFile_', [fileId])
+      .sort((a, b) => a.sourceRow - b.sourceRow);
+  }
+
+  /** G への書込レンジ（行番号）を集める。 */
+  function captureTaxWrites(fn) {
+    const rows = [];
+    gas.stubs.onValuesBatchUpdate((request) => {
+      (request.data || []).forEach((data) => {
+        const match = /!([A-Z]+)(\d+):([A-Z]+)(\d+)$/.exec(String(data.range));
+        if (!match || match[1] !== 'G') return;
+        for (let row = Number(match[2]); row <= Number(match[4]); row += 1) rows.push(row);
+      });
+    });
+    try { return {result: fn(), rows: rows.sort((a, b) => a - b)}; }
+    finally { gas.stubs.onValuesBatchUpdate(null); }
+  }
+
+  /** 取引ログへ渡す直前の `planned.g`（決まらない行が `undefined` か）を見る。 */
+  function capturePlannedTax(fn) {
+    const seen = [];
+    const real = gas.context.registerPrepared;
+    gas.context.registerPrepared = function(txs) {
+      (txs || []).forEach((tx) => {
+        seen.push(tx && tx.planned ? tx.planned.g : undefined);
+      });
+      return real.apply(this, arguments);
+    };
+    try { return {result: fn(), g: seen}; }
+    finally { gas.context.registerPrepared = real; }
+  }
+
+  /** 税の 2 つのタブを、こちらのコードが `getSheetByName` で見た回数を数える。 */
+  function countTaxSheetLookups(fn) {
+    const spreadsheet = gas.stubs.getSpreadsheet('master');
+    const real = spreadsheet.getSheetByName.bind(spreadsheet);
+    let count = 0;
+    spreadsheet.getSheetByName = function(name) {
+      // スタブが範囲を解くときにも `getSheetByName` を通る。数えるのは
+      // こちらの `taxTableSheetsForRun_` から見た分だけにする。
+      if ((name === '取引先の税の印' || name === '顧客の税の設定') &&
+          String(new Error().stack).indexOf('taxTableSheetsForRun_') >= 0) {
+        count += 1;
+      }
+      return real(name);
+    };
+    try { return {result: fn(), count: count}; }
+    finally { spreadsheet.getSheetByName = real; }
+  }
+
+  /** `81` の `customerFixNoticeLines` を、既存の【科目コード】のテストと同じ形で呼ぶ。 */
+  function noticeLines(files) {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', '81_WebAppUi.html'), 'utf8');
+    const script = /<script>([\s\S]*?)<\/script>/.exec(source)[1];
+    const needle = "    el['customer-search'].addEventListener";
+    assert.ok(script.includes(needle));
+    const sandbox = {document: {getElementById() { return {}; }}};
+    vm.runInNewContext(script.replace(needle,
+      `    globalThis.probe = customerFixNoticeLines(${JSON.stringify(files)}); return;\n` + needle),
+    sandbox);
+    return plain(sandbox.probe);
+  }
+
+  // ---------------- gt 4: 取込で書く ----------------
+
+  test('gt 4: 取込で決まる行だけ G に書き、決まらない行は書かず、返金は対象外（足した C でも決まる）', () => {
+    const world = setupWorld({
+      accounts: GT_ACCOUNTS,
+      sheetEntries: [[712, '仕入高']],
+      dictionary: [['架空店舗', '架空店舗取引先'], ['架空フリマ', '架空フリマ取引先']],
+      words: [{word: '仕入', code: 712}, {word: '消耗品', code: 852}, {word: '通信費', code: 843}],
+      cashbackMerchants: ['架空返金店'],
+      taxTabs: {marks: [markRow('架空フリマ取引先', 'フリマ')]}
+    });
+    world.addFile('fileA', [
+      '2026/10/10,架空店舗,1000,消耗品',
+      '2026/10/11,架空フリマ,12000,仕入',
+      '2026/10/12,架空店舗,3000,謎用途',
+      '2026/10/13,架空返金店,1000,仕入',
+      '2026/10/14,架空未登録店,2000,消耗品',
+      '2026/10/15,架空店舗,4000,通信費'
+    ]);
+    const captured = captureTaxWrites(() => capturePlannedTax(() => importReport(world)));
+    const file = captured.result.result.customers[0].files[0];
+    assert.equal(file.outcome, 'WRITTEN', JSON.stringify(file));
+
+    // 決まらない行の planned.g は `undefined`（`''`・`null` にしない。§10.2）。
+    assert.deepEqual(Array.from(captured.result.g, (value) => value),
+      ['課対仕入10%', '課対仕入（控70）10%', undefined, '対象外',
+        '課対仕入10%', '課対仕入10%']);
+
+    // 決まる行だけ G に名前が入る。決まらない行（3 行目）の G は空のまま。
+    assert.equal(cell(5, 7), '課対仕入10%', '消耗品は 10%');
+    assert.equal(cell(6, 7), '課対仕入（控70）10%', 'フリマの 1 万円以上');
+    assert.equal(cell(7, 7), '', 'C が決まらない行の G には触らない');
+    assert.equal(cell(8, 7), '対象外', '返金の行');
+    assert.equal(cell(9, 7), '課対仕入10%', '要確認の行も印なしで入る');
+    assert.equal(cell(10, 7), '課対仕入10%', '一覧に足して C が決まった行');
+
+    // 決まらない行には G の書込要求そのものが無い（空を書かない）。
+    assert.deepEqual(captured.rows, [5, 6, 8, 9, 10]);
+    assert.equal(captured.rows.indexOf(7), -1);
+
+    const txs = transactionsFor('fileA');
+    assert.equal(txs.length, 6);
+    assert.deepEqual(Array.from(txs, (tx) => tx.planned.g),
+      ['課対仕入10%', '課対仕入（控70）10%', undefined, '対象外',
+        '課対仕入10%', '課対仕入10%']);
+    assert.equal(txs[2].verified.g, undefined);
+    assert.equal(txs[1].verified.g, '課対仕入（控70）10%');
+    assert.equal(txs[5].planned.c, 843, '一覧に足した C で G を決める');
+    assert.equal(txs[4].partnerResolutionStatus, 'UNRESOLVED');
+    assert.equal(txs[2].taxResolution, undefined, 'taxResolution は取引ログに出さない');
+  });
+
+  // ---------------- gt 5: 効かない顧客 ----------------
+
+  test('gt 5: §2.3 でない顧客・表が無いときの取込は今と同じ', () => {
+    function taxCase(options) {
+      const world = setupWorld(Object.assign({
+        accounts: GT_ACCOUNTS,
+        sheetEntries: [[712, '仕入高']],
+        dictionary: [['架空店舗', '架空店舗取引先']],
+        words: [{word: '仕入', code: 712}],
+        cashbackMerchants: ['架空返金店']
+      }, options));
+      world.addFile('fileA', [
+        '2026/10/10,架空返金店,1000,仕入',
+        '2026/10/11,架空店舗,2000,仕入'
+      ]);
+      gas.stubs.resetApiCallCounts();
+      const counted = countTaxSheetLookups(() => captureTaxWrites(() => importReport(world)));
+      return {
+        file: counted.result.result.customers[0].files[0],
+        rows: counted.result.rows,
+        counts: gas.stubs.getApiCallCounts(),
+        lookups: counted.count,
+        refund: cell(5, 7),
+        other: cell(6, 7)
+      };
+    }
+
+    const noG = taxCase({gColumn: false});
+    const inExcluded = taxCase({excludedColumns: [7]});
+    const noC = taxCase({accountColumn: false});
+    const noTables = taxCase({});
+    const wrongHeaders = taxCase({taxTabs: {headers: {
+      marks: ['取引先名', '印', '顧客ID', '有効', '登録日時', '登録者', 'メモ ']}}});
+    const oneTab = taxCase({taxTabs: {only: 'marks',
+      marks: [markRow('架空店舗取引先', 'フリマ')]}});
+
+    // G の列が無ければ G を書かない。G があっても §2.3 でなければ今の作り
+    // （返金の行だけ「対象外」）のまま。
+    assert.deepEqual(noG.rows, []);
+    assert.equal(noG.refund, '');
+    assert.equal(noG.other, '');
+    [inExcluded, noC, noTables, wrongHeaders, oneTab].forEach((result) => {
+      assert.deepEqual(result.rows, [5], '返金の行だけ');
+      assert.equal(result.refund, '対象外');
+      assert.equal(result.other, '');
+      assert.equal(result.file.outcome, 'WRITTEN');
+      assert.equal(result.file.taxCategory, undefined, '表が無い・効かない顧客は知らせを出さない');
+    });
+
+    // 書込・読取の回数は今と同じ（同じ C の有無どうしで比べる）。
+    [noTables, wrongHeaders, oneTab].forEach((result) => {
+      assert.equal(result.counts.batchGet, inExcluded.counts.batchGet,
+        JSON.stringify([inExcluded, result]));
+      assert.equal(result.counts.batchUpdate, inExcluded.counts.batchUpdate);
+      assert.equal(result.file.reads, inExcluded.file.reads);
+    });
+    assert.equal(noTables.counts.batchGet, noG.counts.batchGet);
+    assert.equal(noTables.counts.batchUpdate, noG.counts.batchUpdate);
+
+    // タブを見るのは §2.3 の顧客だけ（表の有無を決めるため）。効かない顧客は見ない。
+    assert.equal(noG.lookups, 0);
+    assert.equal(inExcluded.lookups, 0);
+    assert.equal(noC.lookups, 0);
+    assert.equal(noTables.lookups, 2, '無いタブを範囲に入れないため、先に 2 つ見る');
+    assert.equal(wrongHeaders.lookups, 2);
+    assert.equal(oneTab.lookups, 2);
+  });
+
+  // ---------------- gt 9: 行を空ける ----------------
+
+  test('gt 9: 行を空ける 3 か所で G も空にし、G が AL にある顧客では触らない', () => {
+    const world = setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [[712, '仕入高']]});
+    const lease = world.lease();
+    const sheet = destSheet();
+
+    // 1. clearTransactionRows。取消の後に決まらない取引が入っても前の G は残らない。
+    sheet.getRange(5, 7).setValue('対象外');
+    sheet.getRange(5, 15).setValue('GT_TX_9');
+    call('clearTransactionRows', [world.customer, [5], lease, 'lease-file']);
+    assert.equal(cell(5, 7), '');
+    const afterClear = call('buildRowWrite', [5, {fullTxId: 'GT_TX_9B',
+      planned: {b: '2026-10-11', f: '', i: '謎用途', k: '架空店舗', m: 1200}}]);
+    call('writeTransactionRows', [world.customer, [afterClear], lease, 'lease-file']);
+    assert.equal(cell(5, 7), '');
+    assert.equal(afterClear.values.g, undefined);
+
+    // 2. 複製元の判定。G に値があれば使用中と見なす。
+    const values = sheet.getRange(4, 1, 1, 15).getValues()[0];
+    values[6] = '対象外';
+    assert.equal(call('systemOwnedColumnsAreEmpty_', [world.customer, values]), false);
+    values[6] = '';
+    assert.equal(call('systemOwnedColumnsAreEmpty_', [world.customer, values]), true);
+
+    // 3. 行の追加。複製した行の G を空にする。
+    const realGet = sheet.getRange.bind(sheet);
+    sheet.getRange = function(...args) {
+      const range = realGet(...args);
+      if (args[0] === 4 && args[1] === 1 && args[3] === 15) {
+        const copy = range.copyTo.bind(range);
+        range.copyTo = (target) => {
+          const result = copy(target);
+          sheet.getRange(target.getRow(), 7).setValue('対象外');
+          return result;
+        };
+      }
+      return range;
+    };
+    let added;
+    try {
+      const index = call('buildIndex', [world.customer]);
+      added = call('expandTemplateRows', [world.customer, sheet, 1, 4,
+        {actual: sheet.getMaxRows(), index: index}]);
+    } finally { sheet.getRange = realGet; }
+    assert.equal(added.length, 1);
+    assert.equal(cell(added[0], 7), '');
+    assert.equal(cell(added[0], 1), '区切り');
+
+    // G が AL にある顧客では、3 か所とも G に触らない。
+    const al = setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [[712, '仕入高']],
+      excludedColumns: [7]});
+    const alLease = al.lease('lease-al');
+    const alSheet = destSheet();
+    alSheet.getRange(5, 7).setValue('対象外');
+    alSheet.getRange(5, 15).setValue('GT_TX_9C');
+    call('clearTransactionRows', [al.customer, [5], alLease, 'lease-al']);
+    assert.equal(cell(5, 7), '対象外');
+    const alValues = alSheet.getRange(4, 1, 1, 15).getValues()[0];
+    alValues[6] = '対象外';
+    assert.equal(call('systemOwnedColumnsAreEmpty_', [al.customer, alValues]), true);
+
+    const realAlGet = alSheet.getRange.bind(alSheet);
+    alSheet.getRange = function(...args) {
+      const range = realAlGet(...args);
+      if (args[0] === 4 && args[1] === 1 && args[3] === 15) {
+        const copy = range.copyTo.bind(range);
+        range.copyTo = (target) => {
+          const result = copy(target);
+          alSheet.getRange(target.getRow(), 7).setValue('対象外');
+          return result;
+        };
+      }
+      return range;
+    };
+    let alAdded;
+    try {
+      alAdded = call('expandTemplateRows', [al.customer, alSheet, 1, 4,
+        {actual: alSheet.getMaxRows(), index: call('buildIndex', [al.customer])}]);
+    } finally { alSheet.getRange = realAlGet; }
+    assert.equal(alAdded.length, 1);
+    assert.equal(cell(alAdded[0], 7), '対象外');
+  });
+
+  // ---------------- gt 10: 知らせ ----------------
+
+  test('gt 10: 取込の知らせの件数と 1 行（0 の分は出さず、表が無ければ出さない）', () => {
+    const world = setupWorld({
+      accounts: GT_ACCOUNTS.concat([[9999, '架空科目', '共通']]),
+      sheetEntries: [[712, '仕入高'], [9999, '架空科目']],
+      dictionary: [['架空店舗', '架空店舗取引先'], ['架空フリマ', '架空フリマ取引先']],
+      words: [{word: '仕入', code: 712}, {word: '消耗品', code: 852},
+        {word: '謎語', code: 9999}, {word: '消費税', code: 712}],
+      taxTabs: {marks: [markRow('架空フリマ取引先', '○')]}
+    });
+    world.addFile('fileA', [
+      '2026/10/10,架空店舗,1000,まったく謎',
+      '2026/10/11,架空フリマ,2000,仕入',
+      '2026/10/12,架空店舗,3000,消費税',
+      '2026/10/13,架空店舗,4000,謎語'
+    ]);
+    const report = importReport(world);
+    const file = report.customers[0].files[0];
+    assert.equal(file.outcome, 'WRITTEN', JSON.stringify(file));
+    assert.deepEqual(file.taxCategory, {missing: 4, noAccount: 1, notInTable: 1,
+      words: 1, dateAmount: 0, marks: 1, other: 0});
+
+    assert.deepEqual(noticeLines([{fileName: '架空.csv', taxCategory: file.taxCategory}]),
+      ['【税区分】架空.csv：4 行は相手税区分を入れていません（科目が決まっていない 1 行・' +
+        '表に無い科目 1 行・決めない用途 1 行・取引先の印の誤り 1 行）。' +
+        'G 列は空のままでも freee 取込用は作れます（freee が勘定科目の税区分を使います）']);
+
+    // 【科目コード】のすぐ後ろに出る。0 の分は出さない。
+    assert.deepEqual(noticeLines([{fileName: '架空.csv',
+      accountCode: {missing: 1, noMatch: 1, ambiguous: 0, invalidEntry: 0, notInSheetList: 0},
+      taxCategory: {missing: 6, noAccount: 1, notInTable: 1, words: 1,
+        dateAmount: 1, marks: 1, other: 1}}]), [
+      '【科目コード】架空.csv：1 行は相手科目コードを入れていません（辞書に無い用途 1 行）。C 列に手で入れてください',
+      '【税区分】架空.csv：6 行は相手税区分を入れていません（科目が決まっていない 1 行・' +
+        '表に無い科目 1 行・決めない用途 1 行・日付か金額 1 行・取引先の印の誤り 1 行・' +
+        'その他 1 行）。G 列は空のままでも freee 取込用は作れます（freee が勘定科目の税区分を使います）'
+    ]);
+
+    // 0 件・項目が無いときは行を出さない。
+    assert.deepEqual(noticeLines([{fileName: '架空.csv',
+      taxCategory: {missing: 0, noAccount: 0, notInTable: 0, words: 0,
+        dateAmount: 0, marks: 0, other: 0}}]), []);
+    assert.deepEqual(noticeLines([{fileName: '架空.csv'}]), []);
+
+    // 表が無いときは outcome に taxCategory を入れない（知らせも出ない）。
+    const noTables = setupWorld({
+      accounts: GT_ACCOUNTS, sheetEntries: [[712, '仕入高']],
+      dictionary: [['架空店舗', '架空店舗取引先']], words: [{word: '仕入', code: 712}]
+    });
+    noTables.addFile('fileA', ['2026/10/10,架空店舗,1000,謎用途']);
+    const noTablesFile = importReport(noTables).customers[0].files[0];
+    assert.equal(noTablesFile.outcome, 'WRITTEN');
+    assert.equal(noTablesFile.taxCategory, undefined);
+  });
+
+  // ---------------- gt 11: 値を出さない ----------------
+
+  test('gt 11: 用途・店名・金額・取引先名を outcome にもログにも出さない', () => {
+    const world = setupWorld({
+      accounts: GT_ACCOUNTS,
+      sheetEntries: [[712, '仕入高']],
+      dictionary: [['架空秘密店', '架空秘密取引先']],
+      words: [{word: '架空秘密用途', code: 712}],
+      taxTabs: {marks: [markRow('架空秘密取引先', '○')]}
+    });
+    world.addFile('fileA', ['2026/10/10,架空秘密店,9876543,架空秘密用途']);
+    const report = importReport(world);
+    const file = report.customers[0].files[0];
+    assert.equal(file.outcome, 'WRITTEN', JSON.stringify(file));
+    assert.equal(file.taxCategory.missing, 1, '印の誤りで決まらない');
+    const serialized = JSON.stringify(report);
+    for (const secret of ['架空秘密用途', '架空秘密店', '架空秘密取引先', '9876543']) {
+      assert.ok(serialized.indexOf(secret) < 0, secret + ' must not appear in outcome');
+      assert.ok(gas.stubs.getLogLines().every((line) => line.indexOf(secret) < 0),
+        secret + ' must not appear in logs');
+    }
+  });
+
+  // ---------------- gt 13: 回数 ----------------
+
+  test('gt 13: 取込の往復を増やさず、税のタブは実行で 1 回だけ見る', () => {
+    function run(taxTabs) {
+      const world = setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [[712, '仕入高']],
+        dictionary: [['架空店舗', '架空店舗取引先']], words: [{word: '仕入', code: 712}],
+        taxTabs: taxTabs});
+      world.addFile('fileA', ['2026/10/10,架空店舗,1000,仕入']);
+      gas.stubs.resetApiCallCounts();
+      const counted = countTaxSheetLookups(() => importReport(world));
+      return {file: counted.result.customers[0].files[0],
+        counts: gas.stubs.getApiCallCounts(), lookups: counted.count};
+    }
+    const withTables = run({marks: [], flags: []});
+    const withoutTables = run(undefined);
+    assert.equal(withTables.file.outcome, 'WRITTEN');
+    assert.equal(withoutTables.file.outcome, 'WRITTEN');
+    assert.equal(withTables.file.taxCategory, undefined, '決まる行だけなら知らせは出ない');
+
+    // 表の 2 つの範囲は今の 1 回の `batchGet` に足すだけ（往復を増やさない）。
+    assert.equal(withTables.counts.batchGet, withoutTables.counts.batchGet,
+      JSON.stringify([withTables, withoutTables]));
+    assert.equal(withTables.counts.batchUpdate, withoutTables.counts.batchUpdate);
+    assert.equal(withTables.file.reads, withoutTables.file.reads);
+    assert.equal(withTables.lookups, 2);
+    assert.equal(withoutTables.lookups, 2);
+
+    // 2 ファイル目は覚えた表を使う（タブを見直さない）。
+    const two = setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [[712, '仕入高']],
+      dictionary: [['架空店舗', '架空店舗取引先']], words: [{word: '仕入', code: 712}],
+      taxTabs: {marks: [], flags: []}});
+    two.addFile('fileA', ['2026/10/10,架空店舗,1000,仕入']);
+    two.addFile('fileB', ['2026/10/11,架空店舗,2000,仕入']);
+    const counted = countTaxSheetLookups(() => importReport(two));
+    assert.equal(counted.result.customers[0].files.length, 2);
+    assert.equal(counted.count, 2, '実行の中で 1 回だけ見る');
   });
 };

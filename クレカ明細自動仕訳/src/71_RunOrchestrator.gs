@@ -56,7 +56,8 @@ function checkLogCapacityForRun_() {
  * 違う規則で処理されるよりそのほうが筋が通る。
  */
 var runScopedMasters_ = {purposeRules: null, commonPartners: null, accountMasters: null,
-  accountListValues: null, accountWordValues: null, accountSheetLists: Object.create(null)};
+  accountListValues: null, accountWordValues: null, taxTables: null,
+  accountSheetLists: Object.create(null)};
 
 /**
  * 転記先シートの**形**（列の並び・ヘッダー）の確認結果。顧客ごとに1回。
@@ -139,6 +140,7 @@ function commonPartnerRowsFromRecords_(rows) {
 function prefetchMatchingMasters_(customer) {
   var wantsAccounts = Boolean(customer && customer.columnMapping &&
     customer.columnMapping.C);
+  var wantsTax = taxCategoryConfigured_(customer);
   if (!runScopedReads_) {
     var direct = {customer: readDictionary_(false), common: readDictionary_(true),
       commonPartners: commonPartnersForRun_(), partnerList: readCustomerPartnerRows_()};
@@ -147,12 +149,21 @@ function prefetchMatchingMasters_(customer) {
       direct.accounts = directMasters.accounts;
       direct.words = directMasters.words;
     }
+    if (wantsTax) direct.taxTables = readTaxTablesDirect_();
     return direct;
   }
   var customerSheet = dictionarySheet_(false);
   var commonSheet = dictionarySheet_(true);
   var commonPartnerSheet = requireSheet_(masterSpreadsheet_(), CONFIG.SHEET_NAMES.COMMON_PARTNER_LIST);
   var partnerListSheet = customerPartnerListSheet_();
+  // 税の 2 つの表（§6.1）。§2.3 の顧客で、まだ持っていないときだけタブを見る。
+  // どちらか 1 つでも無ければ範囲を足さず、`present: false` を覚える
+  // （同じ実行の中では見直さない）。
+  var taxSheets = null;
+  if (wantsTax && runScopedMasters_.taxTables === null) {
+    taxSheets = taxTableSheetsForRun_();
+    if (!taxSheets) runScopedMasters_.taxTables = taxTablesFromValues_(null, null);
+  }
   var missing = [];
   if (dictionaryRowsCache_.customer === null) missing.push({key: 'customer',
     range: quoteSheetName_(customerSheet.getName()) + '!A2:R', width: DICTIONARY_WIDTH_});
@@ -171,9 +182,19 @@ function prefetchMatchingMasters_(customer) {
     missing.push({key: 'accountWords',
       range: quoteSheetName_(wordSheet.getName()) + '!A2:I', width: 9});
   }
+  // 見出しの 1 行目が要るので、税の 2 つだけは A1 から読む（§4.3）。
+  if (taxSheets) {
+    missing.push({key: 'taxMarks', range: taxSheets.marksRange});
+    missing.push({key: 'taxFlags', range: taxSheets.flagsRange});
+  }
   if (missing.length) {
     var values = sheetsReadRanges_(customerSheet, missing.map(function(item) { return item.range; }));
+    var taxMarksValues = null;
+    var taxFlagsValues = null;
     missing.forEach(function(item, index) {
+      // 税の 2 つは見出しを落とさない（`sheetRowsFromValues_` を通さない）。
+      if (item.key === 'taxMarks') { taxMarksValues = values[index]; return; }
+      if (item.key === 'taxFlags') { taxFlagsValues = values[index]; return; }
       var rows = sheetRowsFromValues_(values[index], item.width);
       if (item.key === 'customer') dictionaryRowsCache_.customer = rows;
       else if (item.key === 'common') dictionaryRowsCache_.common = rows;
@@ -185,6 +206,10 @@ function prefetchMatchingMasters_(customer) {
         runScopedMasters_.accountWordValues = rows.map(function(row) { return row.values; });
       } else customerPartnerListCache_.rows = rows;
     });
+    if (taxSheets) {
+      runScopedMasters_.taxTables = taxTablesFromValues_(
+        taxMarksValues || null, taxFlagsValues || null);
+    }
   }
   if (wantsAccounts && runScopedMasters_.accountMasters === null &&
       runScopedMasters_.accountListValues && runScopedMasters_.accountWordValues) {
@@ -198,7 +223,32 @@ function prefetchMatchingMasters_(customer) {
     result.accounts = masters.accounts;
     result.words = masters.words;
   }
+  if (wantsTax) result.taxTables = runScopedMasters_.taxTables;
   return result;
+}
+
+/**
+ * 税の 2 つのタブ（§4.3）。どちらか 1 つでも無ければ `null`。
+ * 無いタブを `batchGet` の範囲に入れると読取全体が失敗するので、先に見る。
+ */
+function taxTableSheetsForRun_() {
+  var spreadsheet = masterSpreadsheet_();
+  var marks = spreadsheet.getSheetByName(CONFIG.SHEET_NAMES.TAX_PARTNER_MARKS);
+  var flags = spreadsheet.getSheetByName(CONFIG.SHEET_NAMES.TAX_CUSTOMER_FLAGS);
+  if (!marks || !flags) return null;
+  return {
+    marks: marks, flags: flags,
+    marksRange: quoteSheetName_(marks.getName()) + '!A1:G',
+    flagsRange: quoteSheetName_(flags.getName()) + '!A1:E'
+  };
+}
+
+/** 直接読む道（§4.3・決めの 3）。税の 2 つの範囲を 1 回で読む（+1）。 */
+function readTaxTablesDirect_() {
+  var sheets = taxTableSheetsForRun_();
+  if (!sheets) return taxTablesFromValues_(null, null);
+  var values = sheetsReadRanges_(sheets.marks, [sheets.marksRange, sheets.flagsRange]);
+  return taxTablesFromValues_(values[0] || null, values[1] || null);
 }
 
 /** 有効な形式定義のF列キーワードの和集合（5.2 判定3の材料）。 */
@@ -1005,6 +1055,31 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
             });
           }
         }
+        // 8-10 の最後：C が決まった後に、取引ごとに相手税区分（G）を決める
+        // （§6.1）。一覧へ書き足して C が決まった行もここを通る。
+        // 表が無い（`present: false`）ときも呼ぶ ── 返金の行だけ `対象外` に
+        // なり、ほかは `TABLES_MISSING` で G に触らない（今と同じ）。
+        var taxConfigured = taxCategoryConfigured_(customer);
+        if (taxConfigured) {
+          var taxTablesForRun = matchingMasters.taxTables || null;
+          transactions.forEach(function(tx) {
+            // `map` の中の変数は外から見えないので、返金かをもう一度求める
+            // （`isCashbackMerchant` は純粋な関数）。
+            var cashback = isCashbackMerchant(customer, tx.merchantOriginal);
+            var tax = resolveTaxCategory_({
+              customer: customer,
+              accountCode: tx.planned.c,
+              purpose: tx.purpose,
+              date: tx.planned.b,
+              amount: tx.planned.m,
+              partnerName: tx.planned.f,
+              cashback: cashback
+            }, taxTablesForRun);
+            // 決まらない行は `undefined`（書かない）。`''`・`null` にしない（§10.2）。
+            tx.planned.g = tax.status === TAX_STATUS_.DECIDED ? tax.name : undefined;
+            tx.taxResolution = {status: tax.status, reason: tax.reason};
+          });
+        }
       }
     }
 
@@ -1115,6 +1190,37 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
       // 足したものがあれば、C を書かなかった行が 0 でも出す（§23.5）。
       if (accountListAdded.length) accountCode.listAdded = accountListAdded;
       if (accountCode.missing > 0 || accountListAdded.length) outcome.accountCode = accountCode;
+    }
+    // G を決めなかった行の件数（§8）。転記した取引だけを数え、返金の行は
+    // 数えない。表が present のときだけ出す。用途・店名・金額・取引先名は
+    // 出さない（件数だけ）。
+    if (taxConfigured && matchingMasters && matchingMasters.taxTables &&
+        matchingMasters.taxTables.present === true) {
+      var taxCategory = {missing: 0, noAccount: 0, notInTable: 0, words: 0,
+        dateAmount: 0, marks: 0, other: 0};
+      if (result.write && result.write.written.length) {
+        var taxWrittenIds = Object.create(null);
+        result.write.written.forEach(function(id) { taxWrittenIds[String(id)] = true; });
+        transactions.forEach(function(tx) {
+          if (!taxWrittenIds[String(tx.fullTxId)]) return;
+          if (isCashbackMerchant(customer, tx.merchantOriginal)) return;
+          var taxStatus = tx.taxResolution && tx.taxResolution.status;
+          if (!taxStatus || taxStatus === TAX_STATUS_.DECIDED) return;
+          var taxReason = tx.taxResolution.reason;
+          taxCategory.missing += 1;
+          if (taxReason === 'NO_ACCOUNT') taxCategory.noAccount += 1;
+          else if (taxReason === 'ACCOUNT_NOT_IN_TABLE') taxCategory.notInTable += 1;
+          else if (taxReason === 'UNDECIDED_WORD' || taxReason === 'FOOD_AMBIGUOUS') {
+            taxCategory.words += 1;
+          } else if (taxReason === 'DATE_INVALID' || taxReason === 'RATE_PERIOD_MISSING' ||
+              taxReason === 'AMOUNT_INVALID' || taxReason === 'TRANSITION_PERIOD_MISSING') {
+            taxCategory.dateAmount += 1;
+          } else if (taxReason === 'MARK_INVALID' || taxReason === 'CUSTOMER_FLAG_INVALID') {
+            taxCategory.marks += 1;
+          } else taxCategory.other += 1;
+        });
+      }
+      if (taxCategory.missing > 0) outcome.taxCategory = taxCategory;
     }
     outcome.reviews = (result.reviewsRegistered || (result.write && result.write.reviewsRegistered) || []).length;
     return outcome;
