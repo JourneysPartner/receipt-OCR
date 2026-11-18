@@ -42,7 +42,11 @@ const CONFIG = Object.freeze({
     FORMAT_SAMPLE_EXPECTED: '形式サンプル期待値',
     APPROVAL_REQUEST: '承認申請',
     ACCOUNT_LIST: '勘定科目一覧',
-    USAGE_ACCOUNT_DICT: '用途科目辞書'
+    USAGE_ACCOUNT_DICT: '用途科目辞書',
+    // 相手税区分（G 列）のマスター。作るのは運用関数だけなので、
+    // REQUIRED_SHEET_KEYS・MASTER_SHEET_SPECS_ には足さない。
+    TAX_PARTNER_MARKS: '取引先の税の印',
+    TAX_CUSTOMER_FLAGS: '顧客の税の設定'
   }),
 
   TX_INDEX_SHEET_PREFIX: 'TXIDX_',

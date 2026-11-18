@@ -448,13 +448,25 @@ function plannedAccountCodeNumber_(value) {
   throw new TypeError('Account code must be a positive integer');
 }
 
+/**
+ * 相手税区分の予定値を、書ける値だけに限る。
+ * `undefined` は「G を書かない」。それ以外は文字列だけを書く（`null`・数・
+ * 真偽は止める ── `61` と食い違う値をシートへ送らないため）。`''` は
+ * 「G を空にする」なので通す（`work/spec_tax_category.md` §6.3）。
+ */
+function plannedTaxCategoryText_(value) {
+  if (value === undefined) return undefined;
+  if (typeof value === 'string') return value;
+  throw new TypeError('Tax category must be a string');
+}
+
 function buildRowWrite(rowNumber, txLog) {
   var all = {
     b: txLog.planned.b, f: txLog.planned.f, i: txLog.planned.i,
     k: txLog.planned.k, m: txLog.planned.m,
     // 相手税区分は持つ行だけが書く。空文字を書くと転記先テンプレートの
     // 既定値や数式を消してしまう ── 書かないことと空を書くことは違う。
-    g: txLog.planned.g,
+    g: plannedTaxCategoryText_(txLog.planned.g),
     // 相手科目コードも持つ行だけが書く。値は必ず数にしてから渡す。
     c: plannedAccountCodeNumber_(txLog.planned.c)
   };
