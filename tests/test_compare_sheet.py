@@ -196,6 +196,7 @@ class _FakeApiError(Exception):
 _CELL_RE = re.compile(
     r"^(?P<start>[A-Z]+)(?P<start_row>\d+)?(?::(?P<end>[A-Z]+)(?P<end_row>\d+)?)?$"
 )
+_ROW_RE = re.compile(r"^(?P<start_row>\d+):(?P<end_row>\d+)$")
 
 
 def _column_index(letters: str) -> int:
@@ -211,6 +212,16 @@ def _parse_range(range_text: str):
         title = title[1:-1]
     if not cells:
         return title, 0, None, None, None
+    row_match = _ROW_RE.match(cells)
+    if row_match:
+        # 行だけの範囲（例 1:1）。列を指定しないので列数の上限に触れない
+        return (
+            title,
+            0,
+            int(row_match.group("start_row")) - 1,
+            None,
+            int(row_match.group("end_row")) - 1,
+        )
     match = _CELL_RE.match(cells)
     assert match, cells
     start_col = _column_index(match.group("start"))
@@ -498,6 +509,21 @@ def _collect_into(service):
     return code, service
 
 
+def _score_into(service, *, label="L1"):
+    client = CompareSheetClient(RESULT_ID, service=service, sleep=lambda seconds: None)
+    return run_compare(
+        _app_config(),
+        {
+            "COMPARE_STEP": "score",
+            "COMPARE_RESULT_SPREADSHEET_ID": RESULT_ID,
+            "COMPARE_FOLDER_IDS": "",
+            "COMPARE_RUN_LABEL": label,
+        },
+        sheet_client=client,
+        jst_now=lambda: NOW,
+    )
+
+
 def test_collect_finishes_with_new_tabs_of_28_columns():
     service = FakeSheetsService()
     code, service = _collect_into(service)
@@ -557,6 +583,52 @@ def test_header_mismatch_returns_1_without_any_write():
     assert code == 1
     assert service.write_calls == []
     assert list(service.tabs) == ["答え"]
+
+
+def test_score_with_added_answer_column_returns_1_without_any_write():
+    service = FakeSheetsService()
+    service.add_tab(
+        "答え",
+        columns=26,
+        values=[ANSWER_HEADERS[:5] + ["余分な列"] + ANSWER_HEADERS[5:]],
+    )
+    service.add_tab("結果_L1", columns=28, values=[RESULT_HEADERS])
+    assert _score_into(service) == 1
+    assert service.write_calls == []
+
+
+def test_score_with_added_result_column_returns_1_without_any_write():
+    service = FakeSheetsService()
+    service.add_tab("答え", columns=26, values=[ANSWER_HEADERS])
+    service.add_tab(
+        "結果_L1",
+        columns=30,
+        values=[RESULT_HEADERS[:5] + ["余分な列"] + RESULT_HEADERS[5:]],
+    )
+    assert _score_into(service) == 1
+    assert service.write_calls == []
+
+
+def test_collect_with_wrong_result_header_does_not_create_or_expand_before_stopping():
+    service = FakeSheetsService()
+    service.add_tab(
+        "結果_L1",
+        columns=26,
+        values=[RESULT_HEADERS[:5] + ["別の列"] + RESULT_HEADERS[5:]],
+    )
+    code, service = _collect_into(service)
+    assert code == 1
+    assert service.write_calls == []
+    assert list(service.tabs) == ["結果_L1"]
+
+
+def test_collect_with_small_wrong_header_does_not_expand_columns():
+    service = FakeSheetsService()
+    service.add_tab("答え", columns=3, values=[["fileId", "別の列", "さらに別"]])
+    code, service = _collect_into(service)
+    assert code == 1
+    assert service.write_calls == []
+    assert service.tabs["答え"].columns == 3
 
 
 def test_header_trailing_empty_cells_are_same():

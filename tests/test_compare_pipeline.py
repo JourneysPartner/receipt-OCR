@@ -305,6 +305,23 @@ def test_empty_response_is_not_api_error():
     assert is_retryable(outcome) is False
 
 
+def test_non_object_json_text_stays_api_error():
+    # 配列だが中身がオブジェクトでない応答（例 ["a"]）は、本文が空ではないので api_error
+    row = _row(
+        "text",
+        [],
+        error="api_error",
+        info={
+            "finish_reason": "STOP",
+            "error": None,
+            "raw_text": '["a"]',
+            "error_code": None,
+        },
+    )
+    assert row.result == "失敗:api_error"
+    assert row.raw_text == '["a"]'
+
+
 def test_settings_text():
     assert settings_text(0.1, None, 2048) == "temperature=0.1, thinking=なし, max_tokens=2048"
     assert settings_text(None, "high", 4096) == "temperature=none, thinking=high, max_tokens=4096"

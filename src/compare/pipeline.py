@@ -215,6 +215,10 @@ def amount_validation_text(items, ocr_text: str) -> str:
     return "・".join(statuses)
 
 
+def _blank_text(value) -> bool:
+    return value is None or not str(value).strip()
+
+
 def make_result_row(
     *,
     run_label: str,
@@ -237,8 +241,13 @@ def make_result_row(
         result = "成功"
     elif method == METHOD_TEXT and outcome.error == "ocr_failed":
         result = "失敗:ocr_failed"
-    elif outcome.error == "api_error" and info.get("error") is None:
+    elif (
+        outcome.error == "api_error"
+        and info.get("error") is None
+        and _blank_text(info.get("raw_text"))
+    ):
         # API は答えたが出力の上限などで本文が空。やり直しても同じなので分ける（§5.5）
+        # 本文があるのに読めない（例 ["a"]）ときは api_error のまま
         result = "失敗:empty_response"
     else:
         result = f"失敗:{outcome.error or 'unknown'}"

@@ -274,6 +274,13 @@ class CompareSheetClient:
             )
         )
 
+    def read_header(self, title: str) -> list[str]:
+        """既にあるタブの 1 行目だけを読む（列数に収まるので列を足さない）。"""
+        values = self.read_values(title, "1:1")
+        if not values:
+            return []
+        return _trim_trailing_empty(values[0])
+
     def read_values(
         self, title: str, cells: str | None = None, *, formatted: bool = False
     ) -> list[list]:

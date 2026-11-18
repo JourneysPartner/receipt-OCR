@@ -81,6 +81,15 @@ class FakeSheet:
             rows.append(record)
         return rows
 
+    def read_header(self, title):
+        values = self.tabs.get(title, [])
+        if not values:
+            return []
+        header = ["" if value is None else str(value) for value in values[0]]
+        while header and header[-1] == "":
+            header.pop()
+        return header
+
     def append_rows(self, title, rows, columns):
         if not rows:
             return
@@ -834,26 +843,47 @@ class TestConfigErrors:
 
 
 class TestScoreStep:
-    def test_score_uses_latest_result_tab(self):
+    def test_score_without_label_uses_the_only_result_tab(self):
         file = _file("FILE_A1234567890", "a.jpg")
         drive = FakeDrive({FOLDER: [file]}, {FOLDER: "テスト用フォルダ"})
         sheet = FakeSheet()
         _collect(sheet, drive, [])
-        sheet.tabs["結果_L2"] = [list(RESULT_HEADERS)]
-        code = run_compare(
-            _app_config(),
-            _env(
+        # 結果_ で始まるタブは 結果_L1 だけ
+        code, _ = _collect(
+            sheet,
+            drive,
+            [],
+            env=_env(
                 COMPARE_STEP="score",
                 COMPARE_RUN_LABEL="",
                 COMPARE_FOLDER_IDS="",
                 COMPARE_MODELS="m1,m2",
             ),
-            sheet_client=sheet,
-            drive_factory=lambda: (_ for _ in ()).throw(AssertionError("drive")),
-            ocr_factory=lambda: (_ for _ in ()).throw(AssertionError("ocr")),
-            extractor_factory=lambda ai_config: (_ for _ in ()).throw(AssertionError("extractor")),
-            model_checker=lambda name: (_ for _ in ()).throw(AssertionError("model")),
-            jst_now=lambda: NOW,
         )
         assert code == 0
-        assert "集計_L2" in sheet.replaced
+        assert "集計_L1" in sheet.replaced
+
+    def test_score_without_label_and_two_result_tabs_returns_1_without_writes(self):
+        sheet = FakeSheet()
+        sheet.tabs["結果_L1"] = [list(RESULT_HEADERS)]
+        sheet.tabs["結果_L2"] = [list(RESULT_HEADERS)]
+        sheet.tabs["答え"] = [list(ANSWER_HEADERS)]
+        code, records = _collect(
+            sheet,
+            FakeDrive(),
+            [],
+            env=_env(
+                COMPARE_STEP="score",
+                COMPARE_RUN_LABEL="",
+                COMPARE_FOLDER_IDS="",
+                COMPARE_MODELS="m1,m2",
+            ),
+        )
+        assert code == 1
+        assert sheet.appended == []
+        assert sheet.batch_calls == []
+        assert sheet.replaced == []
+        assert list(sheet.tabs) == ["結果_L1", "結果_L2", "答え"]
+        messages = " ".join(record.getMessage() for record in records)
+        assert "COMPARE_RUN_LABEL を指定してください" in messages
+        assert "結果_L1" in messages and "結果_L2" in messages

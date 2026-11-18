@@ -149,13 +149,24 @@ class CompareRunner:
 
     def _run_score(self) -> int:
         titles = self._sheet.get_sheet_titles()
-        label = self._compare.run_label or self._latest_label(titles)
+        label = self._compare.run_label
         if not label:
-            logger.error(
-                "COMPARE_RUN_LABEL が無く、結果_<ラベル> タブも見つかりません",
-                extra={"step": "compare_label_error"},
-            )
-            return 1
+            result_titles = [title for title in titles if title.startswith("結果_")]
+            if len(result_titles) > 1:
+                # 名前の大小は新しさと関係が無いので、推測せずに選ばせる
+                logger.error(
+                    "COMPARE_RUN_LABEL を指定してください（結果_ で始まるタブが複数あります）: "
+                    + ", ".join(result_titles),
+                    extra={"step": "compare_label_error"},
+                )
+                return 1
+            if not result_titles:
+                logger.error(
+                    "COMPARE_RUN_LABEL が無く、結果_<ラベル> タブも見つかりません",
+                    extra={"step": "compare_label_error"},
+                )
+                return 1
+            label = result_titles[0][len("結果_") :]
         result_title = result_tab_name(label)
         answer_title = "答え"
         if result_title not in titles or answer_title not in titles:
@@ -163,6 +174,13 @@ class CompareRunner:
                 f"比較の表に必要なタブがありません: {result_title} / {answer_title}",
                 extra={"step": "compare_tab_error"},
             )
+            return 1
+
+        # 何かを書く前に 1 行目を読むだけで確かめる（列を足すと「メモ」を上書きしうる）
+        if not self._verify_headers(
+            titles,
+            [(answer_title, ANSWER_HEADERS), (result_title, RESULT_HEADERS)],
+        ):
             return 1
 
         result_rows = self._sheet.read_dicts(result_title)
@@ -211,6 +229,17 @@ class CompareRunner:
         ocr_title = ocr_tab_name(label)
         answer_title = "答え"
         summary_title = summary_tab_name(label)
+
+        # タブを作る・列を足す・見出しを書く前に、既にあるタブの 1 行目を読むだけで確かめる
+        if not self._verify_headers(
+            self._sheet.get_sheet_titles(),
+            [
+                (answer_title, ANSWER_HEADERS),
+                (result_title, RESULT_HEADERS),
+                (ocr_title, OCR_HEADERS),
+            ],
+        ):
+            return 1
 
         try:
             self._sheet.ensure_tab(answer_title, ANSWER_HEADERS)
@@ -387,9 +416,27 @@ class CompareRunner:
     def _time_over_budget(self) -> bool:
         return self._clock() - self._started_at > self._compare.time_budget_seconds
 
-    def _latest_label(self, titles: list[str]) -> str | None:
-        labels = [title[len("結果_") :] for title in titles if title.startswith("結果_")]
-        return max(labels) if labels else None
+    def _verify_headers(self, titles: list[str], checks) -> bool:
+        """既にあるタブの 1 行目を、書く前に読むだけで確かめる（S6）。
+
+        後ろの空のセルは同じとみなす。1 つでも違えばログを出して False。
+        """
+        existing = set(titles)
+        try:
+            for title, headers in checks:
+                if title not in existing:
+                    continue
+                actual = self._sheet.read_header(title)
+                expected = [str(header) for header in headers]
+                if actual and actual != expected:
+                    raise HeaderMismatchError(title, headers, actual)
+        except HeaderMismatchError as error:
+            logger.error(
+                f"{error}。列を足したり並べ替えたりせずに直してください",
+                extra={"step": "compare_header_mismatch"},
+            )
+            return False
+        return True
 
     def _check_models(self) -> None:
         for model in self._compare.models:
