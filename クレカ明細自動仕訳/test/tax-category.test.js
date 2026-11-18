@@ -1170,4 +1170,360 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(counted.result.customers[0].files.length, 2);
     assert.equal(counted.count, 2, '実行の中で 1 回だけ見る');
   });
+
+  // ================================================================
+  // 3 回目：確定（gt 6・7）・日付金額の修正（gt 8）・回数（gt 13）。
+  // 材料の組み立ては 2 回目の gt 4・5 と同じ形にした。値はすべて架空である。
+  // ================================================================
+
+  function partnerReviews(fileId) {
+    return plain(call('openReviews', [{}]))
+      .filter((review) => review.reviewType === 'PARTNER' && review.fileId === fileId)
+      .sort((a, b) => Number(a.sourceRow) - Number(b.sourceRow));
+  }
+
+  function typedReviews(fileId, type) {
+    return plain(call('openReviews', [{}]))
+      .filter((review) => review.reviewType === type && review.fileId === fileId)
+      .sort((a, b) => Number(a.sourceRow) - Number(b.sourceRow));
+  }
+
+  /** 1 回の呼出しの `batchGet` と `apiReadCount_` の差を測る。 */
+  function measured(fn) {
+    gas.stubs.resetApiCallCounts();
+    const before = Number(gas.evaluate('apiReadCount_')) || 0;
+    const result = fn();
+    return {result: result, batchGet: gas.stubs.getApiCallCounts().batchGet,
+      reads: (Number(gas.evaluate('apiReadCount_')) || 0) - before};
+  }
+
+  /** 2 つ目の転記先（複数の転記先を見るためだけ）。 */
+  function addDestination(id) {
+    const header = blank(15);
+    Object.assign(header, {1: '利用日', 2: '相手科目コード', 3: '相手勘定科目',
+      5: '取引先', 6: '相手税区分', 8: 'メモ', 10: '摘要', 11: '借方', 12: '貸方', 14: '取引ID'});
+    const values = [blank(15), blank(15), header,
+      Object.assign(blank(15), {0: '区切り'}), blank(15)];
+    gas.stubs.createSpreadsheet(id, {sheets: [
+      {name: '入力用シート', values: values, maxRows: 30, maxColumns: 30},
+      {name: '取引先一覧', values: [['元店名', '取引先名']]}
+    ]});
+  }
+
+  const GT_MARKS = [markRow('架空フリマ取引先', 'フリマ'), markRow('架空印誤り取引先', '○')];
+
+  const GT_CONFIRM_ROWS = [
+    '2026/10/11,架空未登録A,12000,仕入',
+    '2026/10/12,架空未登録B,3000,仕入',
+    '2026/10/13,架空未登録C,5000,仕入',
+    '2026/10/14,架空未登録D,15000,仕入'
+  ];
+
+  function confirmationWorld(options = {}) {
+    const world = setupWorld(Object.assign({
+      accounts: GT_ACCOUNTS,
+      sheetEntries: [[712, '仕入高']],
+      dictionary: [['架空フリマ', '架空フリマ取引先']],
+      words: [{word: '仕入', code: 712}],
+      taxTabs: {marks: GT_MARKS}
+    }, options));
+    // 確定で使う名前を先に一覧へ置く（新規名の登録監査に取引先名を出さない
+    // ため。§10.12 の確かめ）。
+    (options.knownPartners || ['架空フリマ取引先', '架空店舗取引先', '架空印誤り取引先'])
+      .forEach((name) => {
+        master('顧客別取引先一覧').appendRow([
+          call('customerPartnerId_', ['C001', name]), 'C001', name, 'ACTIVE',
+          '', '', 'tester@example.com', '', '', ''
+        ]);
+      });
+    world.addFile('fileA', options.rows || GT_CONFIRM_ROWS.slice());
+    importReport(world);
+    return world;
+  }
+
+  /** §10.12: 用途・店名・金額・取引先名・税区分名をログと監査に出さない。 */
+  function assertNoTaxValues(values) {
+    const logs = gas.stubs.getLogLines().join('\n');
+    const audits = JSON.stringify(master('監査ログ').getDataRange().getValues());
+    values.forEach((secret) => {
+      assert.ok(logs.indexOf(secret) < 0, secret + ' must not appear in logs');
+      assert.ok(audits.indexOf(secret) < 0, secret + ' must not appear in audits');
+    });
+  }
+
+  function adoptionDecision(review, partnerName) {
+    return {reviewId: review.reviewId, operation: 'ADOPT_EXISTING_PARTNER',
+      partnerName: partnerName, learn: false};
+  }
+
+  // ---------------- gt 6: 取引先の確定（1 件） ----------------
+
+  test('gt 6: 取引先の確定（1 件）で G を決め直し、変わるときだけ書き、印が誤りなら空にする', () => {
+    const world = confirmationWorld({rows: GT_CONFIRM_ROWS.slice(0, 3)});
+    const reviews = partnerReviews('fileA');
+    assert.equal(reviews.length, 3);
+    // 取込の時点では取引先が空なので印が無く、すべて 10%。
+    [5, 6, 7].forEach((row) => assert.equal(cell(row, 7), '課対仕入10%'));
+
+    // フリマの印: 1 万円以上なので経過措置（控70）に変わる。
+    const changed = captureTaxWrites(() => call('resolveReview',
+      [reviews[0].reviewId, 'ADOPT_EXISTING_PARTNER',
+        {partnerName: '架空フリマ取引先', learn: false}]));
+    assert.deepEqual(changed.rows, [5]);
+    assert.equal(cell(5, 7), '課対仕入（控70）10%');
+
+    // 印なし: 決め直した値が今と同じなので G に触らない。
+    const unchanged = captureTaxWrites(() => call('resolveReview',
+      [reviews[1].reviewId, 'ADOPT_EXISTING_PARTNER',
+        {partnerName: '架空店舗取引先', learn: false}]));
+    assert.deepEqual(unchanged.rows, []);
+    assert.equal(cell(6, 7), '課対仕入10%');
+
+    // 印が誤り: 決まらなくなったので G を空にする。
+    const invalid = captureTaxWrites(() => call('resolveReview',
+      [reviews[2].reviewId, 'ADOPT_EXISTING_PARTNER',
+        {partnerName: '架空印誤り取引先', learn: false}]));
+    assert.deepEqual(invalid.rows, [7]);
+    assert.equal(cell(7, 7), '');
+
+    // 読取確認と取引ログ 46・47 も新しい値（空にした行は undefined に戻る）。
+    const first = call('getTransaction', [reviews[0].fullTxId]);
+    assert.equal(first.planned.g, '課対仕入（控70）10%');
+    assert.equal(first.verified.g, '課対仕入（控70）10%');
+    const second = call('getTransaction', [reviews[1].fullTxId]);
+    assert.equal(second.planned.g, '課対仕入10%');
+    assert.equal(second.verified.g, '課対仕入10%');
+    const third = call('getTransaction', [reviews[2].fullTxId]);
+    assert.equal(third.planned.g, undefined);
+    assert.equal(third.verified.g, undefined);
+    // §10.12: 用途・店名・金額・取引先名・税区分名をログと監査に出さない。
+    assertNoTaxValues(['仕入', '架空未登録A', '12000', '架空フリマ取引先',
+      '課対仕入（控70）10%']);
+  });
+
+  // ---------------- gt 7: まとめて確定 ----------------
+
+  test('gt 7: まとめて確定で複数件・複数の転記先の G を決め直し、変わる件だけ書く', () => {
+    const world = confirmationWorld();
+    addDestination('dest2');
+    const reviews = partnerReviews('fileA');
+    assert.equal(reviews.length, 4);
+    // 3・4 件目だけ別の転記先へ向ける（M・N 列）。
+    const reviewSheet = master('要確認');
+    [reviews[2], reviews[3]].forEach((review) => {
+      reviewSheet.getRange(review._rowNumber, 13, 1, 2)
+        .setValues([['dest2', '入力用シート']]);
+    });
+    // 転記先を移した行の今の G（取込で入っていた 10%）。変わらない件が
+    // 触られないことを見るため、同じ値を置いておく。
+    [7, 8].forEach((row) => destSheet('dest2').getRange(row, 7)
+      .setValue('課対仕入10%'));
+
+    const captured = captureTaxWrites(() => call('resolvePartnerReviewsBatch',
+      ['C001', 'fileA', [
+        adoptionDecision(reviews[0], '架空フリマ取引先'),
+        adoptionDecision(reviews[1], '架空店舗取引先'),
+        adoptionDecision(reviews[2], '架空フリマ取引先'),
+        adoptionDecision(reviews[3], '架空フリマ取引先')
+      ], {actor: 'tester@example.com'}]));
+    assert.deepEqual(plain(captured.result.errors), []);
+    assert.equal(captured.result.resolvedReviewIds.length, 4);
+
+    // 1 つ目の転記先: 変わる件（1 万円以上）だけ書き、印なしは触らない。
+    assert.equal(cell(5, 7, 'dest1'), '課対仕入（控70）10%');
+    assert.equal(cell(6, 7, 'dest1'), '課対仕入10%');
+    // 2 つ目の転記先: 1 万円未満は少額特例で今と同じ（触らない）、
+    // 1 万円以上は経過措置に変わる。
+    assert.equal(cell(7, 7, 'dest2'), '課対仕入10%');
+    assert.equal(cell(8, 7, 'dest2'), '課対仕入（控70）10%');
+
+    // G の書込要求は、変わった 2 件の行だけ（印なし・少額の行には無い）。
+    assert.deepEqual(captured.rows, [5, 8]);
+
+    const first = call('getTransaction', [reviews[0].fullTxId]);
+    assert.equal(first.planned.g, '課対仕入（控70）10%');
+    assert.equal(first.verified.g, '課対仕入（控70）10%');
+    const second = call('getTransaction', [reviews[1].fullTxId]);
+    assert.equal(second.planned.g, '課対仕入10%');
+    const third = call('getTransaction', [reviews[2].fullTxId]);
+    assert.equal(third.planned.g, '課対仕入10%');
+    const fourth = call('getTransaction', [reviews[3].fullTxId]);
+    assert.equal(fourth.planned.g, '課対仕入（控70）10%');
+    assert.equal(fourth.verified.g, '課対仕入（控70）10%');
+    // §10.12: まとめて確定でも値をログと監査に出さない。
+    assertNoTaxValues(['仕入', '架空未登録D', '15000', '架空フリマ取引先',
+      '課対仕入（控70）10%']);
+  });
+
+  // ---------------- gt 8: 日付・金額の修正 ----------------
+
+  test('gt 8: 日付・金額の修正で G を決め直す（G が入る・控70 から 10% へ）', () => {
+    // 日付: 読めない利用日で G が決まらなかった行に、日付を入れる。
+    const dateWorld = setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [[712, '仕入高']],
+      dictionary: [['架空店舗', '架空店舗取引先']], words: [{word: '仕入', code: 712}],
+      taxTabs: {marks: GT_MARKS}});
+    dateWorld.addFile('fileA', ['日付不明,架空店舗,3000,仕入']);
+    importReport(dateWorld);
+    const dateReview = typedReviews('fileA', 'DATE')[0];
+    assert.ok(dateReview, JSON.stringify(plain(call('openReviews', [{}]))));
+    assert.equal(cell(5, 7), '', '日付が読めない間は G を決めない');
+    const dateFixed = captureTaxWrites(() => call('resolveReview',
+      [dateReview.reviewId, 'FIX_DATE_AMOUNT', {correctedDate: '2026/10/15'}]));
+    assert.deepEqual(dateFixed.rows, [5]);
+    assert.equal(cell(5, 7), '課対仕入10%');
+    const dateTx = call('getTransaction', [dateReview.fullTxId]);
+    assert.equal(dateTx.planned.g, '課対仕入10%');
+    assert.equal(dateTx.verified.g, '課対仕入10%');
+
+    // 金額: フリマの印で 12,000 円（控70）だった行を 8,000 円に直す。
+    // 金額が読めない取引だけが AMOUNT 要確認になるので、取込の後で
+    // 「直す前は 12,000 円で G は控70」という状態を取引ログに置く。
+    const amountWorld = setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [[712, '仕入高']],
+      dictionary: [['架空フリマ', '架空フリマ取引先']], words: [{word: '仕入', code: 712}],
+      taxTabs: {marks: GT_MARKS}});
+    amountWorld.addFile('fileA', ['2026/10/11,架空フリマ,金額不明,仕入']);
+    importReport(amountWorld);
+    const amountReview = typedReviews('fileA', 'AMOUNT')[0];
+    assert.ok(amountReview, JSON.stringify(plain(call('openReviews', [{}]))));
+    const amountTx = call('getTransaction', [amountReview.fullTxId]);
+    const log = master('クレカ取引ログ');
+    log.getRange(amountTx._rowNumber, 23).setValue(12000);
+    log.getRange(amountTx._rowNumber, 46).setValue('課対仕入（控70）10%');
+
+    const amountFixed = captureTaxWrites(() => call('resolveReview',
+      [amountReview.reviewId, 'FIX_DATE_AMOUNT', {correctedAmount: 8000}]));
+    assert.deepEqual(amountFixed.rows, [amountTx.destinationRow]);
+    assert.equal(cell(amountTx.destinationRow, 7), '課対仕入10%');
+    const after = call('getTransaction', [amountReview.fullTxId]);
+    assert.equal(after.planned.m, 8000);
+    assert.equal(after.planned.g, '課対仕入10%');
+    assert.equal(after.verified.g, '課対仕入10%');
+    // §10.12: 日付・金額の修正でも値をログと監査に出さない。
+    assertNoTaxValues(['仕入', '日付不明', '架空店舗', '金額不明', '架空フリマ', '3000',
+      '12000', '課対仕入10%']);
+  });
+
+  // ---------------- gt 13: 回数（確定・日付金額の修正） ----------------
+
+  test('gt 13: 1 件の確定の読取は今と同じ（§2.3 の顧客でも往復を増やさない）', () => {
+    function run(configured) {
+      const world = confirmationWorld({
+        rows: GT_CONFIRM_ROWS.slice(0, 1),
+        gColumn: configured,
+        taxTabs: configured ? {marks: GT_MARKS} : undefined
+      });
+      const review = partnerReviews('fileA')[0];
+      return measured(() => call('resolveReview',
+        [review.reviewId, 'ADOPT_EXISTING_PARTNER',
+          {partnerName: '架空フリマ取引先', learn: false}]));
+    }
+    const withTax = run(true);
+    const withoutTax = run(false);
+    assert.equal(withTax.batchGet, withoutTax.batchGet, JSON.stringify([withTax, withoutTax]));
+    assert.equal(withTax.reads, withoutTax.reads);
+  });
+
+  test('gt 13: まとめて確定の読取は今と同じ（部品 55 と 80 の道の両方）', () => {
+    function direct(configured) {
+      const world = confirmationWorld({
+        rows: GT_CONFIRM_ROWS.slice(0, 2),
+        gColumn: configured,
+        taxTabs: configured ? {marks: GT_MARKS} : undefined
+      });
+      const reviews = partnerReviews('fileA');
+      return measured(() => call('resolvePartnerReviewsBatch',
+        ['C001', 'fileA', reviews.map((review) => adoptionDecision(review, '架空フリマ取引先')),
+          {actor: 'tester@example.com'}]));
+    }
+    function web(configured) {
+      const world = confirmationWorld({
+        rows: GT_CONFIRM_ROWS.slice(0, 2),
+        gColumn: configured,
+        taxTabs: configured ? {marks: GT_MARKS} : undefined
+      });
+      const reviews = partnerReviews('fileA');
+      return measured(() => call('webAppResolveReviews',
+        ['C001', reviews.map((review) => ({reviewId: review.reviewId,
+          partnerName: '架空フリマ取引先'})), {batchId: 'gt13'}]));
+    }
+    const directWith = direct(true);
+    const directWithout = direct(false);
+    assert.equal(directWith.batchGet, directWithout.batchGet,
+      JSON.stringify([directWith, directWithout]));
+    assert.equal(directWith.reads, directWithout.reads);
+    const webWith = web(true);
+    const webWithout = web(false);
+    assert.equal(webWith.batchGet, webWithout.batchGet,
+      JSON.stringify([webWith, webWithout]));
+    assert.equal(webWith.reads, webWithout.reads);
+
+    // 部品 55 に取引先の表を全部渡し、税の表だけ渡さない道は、税の表を
+    // 直接 1 回読む（+1。§6.2）。値はその 1 回で決まる。
+    function directWithOptions(configured) {
+      const world = confirmationWorld({
+        rows: GT_CONFIRM_ROWS.slice(0, 1),
+        gColumn: configured,
+        taxTabs: configured ? {marks: GT_MARKS} : undefined
+      });
+      const review = partnerReviews('fileA')[0];
+      return measured(() => call('resolvePartnerReviewsBatch',
+        ['C001', 'fileA', [adoptionDecision(review, '架空フリマ取引先')],
+          {actor: 'tester@example.com', partnerListRows: [], commonPartnerRows: [],
+            commonDictionaryRows: []}]));
+    }
+    const optionsWith = directWithOptions(true);
+    assert.equal(cell(5, 7), '課対仕入（控70）10%', '直接読んだ表で G を決める');
+    const optionsWithout = directWithOptions(false);
+    assert.equal(optionsWith.batchGet, optionsWithout.batchGet + 1,
+      JSON.stringify([optionsWith, optionsWithout]));
+    assert.equal(optionsWith.reads, optionsWithout.reads + 1);
+  });
+
+  test('gt 13: 日付・金額の修正の読取は §2.3 の顧客だけ +1、§2.3 でない顧客は今と同じ', () => {
+    function dateFix(options) {
+      const world = setupWorld(Object.assign({accounts: GT_ACCOUNTS,
+        sheetEntries: [[712, '仕入高']], dictionary: [['架空店舗', '架空店舗取引先']],
+        words: [{word: '仕入', code: 712}]}, options));
+      world.addFile('fileA', ['日付不明,架空店舗,3000,仕入']);
+      importReport(world);
+      const review = typedReviews('fileA', 'DATE')[0];
+      return measured(() => call('resolveReview',
+        [review.reviewId, 'FIX_DATE_AMOUNT', {correctedDate: '2026/10/15'}]));
+    }
+    const withTables = dateFix({taxTabs: {marks: GT_MARKS}});
+    const withoutTables = dateFix({taxTabs: undefined});
+    const notConfigured = dateFix({gColumn: false, taxTabs: undefined});
+    // §2.3 でない顧客は、タブがあっても表を見ない・読まない（今と同じ）。
+    const notConfiguredWithTables = dateFix({gColumn: false, taxTabs: {marks: GT_MARKS}});
+    assert.equal(withTables.batchGet, notConfigured.batchGet + 1,
+      JSON.stringify([withTables, notConfigured]));
+    assert.equal(withTables.reads, notConfigured.reads + 1);
+    // タブが無ければ読まない（今と同じ）。
+    assert.equal(withoutTables.batchGet, notConfigured.batchGet,
+      JSON.stringify([withoutTables, notConfigured]));
+    assert.equal(withoutTables.reads, notConfigured.reads);
+    assert.equal(notConfiguredWithTables.batchGet, notConfigured.batchGet,
+      JSON.stringify([notConfiguredWithTables, notConfigured]));
+    assert.equal(notConfiguredWithTables.reads, notConfigured.reads);
+
+    function amountFix(options) {
+      const world = setupWorld(Object.assign({accounts: GT_ACCOUNTS,
+        sheetEntries: [[712, '仕入高']], dictionary: [['架空フリマ', '架空フリマ取引先']],
+        words: [{word: '仕入', code: 712}]}, options));
+      world.addFile('fileA', ['2026/10/11,架空フリマ,金額不明,仕入']);
+      importReport(world);
+      const review = typedReviews('fileA', 'AMOUNT')[0];
+      return measured(() => call('resolveReview',
+        [review.reviewId, 'FIX_DATE_AMOUNT', {correctedAmount: 8000}]));
+    }
+    const amountWith = amountFix({taxTabs: {marks: GT_MARKS}});
+    const amountWithout = amountFix({gColumn: false, taxTabs: undefined});
+    const amountNotConfiguredWithTables = amountFix({gColumn: false, taxTabs: {marks: GT_MARKS}});
+    assert.equal(amountWith.batchGet, amountWithout.batchGet + 1,
+      JSON.stringify([amountWith, amountWithout]));
+    assert.equal(amountWith.reads, amountWithout.reads + 1);
+    assert.equal(amountNotConfiguredWithTables.batchGet, amountWithout.batchGet,
+      JSON.stringify([amountNotConfiguredWithTables, amountWithout]));
+    assert.equal(amountNotConfiguredWithTables.reads, amountWithout.reads);
+  });
 };

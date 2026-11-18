@@ -287,11 +287,44 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
       item.decision.scope === 'COMMON' && item.decision.learn === true;
   });
   if (commonDictionaryRows === undefined && needsCommonDictionary) missingMasters.push('commonDictionaryRows');
+  // 税の 2 つの表（§6.2）。`options.taxTables` が無く、§2.3 の顧客で
+  // `ADOPT_EXISTING_PARTNER` があるときだけ要る。今の読取に鍵を足せるなら
+  // 足し（往復を増やさない）、足せないときだけ直接 1 回読む。
+  var taxTablesForBatch = options.taxTables === null ? undefined : options.taxTables;
+  var taxKeysForBatch = [];
+  var taxCustomerForBatch = null;
+  if (hasAdoption && taxTablesForBatch === undefined) {
+    var adoptionItem = selected.filter(function(item) {
+      return item.decision.operation === 'ADOPT_EXISTING_PARTNER';
+    })[0];
+    var adoptionReview = adoptionItem ? reviewsById[adoptionItem.reviewId] : null;
+    var sampleCustomer = adoptionReview ? reviewWriteCustomer_(adoptionReview, customer) : null;
+    if (sampleCustomer && taxCategoryConfigured_(sampleCustomer)) {
+      taxCustomerForBatch = sampleCustomer;
+      taxKeysForBatch = taxTableMasterKeys_(sampleCustomer);
+      if (missingMasters.length) {
+        // 今の読取に鍵を足す（往復を増やさない）。
+        taxKeysForBatch.forEach(function(key) { missingMasters.push(key); });
+        // 表は読み終わってから作る（下）。
+        taxTablesForBatch = null;
+      } else {
+        // 今の読取が無い（取引先の表は全部渡されている）。ここだけ +1。
+        // タブが無ければ `readTaxTablesDirect_` は読まない。
+        taxTablesForBatch = readTaxTablesDirect_();
+      }
+    }
+  }
   if (missingMasters.length) {
     var masters = readPartnerResolutionMasters_(missingMasters);
     if (masters.partnerListRows) partnerListRows = masters.partnerListRows;
     if (masters.commonPartnerRows) commonPartnerRows = masters.commonPartnerRows;
     if (masters.commonDictionaryRows) commonDictionaryRows = masters.commonDictionaryRows;
+    if (taxCustomerForBatch && taxTablesForBatch === null) {
+      // タブが無ければ鍵を足していない。そのときは読まずに `present: false`。
+      taxTablesForBatch = taxKeysForBatch.length ?
+        taxTablesFromMasterRows_(masters, taxKeysForBatch) :
+        taxTablesFromValues_(null, null);
+    }
   }
   commonPartnerRows = commonPartnerRows || [];
   commonDictionaryRows = commonDictionaryRows || [];
@@ -411,6 +444,15 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
       if (item.decision.operation === 'ADOPT_EXISTING_PARTNER') {
         planned = Object.assign({}, tx.planned, {f: item.decision.partnerName});
         columns = ['f'];
+        // 決め直しは新しい取引先名を入れた後（§6.2）。変わるときだけ G を書く。
+        if (taxTablesForBatch !== undefined) {
+          var tax = taxCategoryRecomputed_(reviewWriteCustomer_(item.review, customer),
+            tx, planned, taxTablesForBatch);
+          if (tax.changed) {
+            planned.g = tax.g;
+            columns.push('g');
+          }
+        }
       } else if (item.decision.operation === 'RESOLVE_PARTNER_UNKNOWN') {
         planned = Object.assign({}, tx.planned, {i: appendMemoTag(
           tx.planned && tx.planned.i, MEMO_TAG_PARTNER_UNKNOWN_)});

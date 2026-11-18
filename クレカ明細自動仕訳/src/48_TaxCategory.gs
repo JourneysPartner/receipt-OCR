@@ -508,3 +508,77 @@ function resolveTaxCategory_(input, tables) {
   }
   return taxDecided_(TAX_KIND_.OUT_OF_SCOPE, null);
 }
+
+/**
+ * 確定の読取に足す税の 2 つの鍵（§6.2）。
+ *
+ * §2.3 の顧客で、2 つのタブがそろっているときだけ鍵を返す。無いタブを
+ * `batchGet` の範囲に入れると読取全体が失敗するので、先に見る。
+ * §2.3 でない顧客・タブが無いときは空（読取を増やさない）。
+ *
+ * @param {*} customer `reviewWriteCustomer_` の結果
+ * @return {!Array<string>} `taxMarkRows`・`taxFlagRows` か空
+ */
+function taxTableMasterKeys_(customer) {
+  if (!taxCategoryConfigured_(customer)) return [];
+  if (!taxTableSheetsForRun_()) return [];
+  return ['taxMarkRows', 'taxFlagRows'];
+}
+
+/**
+ * `readPartnerResolutionMasters_` で読んだ値から表を作る（§6.2）。
+ *
+ * 鍵を足していない（タブが無い）ときは `present: false`。§5 の 2 により
+ * 「決まらない」になり、確定では G を空にする側へ倒れる。
+ *
+ * @param {?Object} masters `readPartnerResolutionMasters_` の戻り値
+ * @param {!Array<string>} taxKeys `taxTableMasterKeys_` の戻り値
+ * @return {!Object} `taxTablesFromValues_` の戻り値
+ */
+function taxTablesFromMasterRows_(masters, taxKeys) {
+  if (!taxKeys || !taxKeys.length) return taxTablesFromValues_(null, null);
+  var rows = masters || {};
+  return taxTablesFromValues_(rows.taxMarkRows || null, rows.taxFlagRows || null);
+}
+
+/**
+ * 確定・日付金額の修正で G を決め直す（§6.2。純粋な関数）。
+ *
+ * 1. 返金の行（`isCashbackMerchant(customer, tx.originalMerchant)`）は
+ *    決め直さない（今の `対象外` のまま）。
+ * 2. `resolveTaxCategory_` に、用途は `tx.originalPurpose`・`cashback: false`
+ *    で渡す（用途は取込の時点の言葉のまま）。
+ * 3. `next`（決まらなければ `''`）と `current`（`tx.planned.g`。`undefined`・
+ *    `null` は `''`）を比べる。
+ * 4. 変わるときだけ `changed: true` と `g` を返す。**`planned` は書き換えない。**
+ *    呼ぶ側が `planned.g = g` にし、書く列に `'g'` を足す。変わらないときは
+ *    G に触らない（利用者が手で直した G を消さない）。
+ *
+ * `planned` には、新しい取引先名（`f`）や直した日付・金額（`b`・`m`）を
+ * 入れた後の値を渡す。`g` は必ず文字列か `''` で、`null` は返さない
+ * （§6.3 の `43` の `buildRowWrite` が止める）。
+ *
+ * @param {*} customer `reviewWriteCustomer_` の結果
+ * @param {*} tx 取引ログの 1 行（`getTransaction` の戻り値）
+ * @param {!Object} planned 決め直しの材料を入れた予定値
+ * @param {?Object} taxTables `taxTablesFromValues_` の戻り値
+ * @return {!Object} `{changed: boolean, g: string}`
+ */
+function taxCategoryRecomputed_(customer, tx, planned, taxTables) {
+  var source = planned || {};
+  var old = tx && tx.planned ? tx.planned.g : undefined;
+  var current = old === undefined || old === null ? '' : String(old);
+  if (!tx) return {changed: false, g: current};
+  if (isCashbackMerchant(customer, tx.originalMerchant)) return {changed: false, g: current};
+  var resolution = resolveTaxCategory_({
+    customer: customer,
+    accountCode: source.c,
+    purpose: tx.originalPurpose,
+    date: source.b,
+    amount: source.m,
+    partnerName: source.f,
+    cashback: false
+  }, taxTables);
+  var next = resolution.status === TAX_STATUS_.DECIDED ? resolution.name : '';
+  return {changed: next !== current, g: next};
+}

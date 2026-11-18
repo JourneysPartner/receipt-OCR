@@ -128,9 +128,16 @@ function adoptExistingPartner_(review, input, actor) {
   }
   assertNotPartnerUnknownLabel_(input.partnerName);
   var commonScope = input.scope === 'COMMON';
+  // 転記先の顧客は、税の 2 つのタブの有る無しにも要る。読取の前に求める
+  // （`reviewWriteCustomer_` は読み直さないので往復は増えない）。
+  var customer = reviewWriteCustomer_(review);
   var masterKeys = ['partnerListRows', 'commonPartnerRows'];
   if (commonScope && input.learn !== false) masterKeys.push('commonDictionaryRows');
+  var taxKeys = taxTableMasterKeys_(customer);
+  taxKeys.forEach(function(key) { masterKeys.push(key); });
   var masters = readPartnerResolutionMasters_(masterKeys);
+  var taxTables = taxCategoryConfigured_(customer) ?
+    taxTablesFromMasterRows_(masters, taxKeys) : null;
   var partnerNameIndex = buildPartnerNameIndex_(
     customerPartnerRecords_(masters.partnerListRows), review.customerId,
     commonPartnerRowsFromRecords_(masters.commonPartnerRows));
@@ -148,14 +155,22 @@ function adoptExistingPartner_(review, input, actor) {
     if (different.length) throw new CatalogError('COMMON_DICTIONARY_DIFFERENT_PARTNER',
       commonDictionaryDifferentPartnerMessage_(review.merchantOriginal, different, input.partnerName));
   }
-  var customer = reviewWriteCustomer_(review);
   var leaseId = acquireLease(review.customerId, review.fileId, input.runId || null,
     actor, LEASE_PURPOSE.WRITE_ONLY);
   try {
     var tx = getTransaction(review.fullTxId);
     var planned = Object.assign({}, tx.planned, {f: String(input.partnerName)});
+    var columns = ['f'];
+    // 決め直しは新しい取引先名を入れた後（§6.2）。変わるときだけ G を書く。
+    if (taxTables !== null) {
+      var tax = taxCategoryRecomputed_(customer, tx, planned, taxTables);
+      if (tax.changed) {
+        planned.g = tax.g;
+        columns.push('g');
+      }
+    }
     var rowWrite = buildRowWrite(Number(tx.destinationRow), {
-      fullTxId: tx.fullTxId, planned: planned, columns: ['f']
+      fullTxId: tx.fullTxId, planned: planned, columns: columns
     });
     applyPlainTextFormat(customer, [rowWrite.rowNumber]);
     writeTransactionRows(customer, [rowWrite], leaseId, review.fileId);
@@ -260,6 +275,9 @@ function fixDateAmount_(review, input, actor) {
     throw new TypeError('FIX_DATE_AMOUNT on a DATE review requires a corrected date');
   }
   var customer = reviewWriteCustomer_(review);
+  // 税の 2 つの表は、リースを取る前に 1 回だけ読む（§6.2。§2.3 の顧客だけ。
+  // タブが無ければ読まない。+1）。決め直しは日付・金額を直した値で行う。
+  var taxTables = taxCategoryConfigured_(customer) ? readTaxTablesDirect_() : null;
   var leaseId = acquireLease(review.customerId, review.fileId, input.runId || null,
     actor, LEASE_PURPOSE.WRITE_ONLY);
   try {
@@ -276,6 +294,14 @@ function fixDateAmount_(review, input, actor) {
       columns.push('m');
     }
     if (!columns.length) throw new TypeError('FIX_DATE_AMOUNT requires a date or an amount');
+    // 決め直しは直した日付・金額を入れた後（§6.2）。変わるときだけ G を書く。
+    if (taxTables !== null) {
+      var tax = taxCategoryRecomputed_(customer, tx, planned, taxTables);
+      if (tax.changed) {
+        planned.g = tax.g;
+        columns.push('g');
+      }
+    }
 
     var rowWrite = buildRowWrite(Number(tx.destinationRow),
       {fullTxId: tx.fullTxId, planned: planned, columns: columns});

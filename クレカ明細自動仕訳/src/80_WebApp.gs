@@ -1251,7 +1251,18 @@ function webAppResolveReviews(customerId, decisions, options) {
     authorize(ROLE.REVIEWER, String(customerId), {operation: operation});
     var wantedCustomerId = String(customerId);
     var customer = getCustomerById(wantedCustomerId);
-    var partnerMasters = readPartnerResolutionMasters_(['partnerListRows', 'commonPartnerRows', 'commonDictionaryRows']);
+    // 税の 2 つの表（§6.2）。§2.3 の顧客で 2 つのタブがあれば、今の 1 回の
+    // 読取に鍵を足す（往復を増やさない）。§2.3 でない顧客は今とまったく同じ。
+    var taxConfigured = taxCategoryConfigured_(customer);
+    var taxKeys = taxConfigured ? taxTableMasterKeys_(customer) : [];
+    var partnerMasterKeys = ['partnerListRows', 'commonPartnerRows', 'commonDictionaryRows'];
+    taxKeys.forEach(function(key) { partnerMasterKeys.push(key); });
+    var partnerMasters = readPartnerResolutionMasters_(partnerMasterKeys);
+    var taxTablesForBatch;
+    if (taxConfigured) {
+      // タブが無ければ `present: false`（§5 の 2 → 確定では G を空にする側）。
+      taxTablesForBatch = taxTablesFromMasterRows_(partnerMasters, taxKeys);
+    }
     var partnerListRows = partnerMasters.partnerListRows;
     var reviewsById = Object.create(null);
     allReviewRecords_().forEach(function(review) {
@@ -1434,10 +1445,13 @@ function webAppResolveReviews(customerId, decisions, options) {
 
         var componentResult;
         try {
+          // 税の表は §2.3 の顧客だけ渡す（§2.3 でない顧客は今と同じ鍵・同じ読取）。
+          var partnerBatchOptions = {actor: sentItems[0].auth.userEmail, customer: customer,
+            partnerListRows: partnerListRows, commonPartnerRows: partnerMasters.commonPartnerRows,
+            commonDictionaryRows: partnerMasters.commonDictionaryRows, commonNamesForClick: commonNamesForClick};
+          if (taxConfigured) partnerBatchOptions.taxTables = taxTablesForBatch;
           componentResult = resolvePartnerReviewsBatch(wantedCustomerId, fileId, batchDecisions,
-            {actor: sentItems[0].auth.userEmail, customer: customer,
-              partnerListRows: partnerListRows, commonPartnerRows: partnerMasters.commonPartnerRows,
-              commonDictionaryRows: partnerMasters.commonDictionaryRows, commonNamesForClick: commonNamesForClick});
+            partnerBatchOptions);
         } catch (componentError) {
           followUpKnown = false;
           var componentCode = componentError && componentError.code || 'RESOLVE_FAILED';

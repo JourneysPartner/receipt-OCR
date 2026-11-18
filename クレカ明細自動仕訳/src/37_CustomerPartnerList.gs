@@ -159,14 +159,26 @@ function readPartnerResolutionMasters_(keys) {
   var specs = {
     partnerListRows: {name: CONFIG.SHEET_NAMES.CUSTOMER_PARTNER_LIST, end: 'J', width: 10},
     commonPartnerRows: {name: CONFIG.SHEET_NAMES.COMMON_PARTNER_LIST, end: 'F', width: 6},
-    commonDictionaryRows: {name: CONFIG.SHEET_NAMES.COMMON_PARTNER_DICT, end: 'R', width: 18}
+    commonDictionaryRows: {name: CONFIG.SHEET_NAMES.COMMON_PARTNER_DICT, end: 'R', width: 18},
+    // 税の 2 つの表（§4.3・§6.2）は見出しの 1 行目が要るので A1 から読む。
+    // 呼ぶ側がタブの有る無しを先に確かめ、有るときだけ鍵を渡す。
+    taxMarkRows: {name: CONFIG.SHEET_NAMES.TAX_PARTNER_MARKS, end: 'G', width: 7, start: 1},
+    taxFlagRows: {name: CONFIG.SHEET_NAMES.TAX_CUSTOMER_FLAGS, end: 'E', width: 5, start: 1}
   };
   var result = {};
   if (!keys.length) return result;
   var values = sheetsReadRanges_(requireSheet_(master, specs[keys[0]].name), keys.map(function(key) {
-    return quoteSheetName_(specs[key].name) + '!A2:' + specs[key].end;
+    var start = specs[key].start || 2;
+    return quoteSheetName_(specs[key].name) + '!A' + start + ':' + specs[key].end;
   }));
-  keys.forEach(function(key, index) { result[key] = sheetRowsFromValues_(values[index], specs[key].width); });
+  keys.forEach(function(key, index) {
+    // 税の 2 つは見出しを落とさない（`sheetRowsFromValues_` を通さない）。
+    if (specs[key].start === 1) {
+      result[key] = values[index] || [];
+      return;
+    }
+    result[key] = sheetRowsFromValues_(values[index], specs[key].width);
+  });
   return result;
 }
 
