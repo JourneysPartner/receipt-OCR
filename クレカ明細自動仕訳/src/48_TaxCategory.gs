@@ -582,3 +582,882 @@ function taxCategoryRecomputed_(customer, tx, planned, taxTables) {
   var next = resolution.status === TAX_STATUS_.DECIDED ? resolution.name : '';
   return {changed: next !== current, g: next};
 }
+
+// ================================================================
+// §9 運用関数（既定は見るだけ。`apply === true` のときだけ書く）
+//
+// 共通の手順：`withScriptLock_` の中で読み直す → 検査 → 監査を先に書く
+// （`type: 'SETTING'`）→ RAW で書く → 読み返して確かめる。監査が書けなければ
+// 何も書かない。止めるときは例外でなく報告の `stoppedBy` で返す。
+// 監査には取引の値（店名・金額・用途）を入れない（§10.12）。
+// ================================================================
+
+/** 運用関数の報告を、返す前に 1 回だけログへ出す（§9）。 */
+function taxOpsFinish_(report) {
+  Logger.log(JSON.stringify(report));
+  return report;
+}
+
+/**
+ * ロックの中で監査を 1 行足す。`appendAudit` は同じロックを取り直すので、
+ * ここではその中身（`appendAuditUnlocked_`）を呼ぶ。呼ぶ側は必ず
+ * `withScriptLock_` の中にいる。
+ *
+ * @param {!Object} entry
+ * @return {string} 監査 ID
+ */
+function taxOpsAudit_(entry) {
+  return appendAuditUnlocked_(entry);
+}
+
+/** 顧客マスターの 1 行。無い・重複は `null`（§9.3〜9.5 の引数の確かめ）。 */
+function taxOpsCustomer_(customerId) {
+  var wanted = accountTextValue_(customerId);
+  if (!wanted) return null;
+  try {
+    return getCustomerById(wanted);
+  } catch (error) {
+    return null;
+  }
+}
+
+/** A1 から読んだ値の、見出しを除いた行（行番号は 2 始まり）。 */
+function taxOpsRowsFromA2_(values, headers) {
+  var rows = [];
+  (Array.isArray(values) ? values : []).forEach(function(raw, index) {
+    var padded = taxRowValues_(raw, headers.length);
+    if (taxRowIsEmpty_(padded)) return;
+    rows.push({rowNumber: index + 2, values: padded});
+  });
+  return rows;
+}
+
+/** 表の値が 1 つも無いか（§9.1 の「中身が全部空のタブ」）。 */
+function taxOpsValuesAreEmpty_(values) {
+  var rows = Array.isArray(values) ? values : [];
+  return rows.every(function(row) {
+    if (!Array.isArray(row)) return true;
+    return row.every(function(value) {
+      return value === '' || value === null || value === undefined;
+    });
+  });
+}
+
+/**
+ * タブ 1 つの状態（§9.1）。
+ *
+ * `MISSING`（タブが無い）・`EMPTY`（タブはあるが値が 1 つも無い）・
+ * `HEADER_MISMATCH`（中身があるのに見出しが違う）・`OK`。`EMPTY` は
+ * 見出しを書く側へ倒す（タブを作った直後に見出しの書込が失敗した残り。
+ * `47` の M1 と同じ考え）。
+ *
+ * @param {?Array<!Array<*>>} values
+ * @param {!Array<string>} headers
+ * @return {!Object}
+ */
+function taxOpsTableState_(values, headers) {
+  if (values === null || values === undefined) return {status: 'MISSING', rows: []};
+  if (taxOpsValuesAreEmpty_(values)) return {status: 'EMPTY', rows: []};
+  if (!taxHeaderMatches_(values[0], headers)) return {status: 'HEADER_MISMATCH', rows: []};
+  return {status: 'OK', rows: taxTableRows_(values, headers) || []};
+}
+
+/** 表の誤りの行（§4.1・§4.2。行番号と理由）。 */
+function taxOpsTableProblems_(rows, headers) {
+  var marks = headers === TAX_PARTNER_MARKS_HEADERS_;
+  var problems = [];
+  (Array.isArray(rows) ? rows : []).forEach(function(row) {
+    var values = taxRowValues_(row, headers.length);
+    var reasons = [];
+    if (!accountTextValue_(values[0])) {
+      reasons.push(marks ? 'PARTNER_NAME_EMPTY' : 'CUSTOMER_ID_EMPTY');
+    }
+    if (marks) {
+      if (TAX_MARK_VALUES_.indexOf(accountTextValue_(values[1])) < 0) reasons.push('MARK_INVALID');
+      if (accountFlagValue_(values[3], true) === null) reasons.push('ACTIVE_INVALID');
+    } else if (accountFlagValue_(values[1], false) === null) {
+      reasons.push('FLAG_INVALID');
+    }
+    if (reasons.length) problems.push({row: row.rowNumber, reasons: reasons});
+  });
+  return problems;
+}
+
+/** 表 1 つの報告（§9.1 の見るだけ）。 */
+function taxOpsTableReport_(values, headers) {
+  var state = taxOpsTableState_(values, headers);
+  return {
+    status: state.status,
+    dataRows: state.rows.length,
+    problems: state.status === 'OK' ? taxOpsTableProblems_(state.rows, headers) : []
+  };
+}
+
+/**
+ * §9.1 の見るだけ。2 つのタブの有無・見出し・行数・誤りの行を報告に入れ、
+ * 書く必要があるかを返す。`HEADER_MISMATCH` のときは `stoppedBy` を立てる。
+ */
+function taxOpsSetupInspect_(report) {
+  report.stoppedBy = null;
+  var master = masterSpreadsheet_();
+  var names = [CONFIG.SHEET_NAMES.TAX_PARTNER_MARKS, CONFIG.SHEET_NAMES.TAX_CUSTOMER_FLAGS];
+  var headers = [TAX_PARTNER_MARKS_HEADERS_, TAX_CUSTOMER_FLAGS_HEADERS_];
+  var sheets = names.map(function(name) { return master.getSheetByName(name); });
+  var readingSheet = null;
+  var ranges = [];
+  sheets.forEach(function(sheet, index) {
+    if (!sheet) return;
+    if (!readingSheet) readingSheet = sheet;
+    ranges.push(quoteSheetName_(sheet.getName()) + '!A1:' + columnLetter_(headers[index].length));
+  });
+  var values = ranges.length ? sheetsReadRanges_(readingSheet, ranges) : [];
+  var cursor = 0;
+  var states = sheets.map(function(sheet, index) {
+    if (!sheet) return {status: 'MISSING', dataRows: 0, problems: []};
+    return taxOpsTableReport_(values[cursor++] || null, headers[index]);
+  });
+  report.tables = {marks: states[0], flags: states[1]};
+  report.willWrite = {marks: states[0].status !== 'OK', flags: states[1].status !== 'OK'};
+  report.action = states[0].status === 'OK' && states[1].status === 'OK' ? 'ALREADY_SET' : 'CREATE';
+  if (states[0].status === 'HEADER_MISMATCH' || states[1].status === 'HEADER_MISMATCH') {
+    report.stoppedBy = 'HEADER_MISMATCH';
+  }
+  return master;
+}
+
+/**
+ * §9.1 `opsSetupTaxCategoryTables(apply)`
+ *
+ * 見るだけ：2 つのタブの有る無しと見出しが正しいか、行数、誤りの行。
+ * `apply`：無いタブ・中身が全部空のタブだけ作り、見出しを Sheets API の
+ * RAW で書く（中身の行は書かない）。あるタブは触らない（見出しが違えば
+ * `HEADER_MISMATCH` で止めて何もしない）。
+ *
+ * @param {boolean=} apply
+ * @return {!Object} 報告（`applied` を持つ）
+ */
+function opsSetupTaxCategoryTables(apply) {
+  loadSettingsFromProperties();
+  var actor = activeUserEmail_();
+  var report = {
+    applied: false,
+    stoppedBy: null,
+    action: null,
+    tables: {
+      marks: {status: 'MISSING', dataRows: 0, problems: []},
+      flags: {status: 'MISSING', dataRows: 0, problems: []}
+    },
+    willWrite: {marks: false, flags: false},
+    written: {marks: false, flags: false},
+    verified: false,
+    auditId: null
+  };
+
+  taxOpsSetupInspect_(report);
+  if (apply !== true || report.stoppedBy) return taxOpsFinish_(report);
+  return taxOpsFinish_(withScriptLock_(function() {
+    var master = taxOpsSetupInspect_(report);
+    if (report.stoppedBy) return report;
+    if (report.action === 'ALREADY_SET') return report;
+    var names = [CONFIG.SHEET_NAMES.TAX_PARTNER_MARKS, CONFIG.SHEET_NAMES.TAX_CUSTOMER_FLAGS];
+    var headers = [TAX_PARTNER_MARKS_HEADERS_, TAX_CUSTOMER_FLAGS_HEADERS_];
+    var before = {marks: report.tables.marks.status, flags: report.tables.flags.status};
+
+    // 監査を先に書く。書けなければタブも見出しも書かない。
+    try {
+      report.auditId = taxOpsAudit_({
+        type: 'SETTING',
+        actor: actor,
+        targetType: 'SETTING',
+        targetId: 'TAX_TABLES',
+        before: before,
+        after: {marks: 'OK', flags: 'OK'},
+        reason: 'TAX_TABLES_SETUP'
+      });
+      SpreadsheetApp.flush();
+    } catch (error) {
+      report.stoppedBy = 'AUDIT_WRITE_FAILED';
+      return report;
+    }
+
+    try {
+      ['marks', 'flags'].forEach(function(key) {
+        if (!report.willWrite[key]) return;
+        var index = key === 'marks' ? 0 : 1;
+        var sheet = master.getSheetByName(names[index]);
+        if (!sheet) sheet = master.insertSheet(names[index]);
+        ensureSheetWidth_(sheet, headers[index].length);
+        // 作ったタブを確定させてから Sheets API で見出しを書く（47 と同じ順）。
+        SpreadsheetApp.flush();
+        Sheets.Spreadsheets.Values.update({values: [headers[index].slice()]},
+          String(master.getId()),
+          quoteSheetName_(names[index]) + '!A1:' + columnLetter_(headers[index].length) + '1',
+          {valueInputOption: 'RAW'});
+        report.written[key] = true;
+      });
+    } catch (error) {
+      report.stoppedBy = 'WRITE_FAILED';
+      return report;
+    }
+
+    // 読み返しは 2 つのタブの 1 行目を 1 回の読取で。
+    var verify = sheetsReadRanges_(master.getSheetByName(names[0]), [
+      quoteSheetName_(names[0]) + '!A1:' + columnLetter_(headers[0].length) + '1',
+      quoteSheetName_(names[1]) + '!A1:' + columnLetter_(headers[1].length) + '1'
+    ]);
+    if (!taxHeaderMatches_((verify[0] || [])[0] || [], headers[0]) ||
+        !taxHeaderMatches_((verify[1] || [])[0] || [], headers[1])) {
+      report.stoppedBy = 'WRITE_VERIFY_FAILED';
+      return report;
+    }
+    ['marks', 'flags'].forEach(function(key) {
+      if (!report.willWrite[key]) return;
+      report.tables[key] = {status: 'OK', dataRows: 0, problems: []};
+    });
+    report.verified = true;
+    report.applied = true;
+    return report;
+  }));
+}
+
+/**
+ * §9.2 `opsFindPartnerNames(word)`（見るだけ。書く道は無い）
+ *
+ * 共通取引先一覧と顧客別取引先一覧（全顧客）から、`partnerNameKey_` で
+ * `word` の鍵を含む取引先名を最大 50（名前・共通か顧客 ID・状態）。並びは
+ * 共通取引先一覧の行順、そのあと顧客別取引先一覧の行順。
+ *
+ * @param {*} word
+ * @return {!Object} 報告（`matches`・`truncated`）
+ */
+function opsFindPartnerNames(word) {
+  loadSettingsFromProperties();
+  var report = {
+    applied: false,
+    stoppedBy: null,
+    word: accountTextValue_(word),
+    key: '',
+    matches: [],
+    truncated: false
+  };
+  report.key = partnerNameKey_(report.word);
+  if (!report.key) {
+    report.stoppedBy = 'WORD_REQUIRED';
+    return taxOpsFinish_(report);
+  }
+  var masters = readPartnerResolutionMasters_(['partnerListRows', 'commonPartnerRows']);
+  var matches = [];
+  var seen = Object.create(null);
+  function add(name, scope, status) {
+    var text = accountTextValue_(name);
+    if (!text) return;
+    if (partnerNameKey_(text).indexOf(report.key) < 0) return;
+    var signature = scope + '\u0000' + status + '\u0000' + text;
+    if (seen[signature]) return;
+    seen[signature] = true;
+    matches.push({name: text, scope: scope, status: status});
+  }
+  ((masters && masters.commonPartnerRows) || []).forEach(function(row) {
+    var values = taxRowValues_(row, 6);
+    var active = accountFlagValue_(values[5], true);
+    add(values[1], 'COMMON', active === false ? 'RETIRED' : 'ACTIVE');
+  });
+  customerPartnerRecords_((masters && masters.partnerListRows) || []).forEach(function(record) {
+    add(record.partnerName, accountTextValue_(record.customerId),
+      record.active === true ? 'ACTIVE' : 'RETIRED');
+  });
+  report.truncated = matches.length > 50;
+  report.matches = matches.slice(0, 50);
+  return taxOpsFinish_(report);
+}
+
+/** 監査に入れてよい印の行の値（名前・印・顧客 ID だけ。§10.12）。 */
+function taxOpsMarkAuditValues_(values) {
+  return {
+    name: accountTextValue_(values[0]),
+    mark: accountTextValue_(values[1]),
+    customerId: accountTextValue_(values[2])
+  };
+}
+
+/** 顧客別取引先一覧の行。 */
+function taxOpsPartnerRecords_(masters) {
+  return customerPartnerRecords_((masters && masters.partnerListRows) || []);
+}
+
+/** 共通取引先一覧の行（`readCommonPartners_` と同じ形）。 */
+function taxOpsCommonPartnerRows_(masters) {
+  return commonPartnerRowsFromRecords_((masters && masters.commonPartnerRows) || []);
+}
+
+/**
+ * 名前が取引先一覧にあるかを分類する（§9.3 の決め）。
+ *
+ * 顧客 ID があるとき：その顧客の一覧と共通一覧の索引で分類する。
+ * 顧客 ID が空（共通の印）のとき：共通一覧だけの索引で分類し、`KNOWN` で
+ * なければ顧客別一覧のどれかの顧客に同じ文字（前後の空白を外して完全一致）の
+ * 有効な名前があれば `KNOWN` とする（その顧客 ID を返す）。
+ *
+ * @param {string} partnerName
+ * @param {string} customerId
+ * @param {!Array<!Object>} records `customerPartnerRecords_` の行
+ * @param {!Array<!Object>} commonPartners `commonPartnerRowsFromRecords_` の行
+ * @return {!Object} `{classification, knownCustomerId}`
+ */
+function taxOpsPartnerClassification_(partnerName, customerId, records, commonPartners) {
+  var wanted = accountTextValue_(customerId);
+  var index = buildPartnerNameIndex_(wanted ? records : [], wanted, commonPartners);
+  var classification = classifyPartnerName_(index, partnerName);
+  if (wanted) {
+    return {classification: classification,
+      knownCustomerId: classification.kind === 'KNOWN' ? wanted : null};
+  }
+  if (classification.kind === 'KNOWN') {
+    return {classification: classification, knownCustomerId: null};
+  }
+  var exact = accountTextValue_(partnerName);
+  var hits = (records || []).filter(function(record) {
+    return record.active === true && accountTextValue_(record.partnerName) === exact;
+  });
+  if (hits.length) {
+    return {classification: {kind: 'KNOWN'}, knownCustomerId: accountTextValue_(hits[0].customerId)};
+  }
+  return {classification: classification, knownCustomerId: null};
+}
+
+/**
+ * 同じ鍵・同じ顧客 ID の行のうち、有効がはっきり `FALSE` でない行（§9.3）。
+ * 読めない値（`active === null`）も候補に残す。
+ */
+function taxOpsMarkCandidates_(rows, partnerName, customerId) {
+  var key = partnerNameKey_(partnerName);
+  var wanted = accountTextValue_(customerId);
+  var candidates = [];
+  (Array.isArray(rows) ? rows : []).forEach(function(row) {
+    var values = taxRowValues_(row, TAX_PARTNER_MARKS_HEADERS_.length);
+    if (partnerNameKey_(values[0]) !== key) return;
+    if (accountTextValue_(values[2]) !== wanted) return;
+    var active = accountFlagValue_(values[3], true);
+    if (active === false) return;
+    candidates.push({rowNumber: row.rowNumber, values: values, active: active});
+  });
+  return candidates;
+}
+
+/**
+ * §9.3 `opsSetPartnerTaxMark(partnerName, mark, customerId, apply)`
+ *
+ * 見るだけ：同じ鍵・同じ顧客 ID の今の行、名前が取引先一覧にあるか
+ * （`KNOWN`・`VARIANT`・`RETIRED`・`NEW`）。`apply`：`KNOWN` でなければ
+ * 書かない。同じ鍵・同じ顧客 ID の有効な行が 1 行あれば B・E・F を書き直し、
+ * 無ければ末尾に足す（D＝`TRUE`）。2 行以上なら `DUPLICATE_ROWS` で止める。
+ *
+ * @param {*} partnerName
+ * @param {*} mark
+ * @param {*} customerId 空なら共通
+ * @param {boolean=} apply
+ * @return {!Object} 報告（`applied` を持つ）
+ */
+function opsSetPartnerTaxMark(partnerName, mark, customerId, apply) {
+  loadSettingsFromProperties();
+  var actor = activeUserEmail_();
+  var report = {
+    applied: false,
+    stoppedBy: null,
+    partnerName: accountTextValue_(partnerName),
+    mark: mark === undefined || mark === null ? '' : String(mark),
+    customerId: accountTextValue_(customerId),
+    scope: null,
+    classification: null,
+    knownCustomerId: null,
+    action: null,
+    candidates: 0,
+    before: null,
+    after: null,
+    verified: false,
+    auditId: null
+  };
+  report.scope = report.customerId ? report.customerId : 'COMMON';
+  if (!report.partnerName) {
+    report.stoppedBy = 'PARTNER_NAME_REQUIRED';
+    return taxOpsFinish_(report);
+  }
+  if (TAX_MARK_VALUES_.indexOf(report.mark) < 0) {
+    report.stoppedBy = 'MARK_INVALID';
+    return taxOpsFinish_(report);
+  }
+  if (report.customerId && !taxOpsCustomer_(report.customerId)) {
+    report.stoppedBy = 'CUSTOMER_NOT_FOUND';
+    return taxOpsFinish_(report);
+  }
+
+  function inspect() {
+    report.stoppedBy = null;
+    report.classification = null;
+    report.knownCustomerId = null;
+    report.action = null;
+    report.candidates = 0;
+    report.before = null;
+    var tables = readTaxTablesDirect_();
+    if (!tables.present) {
+      report.stoppedBy = 'TABLES_MISSING';
+      return null;
+    }
+    var masters = readPartnerResolutionMasters_(['partnerListRows', 'commonPartnerRows']);
+    var found = taxOpsPartnerClassification_(report.partnerName, report.customerId,
+      taxOpsPartnerRecords_(masters), taxOpsCommonPartnerRows_(masters));
+    report.classification = found.classification;
+    report.knownCustomerId = found.knownCustomerId;
+    if (found.classification.kind !== 'KNOWN') {
+      report.stoppedBy = 'PARTNER_NAME_NOT_KNOWN';
+      return null;
+    }
+    var candidates = taxOpsMarkCandidates_(tables.marks, report.partnerName, report.customerId);
+    report.candidates = candidates.length;
+    report.action = candidates.length ? 'UPDATE' : 'CREATE';
+    if (candidates.length > 1) {
+      report.stoppedBy = 'DUPLICATE_ROWS';
+      return null;
+    }
+    if (candidates.length === 1) {
+      report.before = taxOpsMarkAuditValues_(candidates[0].values);
+      if (candidates[0].active === null) {
+        report.stoppedBy = 'ROW_INVALID';
+        return null;
+      }
+    }
+    report.after = {name: report.partnerName, mark: report.mark,
+      customerId: report.customerId};
+    return {candidate: candidates.length ? candidates[0] : null};
+  }
+
+  inspect();
+  if (apply !== true || report.stoppedBy) return taxOpsFinish_(report);
+  return taxOpsFinish_(withScriptLock_(function() {
+    var current = inspect();
+    if (report.stoppedBy || !current) return report;
+    var master = masterSpreadsheet_();
+    var sheet = requireSheet_(master, CONFIG.SHEET_NAMES.TAX_PARTNER_MARKS);
+    var now = nowIso_();
+    var before = report.before;
+
+    // 監査を先に書く。書けなければ表には 1 セルも書かない。
+    try {
+      report.auditId = taxOpsAudit_({
+        type: 'SETTING',
+        actor: actor,
+        targetType: 'PARTNER',
+        targetId: report.partnerName,
+        customerId: report.customerId,
+        before: before || '',
+        after: report.after,
+        reason: 'TAX_PARTNER_MARK'
+      });
+      SpreadsheetApp.flush();
+    } catch (error) {
+      report.stoppedBy = 'AUDIT_WRITE_FAILED';
+      return report;
+    }
+
+    try {
+      if (current.candidate) {
+        var rowNumber = current.candidate.rowNumber;
+        Sheets.Spreadsheets.Values.batchUpdate({valueInputOption: 'RAW', data: [
+          {range: quoteSheetName_(sheet.getName()) + '!B' + rowNumber, values: [[report.mark]]},
+          {range: quoteSheetName_(sheet.getName()) + '!E' + rowNumber, values: [[now]]},
+          {range: quoteSheetName_(sheet.getName()) + '!F' + rowNumber, values: [[actor]]}
+        ]}, String(master.getId()));
+      } else {
+        appendRowsBatched_(sheet,
+          [[report.partnerName, report.mark, report.customerId, true, now, actor, '']],
+          7, 'tax-partner-marks');
+      }
+    } catch (error) {
+      report.stoppedBy = 'WRITE_FAILED';
+      return report;
+    }
+
+    var values = sheetsReadRanges_(sheet, [quoteSheetName_(sheet.getName()) + '!A2:G'])[0] || [];
+    var verify = taxOpsMarkCandidates_(taxOpsRowsFromA2_(values, TAX_PARTNER_MARKS_HEADERS_),
+      report.partnerName, report.customerId);
+    var expectedActive = current.candidate ? current.candidate.active : true;
+    var ok = verify.length === 1 &&
+      accountTextValue_(verify[0].values[1]) === report.mark &&
+      accountTextValue_(verify[0].values[2]) === report.customerId &&
+      accountTextValue_(verify[0].values[4]) === now &&
+      accountTextValue_(verify[0].values[5]) === actor &&
+      verify[0].active === expectedActive;
+    if (!ok) {
+      report.stoppedBy = 'WRITE_VERIFY_FAILED';
+      return report;
+    }
+    report.verified = true;
+    report.applied = true;
+    return report;
+  }));
+}
+
+/** 顧客の設定の行（A が同じ顧客 ID の行。§9.4）。 */
+function taxOpsFlagRows_(rows, customerId) {
+  var wanted = accountTextValue_(customerId);
+  var matches = [];
+  (Array.isArray(rows) ? rows : []).forEach(function(row) {
+    var values = taxRowValues_(row, TAX_CUSTOMER_FLAGS_HEADERS_.length);
+    if (accountTextValue_(values[0]) !== wanted) return;
+    matches.push({rowNumber: row.rowNumber, values: values});
+  });
+  return matches;
+}
+
+/**
+ * §9.4 `opsSetCustomerTaxFlag(customerId, smallAmountUnavailable, apply)`
+ *
+ * 見るだけ：今の値。`apply`：その顧客の行を書き直すか足す（2 行以上なら
+ * `DUPLICATE_ROWS` で止める）。`smallAmountUnavailable` は真偽だけ。
+ *
+ * @param {*} customerId
+ * @param {*} smallAmountUnavailable
+ * @param {boolean=} apply
+ * @return {!Object} 報告（`applied` を持つ）
+ */
+function opsSetCustomerTaxFlag(customerId, smallAmountUnavailable, apply) {
+  loadSettingsFromProperties();
+  var actor = activeUserEmail_();
+  var report = {
+    applied: false,
+    stoppedBy: null,
+    customerId: accountTextValue_(customerId),
+    smallAmountUnavailable: smallAmountUnavailable,
+    action: null,
+    candidates: 0,
+    before: null,
+    after: null,
+    verified: false,
+    auditId: null
+  };
+  if (!report.customerId) {
+    report.stoppedBy = 'CUSTOMER_REQUIRED';
+    return taxOpsFinish_(report);
+  }
+  if (typeof smallAmountUnavailable !== 'boolean') {
+    report.stoppedBy = 'ARGUMENT_INVALID';
+    return taxOpsFinish_(report);
+  }
+  if (!taxOpsCustomer_(report.customerId)) {
+    report.stoppedBy = 'CUSTOMER_NOT_FOUND';
+    return taxOpsFinish_(report);
+  }
+
+  function inspect() {
+    report.stoppedBy = null;
+    report.action = null;
+    report.candidates = 0;
+    report.before = null;
+    var tables = readTaxTablesDirect_();
+    if (!tables.present) {
+      report.stoppedBy = 'TABLES_MISSING';
+      return null;
+    }
+    var rows = taxOpsFlagRows_(tables.flags, report.customerId);
+    report.candidates = rows.length;
+    report.action = rows.length ? 'UPDATE' : 'CREATE';
+    if (rows.length > 1) {
+      report.stoppedBy = 'DUPLICATE_ROWS';
+      return null;
+    }
+    if (rows.length === 1) {
+      report.before = {smallAmountUnavailable: accountFlagValue_(rows[0].values[1], false)};
+    }
+    report.after = {smallAmountUnavailable: report.smallAmountUnavailable};
+    return {row: rows.length ? rows[0] : null};
+  }
+
+  inspect();
+  if (apply !== true || report.stoppedBy) return taxOpsFinish_(report);
+  return taxOpsFinish_(withScriptLock_(function() {
+    var current = inspect();
+    if (report.stoppedBy || !current) return report;
+    var master = masterSpreadsheet_();
+    var sheet = requireSheet_(master, CONFIG.SHEET_NAMES.TAX_CUSTOMER_FLAGS);
+    var now = nowIso_();
+    var before = report.before;
+
+    try {
+      report.auditId = taxOpsAudit_({
+        type: 'SETTING',
+        actor: actor,
+        targetType: 'CUSTOMER',
+        targetId: report.customerId,
+        customerId: report.customerId,
+        before: before || '',
+        after: report.after,
+        reason: 'TAX_CUSTOMER_FLAG'
+      });
+      SpreadsheetApp.flush();
+    } catch (error) {
+      report.stoppedBy = 'AUDIT_WRITE_FAILED';
+      return report;
+    }
+
+    try {
+      if (current.row) {
+        var rowNumber = current.row.rowNumber;
+        // B・C・D は続いているので 1 レンジで書く。
+        Sheets.Spreadsheets.Values.batchUpdate({valueInputOption: 'RAW', data: [{
+          range: quoteSheetName_(sheet.getName()) + '!B' + rowNumber + ':D' + rowNumber,
+          values: [[report.smallAmountUnavailable, now, actor]]
+        }]}, String(master.getId()));
+      } else {
+        appendRowsBatched_(sheet,
+          [[report.customerId, report.smallAmountUnavailable, now, actor, '']],
+          5, 'tax-customer-flags');
+      }
+    } catch (error) {
+      report.stoppedBy = 'WRITE_FAILED';
+      return report;
+    }
+
+    var values = sheetsReadRanges_(sheet, [quoteSheetName_(sheet.getName()) + '!A2:E'])[0] || [];
+    var verify = taxOpsFlagRows_(taxOpsRowsFromA2_(values, TAX_CUSTOMER_FLAGS_HEADERS_),
+      report.customerId);
+    var ok = verify.length === 1 &&
+      accountFlagValue_(verify[0].values[1], false) === report.smallAmountUnavailable &&
+      accountTextValue_(verify[0].values[2]) === now &&
+      accountTextValue_(verify[0].values[3]) === actor;
+    if (!ok) {
+      report.stoppedBy = 'WRITE_VERIFY_FAILED';
+      return report;
+    }
+    report.verified = true;
+    report.applied = true;
+    return report;
+  }));
+}
+
+/** 入力規則の要約（§9.5。一覧なら値の並び、範囲なら A1 表記）。 */
+function taxOpsValidationSummary_(validation) {
+  if (!validation) {
+    return {key: 'NONE', type: null, values: null, rangeA1: null, allowInvalid: null};
+  }
+  var type = validation.getCriteriaType ? String(validation.getCriteriaType()) : '';
+  var criteria = validation.getCriteriaValues ? (validation.getCriteriaValues() || []) : [];
+  var values = null;
+  var rangeA1 = null;
+  if (type === 'VALUE_IN_LIST') {
+    values = (criteria[0] || []).map(function(value) { return String(value); });
+  } else if (type === 'VALUE_IN_RANGE') {
+    var target = criteria[0];
+    rangeA1 = target === null || target === undefined ? null :
+      (typeof target === 'string' ? target :
+        (target.getA1Notation ? String(target.getA1Notation()) : String(target)));
+  }
+  var allowInvalid = validation.getAllowInvalid ? Boolean(validation.getAllowInvalid()) : null;
+  return {
+    key: JSON.stringify([type, values, rangeA1, allowInvalid]),
+    type: type,
+    values: values,
+    rangeA1: rangeA1,
+    allowInvalid: allowInvalid
+  };
+}
+
+/**
+ * 入力規則を、同じ規則の続く行ごとにまとめる（§9.5。最大 20 組）。
+ * あわせて、値のある行と、一覧に無い値（最大 10 個）も返す。
+ */
+function taxOpsValidationReport_(range, firstRow) {
+  var validations = range.getDataValidations();
+  var values = range.getValues();
+  var groups = [];
+  var allowInvalid = [];
+  var valueRows = 0;
+  var other = [];
+  validations.forEach(function(row, index) {
+    var validation = row && row[0] ? row[0] : null;
+    var summary = taxOpsValidationSummary_(validation);
+    if (validation) allowInvalid.push(summary.allowInvalid);
+    var last = groups[groups.length - 1];
+    if (last && last.key === summary.key) {
+      last.to = firstRow + index;
+    } else {
+      groups.push({key: summary.key, from: firstRow + index, to: firstRow + index,
+        type: summary.type, values: summary.values, rangeA1: summary.rangeA1,
+        allowInvalid: summary.allowInvalid});
+    }
+    var cell = values[index] && values[index][0];
+    if (cell === '' || cell === null || cell === undefined) return;
+    valueRows += 1;
+    var text = String(cell);
+    var known = FREEE_TAX_CATEGORIES_.some(function(category) {
+      return category.name === text;
+    });
+    if (!known && other.indexOf(text) < 0 && other.length < 10) other.push(text);
+  });
+  var allow = true;
+  if (allowInvalid.length) {
+    allow = allowInvalid.every(function(value) { return value === allowInvalid[0]; }) ?
+      allowInvalid[0] : true;
+  }
+  return {
+    groups: groups.slice(0, 20),
+    truncated: groups.length > 20,
+    rows: validations.length,
+    valueRows: valueRows,
+    otherValues: other.slice(0, 10),
+    allowInvalid: allow
+  };
+}
+
+/**
+ * §9.5 `opsSetTaxCategoryValidation(customerId, apply)`（雛形の G の入力規則）
+ *
+ * 対象は、その顧客の雛形（`customer.destinationSpreadsheetId`）の入力用
+ * シートの G の `headerRow + 1` 行目から最後の行（`getMaxRows()`）まで。
+ * 転記シート（複製）・ほかの顧客の雛形には触らない。
+ *
+ * @param {*} customerId
+ * @param {boolean=} apply
+ * @return {!Object} 報告（`applied` を持つ）
+ */
+function opsSetTaxCategoryValidation(customerId, apply) {
+  loadSettingsFromProperties();
+  var actor = activeUserEmail_();
+  var report = {
+    applied: false,
+    stoppedBy: null,
+    customerId: accountTextValue_(customerId),
+    templateId: null,
+    sheetName: null,
+    column: null,
+    headerRow: null,
+    firstRow: null,
+    lastRow: null,
+    groups: [],
+    truncated: false,
+    rows: 0,
+    valueRows: 0,
+    otherValues: [],
+    allowInvalid: null,
+    verified: false,
+    auditId: null
+  };
+  if (!report.customerId) {
+    report.stoppedBy = 'CUSTOMER_REQUIRED';
+    return taxOpsFinish_(report);
+  }
+  var customer = taxOpsCustomer_(report.customerId);
+  if (!customer) {
+    report.stoppedBy = 'CUSTOMER_NOT_FOUND';
+    return taxOpsFinish_(report);
+  }
+  report.templateId = String(customer.destinationSpreadsheetId || '');
+  report.sheetName = String(customer.destinationSheetName || '');
+  report.headerRow = Number(customer.headerRow);
+  var column = Number(customer.columnMapping && customer.columnMapping.G);
+  var excluded = (customer.rowScanExcludedColumns || []).map(Number);
+  if (!Number.isInteger(column) || column < 1 || excluded.indexOf(column) >= 0) {
+    report.stoppedBy = 'NO_TAX_COLUMN';
+    return taxOpsFinish_(report);
+  }
+  report.column = column;
+  if (!Number.isInteger(report.headerRow) || report.headerRow < 1) {
+    report.stoppedBy = 'TEMPLATE_INVALID';
+    return taxOpsFinish_(report);
+  }
+
+  function open() {
+    if (!report.templateId || !report.sheetName) {
+      report.stoppedBy = 'TEMPLATE_MISSING';
+      return null;
+    }
+    var spreadsheet = null;
+    try { spreadsheet = SpreadsheetApp.openById(report.templateId); } catch (error) {
+      report.stoppedBy = 'TEMPLATE_MISSING';
+      return null;
+    }
+    var sheet = spreadsheet.getSheetByName(report.sheetName);
+    if (!sheet) {
+      report.stoppedBy = 'TEMPLATE_MISSING';
+      return null;
+    }
+    var first = report.headerRow + 1;
+    var last = Number(sheet.getMaxRows());
+    report.firstRow = first;
+    report.lastRow = last;
+    if (!(last >= first)) {
+      report.stoppedBy = 'NO_ROWS';
+      return null;
+    }
+    return {sheet: sheet, range: sheet.getRange(first, column, last - first + 1, 1)};
+  }
+
+  function inspect() {
+    report.stoppedBy = null;
+    var target = open();
+    if (!target) return null;
+    var summary = taxOpsValidationReport_(target.range, report.firstRow);
+    report.groups = summary.groups;
+    report.truncated = summary.truncated;
+    report.rows = summary.rows;
+    report.valueRows = summary.valueRows;
+    report.otherValues = summary.otherValues;
+    report.allowInvalid = summary.allowInvalid;
+    return target;
+  }
+
+  inspect();
+  if (apply !== true || report.stoppedBy) return taxOpsFinish_(report);
+  return taxOpsFinish_(withScriptLock_(function() {
+    var target = inspect();
+    if (report.stoppedBy || !target) return report;
+    var names = FREEE_TAX_CATEGORIES_.map(function(category) { return category.name; });
+    var before = {groups: report.groups, truncated: report.truncated,
+      valueRows: report.valueRows};
+    var allowInvalid = report.allowInvalid;
+
+    try {
+      report.auditId = taxOpsAudit_({
+        type: 'SETTING',
+        actor: actor,
+        targetType: 'TEMPLATE',
+        targetId: report.templateId,
+        customerId: report.customerId,
+        before: before,
+        after: {column: columnLetter_(column), firstRow: report.firstRow,
+          lastRow: report.lastRow, allowInvalid: allowInvalid, count: names.length},
+        reason: 'TAX_VALIDATION'
+      });
+      SpreadsheetApp.flush();
+    } catch (error) {
+      report.stoppedBy = 'AUDIT_WRITE_FAILED';
+      return report;
+    }
+
+    try {
+      var validation = SpreadsheetApp.newDataValidation()
+        .requireValueInList(names, true)
+        .setAllowInvalid(allowInvalid)
+        .build();
+      target.range.setDataValidation(validation);
+    } catch (error) {
+      report.stoppedBy = 'WRITE_FAILED';
+      return report;
+    }
+
+    var verify = target.sheet.getRange(report.firstRow, column,
+      report.lastRow - report.firstRow + 1, 1).getDataValidations();
+    var expected = JSON.stringify(['VALUE_IN_LIST', names, allowInvalid]);
+    var ok = verify.length === report.lastRow - report.firstRow + 1 &&
+      verify.every(function(row) {
+        var summary = taxOpsValidationSummary_(row && row[0] ? row[0] : null);
+        return JSON.stringify([summary.type, summary.values, summary.allowInvalid]) === expected;
+      });
+    if (!ok) {
+      report.stoppedBy = 'WRITE_VERIFY_FAILED';
+      return report;
+    }
+    report.verified = true;
+    report.applied = true;
+    return report;
+  }));
+}

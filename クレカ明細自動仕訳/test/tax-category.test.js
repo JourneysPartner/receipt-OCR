@@ -1526,4 +1526,710 @@ module.exports = ({test, assert, gas}) => {
       JSON.stringify([amountNotConfiguredWithTables, amountWithout]));
     assert.equal(amountNotConfiguredWithTables.reads, amountWithout.reads);
   });
+
+  // ================================================================
+  // 4 回目：運用関数（gt 12・§9.1〜9.5）。値はすべて架空である。
+  // ================================================================
+
+  const TAX_MARK_SHEET = '取引先の税の印';
+  const TAX_FLAG_SHEET = '顧客の税の設定';
+
+  function auditLastRow() { return master('監査ログ').getLastRow(); }
+
+  function auditLast() {
+    const row = auditLastRow();
+    return {
+      type: master('監査ログ').getRange(row, 3).getValue(),
+      targetType: master('監査ログ').getRange(row, 7).getValue(),
+      targetId: master('監査ログ').getRange(row, 8).getValue(),
+      before: master('監査ログ').getRange(row, 10).getValue(),
+      after: master('監査ログ').getRange(row, 11).getValue(),
+      reason: master('監査ログ').getRange(row, 12).getValue()
+    };
+  }
+
+  function sheetValues(name) {
+    const sheet = master(name);
+    if (!sheet) return [];
+    const last = sheet.getLastRow();
+    if (!last) return [];
+    const width = Math.max(sheet.getLastColumn(), 7);
+    return sheet.getRange(1, 1, last, width).getValues();
+  }
+
+  function buildValidation(values, allowInvalid) {
+    return evaluate('SpreadsheetApp.newDataValidation()')
+      .requireValueInList(values, true)
+      .setAllowInvalid(Boolean(allowInvalid))
+      .build();
+  }
+
+  function writeLogIndex(sheetName, from = 0) {
+    return gas.stubs.getWriteLog().findIndex((item, index) =>
+      index >= from && item.sheetName === sheetName);
+  }
+
+  /** 税の 2 つの表がある世界（印・設定の中身は呼ぶ側が決める）。 */
+  function taxOpsWorld(marks, flags) {
+    const world = setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [],
+      taxTabs: {marks: marks || [], flags: flags || []}});
+    master('共通取引先一覧').appendRow(['PTN_9101', '架空フリマ共通', '', '', '', 1]);
+    return world;
+  }
+
+  // ---------------- gt 12: §9.1 ----------------
+
+  test('gt 12: §9.1 見るだけは何も作らず、apply は監査→見出しの順で 2 つのタブを作る', () => {
+    setupWorld({accounts: GT_ACCOUNTS, sheetEntries: []});
+    const beforeAudit = auditLastRow();
+    gas.stubs.resetWriteLog();
+
+    const seen = plain(call('opsSetupTaxCategoryTables', []));
+    assert.equal(seen.applied, false);
+    assert.equal(seen.stoppedBy, null);
+    assert.equal(seen.action, 'CREATE');
+    assert.equal(seen.tables.marks.status, 'MISSING');
+    assert.equal(seen.tables.flags.status, 'MISSING');
+    assert.equal(master(TAX_MARK_SHEET), null, '見るだけはタブを作らない');
+    assert.equal(master(TAX_FLAG_SHEET), null);
+    assert.deepEqual(gas.stubs.getWriteLog(), []);
+    assert.equal(auditLastRow(), beforeAudit);
+
+    gas.stubs.resetWriteLog();
+    const applied = plain(call('opsSetupTaxCategoryTables', [true]));
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    assert.equal(applied.stoppedBy, null);
+    assert.equal(applied.verified, true);
+    assert.deepEqual(applied.written, {marks: true, flags: true});
+    assert.equal(applied.tables.marks.status, 'OK');
+    assert.equal(applied.tables.flags.status, 'OK');
+
+    assert.deepEqual(sheetValues(TAX_MARK_SHEET)[0].slice(0, 7), MARK_HEADERS);
+    assert.deepEqual(sheetValues(TAX_FLAG_SHEET)[0].slice(0, 5), FLAG_HEADERS);
+    assert.equal(master(TAX_MARK_SHEET).getLastRow(), 1, '中身の行は書かない');
+    assert.equal(master(TAX_FLAG_SHEET).getLastRow(), 1);
+
+    // 監査が先。タブの見出しはその後。
+    const log = gas.stubs.getWriteLog();
+    const auditIndex = log.findIndex((item) => item.sheetName === '監査ログ');
+    const marksIndex = log.findIndex((item) => item.sheetName === TAX_MARK_SHEET);
+    const flagsIndex = log.findIndex((item) => item.sheetName === TAX_FLAG_SHEET);
+    assert.ok(auditIndex >= 0 && marksIndex > auditIndex && flagsIndex > auditIndex,
+      JSON.stringify(log));
+    const audit = auditLast();
+    assert.equal(audit.type, 'SETTING');
+    assert.equal(audit.targetType, 'SETTING');
+    assert.equal(audit.targetId, 'TAX_TABLES');
+    assert.equal(audit.reason, 'TAX_TABLES_SETUP');
+
+    // 2 回目は何も書かない。
+    const auditCount = auditLastRow();
+    gas.stubs.resetWriteLog();
+    const again = plain(call('opsSetupTaxCategoryTables', [true]));
+    assert.equal(again.action, 'ALREADY_SET');
+    assert.equal(again.applied, false);
+    assert.equal(again.stoppedBy, null);
+    assert.deepEqual(gas.stubs.getWriteLog(), []);
+    assert.equal(auditLastRow(), auditCount);
+  });
+
+  test('gt 12: §9.1 あるタブは触らず、見出しが違えば止めて何もしない', () => {
+    // 正しい見出しのタブは、中身ごとそのまま残す。
+    setupMaster();
+    const spreadsheet = gas.stubs.getSpreadsheet('master');
+    spreadsheet.insertSheet(TAX_MARK_SHEET, {values: [
+      MARK_HEADERS.slice(), markRow('架空既存取引先', 'フリマ')]});
+    const seen = plain(call('opsSetupTaxCategoryTables', []));
+    assert.equal(seen.tables.marks.status, 'OK');
+    assert.equal(seen.tables.marks.dataRows, 1);
+    assert.equal(seen.tables.flags.status, 'MISSING');
+
+    const applied = plain(call('opsSetupTaxCategoryTables', [true]));
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    assert.deepEqual(applied.willWrite, {marks: false, flags: true});
+    assert.equal(master(TAX_MARK_SHEET).getLastRow(), 2, 'あるタブの中身は触らない');
+    assert.deepEqual(sheetValues(TAX_MARK_SHEET)[1].slice(0, 2), ['架空既存取引先', 'フリマ']);
+
+    // 中身があるのに見出しが違えば、監査も書かず、ほかのタブも作らない。
+    setupMaster();
+    const spreadsheet2 = gas.stubs.getSpreadsheet('master');
+    spreadsheet2.insertSheet(TAX_MARK_SHEET, {values: [
+      ['取引先名', '印', '顧客ID', '有効', '登録日時', '登録者', 'メモ '],
+      markRow('架空既存取引先', 'フリマ')]});
+    const beforeAudit = auditLastRow();
+    const mismatch = plain(call('opsSetupTaxCategoryTables', []));
+    assert.equal(mismatch.tables.marks.status, 'HEADER_MISMATCH');
+    assert.equal(mismatch.stoppedBy, 'HEADER_MISMATCH');
+    gas.stubs.resetWriteLog();
+    const stopped = plain(call('opsSetupTaxCategoryTables', [true]));
+    assert.equal(stopped.applied, false);
+    assert.equal(stopped.stoppedBy, 'HEADER_MISMATCH');
+    assert.equal(master(TAX_FLAG_SHEET), null, '止めるときは何もしない');
+    assert.equal(auditLastRow(), beforeAudit);
+    assert.deepEqual(gas.stubs.getWriteLog(), []);
+  });
+
+  test('gt 12: §9.1 中身が全部空のタブは見出しを書き（HEADER_MISMATCH にしない）', () => {
+    setupMaster();
+    const spreadsheet = gas.stubs.getSpreadsheet('master');
+    spreadsheet.insertSheet(TAX_MARK_SHEET);
+    spreadsheet.insertSheet(TAX_FLAG_SHEET);
+    const seen = plain(call('opsSetupTaxCategoryTables', []));
+    assert.equal(seen.tables.marks.status, 'EMPTY');
+    assert.equal(seen.tables.flags.status, 'EMPTY');
+    assert.equal(seen.stoppedBy, null);
+
+    const applied = plain(call('opsSetupTaxCategoryTables', [true]));
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    assert.deepEqual(applied.written, {marks: true, flags: true});
+    assert.deepEqual(sheetValues(TAX_MARK_SHEET)[0].slice(0, 7), MARK_HEADERS);
+    assert.deepEqual(sheetValues(TAX_FLAG_SHEET)[0].slice(0, 5), FLAG_HEADERS);
+    assert.equal(master(TAX_MARK_SHEET).getLastRow(), 1);
+  });
+
+  test('gt 12: §9.1 見るだけは誤りの行を行番号と理由で返す', () => {
+    setupMaster();
+    const spreadsheet = gas.stubs.getSpreadsheet('master');
+    spreadsheet.insertSheet(TAX_MARK_SHEET, {values: [
+      MARK_HEADERS.slice(),
+      markRow('', 'フリマ'),
+      markRow('架空印誤り', '○'),
+      markRow('架空有効誤り', 'なし', '', '○'),
+      markRow('架空正常', '海外の物')
+    ]});
+    spreadsheet.insertSheet(TAX_FLAG_SHEET, {values: [
+      FLAG_HEADERS.slice(),
+      flagRow('C9001', '○'),
+      flagRow('', true)
+    ]});
+    const report = plain(call('opsSetupTaxCategoryTables', []));
+    assert.equal(report.tables.marks.dataRows, 4);
+    assert.deepEqual(report.tables.marks.problems, [
+      {row: 2, reasons: ['PARTNER_NAME_EMPTY']},
+      {row: 3, reasons: ['MARK_INVALID']},
+      {row: 4, reasons: ['ACTIVE_INVALID']}
+    ]);
+    assert.deepEqual(report.tables.flags.problems, [
+      {row: 2, reasons: ['FLAG_INVALID']},
+      {row: 3, reasons: ['CUSTOMER_ID_EMPTY']}
+    ]);
+  });
+
+  // ---------------- gt 12: §9.2 ----------------
+
+  test('gt 12: §9.2 鍵を含む取引先名を一覧の順で返し、書かない（最大 50）', () => {
+    setupMaster();
+    const common = master('共通取引先一覧');
+    common.appendRow(['PTN_9001', '架空フリマ共通', '', '', '', 1]);
+    common.appendRow(['PTN_9002', '架空一般ストア', '', '', '', 1]);
+    const list = master('顧客別取引先一覧');
+    list.appendRow(['PTN_9003', 'K9001', '架空フリマ東京', 'ACTIVE', '', '', '', '', '', '']);
+    list.appendRow(['PTN_9004', 'K9002', '架空フリマ大阪', 'RETIRED', '架空フリマ大阪2',
+      '', '', '', '', '']);
+    gas.stubs.resetWriteLog();
+    const beforeAudit = auditLastRow();
+
+    const report = plain(call('opsFindPartnerNames', ['フリマ']));
+    assert.equal(report.applied, false);
+    assert.equal(report.stoppedBy, null);
+    assert.equal(report.truncated, false);
+    assert.deepEqual(report.matches, [
+      {name: '架空フリマ共通', scope: 'COMMON', status: 'ACTIVE'},
+      {name: '架空フリマ東京', scope: 'K9001', status: 'ACTIVE'},
+      {name: '架空フリマ大阪', scope: 'K9002', status: 'RETIRED'}
+    ]);
+    assert.deepEqual(gas.stubs.getWriteLog(), [], '見るだけは書かない');
+    assert.equal(auditLastRow(), beforeAudit);
+
+    assert.equal(plain(call('opsFindPartnerNames', ['  '])).stoppedBy, 'WORD_REQUIRED');
+
+    // 名前の鍵の揺れ（全角・半角）でも当たる。
+    common.appendRow(['PTN_9005', 'ABCストア', '', '', '', 1]);
+    const shifted = plain(call('opsFindPartnerNames', ['ＡＢＣ']));
+    assert.deepEqual(shifted.matches.map((match) => match.name), ['ABCストア']);
+  });
+
+  test('gt 12: §9.2 50 を超えたら 50 件と truncated を返す', () => {
+    setupMaster();
+    const common = master('共通取引先一覧');
+    for (let index = 1; index <= 60; index += 1) {
+      common.appendRow(['PTN_95' + String(index).padStart(2, '0'),
+        '架空大量ストア' + String(index).padStart(2, '0'), '', '', '', 1]);
+    }
+    const report = plain(call('opsFindPartnerNames', ['架空大量']));
+    assert.equal(report.matches.length, 50);
+    assert.equal(report.truncated, true);
+    assert.equal(report.matches[0].name, '架空大量ストア01');
+    assert.equal(report.matches[49].name, '架空大量ストア50');
+  });
+
+  // ---------------- gt 12: §9.3 ----------------
+
+  test('gt 12: §9.3 見るだけは書かず、apply は監査→行の順で足し、読み返して確かめる', () => {
+    taxOpsWorld([], []);
+    const beforeAudit = auditLastRow();
+    gas.stubs.resetWriteLog();
+
+    const seen = plain(call('opsSetPartnerTaxMark', ['架空フリマ共通', 'フリマ', '']));
+    assert.equal(seen.applied, false);
+    assert.equal(seen.stoppedBy, null);
+    assert.equal(seen.classification.kind, 'KNOWN');
+    assert.equal(seen.scope, 'COMMON');
+    assert.equal(seen.action, 'CREATE');
+    assert.equal(seen.candidates, 0);
+    assert.deepEqual(gas.stubs.getWriteLog(), [], '見るだけは書かない');
+    assert.equal(auditLastRow(), beforeAudit);
+
+    gas.stubs.resetWriteLog();
+    const applied = plain(call('opsSetPartnerTaxMark', ['架空フリマ共通', 'フリマ', '', true]));
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    assert.equal(applied.verified, true);
+    assert.equal(applied.stoppedBy, null);
+    const rows = sheetValues(TAX_MARK_SHEET);
+    assert.equal(rows.length, 2);
+    assert.equal(rows[1][0], '架空フリマ共通');
+    assert.equal(rows[1][1], 'フリマ');
+    assert.equal(rows[1][2], '');
+    assert.equal(rows[1][3], true);
+    assert.ok(rows[1][4], '登録日時');
+    assert.equal(rows[1][5], 'tester@example.com');
+    assert.equal(rows[1][6], '');
+
+    let log = gas.stubs.getWriteLog();
+    let auditIndex = log.findIndex((item) => item.sheetName === '監査ログ');
+    let markIndex = log.findIndex((item) => item.sheetName === TAX_MARK_SHEET);
+    assert.ok(auditIndex >= 0 && markIndex > auditIndex, JSON.stringify(log));
+    const added = auditLast();
+    assert.equal(added.type, 'SETTING');
+    assert.equal(added.targetType, 'PARTNER');
+    assert.equal(added.targetId, '架空フリマ共通');
+    assert.equal(added.reason, 'TAX_PARTNER_MARK');
+
+    // 同じ鍵・同じ顧客の行があるので、B・E・F だけ書き直す（C・D はそのまま）。
+    master(TAX_MARK_SHEET).getRange(2, 7).setValue('架空メモ');
+    gas.stubs.resetWriteLog();
+    const updated = plain(call('opsSetPartnerTaxMark', ['架空フリマ共通', 'なし', '', true]));
+    assert.equal(updated.action, 'UPDATE');
+    assert.equal(updated.applied, true, JSON.stringify(updated));
+    assert.equal(updated.before.mark, 'フリマ');
+    const after = sheetValues(TAX_MARK_SHEET);
+    assert.equal(after.length, 2, '行を増やさない');
+    assert.equal(after[1][1], 'なし');
+    assert.equal(after[1][2], '');
+    assert.equal(after[1][3], true);
+    assert.equal(after[1][6], '架空メモ', 'メモは触らない');
+    log = gas.stubs.getWriteLog();
+    auditIndex = log.findIndex((item) => item.sheetName === '監査ログ');
+    markIndex = log.findIndex((item) => item.sheetName === TAX_MARK_SHEET);
+    assert.ok(auditIndex >= 0 && markIndex > auditIndex, JSON.stringify(log));
+    const change = auditLast();
+    assert.ok(String(change.before).indexOf('架空メモ') < 0, '監査にメモを出さない');
+    assert.ok(String(change.after).indexOf('架空メモ') < 0);
+  });
+
+  test('gt 12: §9.3 顧客別の名前・共通の印から顧客別の名前を KNOWN にする', () => {
+    taxOpsWorld([], []);
+    const list = master('顧客別取引先一覧');
+    list.appendRow(['PTN_9201', 'C001', '架空フリマ東京', 'ACTIVE', '', '', '', '', '', '']);
+    list.appendRow(['PTN_9202', 'C002', '架空フリマ大阪', 'RETIRED', '架空フリマ大阪2',
+      '', '', '', '', '']);
+    const common = master('共通取引先一覧');
+    common.appendRow(['PTN_9203', 'ABCストア', '', '', '', 1]);
+
+    // 顧客 ID があるとき：その顧客の一覧と共通一覧で分類する。
+    const own = plain(call('opsSetPartnerTaxMark', ['架空フリマ東京', 'フリマ', 'C001']));
+    assert.equal(own.classification.kind, 'KNOWN');
+    assert.equal(own.stoppedBy, null);
+    assert.equal(own.action, 'CREATE');
+
+    // 顧客 ID が空：共通一覧に無ければ、顧客別の有効な同じ名前を KNOWN にする。
+    const viaCustomer = plain(call('opsSetPartnerTaxMark', ['架空フリマ東京', 'フリマ', '']));
+    assert.equal(viaCustomer.classification.kind, 'KNOWN');
+    assert.equal(viaCustomer.knownCustomerId, 'C001');
+    assert.equal(viaCustomer.stoppedBy, null);
+
+    // 表記だけ違う名前（VARIANT）は書かない。
+    const variant = plain(call('opsSetPartnerTaxMark', ['ＡＢＣストア', 'フリマ', '', true]));
+    assert.equal(variant.classification.kind, 'VARIANT');
+    assert.equal(variant.stoppedBy, 'PARTNER_NAME_NOT_KNOWN');
+    assert.equal(master(TAX_MARK_SHEET).getLastRow(), 1);
+
+    // 知らない名前は書かない。
+    const unknown = plain(call('opsSetPartnerTaxMark', ['架空未登録', 'フリマ', '', true]));
+    assert.equal(unknown.classification.kind, 'NEW');
+    assert.equal(unknown.stoppedBy, 'PARTNER_NAME_NOT_KNOWN');
+    assert.equal(master(TAX_MARK_SHEET).getLastRow(), 1);
+    assert.equal(auditLastRow(), 1, '監査ログは GENESIS だけ');
+
+    // 顧客別の印は顧客 ID を C に入れて足す。
+    const applied = plain(call('opsSetPartnerTaxMark', ['架空フリマ東京', 'フリマ', 'C001', true]));
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    assert.equal(sheetValues(TAX_MARK_SHEET)[1][2], 'C001');
+  });
+
+  test('gt 12: §9.3 2 行なら DUPLICATE_ROWS、D が読めない 1 行は ROW_INVALID、FALSE は候補にしない', () => {
+    taxOpsWorld([markRow('架空フリマ共通', 'フリマ'), markRow('架空フリマ共通', 'なし')], []);
+    const duplicate = plain(call('opsSetPartnerTaxMark', ['架空フリマ共通', 'フリマ', '']));
+    assert.equal(duplicate.candidates, 2);
+    assert.equal(duplicate.stoppedBy, 'DUPLICATE_ROWS');
+    const beforeDuplicate = auditLastRow();
+    const stopped = plain(call('opsSetPartnerTaxMark', ['架空フリマ共通', 'フリマ', '', true]));
+    assert.equal(stopped.stoppedBy, 'DUPLICATE_ROWS');
+    assert.equal(stopped.applied, false);
+    assert.equal(auditLastRow(), beforeDuplicate);
+    assert.equal(master(TAX_MARK_SHEET).getLastRow(), 3);
+
+    taxOpsWorld([markRow('架空フリマ共通', 'フリマ', '', '○')], []);
+    const invalid = plain(call('opsSetPartnerTaxMark', ['架空フリマ共通', 'なし', '', true]));
+    assert.equal(invalid.candidates, 1);
+    assert.equal(invalid.stoppedBy, 'ROW_INVALID');
+    assert.equal(invalid.applied, false);
+    assert.equal(master(TAX_MARK_SHEET).getRange(2, 2).getValue(), 'フリマ');
+
+    taxOpsWorld([markRow('架空フリマ共通', 'フリマ', '', false)], []);
+    const created = plain(call('opsSetPartnerTaxMark', ['架空フリマ共通', 'なし', '', true]));
+    assert.equal(created.action, 'CREATE');
+    assert.equal(created.applied, true, JSON.stringify(created));
+    assert.equal(master(TAX_MARK_SHEET).getLastRow(), 3);
+    assert.equal(master(TAX_MARK_SHEET).getRange(2, 4).getValue(), false);
+    assert.equal(master(TAX_MARK_SHEET).getRange(3, 4).getValue(), true);
+  });
+
+  test('gt 12: §9.3 引数の誤り・表が無いときは書かない', () => {
+    taxOpsWorld([], []);
+    const before = auditLastRow();
+    assert.equal(plain(call('opsSetPartnerTaxMark', ['', 'フリマ', '', true]))
+      .stoppedBy, 'PARTNER_NAME_REQUIRED');
+    assert.equal(plain(call('opsSetPartnerTaxMark', ['架空フリマ共通', '購入', '', true]))
+      .stoppedBy, 'MARK_INVALID');
+    assert.equal(plain(call('opsSetPartnerTaxMark', ['架空フリマ共通', 'フリマ', 'K9999', true]))
+      .stoppedBy, 'CUSTOMER_NOT_FOUND');
+    assert.equal(auditLastRow(), before);
+    assert.equal(master(TAX_MARK_SHEET).getLastRow(), 1);
+
+    setupWorld({accounts: GT_ACCOUNTS, sheetEntries: []});
+    master('共通取引先一覧').appendRow(['PTN_9101', '架空フリマ共通', '', '', '', 1]);
+    const noTablesAudit = auditLastRow();
+    const mark = plain(call('opsSetPartnerTaxMark', ['架空フリマ共通', 'フリマ', '', true]));
+    assert.equal(mark.stoppedBy, 'TABLES_MISSING');
+    assert.equal(mark.applied, false);
+    const flag = plain(call('opsSetCustomerTaxFlag', ['C001', true, true]));
+    assert.equal(flag.stoppedBy, 'TABLES_MISSING');
+    assert.equal(auditLastRow(), noTablesAudit);
+  });
+
+  test('gt 12: §9.3 監査が書けなければ表に書かない（読み返しの失敗も戻さない）', () => {
+    taxOpsWorld([], []);
+    const realAudit = gas.context.appendAuditUnlocked_;
+    gas.context.appendAuditUnlocked_ = function() { throw new Error('audit down'); };
+    try {
+      const before = auditLastRow();
+      const stopped = plain(call('opsSetPartnerTaxMark', ['架空フリマ共通', 'フリマ', '', true]));
+      assert.equal(stopped.stoppedBy, 'AUDIT_WRITE_FAILED');
+      assert.equal(stopped.applied, false);
+      assert.equal(auditLastRow(), before);
+      assert.equal(master(TAX_MARK_SHEET).getLastRow(), 1);
+    } finally {
+      gas.context.appendAuditUnlocked_ = realAudit;
+    }
+
+    // 読み返しが違えば WRITE_VERIFY_FAILED。書いた値は戻さない。
+    taxOpsWorld([markRow('架空フリマ共通', 'フリマ')], []);
+    const realBatchUpdate = gas.context.Sheets.Spreadsheets.Values.batchUpdate;
+    let corrupted = false;
+    gas.context.Sheets.Spreadsheets.Values.batchUpdate = function(request, id) {
+      const result = realBatchUpdate.call(this, request, id);
+      if (!corrupted) {
+        corrupted = true;
+        master(TAX_MARK_SHEET).getRange(2, 2).setValue('海外の物');
+      }
+      return result;
+    };
+    try {
+      const failed = plain(call('opsSetPartnerTaxMark', ['架空フリマ共通', 'なし', '', true]));
+      assert.equal(failed.stoppedBy, 'WRITE_VERIFY_FAILED');
+      assert.equal(failed.applied, false);
+      assert.equal(master(TAX_MARK_SHEET).getRange(2, 2).getValue(), '海外の物',
+        '書いた値は戻さない');
+    } finally {
+      gas.context.Sheets.Spreadsheets.Values.batchUpdate = realBatchUpdate;
+    }
+  });
+
+  // ---------------- gt 12: §9.4 ----------------
+
+  test('gt 12: §9.4 見るだけは書かず、apply は監査→行の順で足し、書き直し、2 行なら止める', () => {
+    taxOpsWorld([], []);
+    const beforeAudit = auditLastRow();
+    gas.stubs.resetWriteLog();
+    const seen = plain(call('opsSetCustomerTaxFlag', ['C001', true]));
+    assert.equal(seen.applied, false);
+    assert.equal(seen.stoppedBy, null);
+    assert.equal(seen.action, 'CREATE');
+    assert.equal(seen.before, null);
+    assert.deepEqual(gas.stubs.getWriteLog(), []);
+    assert.equal(auditLastRow(), beforeAudit);
+
+    gas.stubs.resetWriteLog();
+    const applied = plain(call('opsSetCustomerTaxFlag', ['C001', true, true]));
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    assert.equal(applied.verified, true);
+    const rows = sheetValues(TAX_FLAG_SHEET);
+    assert.equal(rows.length, 2);
+    assert.equal(rows[1][0], 'C001');
+    assert.equal(rows[1][1], true);
+    assert.ok(rows[1][2], '更新日時');
+    assert.equal(rows[1][3], 'tester@example.com');
+    assert.equal(rows[1][4], '');
+    let log = gas.stubs.getWriteLog();
+    let auditIndex = log.findIndex((item) => item.sheetName === '監査ログ');
+    let flagIndex = log.findIndex((item) => item.sheetName === TAX_FLAG_SHEET);
+    assert.ok(auditIndex >= 0 && flagIndex > auditIndex, JSON.stringify(log));
+    const audit = auditLast();
+    assert.equal(audit.type, 'SETTING');
+    assert.equal(audit.targetType, 'CUSTOMER');
+    assert.equal(audit.targetId, 'C001');
+    assert.equal(audit.reason, 'TAX_CUSTOMER_FLAG');
+
+    gas.stubs.resetWriteLog();
+    const updated = plain(call('opsSetCustomerTaxFlag', ['C001', false, true]));
+    assert.equal(updated.action, 'UPDATE');
+    assert.equal(updated.applied, true, JSON.stringify(updated));
+    assert.equal(updated.before.smallAmountUnavailable, true);
+    assert.equal(master(TAX_FLAG_SHEET).getLastRow(), 2);
+    assert.equal(master(TAX_FLAG_SHEET).getRange(2, 2).getValue(), false);
+    log = gas.stubs.getWriteLog();
+    auditIndex = log.findIndex((item) => item.sheetName === '監査ログ');
+    flagIndex = log.findIndex((item) => item.sheetName === TAX_FLAG_SHEET);
+    assert.ok(auditIndex >= 0 && flagIndex > auditIndex, JSON.stringify(log));
+
+    taxOpsWorld([], [flagRow('C001', true), flagRow('C001', false)]);
+    const duplicate = plain(call('opsSetCustomerTaxFlag', ['C001', false, true]));
+    assert.equal(duplicate.candidates, 2);
+    assert.equal(duplicate.stoppedBy, 'DUPLICATE_ROWS');
+    assert.equal(duplicate.applied, false);
+    assert.equal(master(TAX_FLAG_SHEET).getLastRow(), 3);
+  });
+
+  test('gt 12: §9.4 引数の誤りと監査・読み返しの失敗', () => {
+    taxOpsWorld([], []);
+    const before = auditLastRow();
+    assert.equal(plain(call('opsSetCustomerTaxFlag', ['', true, true]))
+      .stoppedBy, 'CUSTOMER_REQUIRED');
+    assert.equal(plain(call('opsSetCustomerTaxFlag', ['C001', 'true', true]))
+      .stoppedBy, 'ARGUMENT_INVALID');
+    assert.equal(plain(call('opsSetCustomerTaxFlag', ['C001', 1, true]))
+      .stoppedBy, 'ARGUMENT_INVALID');
+    assert.equal(plain(call('opsSetCustomerTaxFlag', ['C001', null, true]))
+      .stoppedBy, 'ARGUMENT_INVALID');
+    assert.equal(plain(call('opsSetCustomerTaxFlag', ['K9999', true, true]))
+      .stoppedBy, 'CUSTOMER_NOT_FOUND');
+    assert.equal(auditLastRow(), before);
+    assert.equal(master(TAX_FLAG_SHEET).getLastRow(), 1);
+
+    const realAudit = gas.context.appendAuditUnlocked_;
+    gas.context.appendAuditUnlocked_ = function() { throw new Error('audit down'); };
+    try {
+      const stopped = plain(call('opsSetCustomerTaxFlag', ['C001', true, true]));
+      assert.equal(stopped.stoppedBy, 'AUDIT_WRITE_FAILED');
+      assert.equal(master(TAX_FLAG_SHEET).getLastRow(), 1);
+    } finally {
+      gas.context.appendAuditUnlocked_ = realAudit;
+    }
+
+    // 先に 1 行作り、書き直しの読み返しだけを壊す。
+    const seeded = plain(call('opsSetCustomerTaxFlag', ['C001', true, true]));
+    assert.equal(seeded.applied, true);
+    const realBatchUpdate = gas.context.Sheets.Spreadsheets.Values.batchUpdate;
+    let corrupted = false;
+    gas.context.Sheets.Spreadsheets.Values.batchUpdate = function(request, id) {
+      const result = realBatchUpdate.call(this, request, id);
+      if (!corrupted) {
+        corrupted = true;
+        master(TAX_FLAG_SHEET).getRange(2, 2).setValue(true);
+      }
+      return result;
+    };
+    try {
+      const failed = plain(call('opsSetCustomerTaxFlag', ['C001', false, true]));
+      assert.equal(failed.stoppedBy, 'WRITE_VERIFY_FAILED');
+      assert.equal(failed.applied, false);
+      assert.equal(master(TAX_FLAG_SHEET).getRange(2, 2).getValue(), true,
+        '書いた値は戻さない');
+    } finally {
+      gas.context.Sheets.Spreadsheets.Values.batchUpdate = realBatchUpdate;
+    }
+  });
+
+  // ---------------- gt 12: §9.5 ----------------
+
+  test('gt 12: §9.5 見るだけは入力規則も値を変えず、要約を返す', () => {
+    setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [], taxTabs: {marks: [], flags: []}});
+    const sheet = destSheet();
+    sheet.getRange(5, 7).setValue('架空値');
+    sheet.getRange(6, 7).setValue('課対仕入10%');
+    const ruleA = buildValidation(['対象外', '架空旧名'], false);
+    const ruleB = buildValidation(['対象外', '架空旧名'], true);
+    sheet.getRange(4, 7, 7, 1).setDataValidation(ruleA);
+    sheet.getRange(11, 7, 10, 1).setDataValidation(ruleB);
+    gas.stubs.resetWriteLog();
+    const beforeAudit = auditLastRow();
+
+    const report = plain(call('opsSetTaxCategoryValidation', ['C001']));
+    assert.equal(report.applied, false);
+    assert.equal(report.stoppedBy, null);
+    assert.equal(report.customerId, 'C001');
+    assert.equal(report.templateId, 'dest1');
+    assert.equal(report.sheetName, '入力用シート');
+    assert.equal(report.column, 7);
+    assert.equal(report.firstRow, 5);
+    assert.equal(report.lastRow, 30);
+    assert.equal(report.rows, 26);
+    assert.equal(report.groups.length, 3);
+    assert.deepEqual(report.groups[0].values, ['対象外', '架空旧名']);
+    assert.equal(report.groups[0].from, 5);
+    assert.equal(report.groups[0].to, 10);
+    assert.equal(report.groups[0].allowInvalid, false);
+    assert.equal(report.groups[1].from, 11);
+    assert.equal(report.groups[1].to, 20);
+    assert.equal(report.groups[1].allowInvalid, true);
+    assert.equal(report.groups[2].type, null);
+    assert.equal(report.groups[2].from, 21);
+    assert.equal(report.groups[2].to, 30);
+    assert.equal(report.valueRows, 2);
+    assert.deepEqual(report.otherValues, ['架空値']);
+    assert.equal(report.allowInvalid, true, 'ばらばらなら true');
+    assert.deepEqual(gas.stubs.getWriteLog(), [], '見るだけは書かない');
+    assert.equal(auditLastRow(), beforeAudit);
+
+    const still = sheet.getRange(4, 7, 7, 1).getDataValidations();
+    assert.deepEqual(still[0][0].getCriteriaValues()[0], ['対象外', '架空旧名']);
+    assert.equal(still[0][0].getAllowInvalid(), false);
+    assert.equal(sheet.getRange(5, 7).getValue(), '架空値', '値を変えない');
+  });
+
+  test('gt 12: §9.5 apply は雛形の G だけに付け、値を変えず、複製とほかの顧客に触らない', () => {
+    setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [], taxTabs: {marks: [], flags: []}});
+    const sheet = destSheet();
+    sheet.getRange(5, 7).setValue('架空値');
+    const uniform = buildValidation(['架空旧名'], false);
+    sheet.getRange(5, 7, 26, 1).setDataValidation(uniform);
+    const hRule = buildValidation(['H1', 'H2'], false);
+    sheet.getRange(5, 8, 26, 1).setDataValidation(hRule);
+
+    // 転記シート（複製）と、もう 1 人の顧客の雛形。
+    gas.stubs.createSpreadsheet('copy1', {sheets: [
+      {name: '入力用シート', maxRows: 30, maxColumns: 26}]});
+    const copySheet = gas.stubs.getSpreadsheet('copy1').getSheetByName('入力用シート');
+    copySheet.getRange(5, 7, 26, 1).setDataValidation(buildValidation(['複製の値'], true));
+    const otherHeader = blank(15);
+    Object.assign(otherHeader, {1: '利用日', 2: '相手科目コード', 3: '相手勘定科目',
+      5: '取引先', 6: '相手税区分', 8: 'メモ', 10: '摘要', 11: '借方', 12: '貸方', 14: '取引ID'});
+    gas.stubs.createSpreadsheet('dest2', {sheets: [
+      {name: '入力用シート', values: [blank(15), blank(15), otherHeader, blank(15),
+        blank(15)], maxRows: 30, maxColumns: 26},
+      {name: '取引先一覧', values: [['元店名', '取引先名']]}]});
+    gas.stubs.createFolder('folder2', {fileIds: []});
+    call('registerTestCustomer', [{customerId: 'C002', customerName: '架空顧客2',
+      sourceFolderId: 'folder2', destinationSpreadsheetId: 'dest2',
+      destinationSheetName: '入力用シート', partnerListSheetName: '取引先一覧',
+      headerRow: 3, dataStartRow: 5, rowScanLastColumn: 15,
+      columns: {B: 2, F: 6, I: 9, K: 11, M: 13, txId: 15, G: 7, C: 3},
+      accountListRange: 'Q5:R12', reviewers: 'tester@example.com',
+      admins: 'tester@example.com'}]);
+    const other = gas.stubs.getSpreadsheet('dest2').getSheetByName('入力用シート');
+    other.getRange(5, 7, 26, 1).setDataValidation(buildValidation(['ほかの顧客'], true));
+
+    gas.stubs.resetWriteLog();
+    const applied = plain(call('opsSetTaxCategoryValidation', ['C001', true]));
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    assert.equal(applied.stoppedBy, null);
+    assert.equal(applied.verified, true);
+    assert.equal(applied.allowInvalid, false, '今の規則が全部同じ値ならその値');
+
+    const names = plain(evaluate('FREEE_TAX_CATEGORIES_')).map((category) => category.name);
+    assert.equal(names.length, 30);
+    const validations = sheet.getRange(5, 7, 26, 1).getDataValidations();
+    assert.equal(validations.length, 26);
+    validations.forEach((row) => {
+      assert.ok(row[0], '全部の行に規則');
+      assert.equal(row[0].getCriteriaType(), 'VALUE_IN_LIST');
+      assert.deepEqual(Array.from(row[0].getCriteriaValues()[0]), names);
+      assert.equal(row[0].getAllowInvalid(), false);
+    });
+    assert.equal(sheet.getRange(3, 7).getDataValidations()[0][0], null, '見出し行は触らない');
+    assert.equal(sheet.getRange(5, 7).getValue(), '架空値', '値を変えない');
+    assert.deepEqual(sheet.getRange(5, 8, 26, 1).getDataValidations()[0][0]
+      .getCriteriaValues()[0], ['H1', 'H2'], 'G 以外は触らない');
+
+    assert.deepEqual(copySheet.getRange(5, 7, 26, 1).getDataValidations()[0][0]
+      .getCriteriaValues()[0], ['複製の値'], '複製に触らない');
+    assert.deepEqual(other.getRange(5, 7, 26, 1).getDataValidations()[0][0]
+      .getCriteriaValues()[0], ['ほかの顧客'], 'ほかの顧客の雛形に触らない');
+
+    const log = gas.stubs.getWriteLog();
+    const auditIndex = log.findIndex((item) => item.sheetName === '監査ログ');
+    const dataIndex = log.findIndex((item) => item.sheetName === '入力用シート');
+    assert.ok(auditIndex >= 0 && dataIndex > auditIndex, JSON.stringify(log));
+    assert.equal(log.filter((item) => item.sheetName === '入力用シート').length, 1,
+      '入力規則は 1 回で付ける');
+    const audit = auditLast();
+    assert.equal(audit.type, 'SETTING');
+    assert.equal(audit.targetType, 'TEMPLATE');
+    assert.equal(audit.targetId, 'dest1');
+    assert.equal(audit.reason, 'TAX_VALIDATION');
+  });
+
+  test('gt 12: §9.5 税の列が無い・行が無い・顧客が無いときは書かない', () => {
+    setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [], gColumn: false,
+      taxTabs: {marks: [], flags: []}});
+    const beforeAudit = auditLastRow();
+    assert.equal(plain(call('opsSetTaxCategoryValidation', ['C001'])).stoppedBy,
+      'NO_TAX_COLUMN');
+    assert.equal(plain(call('opsSetTaxCategoryValidation', ['C001', true])).stoppedBy,
+      'NO_TAX_COLUMN');
+    assert.equal(plain(call('opsSetTaxCategoryValidation', [''])).stoppedBy,
+      'CUSTOMER_REQUIRED');
+    assert.equal(plain(call('opsSetTaxCategoryValidation', ['K9999'])).stoppedBy,
+      'CUSTOMER_NOT_FOUND');
+    assert.equal(auditLastRow(), beforeAudit);
+
+    setupMaster();
+    const header = blank(15);
+    header[5] = '相手税区分';
+    gas.stubs.createSpreadsheet('destR', {sheets: [{name: '入力用シート',
+      values: [blank(15), blank(15), blank(15), header], maxRows: 4, maxColumns: 26}]});
+    gas.stubs.createFolder('folderR', {fileIds: []});
+    call('registerTestCustomer', [{customerId: 'K9101', customerName: '架空顧客R',
+      sourceFolderId: 'folderR', destinationSpreadsheetId: 'destR',
+      destinationSheetName: '入力用シート', partnerListSheetName: '取引先一覧',
+      headerRow: 4, dataStartRow: 5, rowScanLastColumn: 15,
+      columns: {B: 2, F: 6, I: 9, K: 11, M: 13, txId: 15, G: 7, C: 3},
+      accountListRange: 'Q5:R12', reviewers: 'tester@example.com',
+      admins: 'tester@example.com'}]);
+    gas.stubs.resetWriteLog();
+    const noRows = plain(call('opsSetTaxCategoryValidation', ['K9101', true]));
+    assert.equal(noRows.stoppedBy, 'NO_ROWS');
+    assert.equal(noRows.applied, false);
+    assert.deepEqual(gas.stubs.getWriteLog(), []);
+  });
+
+  test('gt 12: §9.1 監査が書けなければタブも見出しも書かない', () => {
+    setupMaster();
+    const realAudit = gas.context.appendAuditUnlocked_;
+    gas.context.appendAuditUnlocked_ = function() { throw new Error('audit down'); };
+    try {
+      const before = auditLastRow();
+      gas.stubs.resetWriteLog();
+      const stopped = plain(call('opsSetupTaxCategoryTables', [true]));
+      assert.equal(stopped.stoppedBy, 'AUDIT_WRITE_FAILED');
+      assert.equal(stopped.applied, false);
+      assert.equal(master(TAX_MARK_SHEET), null);
+      assert.equal(master(TAX_FLAG_SHEET), null);
+      assert.equal(auditLastRow(), before);
+      assert.deepEqual(gas.stubs.getWriteLog(), []);
+    } finally {
+      gas.context.appendAuditUnlocked_ = realAudit;
+    }
+  });
 };

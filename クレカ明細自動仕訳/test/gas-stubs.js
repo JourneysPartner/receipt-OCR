@@ -255,6 +255,36 @@ class MemoryRange {
       this.sheet._setFormat(this.row + r, this.column + c, format)));
     return this;
   }
+  getDataValidations() {
+    countRoundTrip('rangeReads');
+    return Array.from({length: this.numRows}, (_, r) => Array.from({length: this.numColumns},
+      (_, c) => this.sheet._dataValidation(this.row + r, this.column + c)));
+  }
+  setDataValidation(validation) {
+    countRoundTrip('rangeWrites');
+    recordWrite('range.setDataValidation', this.sheet.getName(), this.sheet.getParent().getId(),
+      {row: this.row, column: this.column, numRows: this.numRows, numColumns: this.numColumns,
+        criteriaType: validation && typeof validation.getCriteriaType === 'function' ?
+          String(validation.getCriteriaType()) : null});
+    for (let r = 0; r < this.numRows; r += 1) {
+      for (let c = 0; c < this.numColumns; c += 1) {
+        this.sheet._setDataValidation(this.row + r, this.column + c, validation || null);
+      }
+    }
+    return this;
+  }
+  setDataValidations(validations) {
+    if (!Array.isArray(validations) || validations.length !== this.numRows ||
+        validations.some((row) => !Array.isArray(row) || row.length !== this.numColumns)) {
+      throw new RangeError('setDataValidations dimensions do not match range');
+    }
+    countRoundTrip('rangeWrites');
+    recordWrite('range.setDataValidations', this.sheet.getName(), this.sheet.getParent().getId(),
+      {row: this.row, column: this.column, numRows: this.numRows, numColumns: this.numColumns});
+    validations.forEach((row, r) => row.forEach((validation, c) =>
+      this.sheet._setDataValidation(this.row + r, this.column + c, validation || null)));
+    return this;
+  }
   clearContent() {
     if (clearContentIgnored) return this;
     const blanks = Array.from({length: this.numRows}, () => Array(this.numColumns).fill(''));
@@ -286,6 +316,8 @@ class MemorySheet {
     this.maxColumns = options.maxColumns || Math.max(26, Math.max(0, ...(options.values || []).map((r) => r.length)));
     this.values = Array.from({length: this.maxRows}, () => Array(this.maxColumns).fill(''));
     this.formulas = Array.from({length: this.maxRows}, () => Array(this.maxColumns).fill(''));
+    // セルごとの入力規則。無いセルは null。
+    this.validations = {};
     this.beforeAppendHook = null;
     if (options.values && options.values.length) {
       const width = Math.max(1, ...options.values.map((r) => r.length));
@@ -405,6 +437,13 @@ class MemorySheet {
   _setFormat(row, column, format) {
     if (!this.formats) this.formats = {};
     this.formats[`${row}:${column}`] = String(format);
+  }
+  _dataValidation(row, column) {
+    return (this.validations && this.validations[`${row}:${column}`]) || null;
+  }
+  _setDataValidation(row, column, validation) {
+    if (!this.validations) this.validations = {};
+    this.validations[`${row}:${column}`] = validation;
   }
   _read(row, column, numRows, numColumns, formulas) {
     // 走査量を検査できるようにする（INV-25）。スタブ上では全面走査も一瞬で
@@ -600,6 +639,7 @@ function createGasStubs() {
       clonedSheet.formulas = sourceSheet.formulas.map((row) => row.map(cloneCellValue));
       clonedSheet.formats = sourceSheet.formats ? Object.fromEntries(
         Object.entries(sourceSheet.formats).map(([key, value]) => [key, cloneCellValue(value)])) : undefined;
+      clonedSheet.validations = sourceSheet.validations ? Object.assign({}, sourceSheet.validations) : {};
       clonedSheet.protections = sourceSheet.protections ?
         sourceSheet.protections.map(cloneProtection) : undefined;
     });
@@ -782,7 +822,55 @@ function createGasStubs() {
       };
     }
   };
-  const SpreadsheetApp = {openById: openSpreadsheet, getActiveSpreadsheet: () => activeSpreadsheetId ? openSpreadsheet(activeSpreadsheetId) : null, getUi: () => { if (!uiAvailable) throw new Error('Cannot call SpreadsheetApp.getUi() from this context.'); return Ui; }, flush: () => { roundTrips.flushes += 1; if (roundTripListener) roundTripListener('flushes'); }, ProtectionType: Object.freeze({RANGE: 'RANGE', SHEET: 'SHEET'})};
+  const DataValidationCriteria = Object.freeze({
+    VALUE_IN_LIST: 'VALUE_IN_LIST',
+    VALUE_IN_RANGE: 'VALUE_IN_RANGE',
+    NUMBER_BETWEEN: 'NUMBER_BETWEEN',
+    TEXT_CONTAINS: 'TEXT_CONTAINS',
+    CUSTOM_FORMULA: 'CUSTOM_FORMULA'
+  });
+
+  /** 実 GAS の DataValidation（不変）。検査に使う口だけを持つ。 */
+  class StubDataValidation {
+    constructor(criteriaType, criteriaValues, allowInvalid) {
+      this.criteriaType = criteriaType;
+      this.criteriaValues = criteriaValues;
+      this.allowInvalid = allowInvalid;
+    }
+    getCriteriaType() { return this.criteriaType; }
+    getCriteriaValues() { return this.criteriaValues.slice(); }
+    getAllowInvalid() { return this.allowInvalid; }
+    copy() {
+      return new StubDataValidation(this.criteriaType, this.criteriaValues.slice(), this.allowInvalid);
+    }
+  }
+
+  function newDataValidationBuilder() {
+    let criteriaType = null;
+    let criteriaValues = [];
+    let allowInvalid = false;
+    const builder = {
+      requireValueInList(values, showDropdown) {
+        criteriaType = DataValidationCriteria.VALUE_IN_LIST;
+        criteriaValues = [(values || []).map((value) => String(value)),
+          showDropdown === undefined ? true : Boolean(showDropdown)];
+        return builder;
+      },
+      requireValueInRange(range, showDropdown) {
+        criteriaType = DataValidationCriteria.VALUE_IN_RANGE;
+        criteriaValues = [range, showDropdown === undefined ? true : Boolean(showDropdown)];
+        return builder;
+      },
+      setAllowInvalid(value) { allowInvalid = Boolean(value); return builder; },
+      setHelpText() { return builder; },
+      build() {
+        return new StubDataValidation(criteriaType, criteriaValues.slice(), allowInvalid);
+      }
+    };
+    return builder;
+  }
+
+  const SpreadsheetApp = {openById: openSpreadsheet, getActiveSpreadsheet: () => activeSpreadsheetId ? openSpreadsheet(activeSpreadsheetId) : null, getUi: () => { if (!uiAvailable) throw new Error('Cannot call SpreadsheetApp.getUi() from this context.'); return Ui; }, flush: () => { roundTrips.flushes += 1; if (roundTripListener) roundTripListener('flushes'); }, newDataValidation: newDataValidationBuilder, DataValidationCriteria, ProtectionType: Object.freeze({RANGE: 'RANGE', SHEET: 'SHEET'})};
   const Sheets = {Spreadsheets: {
     get(spreadsheetId, request = {}) {
       return asOneRoundTrip('rangeReads', () => {
