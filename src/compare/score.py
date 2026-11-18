@@ -2,7 +2,7 @@
 
 from collections.abc import Iterable
 
-from src.compare.config import CompareConfig
+from src.compare.config import CompareConfig, CompareModel
 from src.compare.normalize import (
     FIELD_AMOUNT,
     FIELD_DATE,
@@ -48,6 +48,27 @@ def _int_or_none(value) -> int | None:
 
 def base_model_name(label: str) -> str:
     return _text(label).split("@", 1)[0]
+
+
+def derive_models(result_rows: list[dict]) -> tuple[CompareModel, ...]:
+    """結果タブの「型」の列から、出てきた順に並びを作る（score で env 省略時）。"""
+    labels: list[str] = []
+    for row in result_rows:
+        label = _text(row.get("型"))
+        if label and label not in labels:
+            labels.append(label)
+    return tuple(CompareModel(label=label, name=base_model_name(label)) for label in labels)
+
+
+def derive_methods(result_rows: list[dict]) -> tuple[str, ...]:
+    """結果タブの「方式」の列から、出てきた順に並びを作る（現行の流れは除く）。"""
+    by_label = {METHOD_TEXT_LABEL: "text", METHOD_IMAGE_LABEL: "image"}
+    found: list[str] = []
+    for row in result_rows:
+        key = by_label.get(_text(row.get("方式")))
+        if key and key not in found:
+            found.append(key)
+    return tuple(found)
 
 
 def estimate_cost(

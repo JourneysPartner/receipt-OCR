@@ -23,6 +23,7 @@ _MODEL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.\-]*$")
 _RESULT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{20,}$")
 _FOLDER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{10,}$")
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+_LABEL_DISALLOWED_RE = re.compile(r"[^A-Za-z0-9_-]")
 
 DEFAULT_MODELS = "gemini-2.5-flash,gemini-3.5-flash-lite,gemini-3.8-flash"
 DEFAULT_METHODS = ("text", "image")
@@ -63,6 +64,9 @@ class CompareConfig:
     thinking_level: str | None = None
     max_tokens: int = 2048
     request_timeout_seconds: int | None = None
+    # score で COMPARE_MODELS / COMPARE_METHODS を省いたとき、結果タブから並びを作る
+    models_set: bool = False
+    methods_set: bool = False
 
     @property
     def result_tab(self) -> str:
@@ -95,6 +99,12 @@ def summary_tab_name(label: str) -> str:
 
 def default_run_label(now: datetime | None = None) -> str:
     return (now or datetime.now(JST)).astimezone(JST).strftime("%Y%m%d-%H%M")
+
+
+def label_from_execution(execution: str | None) -> str:
+    """Cloud Run の実行名からラベルを作る（同じ実行のやり直しは同じ値）。"""
+    cleaned = _LABEL_DISALLOWED_RE.sub("", execution or "")
+    return cleaned[-40:]
 
 
 def _require_int(
@@ -223,8 +233,16 @@ def _parse_prices(raw: str | None) -> dict[str, tuple[float, float]]:
     return prices
 
 
-def _parse_label(raw: str | None, step: str, now: datetime | None) -> str | None:
+def _parse_label(
+    raw: str | None,
+    step: str,
+    now: datetime | None,
+    cloud_execution: str | None = None,
+) -> str | None:
     value = (raw or "").strip()
+    if not value and step == "collect":
+        # Cloud Run の自動のやり直しでは同じ実行名なので、続きからになる
+        value = label_from_execution(cloud_execution)
     if not value:
         return default_run_label(now) if step == "collect" else None
     if not _LABEL_RE.match(value):
@@ -244,9 +262,13 @@ def load_compare_config(env, now: datetime | None = None) -> CompareConfig:
     else:
         # score では使わない（値が残っていても読まない）
         folder_ids = ()
-    models = _parse_models(env.get("COMPARE_MODELS"))
-    methods = _parse_methods(env.get("COMPARE_METHODS"))
-    run_label = _parse_label(env.get("COMPARE_RUN_LABEL"), step, now)
+    models_raw = env.get("COMPARE_MODELS")
+    methods_raw = env.get("COMPARE_METHODS")
+    models = _parse_models(models_raw)
+    methods = _parse_methods(methods_raw)
+    run_label = _parse_label(
+        env.get("COMPARE_RUN_LABEL"), step, now, env.get("CLOUD_RUN_EXECUTION")
+    )
     max_files = _require_int(env, "COMPARE_MAX_FILES", None, minimum=1)
     max_workers = _require_int(env, "COMPARE_MAX_WORKERS", 4, minimum=1, maximum=8)
     time_budget = _require_int(env, "COMPARE_TIME_BUDGET_SECONDS", 3300, minimum=60)
@@ -281,4 +303,6 @@ def load_compare_config(env, now: datetime | None = None) -> CompareConfig:
         thinking_level=_parse_ai_thinking_level(env.get("AI_THINKING_LEVEL")),
         max_tokens=max_tokens,
         request_timeout_seconds=_parse_ai_request_timeout(env.get("AI_REQUEST_TIMEOUT_SECONDS")),
+        models_set=bool((models_raw or "").strip()),
+        methods_set=bool((methods_raw or "").strip()),
     )

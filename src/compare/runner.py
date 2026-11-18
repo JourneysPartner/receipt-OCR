@@ -30,17 +30,19 @@ from src.compare.pipeline import (
     make_result_row,
     settings_text,
 )
-from src.compare.score import estimate_cost, summary_rows
+from src.compare.score import derive_methods, derive_models, estimate_cost, summary_rows
 from src.compare.sheet import (
     ANSWER_HEADERS,
     OCR_HEADERS,
     RESULT_HEADERS,
     SUMMARY_HEADERS,
     CompareSheetClient,
+    HeaderMismatchError,
 )
 from src.config import AiConfig, AppConfig
 from src.drive.client import DriveClient
 from src.logging.logger import setup_logger
+from src.models import extract_id_from_url
 from src.ocr.factory import create_ocr_engine
 
 logger = setup_logger()
@@ -124,12 +126,15 @@ class CompareRunner:
         clock=time.monotonic,
         jst_now=None,
         retry_sleeps=DEFAULT_RETRY_SLEEPS,
+        started_at: float | None = None,
     ):
         self._config = config
         self._compare = compare_config
         self._sheet = sheet
         self._sleep = sleep
         self._clock = clock
+        # 時間の数え始めはプロセスの始め（run_compare に入った時点）
+        self._started_at = self._clock() if started_at is None else started_at
         self._jst_now = jst_now or (lambda: datetime.now(JST))
         self._retry_sleeps = tuple(retry_sleeps)
         self._resources = _ThreadResources(drive_factory, ocr_factory, extractor_factory)
@@ -173,12 +178,19 @@ class CompareRunner:
         self._sheet.append_rows(answer_title, plan.append_rows, len(ANSWER_HEADERS))
         answer_rows = attach_values(self._sheet.read_dicts(answer_title, formatted=True))
 
+        # COMPARE_MODELS / COMPARE_METHODS を省いたときは、結果タブの列から並びを作る
+        config = self._compare
+        if not config.models_set:
+            config = replace(config, models=derive_models(result_rows) or config.models)
+        if not config.methods_set:
+            config = replace(config, methods=derive_methods(result_rows) or config.methods)
+
         summary_title = summary_tab_name(label)
-        self._sheet.ensure_tab(summary_title, SUMMARY_HEADERS)
+        self._sheet.ensure_tab(summary_title, SUMMARY_HEADERS, check_headers=False)
         self._sheet.replace_all(
             summary_title,
             summary_rows(
-                config=self._compare,
+                config=config,
                 result_rows=result_rows,
                 answer_rows=answer_rows,
                 label=label,
@@ -200,80 +212,103 @@ class CompareRunner:
         answer_title = "答え"
         summary_title = summary_tab_name(label)
 
-        self._sheet.ensure_tab(answer_title, ANSWER_HEADERS)
-        self._sheet.ensure_tab(result_title, RESULT_HEADERS)
-        self._sheet.ensure_tab(ocr_title, OCR_HEADERS)
+        try:
+            self._sheet.ensure_tab(answer_title, ANSWER_HEADERS)
+            self._sheet.ensure_tab(result_title, RESULT_HEADERS)
+            self._sheet.ensure_tab(ocr_title, OCR_HEADERS)
+        except HeaderMismatchError as error:
+            # 列が足されると「メモ」などを上書きしうるので、何も書かずに 1 で終わる
+            logger.error(
+                f"{error}。列を足したり並べ替えたりせずに直してください",
+                extra={"step": "compare_header_mismatch"},
+            )
+            return 1
 
-        self._check_models()
-        usable = [m for m in self._compare.models if m.label not in self._unusable]
-
-        started = self._clock()
-        infos = self._collect_files()
-        done = self._done_map(self._sheet.read_dicts(result_title))
-        models_left = {
-            info.file.file_id: [
-                model for model in usable if not self._model_done(done, info.file.file_id, model)
-            ]
-            for info in infos
-        }
+        infos: list = []
+        models_left: dict[str, list] = {}
         submitted_ids: set[str] = set()
         budget_exceeded = False
+        failed = False
 
-        with ThreadPoolExecutor(max_workers=self._compare.max_workers) as executor:
-            iterator = iter(infos)
-            pending: dict = {}
-            while True:
-                while len(pending) < self._compare.max_workers and not budget_exceeded:
-                    if iterator is None:
-                        break
-                    try:
-                        info = next(iterator)
-                    except StopIteration:
-                        iterator = None
-                        break
-                    if self._clock() - started > self._compare.time_budget_seconds:
-                        budget_exceeded = True
-                        break
-                    models = models_left[info.file.file_id]
-                    if not models:
-                        continue  # 全部済みのファイルはダウンロードもしない
-                    task = _FileTask(file=info.file, folder_name=info.folder_name, models=models)
-                    pending[executor.submit(self._process_file, task)] = task
-                    submitted_ids.add(info.file.file_id)
+        try:
+            self._check_models()
+            usable = [m for m in self._compare.models if m.label not in self._unusable]
 
-                if not pending:
-                    if budget_exceeded or iterator is None:
-                        break
-                    continue
+            infos = self._collect_files()
+            done = self._done_map(self._sheet.read_dicts(result_title))
+            models_left = {
+                info.file.file_id: [
+                    model
+                    for model in usable
+                    if not self._model_done(done, info.file.file_id, model)
+                ]
+                for info in infos
+            }
 
-                completed, _ = wait(pending, return_when=FIRST_COMPLETED)
-                for future in completed:
-                    task = pending.pop(future)
-                    try:
-                        rows, ocr_row = future.result()
-                    except Exception as error:  # 念のための最終防衛
-                        logger.error(
-                            f"ファイル処理が異常終了: {task.file.file_name}: {error}",
-                            extra={"step": "compare_file_fatal"},
+            with ThreadPoolExecutor(max_workers=self._compare.max_workers) as executor:
+                iterator = iter(infos)
+                pending: dict = {}
+                while True:
+                    while len(pending) < self._compare.max_workers and not budget_exceeded:
+                        if iterator is None:
+                            break
+                        try:
+                            info = next(iterator)
+                        except StopIteration:
+                            iterator = None
+                            break
+                        if self._time_over_budget():
+                            budget_exceeded = True
+                            break
+                        models = models_left[info.file.file_id]
+                        if not models:
+                            continue  # 全部済みのファイルはダウンロードもしない
+                        task = _FileTask(
+                            file=info.file, folder_name=info.folder_name, models=models
                         )
-                        rows, ocr_row = [], None
-                    if rows:
-                        self._sheet.append_rows(
-                            result_title,
-                            [row.to_sheet_row() for row in rows],
-                            len(RESULT_HEADERS),
-                        )
-                    if ocr_row is not None:
-                        self._sheet.append_rows(ocr_title, [ocr_row], len(OCR_HEADERS))
+                        pending[executor.submit(self._process_file, task)] = task
+                        submitted_ids.add(info.file.file_id)
 
-                if budget_exceeded and not pending:
-                    break
+                    if not pending:
+                        if budget_exceeded or iterator is None:
+                            break
+                        continue
+
+                    completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in completed:
+                        task = pending.pop(future)
+                        try:
+                            rows, ocr_row = future.result()
+                        except Exception as error:  # 念のための最終防衛
+                            logger.error(
+                                f"ファイル処理が異常終了: {task.file.file_name}: {error}",
+                                extra={"step": "compare_file_fatal"},
+                            )
+                            rows, ocr_row = [], None
+                        if rows:
+                            self._sheet.append_rows(
+                                result_title,
+                                [row.to_sheet_row() for row in rows],
+                                len(RESULT_HEADERS),
+                            )
+                        if ocr_row is not None:
+                            self._sheet.append_rows(ocr_title, [ocr_row], len(OCR_HEADERS))
+
+                    if budget_exceeded and not pending:
+                        break
+        except Exception as error:
+            # 表への追記の失敗など。それまでの結果で答えと集計は書いてから 1 にする
+            logger.error(
+                f"比較の実行中に例外: {type(error).__name__}: {error}",
+                extra={"step": "compare_collect_error"},
+            )
+            failed = True
 
         if budget_exceeded:
             remaining = sum(
                 1
                 for info in infos
-                if info.file.file_id not in submitted_ids and models_left[info.file.file_id]
+                if info.file.file_id not in submitted_ids and models_left.get(info.file.file_id)
             )
             logger.info(
                 f"時間切れのため新しいファイルを始めません: 残り {remaining} 本。"
@@ -281,47 +316,76 @@ class CompareRunner:
                 extra={"step": "compare_time_budget"},
             )
 
-        result_rows = self._sheet.read_dicts(result_title)
-        answer_rows = attach_values(self._sheet.read_dicts(answer_title, formatted=True))
-        plan = build_answer_plan(
-            answer_title=answer_title,
-            existing_rows=answer_rows,
-            file_infos=[
-                {
-                    "file_id": info.file.file_id,
-                    "file_name": info.file.file_name,
-                    "folder_name": info.folder_name,
-                }
-                for info in infos
-            ],
-            result_rows=result_rows,
-            now_text=self._now_text(),
-        )
-        self._sheet.batch_update_cells(plan.updates)
-        self._sheet.append_rows(answer_title, plan.append_rows, len(ANSWER_HEADERS))
-        answer_rows = attach_values(self._sheet.read_dicts(answer_title, formatted=True))
+        # それまでの結果で「答え」と「集計」を書けるだけ書く（書けなくても次を試す）
+        try:
+            result_rows = self._sheet.read_dicts(result_title)
+        except Exception as error:
+            logger.error(
+                f"結果を読めません: {type(error).__name__}: {error}",
+                extra={"step": "compare_finalize_error"},
+            )
+            return 1
 
-        self._sheet.ensure_tab(summary_title, SUMMARY_HEADERS)
-        self._sheet.replace_all(
-            summary_title,
-            summary_rows(
-                config=self._compare,
+        answer_rows: list[dict] = []
+        try:
+            answer_rows = attach_values(self._sheet.read_dicts(answer_title, formatted=True))
+            plan = build_answer_plan(
+                answer_title=answer_title,
+                existing_rows=answer_rows,
+                file_infos=[
+                    {
+                        "file_id": info.file.file_id,
+                        "file_name": info.file.file_name,
+                        "folder_name": info.folder_name,
+                    }
+                    for info in infos
+                ],
                 result_rows=result_rows,
-                answer_rows=answer_rows,
-                label=label,
                 now_text=self._now_text(),
-                unusable_models=self._unusable,
-            ),
-        )
+            )
+            self._sheet.batch_update_cells(plan.updates)
+            self._sheet.append_rows(answer_title, plan.append_rows, len(ANSWER_HEADERS))
+            answer_rows = attach_values(self._sheet.read_dicts(answer_title, formatted=True))
+        except Exception as error:
+            logger.error(
+                f"答えを書けません: {type(error).__name__}: {error}",
+                extra={"step": "compare_finalize_error"},
+            )
+            answer_rows = []
+            failed = True
+
+        try:
+            self._sheet.ensure_tab(summary_title, SUMMARY_HEADERS, check_headers=False)
+            self._sheet.replace_all(
+                summary_title,
+                summary_rows(
+                    config=self._compare,
+                    result_rows=result_rows,
+                    answer_rows=answer_rows,
+                    label=label,
+                    now_text=self._now_text(),
+                    unusable_models=self._unusable,
+                ),
+            )
+        except Exception as error:
+            logger.error(
+                f"集計を書けません: {type(error).__name__}: {error}",
+                extra={"step": "compare_finalize_error"},
+            )
+            return 1
+
         logger.info(
             f"比較の collect 完了: {label}（処理 {len(submitted_ids)} 本）",
             extra={"step": "compare_collect"},
         )
-        return 0
+        return 1 if failed else 0
 
     # ── 準備 ────────────────────────────────────
     def _now_text(self) -> str:
         return self._jst_now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _time_over_budget(self) -> bool:
+        return self._clock() - self._started_at > self._compare.time_budget_seconds
 
     def _latest_label(self, titles: list[str]) -> str | None:
         labels = [title[len("結果_") :] for title in titles if title.startswith("結果_")]
@@ -385,13 +449,20 @@ class CompareRunner:
         return infos
 
     def _done_map(self, result_rows: list[dict]) -> dict[tuple[str, str], set[str]]:
-        done: dict[tuple[str, str], set[str]] = {}
+        # （ファイル, 型, 方式）ごとに一番下の行で決める（§5.4）
+        latest: dict[tuple[str, str, str], str] = {}
         for row in result_rows:
-            result = str(row.get("結果", "")).strip()
+            key = (
+                str(row.get("fileId", "")).strip(),
+                str(row.get("型", "")).strip(),
+                str(row.get("方式", "")).strip(),
+            )
+            latest[key] = str(row.get("結果", "")).strip()
+        done: dict[tuple[str, str], set[str]] = {}
+        for (file_id, model, method), result in latest.items():
             if result.startswith("失敗:api_error") or result.startswith("失敗:file_error"):
                 continue
-            key = (str(row.get("fileId", "")).strip(), str(row.get("型", "")).strip())
-            done.setdefault(key, set()).add(str(row.get("方式", "")).strip())
+            done.setdefault((file_id, model), set()).add(method)
         return done
 
     def _model_done(self, done, file_id: str, model: CompareModel) -> bool:
@@ -431,6 +502,13 @@ class CompareRunner:
             ]
 
             for model in task.models:
+                if self._time_over_budget():
+                    # その型の行は書かない（次の続きからで呼ばれる）
+                    logger.info(
+                        f"時間切れのため残りの型を呼びません: {file.file_name}: {model.label}",
+                        extra={"step": "compare_time_budget_model"},
+                    )
+                    break
                 ai_config = self._model_ai_config(model)
                 extractor = self._resources.extractor(model, ai_config)
                 settings = settings_text(
@@ -459,6 +537,7 @@ class CompareRunner:
                             lambda m=method: extract_once(extractor, m, ocr, file),
                             sleeps=self._retry_sleeps,
                             sleep=self._sleep,
+                            should_stop=self._time_over_budget,
                         )
                         row = make_result_row(
                             run_label=self._compare.run_label,
@@ -490,16 +569,18 @@ class CompareRunner:
                             ocr_text=ocr.raw_text,
                             ai_config=ai_config,
                             settings=settings,
+                            ocr_failed=ocr_failed,
                         )
                     )
                 for row in model_rows:
-                    row.cost_usd = estimate_cost(
-                        self._compare.prices,
-                        model.label,
-                        row.input_tokens,
-                        row.output_tokens,
-                        row.thinking_tokens,
-                    )
+                    if row.cost_usd is None:
+                        row.cost_usd = estimate_cost(
+                            self._compare.prices,
+                            model.label,
+                            row.input_tokens,
+                            row.output_tokens,
+                            row.thinking_tokens,
+                        )
                 rows.extend(model_rows)
         except Exception as error:
             logger.error(
@@ -517,7 +598,8 @@ class CompareRunner:
     ) -> list[CompareRow]:
         rows: list[CompareRow] = []
         detail = f"{type(error).__name__}: {error}"[:300]
-        for model in self._compare.models:
+        # このファイルで今回呼ぶ型だけ。済んだ型の成功を失敗で上書きしない（§5.4）
+        for model in task.models:
             if model.label in self._unusable:
                 continue
             ai_config = self._model_ai_config(model)
@@ -579,6 +661,8 @@ def run_compare(
     retry_sleeps=DEFAULT_RETRY_SLEEPS,
 ) -> int:
     """比較モードの入口。設定の誤りと表を開けないときだけ 1 を返す。"""
+    # 時間の数え始めはプロセスの始め（この関数に入った時点）
+    started_at = clock()
     try:
         compare_config = load_compare_config(env if env is not None else os.environ)
     except ValueError as error:
@@ -586,7 +670,8 @@ def run_compare(
         return 1
 
     # S3: 書くのは比較の表だけ。マスターと同じなら何も読まず・書かずに 1
-    master_id = (config.master.spreadsheet_id or "").strip()
+    master_raw = (config.master.spreadsheet_id or "").strip()
+    master_id = extract_id_from_url(master_raw) if master_raw else ""
     if master_id and master_id == compare_config.result_spreadsheet_id:
         logger.error(
             "COMPARE_RESULT_SPREADSHEET_ID が MASTER_SPREADSHEET_ID と同じです",
@@ -655,6 +740,7 @@ def run_compare(
         clock=clock,
         jst_now=jst_now,
         retry_sleeps=retry_sleeps,
+        started_at=started_at,
     )
     try:
         return runner.run()

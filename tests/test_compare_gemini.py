@@ -84,6 +84,7 @@ class TestLastCallInfo:
         assert info["thinking_tokens"] == 3
         assert isinstance(info["latency_ms"], int)
         assert info["error"] is None
+        assert info["error_code"] is None
         assert info["raw_text"].startswith("[")
 
     def test_none_text_keeps_finish_reason(self):
@@ -103,3 +104,15 @@ class TestLastCallInfo:
         assert extractor.last_extraction_error == "api_error"
         assert "429 quota" in extractor.last_call_info["error"]
         assert isinstance(extractor.last_call_info["latency_ms"], int)
+        assert extractor.last_call_info["error_code"] is None
+
+    def test_exception_integer_code_is_recorded(self):
+        class ApiError(Exception):
+            code = 503
+
+        client = MagicMock()
+        client.models.generate_content.side_effect = ApiError("503 UNAVAILABLE")
+        with patch("src.ai.gemini.genai.Client", return_value=client):
+            extractor = GeminiExtractor(AiConfig(), api_key="fake")
+        assert extractor.extract_receipt_data(_ocr(), "a.jpg") == []
+        assert extractor.last_call_info["error_code"] == 503

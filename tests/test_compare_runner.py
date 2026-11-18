@@ -64,7 +64,7 @@ class FakeSheet:
     def get_sheet_titles(self):
         return list(self.tabs)
 
-    def ensure_tab(self, title, headers):
+    def ensure_tab(self, title, headers, *, check_headers=True):
         if title not in self.tabs:
             self.tabs[title] = [list(headers)]
 
@@ -82,6 +82,8 @@ class FakeSheet:
         return rows
 
     def append_rows(self, title, rows, columns):
+        if not rows:
+            return
         self.appended.append((title, rows))
         self.ensure_tab(title, [])
         self.tabs.setdefault(title, [[]])
@@ -367,6 +369,159 @@ class TestContinuation:
         assert drive.downloads == []
 
 
+class TestContinuationBottomRow:
+    def _row(self, file, model, method, result):
+        return CompareRow(
+            run_label="L1",
+            recorded_at="2026-11-18 12:00:00",
+            file_id=file.file_id,
+            folder_name="テスト用フォルダ",
+            file_name=file.file_name,
+            model_label=model,
+            model_name=model,
+            method=method,
+            result=result,
+        ).to_sheet_row()
+
+    def test_bottom_api_error_is_not_done_even_if_success_is_above(self):
+        file = _file("FILE_A1234567890", "a.jpg")
+        drive = FakeDrive({FOLDER: [file]}, {FOLDER: "テスト用フォルダ"})
+        sheet = FakeSheet()
+        sheet.tabs["結果_L1"] = [list(RESULT_HEADERS)]
+        sheet.tabs["結果_L1"].append(self._row(file, "m1", "文字から", "成功"))
+        sheet.tabs["結果_L1"].append(self._row(file, "m1", "文字から", "失敗:api_error"))
+        history = []
+        code, _ = _collect(
+            sheet, drive, history, env=_env(COMPARE_MODELS="m1", COMPARE_METHODS="text")
+        )
+        assert code == 0
+        assert [entry[1] for entry in history] == ["text"]
+
+    def test_only_remaining_models_get_file_error_rows(self):
+        class FailingDownloadDrive(FakeDrive):
+            def download_file(self, file):
+                raise RuntimeError("download failed")
+
+        file = _file("FILE_A1234567890", "a.jpg")
+        drive = FailingDownloadDrive({FOLDER: [file]}, {FOLDER: "テスト用フォルダ"})
+        sheet = FakeSheet()
+        sheet.tabs["結果_L1"] = [list(RESULT_HEADERS)]
+        for method in ("文字から", "画像から"):
+            sheet.tabs["結果_L1"].append(self._row(file, "m1", method, "成功"))
+        history = []
+        code, _ = _collect(sheet, drive, history)
+        assert code == 0
+        m1_rows = [row for row in sheet.tabs["結果_L1"][1:] if row[6] == "m1"]
+        m2_rows = [row for row in sheet.tabs["結果_L1"][1:] if row[6] == "m2"]
+        assert len(m1_rows) == 2  # 済んだ型の成功を失敗で上書きしない
+        assert all(row[8] != "失敗:file_error" for row in m1_rows)
+        assert m2_rows and all(row[8] == "失敗:file_error" for row in m2_rows)
+
+        summary = sheet.tabs["集計_L1"]
+        headers = summary[6]
+        m1_text = next(row for row in summary[7:] if row[0] == "m1" and row[1] == "文字から")
+        assert m1_text[headers.index("失敗")] == 0
+
+
+class TestEmptyResponse:
+    class _Extractor:
+        def __init__(self, history):
+            self.history = history
+
+        def extract_receipt_data(self, ocr_result, file_name):
+            self.history.append(file_name)
+            self.last_extraction_error = "api_error"
+            self.last_call_info = {
+                "model": "m1",
+                "latency_ms": 12,
+                "finish_reason": "MAX_TOKENS",
+                "prompt_tokens": 10,
+                "output_tokens": 0,
+                "thinking_tokens": 0,
+                "raw_text": None,
+                "error": None,
+                "error_code": None,
+            }
+            return []
+
+        def extract_from_file(self, file):
+            return self.extract_receipt_data(None, file.file_name)
+
+    def _run(self, sheet, drive, history):
+        return run_compare(
+            _app_config(),
+            _env(COMPARE_MODELS="m1", COMPARE_METHODS="text"),
+            sheet_client=sheet,
+            drive_factory=lambda: drive,
+            ocr_factory=lambda: FakeOcr(),
+            extractor_factory=lambda ai_config: self._Extractor(history),
+            model_checker=lambda name: True,
+            sleep=lambda seconds: None,
+            jst_now=lambda: NOW,
+        )
+
+    def test_none_text_with_finish_reason_is_empty_response_and_not_retried(self):
+        file = _file("FILE_A1234567890", "a.jpg")
+        drive = FakeDrive({FOLDER: [file]}, {FOLDER: "テスト用フォルダ"})
+        sheet = FakeSheet()
+        history = []
+        assert self._run(sheet, drive, history) == 0
+        row = sheet.tabs["結果_L1"][1]
+        assert row[8] == "失敗:empty_response"
+        assert row[9] == "MAX_TOKENS"
+        assert len(history) == 1
+
+        # 続きからでは呼ばない（empty_response は済み）
+        history.clear()
+        assert self._run(sheet, drive, history) == 0
+        assert history == []
+        assert drive.downloads == [file.file_id]
+
+
+class TestOcrFailureCurrentFlow:
+    def test_empty_ocr_current_flow_is_manual_with_zero_cost(self):
+        class EmptyOcr:
+            def extract_text(self, file):
+                return OcrResult(raw_text="", engine="fake", confidence=0.0, error=None)
+
+        file = _file("FILE_A1234567890", "a.jpg")
+        drive = FakeDrive({FOLDER: [file]}, {FOLDER: "テスト用フォルダ"})
+        sheet = FakeSheet()
+        # 単価の表に無い型でも、AI を呼ばないので費用は 0
+        code, _ = _collect(sheet, drive, [], ocr=EmptyOcr())
+        assert code == 0
+        current = next(row for row in sheet.tabs["結果_L1"][1:] if row[7] == "現行の流れ")
+        assert current[8] == "要手入力"
+        assert current[19] == "OCR失敗"
+        assert current[20] == 0  # 応答ms
+        assert current[21:25] == [0, 0, 0, "0.000000"]
+
+
+class TestScoreDerivesModels:
+    def test_score_without_compare_models_uses_result_tab(self):
+        file = _file("FILE_A1234567890", "a.jpg")
+        drive = FakeDrive({FOLDER: [file]}, {FOLDER: "テスト用フォルダ"})
+        sheet = FakeSheet()
+        _collect(sheet, drive, [], env=_env(COMPARE_MODELS="gemini-3.8-flash@low"))
+
+        code = run_compare(
+            _app_config(),
+            _env(
+                COMPARE_STEP="score",
+                COMPARE_RUN_LABEL="L1",
+                COMPARE_FOLDER_IDS="",
+                COMPARE_MODELS=None,
+                COMPARE_METHODS=None,
+            ),
+            sheet_client=sheet,
+            jst_now=lambda: NOW,
+        )
+        assert code == 0
+        summary = sheet.tabs["集計_L1"]
+        assert any(row[0] == "gemini-3.8-flash@low" for row in summary[7:])
+        assert all(row[0] != "gemini-2.5-flash" for row in summary[7:])
+
+
 class TestTimeBudget:
     def test_stops_starting_new_files_and_still_writes_answers(self):
         files = [
@@ -376,7 +531,8 @@ class TestTimeBudget:
         drive = FakeDrive({FOLDER: files}, {FOLDER: "テスト用フォルダ"})
         sheet = FakeSheet()
         history = []
-        ticks = iter([0, 0, 999])
+        # run_compare に入った時点 / 1 本目の開始 / 1 本目の型の前 / 2 本目の開始
+        ticks = iter([0, 0, 0, 999])
 
         code = run_compare(
             _app_config(),
@@ -398,6 +554,117 @@ class TestTimeBudget:
         assert "集計_L1" in sheet.replaced
         # 始めていないファイルの答えの行は足さない
         assert len(sheet.tabs["答え"]) == 2
+
+    def test_budget_stops_calling_remaining_models(self):
+        file = _file("FILE_A1234567890", "a.jpg")
+        drive = FakeDrive({FOLDER: [file]}, {FOLDER: "テスト用フォルダ"})
+        sheet = FakeSheet()
+        history = []
+        # run_compare の始め / 1 本目の開始 / m1 の前 / m2 の前（ここで時間切れ）
+        ticks = iter([0, 0, 0, 999])
+
+        code = run_compare(
+            _app_config(),
+            _env(COMPARE_MODELS="m1,m2", COMPARE_METHODS="text"),
+            sheet_client=sheet,
+            drive_factory=lambda: drive,
+            ocr_factory=lambda: FakeOcr(),
+            extractor_factory=_extractor_factory(history),
+            model_checker=lambda name: True,
+            sleep=lambda seconds: None,
+            clock=lambda: next(ticks),
+            jst_now=lambda: NOW,
+        )
+        assert code == 0
+        assert {model for model, _, _ in history} == {"m1"}
+        results = sheet.tabs["結果_L1"][1:]
+        assert {row[6] for row in results} == {"m1"}
+        m2_rows = [row for row in results if row[6] == "m2"]
+        assert m2_rows == []  # 時間切れの型の行は書かない（続きから呼ばれる）
+
+    def test_budget_stops_retry_wait(self):
+        class AlwaysRetryable:
+            def __init__(self, history):
+                self.history = history
+
+            def _fail(self, name):
+                self.history.append(name)
+                self.last_extraction_error = "api_error"
+                self.last_call_info = {
+                    "model": "m1",
+                    "latency_ms": 12,
+                    "finish_reason": None,
+                    "prompt_tokens": None,
+                    "output_tokens": None,
+                    "thinking_tokens": None,
+                    "raw_text": None,
+                    "error": "503 UNAVAILABLE",
+                    "error_code": None,
+                }
+                return []
+
+            def extract_receipt_data(self, ocr_result, file_name):
+                return self._fail(file_name)
+
+            def extract_from_file(self, file):
+                return self._fail(file.file_name)
+
+        file = _file("FILE_A1234567890", "a.jpg")
+        drive = FakeDrive({FOLDER: [file]}, {FOLDER: "テスト用フォルダ"})
+        sheet = FakeSheet()
+        history = []
+        sleeps = []
+        # 始め / 開始 / 型の前 / やり直しの待ちの前（ここで時間切れ）
+        ticks = iter([0, 0, 0, 999])
+
+        code = run_compare(
+            _app_config(),
+            _env(COMPARE_MODELS="m1", COMPARE_METHODS="text"),
+            sheet_client=sheet,
+            drive_factory=lambda: drive,
+            ocr_factory=lambda: FakeOcr(),
+            extractor_factory=lambda ai_config: AlwaysRetryable(history),
+            model_checker=lambda name: True,
+            sleep=sleeps.append,
+            clock=lambda: next(ticks),
+            jst_now=lambda: NOW,
+        )
+        assert code == 0
+        assert len(history) == 1  # やり直さない
+        assert sleeps == []
+
+
+class TestExceptionWhileRunning:
+    def test_append_failure_still_writes_answers_and_summary(self):
+        class BrokenAppendSheet(FakeSheet):
+            def append_rows(self, title, rows, columns):
+                if not rows:
+                    return
+                raise RuntimeError("sheet write failed")
+
+        file = _file("FILE_A1234567890", "a.jpg")
+        drive = FakeDrive({FOLDER: [file]}, {FOLDER: "テスト用フォルダ"})
+        sheet = BrokenAppendSheet()
+        code, records = _collect(sheet, drive, [])
+        assert code == 1
+        assert "集計_L1" in sheet.replaced
+        assert any(
+            record.levelname == "ERROR" and "例外" in record.getMessage() for record in records
+        )
+
+    def test_answer_write_failure_still_writes_summary(self):
+        class BrokenAnswerSheet(FakeSheet):
+            def append_rows(self, title, rows, columns):
+                if title == "答え" and rows:
+                    raise RuntimeError("answer write failed")
+                super().append_rows(title, rows, columns)
+
+        file = _file("FILE_A1234567890", "a.jpg")
+        drive = FakeDrive({FOLDER: [file]}, {FOLDER: "テスト用フォルダ"})
+        sheet = BrokenAnswerSheet()
+        code, _ = _collect(sheet, drive, [])
+        assert code == 1
+        assert "集計_L1" in sheet.replaced
 
 
 class TestModels:
@@ -523,6 +790,30 @@ class TestS3:
         sheet = GuardSheet()
         code = run_compare(
             _app_config(master=RESULT_ID),
+            _env(),
+            sheet_client=sheet,
+            drive_factory=lambda: (_ for _ in ()).throw(AssertionError("drive")),
+            ocr_factory=lambda: (_ for _ in ()).throw(AssertionError("ocr")),
+            extractor_factory=lambda ai_config: (_ for _ in ()).throw(AssertionError("extractor")),
+            model_checker=lambda name: (_ for _ in ()).throw(AssertionError("model")),
+        )
+        assert code == 1
+        assert sheet.calls == 0
+
+    def test_master_url_is_extracted_before_comparing(self):
+        class GuardSheet(FakeSheet):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            def get_sheet_titles(self):
+                self.calls += 1
+                return super().get_sheet_titles()
+
+        sheet = GuardSheet()
+        master_url = f"https://docs.google.com/spreadsheets/d/{RESULT_ID}/edit#gid=0"
+        code = run_compare(
+            _app_config(master=master_url),
             _env(),
             sheet_client=sheet,
             drive_factory=lambda: (_ for _ in ()).throw(AssertionError("drive")),

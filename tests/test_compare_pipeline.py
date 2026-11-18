@@ -4,6 +4,7 @@ from src.compare.pipeline import (
     AttemptOutcome,
     build_current_flow_row,
     extract_with_retries,
+    is_retryable,
     make_result_row,
     settings_text,
 )
@@ -142,6 +143,29 @@ class TestCurrentFlow:
         assert "文字:なし" in row.amount_validation
         assert "画像" not in row.amount_validation
 
+    def test_ocr_failed_is_manual_with_zero_cost(self):
+        row = build_current_flow_row(
+            run_label="L1",
+            recorded_at="2026-11-18 12:00:00",
+            file=FILE,
+            folder_name="テスト用フォルダ",
+            model_label="gemini-test@low",
+            model_name="gemini-test",
+            text_row=_row("text", []),
+            image_row=_row("image", [_item()], tokens=20),
+            ocr_text="",
+            ai_config=AiConfig(),
+            settings="temperature=0.1, thinking=low, max_tokens=2048",
+            ocr_failed=True,
+        )
+        # 本番は OCR 失敗なら AI を呼ばない（§8）
+        assert row.result == "要手入力"
+        assert row.amount_validation == "OCR失敗"
+        assert row.latency_ms == 0
+        assert row.input_tokens == 0
+        assert row.output_tokens == 0
+        assert row.thinking_tokens == 0
+
 
 def _outcome(error, detail=None):
     return AttemptOutcome(
@@ -211,6 +235,74 @@ class TestExtractionRetries:
         )
         assert retries == 0
         assert sleeps == []
+
+    def _coded(self, code, detail="500 INTERNAL"):
+        return AttemptOutcome(
+            items=[],
+            error="api_error",
+            info={"error": detail, "error_code": code},
+        )
+
+    def test_integer_code_400_is_not_retried_even_if_text_has_500(self):
+        sleeps = []
+        _, retries = extract_with_retries(
+            lambda: self._coded(400, "400 INVALID_ARGUMENT: 500"),
+            sleeps=(10,),
+            sleep=sleeps.append,
+        )
+        assert retries == 0
+        assert sleeps == []
+
+    def test_integer_code_503_is_retried(self):
+        sleeps = []
+        _, retries = extract_with_retries(
+            lambda: self._coded(503, "503 UNAVAILABLE"),
+            sleeps=(0,),
+            sleep=sleeps.append,
+        )
+        assert retries == 1
+        assert sleeps == [0]
+
+    def test_should_stop_prevents_retry_wait(self):
+        sleeps = []
+        result, retries = extract_with_retries(
+            lambda: _outcome("api_error", "503 UNAVAILABLE"),
+            sleeps=(10,),
+            sleep=sleeps.append,
+            should_stop=lambda: True,
+        )
+        assert result.error == "api_error"
+        assert retries == 0
+        assert sleeps == []
+
+
+def test_empty_response_is_not_api_error():
+    outcome = AttemptOutcome(
+        items=[],
+        error="api_error",
+        info={
+            "finish_reason": "MAX_TOKENS",
+            "error": None,
+            "raw_text": None,
+            "error_code": None,
+        },
+    )
+    row = make_result_row(
+        run_label="L1",
+        recorded_at="2026-11-18 12:00:00",
+        file=FILE,
+        folder_name="テスト用フォルダ",
+        model_label="gemini-test",
+        model_name="gemini-test",
+        method="text",
+        outcome=outcome,
+        retries=0,
+        settings="temperature=0.1, thinking=なし, max_tokens=2048",
+        ocr_text=OCR_TEXT,
+    )
+    assert row.result == "失敗:empty_response"
+    assert row.finish_reason == "MAX_TOKENS"
+    assert is_retryable(outcome) is False
 
 
 def test_settings_text():

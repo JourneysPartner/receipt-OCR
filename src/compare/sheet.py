@@ -99,6 +99,18 @@ SUMMARY_HEADERS = [
 
 SPREADSHEET_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 DEFAULT_RETRY_SLEEPS = (10, 30, 60)
+# API で作ったタブの既定の列数（A〜Z）。見出しがこれより多いときは足す
+DEFAULT_COLUMN_COUNT = 26
+
+
+class HeaderMismatchError(RuntimeError):
+    """既にあるタブの 1 行目が、決まった見出しと違う（S6: 列の位置に頼る）。"""
+
+    def __init__(self, title: str, expected: list[str], actual: list[str]):
+        self.title = title
+        self.expected = list(expected)
+        self.actual = list(actual)
+        super().__init__(f"タブ {title!r} の見出しが決まった並びと違います")
 
 
 def _col_letter(index: int) -> str:
@@ -108,6 +120,14 @@ def _col_letter(index: int) -> str:
         index = index // 26 - 1
         if index < 0:
             return result
+
+
+def _trim_trailing_empty(row) -> list[str]:
+    """見出しの後ろに空のセルがあるだけなら同じとみなす。"""
+    values = list(row)
+    while values and (values[-1] is None or str(values[-1]) == ""):
+        values.pop()
+    return [str(value) if value is not None else "" for value in values]
 
 
 def _status_code(error) -> int | None:
@@ -170,27 +190,77 @@ class CompareSheetClient:
                 )
                 self._sleep(self._retry_sleeps[attempt])
 
-    def get_sheet_titles(self) -> list[str]:
+    def get_sheet_properties(self) -> list[dict]:
         meta = self._execute(
             lambda: self._sheets.get(
                 spreadsheetId=self._spreadsheet_id,
-                fields="sheets.properties.title",
+                fields="sheets.properties",
             ).execute()
         )
-        return [s["properties"]["title"] for s in meta.get("sheets", [])]
+        return [s.get("properties", {}) for s in meta.get("sheets", [])]
 
-    def ensure_tab(self, title: str, headers: list[str]) -> None:
-        if title not in self.get_sheet_titles():
+    def get_sheet_titles(self) -> list[str]:
+        return [str(properties.get("title", "")) for properties in self.get_sheet_properties()]
+
+    def _expand_columns(self, properties: dict, needed: int) -> int:
+        """既にあるタブの列数が見出しより少なければ COLUMNS を足す。"""
+        grid = properties.get("gridProperties") or {}
+        current = int(grid.get("columnCount") or DEFAULT_COLUMN_COUNT)
+        if current >= needed:
+            return current
+        self._execute(
+            lambda: self._sheets.batchUpdate(
+                spreadsheetId=self._spreadsheet_id,
+                body={
+                    "requests": [
+                        {
+                            "appendDimension": {
+                                "sheetId": properties.get("sheetId"),
+                                "dimension": "COLUMNS",
+                                "length": needed - current,
+                            }
+                        }
+                    ]
+                },
+            ).execute()
+        )
+        return needed
+
+    def ensure_tab(self, title: str, headers: list[str], *, check_headers: bool = True) -> None:
+        properties = {str(p.get("title", "")): p for p in self.get_sheet_properties()}
+        needed = max(len(headers), DEFAULT_COLUMN_COUNT)
+        if title in properties:
+            # 見出しより列が少なければ先に足してから読む（400 を避ける）
+            total_columns = self._expand_columns(properties[title], len(headers))
+            header_last_col = _col_letter(max(total_columns, 1) - 1)
+            values = self.read_values(title, f"A1:{header_last_col}1")
+            actual = _trim_trailing_empty(values[0]) if values else []
+            if actual:
+                if not check_headers:
+                    return
+                if actual != [str(header) for header in headers]:
+                    raise HeaderMismatchError(title, headers, actual)
+                return
+        else:
             self._execute(
                 lambda: self._sheets.batchUpdate(
                     spreadsheetId=self._spreadsheet_id,
-                    body={"requests": [{"addSheet": {"properties": {"title": title}}}]},
+                    body={
+                        "requests": [
+                            {
+                                "addSheet": {
+                                    "properties": {
+                                        "title": title,
+                                        "gridProperties": {"columnCount": needed},
+                                    }
+                                }
+                            }
+                        ]
+                    },
                 ).execute()
             )
+
         last_col = _col_letter(len(headers) - 1)
-        values = self.read_values(title, f"A1:{last_col}1")
-        if values:
-            return
         self._execute(
             lambda: (
                 self._sheets.values()
@@ -205,15 +275,16 @@ class CompareSheetClient:
         )
 
     def read_values(
-        self, title: str, cells: str = "A:ZZ", *, formatted: bool = False
+        self, title: str, cells: str | None = None, *, formatted: bool = False
     ) -> list[list]:
         render = "FORMATTED_VALUE" if formatted else "UNFORMATTED_VALUE"
+        cell_range = f"'{title}'" if cells is None else f"'{title}'!{cells}"
         result = self._execute(
             lambda: (
                 self._sheets.values()
                 .get(
                     spreadsheetId=self._spreadsheet_id,
-                    range=f"'{title}'!{cells}",
+                    range=cell_range,
                     valueRenderOption=render,
                 )
                 .execute()
@@ -272,7 +343,7 @@ class CompareSheetClient:
                 self._sheets.values()
                 .clear(
                     spreadsheetId=self._spreadsheet_id,
-                    range=f"'{title}'!A:ZZZ",
+                    range=f"'{title}'",
                 )
                 .execute()
             )

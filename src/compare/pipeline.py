@@ -31,6 +31,7 @@ RETRYABLE_MARKERS = (
 )
 
 DEFAULT_RETRY_SLEEPS = (10, 30, 60)
+RETRYABLE_CODES = (429, 500, 502, 503, 504)
 
 METHOD_TEXT = "text"
 METHOD_IMAGE = "image"
@@ -127,6 +128,10 @@ def is_retryable(outcome: AttemptOutcome) -> bool:
     if outcome.error != "api_error":
         return False
     info = outcome.info if isinstance(outcome.info, dict) else {}
+    code = info.get("error_code")
+    if isinstance(code, int) and not isinstance(code, bool):
+        # 例外に整数の code があれば、その値だけで決める（本文の数字に頼らない）
+        return code in RETRYABLE_CODES
     detail = str(info.get("error") or "")
     lowered = detail.lower()
     return any(marker in lowered for marker in RETRYABLE_MARKERS)
@@ -137,12 +142,18 @@ def extract_with_retries(
     *,
     sleeps=DEFAULT_RETRY_SLEEPS,
     sleep=time.sleep,
+    should_stop=None,
 ) -> tuple[AttemptOutcome, int]:
-    """429 / 5xx 系だけを 10・30・60 秒待って最大 3 回やり直す。"""
+    """429 / 5xx 系だけを 10・30・60 秒待って最大 3 回やり直す。
+
+    should_stop が真を返したら（時間切れ）、待たずにその回で終える。
+    """
     retries = 0
     while True:
         outcome = call()
         if not is_retryable(outcome) or retries >= len(sleeps):
+            return outcome, retries
+        if should_stop is not None and should_stop():
             return outcome, retries
         sleep(sleeps[retries])
         retries += 1
@@ -226,6 +237,9 @@ def make_result_row(
         result = "成功"
     elif method == METHOD_TEXT and outcome.error == "ocr_failed":
         result = "失敗:ocr_failed"
+    elif outcome.error == "api_error" and info.get("error") is None:
+        # API は答えたが出力の上限などで本文が空。やり直しても同じなので分ける（§5.5）
+        result = "失敗:empty_response"
     else:
         result = f"失敗:{outcome.error or 'unknown'}"
     error_text = info.get("error")
@@ -280,8 +294,32 @@ def build_current_flow_row(
     ocr_text: str,
     ai_config: AiConfig,
     settings: str,
+    ocr_failed: bool = False,
 ) -> CompareRow:
     """本番 `ProcessingManager._process_file` の判断を API を追加で呼ばずにまねる。"""
+    if ocr_failed:
+        # 本番は OCR が失敗か空なら AI を一度も呼ばずに要手入力にする（§8）
+        return CompareRow(
+            run_label=run_label,
+            recorded_at=recorded_at,
+            file_id=file.file_id,
+            folder_name=folder_name,
+            file_name=file.file_name,
+            model_label=model_label,
+            model_name=model_name,
+            method=METHOD_LABELS[METHOD_CURRENT],
+            result="要手入力",
+            retries=0,
+            count=0,
+            amount_validation="OCR失敗",
+            latency_ms=0,
+            input_tokens=0,
+            output_tokens=0,
+            thinking_tokens=0,
+            cost_usd=0.0,
+            settings=settings,
+        )
+
     text_items = list(text_row.items)
     image_items = list(image_row.items)
 

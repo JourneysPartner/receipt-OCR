@@ -72,6 +72,35 @@ class TestDefaults:
         env = _env(COMPARE_STEP="score", COMPARE_FOLDER_IDS="not-a-folder")
         assert load_compare_config(env).folder_ids == ()
 
+    def test_cloud_run_execution_becomes_label(self):
+        cfg = load_compare_config(
+            _env(COMPARE_RUN_LABEL=None, CLOUD_RUN_EXECUTION="receipt-ocr-job-abc_123")
+        )
+        assert cfg.run_label == "receipt-ocr-job-abc_123"
+
+    def test_cloud_run_execution_label_removes_chars_and_keeps_last_40(self):
+        execution = "projects/1/executions/" + "a" * 30 + "/run 01#x_"
+        cfg = load_compare_config(_env(COMPARE_RUN_LABEL=None, CLOUD_RUN_EXECUTION=execution))
+        cleaned = "projects1executions" + "a" * 30 + "run01x_"
+        assert cfg.run_label == cleaned[-40:]
+
+    def test_cloud_run_execution_ignored_when_label_is_given(self):
+        cfg = load_compare_config(
+            _env(COMPARE_RUN_LABEL="L1", CLOUD_RUN_EXECUTION="receipt-ocr-job-abc")
+        )
+        assert cfg.run_label == "L1"
+
+    def test_cloud_run_execution_is_not_used_for_score(self):
+        cfg = load_compare_config(
+            _env(
+                COMPARE_STEP="score",
+                COMPARE_FOLDER_IDS=None,
+                COMPARE_RUN_LABEL=None,
+                CLOUD_RUN_EXECUTION="receipt-ocr-job-abc",
+            )
+        )
+        assert cfg.run_label is None
+
 
 class TestParsing:
     def test_urls_are_extracted(self):

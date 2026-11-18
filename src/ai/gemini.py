@@ -72,6 +72,7 @@ class GeminiExtractor(AiExtractor):
         try:
             resp = self._client.models.generate_content(**kwargs)
         except Exception as e:
+            code = getattr(e, "code", None)
             self.last_call_info = {
                 "model": model,
                 "latency_ms": int((time.monotonic() - started) * 1000),
@@ -81,6 +82,9 @@ class GeminiExtractor(AiExtractor):
                 "thinking_tokens": None,
                 "raw_text": None,
                 "error": str(e),
+                "error_code": code
+                if isinstance(code, int) and not isinstance(code, bool)
+                else None,
             }
             raise
         latency_ms = int((time.monotonic() - started) * 1000)
@@ -93,6 +97,7 @@ class GeminiExtractor(AiExtractor):
             "thinking_tokens": _usage_value(resp, "thoughts_token_count"),
             "raw_text": _safe_text(resp),
             "error": None,
+            "error_code": None,
         }
         return resp
 
