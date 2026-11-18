@@ -76,8 +76,6 @@ class _ThreadResources:
         self._ocr_factory = ocr_factory
         self._extractor_factory = extractor_factory
         self._local = threading.local()
-        self._extractors: dict[tuple[int, str], object] = {}
-        self._lock = threading.Lock()
 
     def drive(self):
         drive = getattr(self._local, "drive", None)
@@ -94,13 +92,15 @@ class _ThreadResources:
         return ocr
 
     def extractor(self, model: CompareModel, ai_config: AiConfig):
-        key = (threading.get_ident(), model.label)
-        with self._lock:
-            extractor = self._extractors.get(key)
+        # スレッド番号は使い回されるので鍵にしない（スレッドごとの辞書に型で引く）
+        extractors = getattr(self._local, "extractors", None)
+        if extractors is None:
+            extractors = {}
+            self._local.extractors = extractors
+        extractor = extractors.get(model.label)
         if extractor is None:
             extractor = self._extractor_factory(ai_config)
-            with self._lock:
-                self._extractors[key] = extractor
+            extractors[model.label] = extractor
         return extractor
 
 

@@ -3,8 +3,10 @@
 import logging
 import re
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime
 
+from src.compare.config import CompareModel
 from src.compare.pipeline import CompareRow
 from src.compare.runner import _ThreadResources, run_compare
 from src.compare.sheet import ANSWER_HEADERS, OCR_HEADERS, RESULT_HEADERS
@@ -739,9 +741,20 @@ class TestOrdering:
 
 
 class TestThreadResources:
+    """§5.2: Drive と OCR はスレッドごと、GeminiExtractor はスレッドと型の組ごと。"""
+
+    @staticmethod
+    def _models():
+        # 記録は ai_config.model（＝型名）で取る。2 つの型を取り違えないよう名前を変える
+        return [
+            (CompareModel(label="m1", name="m1"), replace(AiConfig(), model="m1")),
+            (CompareModel(label="m2", name="m2"), replace(AiConfig(), model="m2")),
+        ]
+
     def test_drive_and_ocr_per_thread_and_extractor_per_thread_and_model(self):
         created = {"drive": [], "ocr": [], "extractor": []}
         lock = threading.Lock()
+        barrier = threading.Barrier(2, timeout=10)
 
         def drive_factory():
             with lock:
@@ -759,19 +772,19 @@ class TestThreadResources:
             return object()
 
         resources = _ThreadResources(drive_factory, ocr_factory, extractor_factory)
-        from src.compare.config import CompareModel
-
-        model = CompareModel("m1", "m1")
-        other = CompareModel("m2", "m2")
-        ai_config = AiConfig()
+        models = self._models()
+        per_thread = {}
 
         def work():
             resources.drive()
             resources.drive()
             resources.ocr()
-            resources.extractor(model, ai_config)
-            resources.extractor(model, ai_config)
-            resources.extractor(other, ai_config)
+            first = resources.extractor(*models[0])
+            again = resources.extractor(*models[0])
+            other = resources.extractor(*models[1])
+            per_thread[threading.get_ident()] = (first, again, other)
+            # 2 つのスレッドが同時に生きている間に作らせる（番号が重ならない前提を置かない）
+            barrier.wait()
 
         threads = [threading.Thread(target=work) for _ in range(2)]
         for thread in threads:
@@ -783,6 +796,43 @@ class TestThreadResources:
         assert len(created["ocr"]) == 2
         assert len(created["extractor"]) == 4  # 2 スレッド × 2 型
         assert len(set(created["drive"])) == 2
+
+        by_thread = {}
+        for ident, model in created["extractor"]:
+            by_thread.setdefault(ident, []).append(model)
+        assert sorted(by_thread.values()) == [["m1", "m2"], ["m1", "m2"]]
+
+        for first, again, other in per_thread.values():
+            assert first is again  # 同じスレッド・同じ型では作り直さない
+            assert first is not other  # 型が違えば別の extractor
+        assert len({id(entry[0]) for entry in per_thread.values()}) == 2
+
+    def test_extractor_is_recreated_after_a_thread_ends_even_if_the_id_is_reused(self):
+        created = []
+        lock = threading.Lock()
+
+        def extractor_factory(ai_config):
+            with lock:
+                created.append((threading.get_ident(), ai_config.model))
+            return object()
+
+        resources = _ThreadResources(lambda: object(), lambda: object(), extractor_factory)
+        models = self._models()
+
+        def work():
+            for model, ai_config in models:
+                resources.extractor(model, ai_config)
+
+        # 1 つ目が終わってから 2 つ目を始める（Linux ではスレッド番号が使い回される）
+        first = threading.Thread(target=work)
+        first.start()
+        first.join()
+        second = threading.Thread(target=work)
+        second.start()
+        second.join()
+
+        assert len(created) == 4  # 2 スレッド × 2 型（前のスレッドの extractor を使い回さない）
+        assert [model for _, model in created] == ["m1", "m2", "m1", "m2"]
 
 
 class TestS3:
