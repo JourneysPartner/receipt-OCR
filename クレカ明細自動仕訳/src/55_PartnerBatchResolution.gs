@@ -288,20 +288,18 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
   });
   if (commonDictionaryRows === undefined && needsCommonDictionary) missingMasters.push('commonDictionaryRows');
   // 税の 2 つの表（§6.2）。`options.taxTables` が無く、§2.3 の顧客で
-  // `ADOPT_EXISTING_PARTNER` があるときだけ要る。今の読取に鍵を足せるなら
-  // 足し（往復を増やさない）、足せないときだけ直接 1 回読む。
+  // `ADOPT_EXISTING_PARTNER` があるときだけ要る。読むかの判定は**まとめの
+  // 顧客**（`options.customer`、無ければ上の `getCustomerById` の結果）で
+  // 行う ── 最初の件の要確認が見つからなくても、ほかの正しい件は決め直せる。
+  // 今の読取に鍵を足せるなら足し（往復を増やさない）、足せないときだけ
+  // 直接 1 回読む。
   var taxTablesForBatch = options.taxTables === null ? undefined : options.taxTables;
   var taxKeysForBatch = [];
   var taxCustomerForBatch = null;
   if (hasAdoption && taxTablesForBatch === undefined) {
-    var adoptionItem = selected.filter(function(item) {
-      return item.decision.operation === 'ADOPT_EXISTING_PARTNER';
-    })[0];
-    var adoptionReview = adoptionItem ? reviewsById[adoptionItem.reviewId] : null;
-    var sampleCustomer = adoptionReview ? reviewWriteCustomer_(adoptionReview, customer) : null;
-    if (sampleCustomer && taxCategoryConfigured_(sampleCustomer)) {
-      taxCustomerForBatch = sampleCustomer;
-      taxKeysForBatch = taxTableMasterKeys_(sampleCustomer);
+    if (customer && taxCategoryConfigured_(customer)) {
+      taxCustomerForBatch = customer;
+      taxKeysForBatch = taxTableMasterKeys_(customer);
       if (missingMasters.length) {
         // 今の読取に鍵を足す（往復を増やさない）。
         taxKeysForBatch.forEach(function(key) { missingMasters.push(key); });
@@ -445,8 +443,12 @@ function resolvePartnerReviewsBatch(customerId, fileId, decisions, options) {
         planned = Object.assign({}, tx.planned, {f: item.decision.partnerName});
         columns = ['f'];
         // 決め直しは新しい取引先名を入れた後（§6.2）。変わるときだけ G を書く。
-        if (taxTablesForBatch !== undefined) {
-          var tax = taxCategoryRecomputed_(reviewWriteCustomer_(item.review, customer),
+        // 決め直すかは、その件の転記先の顧客（`reviewWriteCustomer_`）で見る
+        // ── `options.taxTables` が渡されたときも、§2.3 でない顧客の G には
+        // 触らない（表を読むかの判定をまとめの顧客で行った後も同じ）。
+        var reviewCustomerForTax = reviewWriteCustomer_(item.review, customer);
+        if (taxTablesForBatch !== undefined && taxCategoryConfigured_(reviewCustomerForTax)) {
+          var tax = taxCategoryRecomputed_(reviewCustomerForTax,
             tx, planned, taxTablesForBatch);
           if (tax.changed) {
             planned.g = tax.g;

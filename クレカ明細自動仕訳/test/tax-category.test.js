@@ -972,6 +972,46 @@ module.exports = ({test, assert, gas}) => {
 
   // ---------------- gt 9: 行を空ける ----------------
 
+  test('gt 9: 対象外のまとめ（57）で G も空にし、G が AL にある顧客では触らない', () => {
+    function run(excludedColumns) {
+      const world = setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [[712, '仕入高']],
+        dictionary: [['架空零円店', '架空零円取引先']], words: [{word: '仕入', code: 712}],
+        taxTabs: {marks: GT_MARKS}, excludedColumns: excludedColumns});
+      world.addFile('fileA', ['2026/10/10,架空零円店,0,仕入']);
+      importReport(world);
+      const review = typedReviews('fileA', 'ZERO_AMOUNT')[0];
+      assert.ok(review, JSON.stringify(plain(call('openReviews', [{}]))));
+      const tx = call('getTransaction', [review.fullTxId]);
+      destSheet().getRange(tx.destinationRow, 7).setValue('課対仕入10%');
+      const captured = captureTaxWrites(() => call('excludeOtherReviewsBatch',
+        ['C001', 'fileA', [{reviewId: review.reviewId, operation: 'EXCLUDE'}],
+          {actor: 'tester@example.com'}]));
+      const customer = call('getCustomerById', ['C001']);
+      return {result: plain(captured.result), rows: captured.rows,
+        row: tx.destinationRow, value: cell(tx.destinationRow, 7),
+        keys: call('excludeBatchClearColumns_', [customer]).map((entry) => entry.key),
+        empty: call('excludeBatchEmptyValues_', [customer])};
+    }
+    // G が AL に無い顧客: 対象外のまとめで G も空にし、読み返しでも G を見る
+    // （空にできなければ DESTINATION_VALUE_MISMATCH で止まる）。
+    const clearable = run(undefined);
+    assert.deepEqual(clearable.result.errors, []);
+    assert.equal(clearable.result.resolvedReviewIds.length, 1);
+    assert.ok(clearable.keys.indexOf('g') >= 0, '空にする列に G がある');
+    assert.equal(Object.prototype.hasOwnProperty.call(clearable.empty, 'g'), true,
+      '読み返しでも G を見る');
+    assert.equal(clearable.value, '');
+    assert.ok(clearable.rows.indexOf(clearable.row) >= 0, 'G を空にする書込がある');
+
+    // G が AL にある顧客: G に触らない（今の作りのまま）。
+    const inAl = run([7]);
+    assert.deepEqual(inAl.result.errors, []);
+    assert.equal(inAl.keys.indexOf('g'), -1);
+    assert.equal(Object.prototype.hasOwnProperty.call(inAl.empty, 'g'), false);
+    assert.equal(inAl.value, '課対仕入10%');
+    assert.deepEqual(inAl.rows, []);
+  });
+
   test('gt 9: 行を空ける 3 か所で G も空にし、G が AL にある顧客では触らない', () => {
     const world = setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [[712, '仕入高']]});
     const lease = world.lease();
@@ -1301,6 +1341,29 @@ module.exports = ({test, assert, gas}) => {
       '課対仕入（控70）10%']);
   });
 
+  // ---------------- gt 6: 表が無いときの確定 ----------------
+
+  test('gt 6: 表が無い・見出しが違うときの確定は G を変えない（TABLES_MISSING）', () => {
+    function run(taxTabs) {
+      const world = confirmationWorld({rows: GT_CONFIRM_ROWS.slice(0, 1), taxTabs: taxTabs});
+      const review = partnerReviews('fileA')[0];
+      const tx = call('getTransaction', [review.fullTxId]);
+      // 取込では表が無いので G に入らない。手で入れた値（転記先と取引ログ
+      // 46 列の予定値）が確定で消えないことを見る。
+      master('クレカ取引ログ').getRange(tx._rowNumber, 46).setValue('課対仕入10%');
+      destSheet().getRange(5, 7).setValue('課対仕入10%');
+      const captured = captureTaxWrites(() => call('resolveReview',
+        [review.reviewId, 'ADOPT_EXISTING_PARTNER',
+          {partnerName: '架空フリマ取引先', learn: false}]));
+      return {rows: captured.rows, value: cell(5, 7)};
+    }
+    const noTab = run(undefined);
+    const wrongHeader = run({headers: {
+      marks: ['取引先名', '印', '顧客ID', '有効', '登録日時', '登録者', 'メモ ']}});
+    assert.deepEqual(noTab, {rows: [], value: '課対仕入10%'});
+    assert.deepEqual(wrongHeader, {rows: [], value: '課対仕入10%'});
+  });
+
   // ---------------- gt 7: まとめて確定 ----------------
 
   test('gt 7: まとめて確定で複数件・複数の転記先の G を決め直し、変わる件だけ書く', () => {
@@ -1355,6 +1418,27 @@ module.exports = ({test, assert, gas}) => {
       '課対仕入（控70）10%']);
   });
 
+  // ---------------- gt 4: 55 の表を読むかの判定 ----------------
+
+  test('gt 4: 55 は最初の ADOPT の要確認が無くても、ほかの件の G を決め直す', () => {
+    const world = confirmationWorld({rows: GT_CONFIRM_ROWS.slice(0, 1)});
+    const review = partnerReviews('fileA')[0];
+    // 1 件目は取引先の表を読むかの判定にだけ使われ、要確認が無い。まとめの
+    // 顧客で判定するので、2 件目の正しい件は決め直される。
+    const captured = captureTaxWrites(() => call('resolvePartnerReviewsBatch',
+      ['C001', 'fileA', [
+        {reviewId: 'RV_GT_MISSING', operation: 'ADOPT_EXISTING_PARTNER',
+          partnerName: '架空フリマ取引先', learn: false},
+        adoptionDecision(review, '架空フリマ取引先')],
+        {actor: 'tester@example.com'}]));
+    const result = plain(captured.result);
+    assert.deepEqual(result.errors.map((entry) => [entry.reviewId, entry.code]),
+      [['RV_GT_MISSING', 'REVIEW_NOT_FOUND']]);
+    assert.deepEqual(result.resolvedReviewIds, [review.reviewId]);
+    assert.deepEqual(captured.rows, [5]);
+    assert.equal(cell(5, 7), '課対仕入（控70）10%');
+  });
+
   // ---------------- gt 8: 日付・金額の修正 ----------------
 
   test('gt 8: 日付・金額の修正で G を決め直す（G が入る・控70 から 10% へ）', () => {
@@ -1401,6 +1485,121 @@ module.exports = ({test, assert, gas}) => {
     // §10.12: 日付・金額の修正でも値をログと監査に出さない。
     assertNoTaxValues(['仕入', '日付不明', '架空店舗', '金額不明', '架空フリマ', '3000',
       '12000', '課対仕入10%']);
+  });
+
+  // ---------------- gt 15: 利用日がシリアル値（確定の道） ----------------
+
+  const SERIAL_2026_10_11 = 46306;
+
+  /** 取引ログの S 列（19。B 列予定値）に、本番の `setValues` が作る数（シリアル値）を置く。 */
+  function putPlannedDateSerial(fullTxId, serial) {
+    const tx = call('getTransaction', [fullTxId]);
+    master('クレカ取引ログ').getRange(tx._rowNumber, 19).setValue(serial);
+    return tx;
+  }
+
+  test('gt 15: 1 件の確定で S がシリアル値でも G を決め直す（46306 は 2026-10-11）', () => {
+    const world = confirmationWorld({rows: GT_CONFIRM_ROWS.slice(0, 1)});
+    const review = partnerReviews('fileA')[0];
+    putPlannedDateSerial(review.fullTxId, SERIAL_2026_10_11);
+    const captured = captureTaxWrites(() => call('resolveReview',
+      [review.reviewId, 'ADOPT_EXISTING_PARTNER',
+        {partnerName: '架空フリマ取引先', learn: false}]));
+    assert.deepEqual(captured.rows, [5]);
+    assert.equal(cell(5, 7), '課対仕入（控70）10%');
+    const after = call('getTransaction', [review.fullTxId]);
+    assert.equal(after.planned.g, '課対仕入（控70）10%');
+    assert.equal(after.verified.g, '課対仕入（控70）10%');
+  });
+
+  test('gt 15: まとめて確定で S がシリアル値でも G を決め直す', () => {
+    const world = confirmationWorld({rows: GT_CONFIRM_ROWS.slice(0, 2)});
+    const reviews = partnerReviews('fileA');
+    reviews.forEach((review) => putPlannedDateSerial(review.fullTxId, SERIAL_2026_10_11));
+    const captured = captureTaxWrites(() => call('resolvePartnerReviewsBatch',
+      ['C001', 'fileA', reviews.map((review) =>
+        adoptionDecision(review, '架空フリマ取引先')),
+        {actor: 'tester@example.com'}]));
+    assert.deepEqual(plain(captured.result.errors), []);
+    assert.equal(captured.result.resolvedReviewIds.length, 2);
+    // 1 万円以上は控70 に変わり、1 万円未満は今と同じで書かない。
+    assert.deepEqual(captured.rows, [5]);
+    assert.equal(cell(5, 7), '課対仕入（控70）10%');
+    assert.equal(cell(6, 7), '課対仕入10%');
+  });
+
+  test('gt 15: 画面のまとめて確定（80）でも S がシリアル値で G を決め直す', () => {
+    const world = confirmationWorld({rows: GT_CONFIRM_ROWS.slice(0, 1)});
+    const reviews = partnerReviews('fileA');
+    putPlannedDateSerial(reviews[0].fullTxId, SERIAL_2026_10_11);
+    const captured = captureTaxWrites(() => call('webAppResolveReviews',
+      ['C001', [{reviewId: reviews[0].reviewId, partnerName: '架空フリマ取引先'}],
+        {batchId: 'gt15'}]));
+    assert.deepEqual(plain(captured.result.errors), []);
+    assert.equal(captured.result.resolved, 1, '確定を空振りしない');
+    assert.deepEqual(captured.rows, [5]);
+    assert.equal(cell(5, 7), '課対仕入（控70）10%');
+  });
+
+  test('gt 15: 金額だけの修正で S がシリアル値でも G を消さない', () => {
+    const world = setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [[712, '仕入高']],
+      dictionary: [['架空フリマ', '架空フリマ取引先']], words: [{word: '仕入', code: 712}],
+      taxTabs: {marks: GT_MARKS}});
+    world.addFile('fileA', ['2026/10/11,架空フリマ,金額不明,仕入']);
+    importReport(world);
+    const review = typedReviews('fileA', 'AMOUNT')[0];
+    assert.ok(review, JSON.stringify(plain(call('openReviews', [{}]))));
+    const tx = call('getTransaction', [review.fullTxId]);
+    // 金額だけを直す前の状態（12,000 円のフリマ → 控70）を取引ログと行に置く。
+    const log = master('クレカ取引ログ');
+    log.getRange(tx._rowNumber, 19).setValue(SERIAL_2026_10_11);
+    log.getRange(tx._rowNumber, 23).setValue(12000);
+    log.getRange(tx._rowNumber, 46).setValue('課対仕入（控70）10%');
+    destSheet().getRange(tx.destinationRow, 7).setValue('課対仕入（控70）10%');
+    const captured = captureTaxWrites(() => call('resolveReview',
+      [review.reviewId, 'FIX_DATE_AMOUNT', {correctedAmount: 12000}]));
+    assert.deepEqual(captured.rows, [], '変わらないので G の書込は無い');
+    assert.equal(cell(tx.destinationRow, 7), '課対仕入（控70）10%');
+    const after = call('getTransaction', [review.fullTxId]);
+    assert.equal(after.planned.g, '課対仕入（控70）10%');
+  });
+
+  // ---------------- gt 16: 画面のまとめて確定（80）の G の値 ----------------
+
+  test('gt 16: 80 の道で G の値（控70・変わらない件・印の誤り）と取引ログ 46・47 を確かめる', () => {
+    const world = confirmationWorld({rows: GT_CONFIRM_ROWS.slice(0, 3)});
+    const reviews = partnerReviews('fileA');
+    assert.equal(reviews.length, 3);
+    const captured = captureTaxWrites(() => call('webAppResolveReviews',
+      ['C001', [
+        {reviewId: reviews[0].reviewId, partnerName: '架空フリマ取引先'},
+        {reviewId: reviews[1].reviewId, partnerName: '架空店舗取引先'},
+        {reviewId: reviews[2].reviewId, partnerName: '架空印誤り取引先'}
+      ], {batchId: 'gt16'}]));
+    const outcome = plain(captured.result);
+    assert.deepEqual(outcome.errors, []);
+    assert.equal(outcome.resolved, 3, '確定を空振りしない');
+    assert.equal(outcome.resolvedReviewIds.length, 3);
+
+    // G の値: フリマの 1 万円以上は控70、印なしは 10% のまま、
+    // 印が誤りの件は空。書き換える 2 件の行だけ G を書く。
+    assert.equal(cell(5, 7), '課対仕入（控70）10%');
+    assert.equal(cell(6, 7), '課対仕入10%');
+    assert.equal(cell(7, 7), '');
+    assert.deepEqual(captured.rows, [5, 7]);
+
+    // 取引ログ 46・47 列（予定値・読取確認値）も新しい値。
+    const log = master('クレカ取引ログ');
+    const gCells = reviews.map((review) => {
+      const tx = call('getTransaction', [review.fullTxId]);
+      return [log.getRange(tx._rowNumber, 46).getValue(),
+        log.getRange(tx._rowNumber, 47).getValue()];
+    });
+    assert.deepEqual(gCells, [
+      ['課対仕入（控70）10%', '課対仕入（控70）10%'],
+      ['課対仕入10%', '課対仕入10%'],
+      ['', '']
+    ]);
   });
 
   // ---------------- gt 13: 回数（確定・日付金額の修正） ----------------

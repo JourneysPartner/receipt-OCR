@@ -558,6 +558,19 @@ function taxTablesFromMasterRows_(masters, taxKeys) {
  * 入れた後の値を渡す。`g` は必ず文字列か `''` で、`null` は返さない
  * （§6.3 の `43` の `buildRowWrite` が止める）。
  *
+ * **利用日がシリアル値のとき**（取引ログの予定値は `61` の
+ * `updateWrittenValues` が `setValues` で書くので、`'2026-10-15'` は日付の
+ * セルになり、確定の読取（`UNFORMATTED_VALUE`）では `46310` のような数で
+ * 返る）、有限の整数が `FREEE_EXPORT_MIN_SERIAL_`〜`FREEE_EXPORT_MAX_SERIAL_`
+ * の範囲なら `yyyy-MM-dd` に直してから決める。範囲の外・整数でない数は
+ * 今のまま（`DATE_INVALID`）。`taxDateValue_` と `resolveTaxCategory_` は
+ * 変えない（取込の道は文字のまま）。
+ *
+ * **表が無い・見出しが違う**（`TABLES_MISSING`）ときは G に触らない
+ * （`changed: false`）。取込も表が無ければ G に触らないので、確定だけが
+ * 正しく決めた値（`非課仕入` など）を消さない。ほかの「決まらない」
+ * （`MARK_INVALID`・`DATE_INVALID` など）は今のまま空にする側へ倒す。
+ *
  * @param {*} customer `reviewWriteCustomer_` の結果
  * @param {*} tx 取引ログの 1 行（`getTransaction` の戻り値）
  * @param {!Object} planned 決め直しの材料を入れた予定値
@@ -570,15 +583,21 @@ function taxCategoryRecomputed_(customer, tx, planned, taxTables) {
   var current = old === undefined || old === null ? '' : String(old);
   if (!tx) return {changed: false, g: current};
   if (isCashbackMerchant(customer, tx.originalMerchant)) return {changed: false, g: current};
+  var date = source.b;
+  if (typeof date === 'number' && Number.isInteger(date) &&
+      date >= FREEE_EXPORT_MIN_SERIAL_ && date <= FREEE_EXPORT_MAX_SERIAL_) {
+    date = toTokyoDateString_(excelSerialToDate(date));
+  }
   var resolution = resolveTaxCategory_({
     customer: customer,
     accountCode: source.c,
     purpose: tx.originalPurpose,
-    date: source.b,
+    date: date,
     amount: source.m,
     partnerName: source.f,
     cashback: false
   }, taxTables);
+  if (resolution.reason === 'TABLES_MISSING') return {changed: false, g: current};
   var next = resolution.status === TAX_STATUS_.DECIDED ? resolution.name : '';
   return {changed: next !== current, g: next};
 }

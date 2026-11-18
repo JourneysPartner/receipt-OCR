@@ -45,6 +45,9 @@ function excludeBatchClearColumns_(customer) {
   var keys = ['txId', 'b', 'f', 'i', 'k', 'm'];
   if (customer.columnMapping && customer.columnMapping.L) keys.push('l');
   if (customer.columnMapping && customer.columnMapping.C) keys.push('c');
+  // G は `43` の `clearTransactionRows` と同じ条件のときだけ空にする
+  // （G が AL にある顧客の G には触らない。§7・§10.9）。
+  if (taxColumnClearable_(customer)) keys.push('g');
   return keys.map(function(key) {
     return {key: key, column: writeColumnNumber_(customer, key)};
   });
@@ -63,6 +66,7 @@ function excludeBatchRowIsClear_(row, columns) {
 function excludeBatchEmptyValues_(customer) {
   var values = {b: '', f: '', i: '', k: '', m: ''};
   if (customer.columnMapping && customer.columnMapping.C) values.c = '';
+  if (taxColumnClearable_(customer)) values.g = '';
   return values;
 }
 
