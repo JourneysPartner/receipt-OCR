@@ -21,6 +21,9 @@ class DriveClient:
     SCOPES = [
         "https://www.googleapis.com/auth/drive",
     ]
+    READ_ONLY_SCOPES = [
+        "https://www.googleapis.com/auth/drive.readonly",
+    ]
 
     # 成功時にファイル名先頭へ付与するプレフィックス
     DONE_PREFIX = "【済】"
@@ -34,16 +37,23 @@ class DriveClient:
     # 探索フォルダ数の上限（暴発防止）
     _MAX_FOLDERS_TO_TRAVERSE = 100
 
-    def __init__(self, config: DriveConfig, credentials_path: str | None = None):
+    def __init__(
+        self,
+        config: DriveConfig,
+        credentials_path: str | None = None,
+        read_only: bool = False,
+    ):
         self._config = config
+        self._read_only = read_only
+        scopes = self.READ_ONLY_SCOPES if read_only else self.SCOPES
         if credentials_path:
             creds = service_account.Credentials.from_service_account_file(
-                credentials_path, scopes=self.SCOPES
+                credentials_path, scopes=scopes
             )
         else:
             import google.auth
 
-            creds, _ = google.auth.default(scopes=self.SCOPES)
+            creds, _ = google.auth.default(scopes=scopes)
         self._service = build("drive", "v3", credentials=creds)
 
     def list_files(self, folder_id: str) -> list[DriveFile]:
@@ -156,11 +166,20 @@ class DriveClient:
         )
         return files
 
+    def get_name(self, file_id: str) -> str:
+        """ファイル / フォルダの名前を取得する（読取りのみ）。"""
+        resp = self._service.files().get(fileId=file_id, fields="name").execute()
+        return resp.get("name", "")
+
     def rename_file_as_done(self, file: DriveFile) -> str | None:
         """成功したファイルのファイル名先頭に `【済】` を付与する。
         既に [済] / 【済】 で始まる場合は何もしない。
         戻り値: 新しいファイル名（付与した場合）、または None（付与しなかった場合）
+
+        読取り専用で作られたクライアントは API を呼ばずに RuntimeError を投げる。
         """
+        if getattr(self, "_read_only", False):
+            raise RuntimeError("読取り専用の DriveClient では rename_file_as_done を使えません")
         if any(file.file_name.startswith(p) for p in self._ALREADY_DONE_PREFIXES):
             logger.info(
                 f"rename スキップ（既に済プレフィックス付き）: {file.file_name}",

@@ -1,6 +1,7 @@
 """Gemini API による AI 解析エンジン"""
 
 import json
+import time
 
 from google import genai
 from google.genai import types
@@ -42,7 +43,58 @@ class GeminiExtractor(AiExtractor):
     def __init__(self, config: AiConfig, api_key: str | None = None):
         super().__init__()
         self._config = config
-        self._client = genai.Client(api_key=api_key)
+        self.last_call_info: dict | None = None
+        client_kwargs: dict = {"api_key": api_key}
+        if config.request_timeout_seconds is not None:
+            client_kwargs["http_options"] = types.HttpOptions(
+                timeout=config.request_timeout_seconds * 1000
+            )
+        self._client = genai.Client(**client_kwargs)
+
+    def _generate_config(self) -> types.GenerateContentConfig:
+        kwargs: dict = {
+            "system_instruction": SYSTEM_INSTRUCTION,
+            "max_output_tokens": self._config.max_tokens,
+        }
+        if self._config.temperature is not None:
+            kwargs["temperature"] = self._config.temperature
+        if self._config.thinking_level is not None:
+            kwargs["thinking_config"] = types.ThinkingConfig(
+                thinking_level=self._config.thinking_level
+            )
+        return types.GenerateContentConfig(**kwargs)
+
+    def _generate_content(self, **kwargs):
+        """1 回の generate_content を呼び、last_call_info を残す。"""
+        self.last_call_info = None
+        started = time.monotonic()
+        model = kwargs.get("model", self._config.model)
+        try:
+            resp = self._client.models.generate_content(**kwargs)
+        except Exception as e:
+            self.last_call_info = {
+                "model": model,
+                "latency_ms": int((time.monotonic() - started) * 1000),
+                "finish_reason": None,
+                "prompt_tokens": None,
+                "output_tokens": None,
+                "thinking_tokens": None,
+                "raw_text": None,
+                "error": str(e),
+            }
+            raise
+        latency_ms = int((time.monotonic() - started) * 1000)
+        self.last_call_info = {
+            "model": model,
+            "latency_ms": latency_ms,
+            "finish_reason": _finish_reason(resp),
+            "prompt_tokens": _usage_value(resp, "prompt_token_count"),
+            "output_tokens": _usage_value(resp, "candidates_token_count"),
+            "thinking_tokens": _usage_value(resp, "thoughts_token_count"),
+            "raw_text": _safe_text(resp),
+            "error": None,
+        }
+        return resp
 
     def extract_receipt_data(self, ocr_result: OcrResult, file_name: str) -> list[ReceiptItem]:
         self.last_extraction_error = None
@@ -57,14 +109,10 @@ class GeminiExtractor(AiExtractor):
             f"---\n{ocr_result.raw_text}\n---"
         )
         try:
-            resp = self._client.models.generate_content(
+            resp = self._generate_content(
                 model=self._config.model,
                 contents=user_msg,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_INSTRUCTION,
-                    max_output_tokens=self._config.max_tokens,
-                    temperature=0.1,
-                ),
+                config=self._generate_config(),
             )
             items = self._parse_response(resp.text.strip(), file_name)
             if not items:
@@ -114,17 +162,13 @@ class GeminiExtractor(AiExtractor):
             "JSON配列で返してください(金額の桁を特に注意して読んでください)。"
         )
         try:
-            resp = self._client.models.generate_content(
+            resp = self._generate_content(
                 model=self._config.model,
                 contents=[
                     types.Part.from_bytes(data=file.content, mime_type=file.mime_type),
                     user_msg,
                 ],
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_INSTRUCTION,
-                    max_output_tokens=self._config.max_tokens,
-                    temperature=0.1,
-                ),
+                config=self._generate_config(),
             )
             items = self._parse_response(resp.text.strip(), file.file_name)
             if items:
@@ -193,3 +237,33 @@ def _safe_int(value) -> int | None:
         return int(float(cleaned))
     except (ValueError, TypeError):
         return None
+
+
+def _finish_reason(resp) -> str | None:
+    candidates = getattr(resp, "candidates", None)
+    if not candidates:
+        return None
+    try:
+        first = candidates[0]
+    except (IndexError, KeyError, TypeError):
+        return None
+    reason = getattr(first, "finish_reason", None)
+    if reason is None:
+        return None
+    return getattr(reason, "name", None) or str(reason)
+
+
+def _usage_value(resp, name: str) -> int | None:
+    usage = getattr(resp, "usage_metadata", None)
+    if usage is None:
+        return None
+    value = getattr(usage, name, None)
+    return value if isinstance(value, int) else None
+
+
+def _safe_text(resp) -> str | None:
+    try:
+        text = resp.text
+    except Exception:
+        return None
+    return text if isinstance(text, str) else None

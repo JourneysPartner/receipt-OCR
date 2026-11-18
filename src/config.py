@@ -156,6 +156,12 @@ class AiConfig:
     # AI 抽出が 0 明細 / parse_error だった時に
     # Gemini multimodal で画像/PDF から再抽出するか
     enable_extraction_retry: bool = True
+    # None なら temperature を送らない（既定は今までどおり 0.1）
+    temperature: float | None = 0.1
+    # None なら thinking_config を送らない
+    thinking_level: str | None = None
+    # None なら http_options を渡さない（1 回の呼び出しの待ち時間の上限）
+    request_timeout_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -172,13 +178,17 @@ class RuntimeConfig:
       - target_scope = "selected" のとき必須。マスターシート上の行番号 (1-indexed)
     """
 
-    run_mode: str = "prod"  # "prod" | "validate"
+    run_mode: str = "prod"  # "prod" | "validate" | "compare"
     target_scope: str = "all"  # "all" | "selected"
     target_row: int | None = None
 
     @property
     def is_validate(self) -> bool:
         return self.run_mode == "validate"
+
+    @property
+    def is_compare(self) -> bool:
+        return self.run_mode == "compare"
 
     @property
     def is_selected(self) -> bool:
@@ -221,8 +231,11 @@ def _build_runtime_config() -> RuntimeConfig:
     raw_scope = os.environ.get("TARGET_SCOPE", "all").strip().lower() or "all"
     raw_row = os.environ.get("TARGET_ROW", "").strip()
 
-    if raw_mode not in ("prod", "validate"):
-        raise ValueError(f"RUN_MODE は 'prod' か 'validate' のいずれか (received={raw_mode!r})")
+    if raw_mode not in ("prod", "validate", "compare"):
+        raise ValueError("RUN_MODE は 'prod' / 'validate' / 'compare' のいずれか")
+    if raw_mode == "compare":
+        # TARGET_SCOPE / TARGET_ROW は比較では使わない（値があっても無視する）
+        return RuntimeConfig(run_mode="compare", target_scope="all", target_row=None)
     if raw_scope not in ("all", "selected"):
         raise ValueError(f"TARGET_SCOPE は 'all' か 'selected' のいずれか (received={raw_scope!r})")
 
@@ -246,6 +259,49 @@ def _build_runtime_config() -> RuntimeConfig:
         target_scope=raw_scope,
         target_row=target_row,
     )
+
+
+THINKING_LEVELS = ("minimal", "low", "medium", "high")
+
+
+def _parse_ai_temperature(raw: str | None) -> float | None:
+    if raw is None or not raw.strip():
+        return 0.1
+    if raw.strip().lower() == "none":
+        return None
+    try:
+        return float(raw)
+    except ValueError as e:
+        raise ValueError(
+            f"AI_TEMPERATURE は数値か 'none' でなければなりません (received={raw!r})"
+        ) from e
+
+
+def _parse_ai_thinking_level(raw: str | None) -> str | None:
+    if raw is None or not raw.strip():
+        return None
+    value = raw.strip().lower()
+    if value not in THINKING_LEVELS:
+        raise ValueError(
+            f"AI_THINKING_LEVEL は {' / '.join(THINKING_LEVELS)} のいずれか (received={raw!r})"
+        )
+    return value
+
+
+def _parse_ai_request_timeout(raw: str | None) -> int | None:
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = int(raw)
+    except ValueError as e:
+        raise ValueError(
+            f"AI_REQUEST_TIMEOUT_SECONDS は正の整数でなければなりません (received={raw!r})"
+        ) from e
+    if value <= 0:
+        raise ValueError(
+            f"AI_REQUEST_TIMEOUT_SECONDS は正の整数でなければなりません (received={raw!r})"
+        )
+    return value
 
 
 def load_config() -> AppConfig:
@@ -344,6 +400,11 @@ def load_config() -> AppConfig:
             == "true",
             enable_extraction_retry=os.environ.get("ENABLE_EXTRACTION_RETRY", "true").lower()
             == "true",
+            temperature=_parse_ai_temperature(os.environ.get("AI_TEMPERATURE")),
+            thinking_level=_parse_ai_thinking_level(os.environ.get("AI_THINKING_LEVEL")),
+            request_timeout_seconds=_parse_ai_request_timeout(
+                os.environ.get("AI_REQUEST_TIMEOUT_SECONDS")
+            ),
         ),
         google_credentials_path=os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
         gemini_api_key=os.environ.get("GEMINI_API_KEY"),

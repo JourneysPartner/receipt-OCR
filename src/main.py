@@ -1,8 +1,10 @@
 """Cloud Run Job エントリポイント"""
 
+import os
 import sys
 
 from src.ai.factory import create_ai_extractor
+from src.compare.runner import run_compare
 from src.config import load_config
 from src.drive.client import DriveClient
 from src.logging.logger import setup_logger
@@ -10,6 +12,13 @@ from src.ocr.factory import create_ocr_engine
 from src.processing.manager import ProcessingManager
 from src.rules.corrections import RuleCorrector
 from src.sheets.client import MasterSheetClient
+
+
+def _compare_env_names_with_values() -> list[str]:
+    """値の入った COMPARE_ 環境変数の名前を返す（値はログに出さない）。"""
+    return sorted(
+        name for name, value in os.environ.items() if name.startswith("COMPARE_") and value != ""
+    )
 
 
 def main() -> int:
@@ -23,11 +32,28 @@ def main() -> int:
 
     logger = setup_logger(level=config.log_level)
     rt = config.runtime
+
+    # S4: 比較のつもりで本番を動かす事故を防ぐ。load_config の直後、
+    # MASTER_SPREADSHEET_ID の確かめより前に行う。
+    if not rt.is_compare:
+        leaked = _compare_env_names_with_values()
+        if leaked:
+            logger.error(
+                "RUN_MODE が compare 以外なのに COMPARE_ 環境変数に値があります: "
+                f"{', '.join(leaked)}",
+                extra={"step": "compare_env_guard"},
+            )
+            return 1
+
     logger.info(
         f"=== レシート OCR ジョブ開始 (run_mode={rt.run_mode}, "
         f"target_scope={rt.target_scope}, target_row={rt.target_row}) ===",
         extra={"step": "job_start"},
     )
+
+    if rt.is_compare:
+        # 比較ではマスター・出納帳を作らない（S1）。MASTER_SPREADSHEET_ID は不要。
+        return run_compare(config)
 
     if not config.master.spreadsheet_id:
         logger.error("MASTER_SPREADSHEET_ID 未設定", extra={"step": "validation"})
