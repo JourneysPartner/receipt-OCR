@@ -234,7 +234,7 @@
 
 1. 利用者が、テスト用フォルダ（ジョブのサービスアカウントが編集者のフォルダ）の中に空のスプレッドシートを作る。サービスアカウントは新しいファイルを作れないため。
 2. main へ push（＝本番ジョブの作り直し）。push の前に利用者の了解を取る。
-3. Cloud Console → Cloud Run → ジョブ `receipt-ocr-job` →「オーバーライドして実行」。環境変数に `RUN_MODE=compare`・`COMPARE_RESULT_SPREADSHEET_ID`・`COMPARE_FOLDER_IDS` を入れ、タスクのタイムアウトを 3600 秒にする。**押す前に `RUN_MODE=compare` が入っていることを必ず確かめる**（入っていないと本番の記帳が全顧客で動く。`COMPARE_` の値があれば S4 で止まるが、全部を書き忘れると止まらない）。
+3. Cloud Console → Cloud Run → ジョブ `receipt-ocr-job` →「オーバーライドして実行」。環境変数に `RUN_MODE=compare`・`COMPARE_RESULT_SPREADSHEET_ID`・`COMPARE_FOLDER_IDS`・`COMPARE_RUN_LABEL` を入れ、タスクのタイムアウトを 3600 秒にする。**`COMPARE_RUN_LABEL` は毎回明示する**（ジョブは失敗すると同じ環境変数で 1 回だけ自動でやり直す。ラベルが同じなら続きからになり、二重に費用がかからない）。**押す前に `RUN_MODE=compare` が入っていることを必ず確かめる**（入っていないと本番の記帳が全顧客で動く。`COMPARE_` の値があれば S4 で止まるが、全部を書き忘れると止まらない）。
 4. まず `COMPARE_MAX_FILES=4` で試す → 表と `MAX_TOKENS` を見る → 全部を流す（時間切れなら同じラベルで続き）。
 5. 「答え」で `要確認` の行を確かめる（司令役が画像を見て案を書き、利用者が確かめる）。`全一致（自動）` の行からも抜き取りで確かめる。直したら「答えの出どころ」を `人` に。
 6. `COMPARE_STEP=score` と `COMPARE_RUN_LABEL` で集計し直す。
@@ -243,3 +243,4 @@
 ## 14. 記録
 
 - 1.0（2026-11-18）: 初版。
+- 1.0 の追記（2026-11-18）: §13 に `COMPARE_RUN_LABEL` を毎回明示する理由（ジョブの自動のやり直し 1 回）。実装は go-job（`go/model-compare`）で、§9 は `src/compare/answers.py` に分けた。

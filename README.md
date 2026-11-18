@@ -41,6 +41,14 @@
 | 本番：選択行だけ | `RUN_MODE=prod, TARGET_SCOPE=selected, TARGET_ROW=13` |
 | 本番：全顧客 | `RUN_MODE=prod, TARGET_SCOPE=all` |
 
+### 型の比較（`RUN_MODE=compare`）
+
+答えの分かったテスト用レシートで Gemini の型を比べるモード。仕様は [docs/spec_model_compare.md](docs/spec_model_compare.md)。
+
+- マスター・出納帳には触れない。Drive は読取り専用で、【済】も付けない。書くのは `COMPARE_RESULT_SPREADSHEET_ID` の表だけ
+- 実行は Cloud Console の「オーバーライドして実行」から。`RUN_MODE=compare`・`COMPARE_RESULT_SPREADSHEET_ID`・`COMPARE_FOLDER_IDS`・`COMPARE_RUN_LABEL` を入れ、タスクのタイムアウトを 3600 秒にする。**`RUN_MODE=compare` を書き忘れると本番の記帳が動く**（`COMPARE_` の値が残っていれば止まる）
+- 表には「答え」「結果_<ラベル>」「OCR_<ラベル>」「集計_<ラベル>」のタブができる。答えを確かめたら `COMPARE_STEP=score` で集計し直す
+
 ### ログ出力
 
 ジョブ開始時:
