@@ -1260,7 +1260,8 @@ function webAppResolveReviews(customerId, decisions, options) {
     var partnerMasters = readPartnerResolutionMasters_(partnerMasterKeys);
     var taxTablesForBatch;
     if (taxConfigured) {
-      // タブが無ければ `present: false`（§5 の 2 → 確定では G を空にする側）。
+      // タブが無ければ `present: false`（§5 の 2 → 確定では G に触らない。
+      // `taxCategoryRecomputed_` が `TABLES_MISSING` を `changed: false` にする）。
       taxTablesForBatch = taxTablesFromMasterRows_(partnerMasters, taxKeys);
     }
     var partnerListRows = partnerMasters.partnerListRows;

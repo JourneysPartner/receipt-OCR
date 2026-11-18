@@ -529,7 +529,8 @@ function taxTableMasterKeys_(customer) {
  * `readPartnerResolutionMasters_` で読んだ値から表を作る（§6.2）。
  *
  * 鍵を足していない（タブが無い）ときは `present: false`。§5 の 2 により
- * 「決まらない」になり、確定では G を空にする側へ倒れる。
+ * 「決まらない」になるが、確定では G に触らない
+ * （`taxCategoryRecomputed_` が `TABLES_MISSING` を `changed: false` にする）。
  *
  * @param {?Object} masters `readPartnerResolutionMasters_` の戻り値
  * @param {!Array<string>} taxKeys `taxTableMasterKeys_` の戻り値

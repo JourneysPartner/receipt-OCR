@@ -1094,6 +1094,75 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(cell(alAdded[0], 7), '対象外');
   });
 
+  /** 対象外のまとめで使う、0 円の要確認を 1 件だけ作る。 */
+  function zeroAmountWorld() {
+    const world = setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [[712, '仕入高']],
+      dictionary: [['架空零円店', '架空零円取引先']], words: [{word: '仕入', code: 712}],
+      taxTabs: {marks: GT_MARKS}});
+    world.addFile('fileA', ['2026/10/10,架空零円店,0,仕入']);
+    importReport(world);
+    const review = typedReviews('fileA', 'ZERO_AMOUNT')[0];
+    assert.ok(review, JSON.stringify(plain(call('openReviews', [{}]))));
+    return {world: world, review: review,
+      tx: call('getTransaction', [review.fullTxId])};
+  }
+
+  test('gt 9: 57 の読み返しで G に値が戻れば DESTINATION_VALUE_MISMATCH にし、取引を CANCELED にしない', () => {
+    const {review, tx} = zeroAmountWorld();
+    const row = Number(tx.destinationRow);
+    destSheet().getRange(row, 7).setValue('課対仕入10%');
+    // 空にした後に G だけ値が戻る（別の担当者が入れた等）。G への書込だけ、
+    // 書いた後に値を書き戻す ── スタブの `batchUpdate` の G の 1 セルが
+    // 空にならずに残るのと同じ状態になる。
+    const sheet = destSheet();
+    const realGet = sheet.getRange.bind(sheet);
+    sheet.getRange = function(...args) {
+      const range = realGet(...args);
+      if (Number(args[0]) === row && Number(args[1]) === 7 &&
+          (args.length < 3 || Number(args[2]) === 1)) {
+        const realSet = range.setValues.bind(range);
+        range.setValues = (values) => {
+          const result = realSet(values);
+          realSet([['課対仕入10%']]);
+          return result;
+        };
+      }
+      return range;
+    };
+    let result;
+    try {
+      result = plain(call('excludeOtherReviewsBatch', ['C001', 'fileA',
+        [{reviewId: review.reviewId, operation: 'EXCLUDE'}],
+        {actor: 'tester@example.com'}]));
+    } finally { sheet.getRange = realGet; }
+    assert.deepEqual(result.resolvedReviewIds, []);
+    assert.deepEqual(result.errors.map((entry) => entry.code), ['DESTINATION_VALUE_MISMATCH']);
+    assert.equal(result.errors[0].reviewId, review.reviewId);
+    assert.equal(call('getTransaction', [review.fullTxId]).transactionStatus, 'REVIEW_REQUIRED');
+    assert.equal(call('getReviewById', [review.reviewId]).status, 'OPEN');
+    assert.equal(cell(row, 7), '課対仕入10%');
+  });
+
+  test('gt 9: 57 の「もう空」の判定は G が残る行を ALREADY_CLEARED にせず DESTINATION_ROW_MISMATCH にする', () => {
+    const {review, tx} = zeroAmountWorld();
+    const row = Number(tx.destinationRow);
+    // 取引ログにこの行の記録はあるが、取引 ID の列は空で G だけ値が残る行
+    // （前の対象外で G を消し損ねた行）。
+    assert.equal(tx.destinationSpreadsheetId, 'dest1');
+    const sheet = destSheet();
+    [2, 3, 6, 9, 11, 12, 13, 15].forEach((column) => sheet.getRange(row, column).setValue(''));
+    sheet.getRange(row, 7).setValue('課対仕入10%');
+    const result = plain(call('excludeOtherReviewsBatch', ['C001', 'fileA',
+      [{reviewId: review.reviewId, operation: 'EXCLUDE'}],
+      {actor: 'tester@example.com'}]));
+    assert.deepEqual(result.resolvedReviewIds, []);
+    assert.deepEqual(result.errors.map((entry) => entry.code), ['DESTINATION_ROW_MISMATCH']);
+    assert.equal(result.errors[0].reviewId, review.reviewId);
+    assert.equal(call('getTransaction', [review.fullTxId]).transactionStatus, 'REVIEW_REQUIRED');
+    assert.equal(call('getReviewById', [review.reviewId]).status, 'OPEN');
+    assert.equal(cell(row, 7), '課対仕入10%');
+  });
+
   // ---------------- gt 10: 知らせ ----------------
 
   test('gt 10: 取込の知らせの件数と 1 行（0 の分は出さず、表が無ければ出さない）', () => {
@@ -1416,6 +1485,23 @@ module.exports = ({test, assert, gas}) => {
     // §10.12: まとめて確定でも値をログと監査に出さない。
     assertNoTaxValues(['仕入', '架空未登録D', '15000', '架空フリマ取引先',
       '課対仕入（控70）10%']);
+  });
+
+  test('gt 7: 55 は options.taxTables を渡しても G が AL にある顧客の G を書かず、F は書く', () => {
+    const world = confirmationWorld({rows: GT_CONFIRM_ROWS.slice(0, 1),
+      excludedColumns: [7]});
+    const review = partnerReviews('fileA')[0];
+    // `options.taxTables` を渡すと、表を読むかの判定を通らずに件ごとの
+    // 決め直しへ進む。G が AL にある顧客なので、G には触らない。
+    const captured = captureTaxWrites(() => call('resolvePartnerReviewsBatch',
+      ['C001', 'fileA', [adoptionDecision(review, '架空フリマ取引先')],
+        {actor: 'tester@example.com', taxTables: tables(GT_MARKS)}]));
+    const result = plain(captured.result);
+    assert.deepEqual(result.errors, []);
+    assert.deepEqual(result.resolvedReviewIds, [review.reviewId]);
+    assert.deepEqual(captured.rows, [], 'G の書込の要求が無い');
+    assert.equal(cell(5, 6), '架空フリマ取引先');
+    assert.equal(cell(5, 7), '');
   });
 
   // ---------------- gt 4: 55 の表を読むかの判定 ----------------
