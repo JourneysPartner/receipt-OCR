@@ -1,7 +1,8 @@
 # 相手税区分（G 列）を自動で入れる 第 1 段 仕様書
 
 作成日：2026-11-18
-版：1.0（2026-11-18。§1.4 の 1〜3 は利用者が決めた。4 は本番で取引先名を調べてから決める）
+版：1.1（2026-11-18。実装・監査で決めたことを足した。変えた所は「（1.1）」の印。記録は §18）
+1.0（2026-11-18。§1.4 の 1〜3 は利用者が決めた。4 は本番で取引先名を調べてから決める）
 読者：本仕様だけを読んで実装する実装者（AI を含む）。書いてあることは変えない。書いていないことは安全側で決め、決めたことは全部報告する。
 前提：
 - `work/spec_account_code.md`（相手科目コード 1.2。C は用途の言葉で決まり、決まらない行の C には触らない）
@@ -91,7 +92,7 @@
 1. `columnMapping.G` が 1 以上の整数で、`rowScanExcludedColumns` に入っていない（G に雛形の既定値が無く、行を空ける所で G を空にできる）。
 2. `columnMapping.C` が 1 以上の整数で、`accountListRange` がある（G は C で決まる）。
 
-さらに、マスターの 2 つの表（§4）が**両方あり、見出しが正しい**ときだけ G を決める（＝本番では §9.1 で表を作るまで、今と同じに動く）。表が無い・見出しが違うときは、取込では今の作り（返金の行だけ「対象外」）、確定では §6.2 の「決まらない」として扱う。
+さらに、マスターの 2 つの表（§4）が**両方あり、見出しが正しい**ときだけ G を決める（＝本番では §9.1 で表を作るまで、今と同じに動く）。表が無い・見出しが違うときは、取込では今の作り（返金の行だけ「対象外」）。確定では（1.1）G に触らない（§6.2 の 2。1.0 では「決まらない」として空にしていた）。
 
 ---
 
@@ -285,7 +286,7 @@ input = {customer, accountCode, purpose, date, amount, partnerName, cashback}
 
 ### 6.1 取込（`71` の 8-10）
 
-- 材料：`prefetchMatchingMasters_` で、`taxCategoryConfigured_(customer)` の顧客のときだけ、2 つのタブがあれば `'取引先の税の印'!A1:G` と `'顧客の税の設定'!A1:E` を**今の 1 回の `sheetsReadRanges_` に足す**（往復を増やさない）。直接読む道（`runScopedReads_` が偽）でも同じ 1 回に足す。結果を `matchingMasters.taxTables` に入れる。
+- 材料：`prefetchMatchingMasters_` で、`taxCategoryConfigured_(customer)` の顧客のときだけ、2 つのタブがあれば `'取引先の税の印'!A1:G` と `'顧客の税の設定'!A1:E` を**今の 1 回の `sheetsReadRanges_` に足す**（往復を増やさない）。結果を `matchingMasters.taxTables` に入れる。（1.1）どちらかのタブが無ければ範囲を足さず `present: false` を覚える（同じ実行の中でタブを見直さない）。**直接読む道（`runScopedReads_` が偽）にはまとめて読む 1 回が無いので、税の 2 つの範囲を 1 回で読む（この道だけ +1。覚えない）。**本番の取込（`runImport`）は必ず `beginRunScopedReads_` を通るので、この道を通らない。
 - **G は C が決まった後に決める**：今の 8-10 の `transactions.map`（C を決める）と、その後の一覧への書き足し（`NEEDS_LIST_ENTRY` → `MATCHED`）が**全部終わってから**、取引ごとに：
   - `taxCategoryConfigured_(customer)` が偽 → 今のまま（`planned.g` は返金の行だけ `対象外`、ほかは `undefined`）。
   - 真 → `r = resolveTaxCategory_({customer, accountCode: tx.planned.c, purpose: tx.purpose, date: tx.planned.b, amount: tx.planned.m, partnerName: tx.planned.f, cashback}, taxTables)`。`DECIDED` なら `planned.g = r.name`、`UNDECIDED` なら `planned.g = undefined`（書かない。複製の G は空なので空のまま）。`tx.taxResolution = {status, reason}`（取引ログには書かない。§8 の件数に使う）。
@@ -307,12 +308,15 @@ input = {customer, accountCode, purpose, date, amount, partnerName, cashback}
 
 1. 返金の行（`isCashbackMerchant(customer, tx.originalMerchant)`）は決め直さない（今の `対象外` のまま）。
 2. `r = resolveTaxCategory_({customer, accountCode: planned.c, purpose: tx.originalPurpose, date: planned.b, amount: planned.m, partnerName: planned.f, cashback: false}, taxTables)`。
+   - （1.1、監査 High-1）**`planned.b` が有限の整数で `FREEE_EXPORT_MIN_SERIAL_`〜`FREEE_EXPORT_MAX_SERIAL_` の範囲なら、`toTokyoDateString_(excelSerialToDate(数))` で `yyyy-MM-dd` に直してから渡す。**取引ログの予定値（S〜AB 列）は `61` の `updateWrittenValues` が `SpreadsheetApp` の `setValues` で書くので、日付の文字は日付のセルになり、確定の読取（`UNFORMATTED_VALUE`・`SERIAL_NUMBER`）ではシリアル値で返る。直さないと 2 回目以降の確定で `DATE_INVALID` になり、正しい G が空になる。`taxDateValue_`・`resolveTaxCategory_` は変えない（取込の道は文字のまま）。
+   - （1.1）**`r.reason === 'TABLES_MISSING'`（表が無い・見出しが違う）なら G に触らない**（`changed: false`）。取込も表が無ければ G に触らない。確定だけが正しく決めた値（`非課仕入` など）を消すと、freee は科目の初期値（誤り）を使う。「変えない」は「空にする」より悪くならない（監査の勧め。Claude の判断）。
 3. `next = r.status === 'DECIDED' ? r.name : ''`。`current = tx.planned.g`（`undefined`・`null` は `''`）。
 4. `next !== current` のときだけ、`planned.g = next` にして、書く列に `'g'` を足す（`['f'] → ['f', 'g']`、`['b','m'] の一部 → それに 'g'`）。同じなら `planned.g` も書く列も今のまま（**利用者が手で直した G を、変わらないときは消さない**）。
-   - `next === ''` は G を空にする（決まらなくなった。例：取引先の印が誤りの行）。§2.3 の顧客は G が AL に無いので、空を書いても雛形の既定値は消えない。
+   - `next === ''` は G を空にする（決まらなくなった。例：取引先の印が誤りの行）。§2.3 の顧客は G が AL に無いので、空を書いても雛形の既定値は消えない。（1.1）`TABLES_MISSING` は 2 のとおり空にしない。
 5. 書込・読取確認・取引ログの更新は今の手順のまま（G は同じ RAW の `batchUpdate` に入り、`verifyWrittenValues` が比べ、取引ログ 46・47 に入る）。**往復を増やさない。**
 - 材料の読み方：
-  - `51` の `adoptExistingPartner_`・`55`：今の `readPartnerResolutionMasters_` の 1 回に、鍵 `taxMarkRows`・`taxFlagRows`（`37` の `specs` に足す。見出しも読むので範囲は **A1:G・A1:E**。今の鍵は A2 からなので、`specs` に始めの行 `start`（既定 2）を足してよい。今の 3 つの鍵の範囲は変えない）を足す。タブが無いときは鍵を足さず、`tables.present = false`（§5 の 2 → 決まらない → 3 で `''`）。`55` で `options` に渡されていなければ読む。
+  - `51` の `adoptExistingPartner_`・`55`：今の `readPartnerResolutionMasters_` の 1 回に、鍵 `taxMarkRows`・`taxFlagRows`（`37` の `specs` に足す。見出しも読むので範囲は **A1:G・A1:E**。今の鍵は A2 からなので、`specs` に始めの行 `start`（既定 2）を足してよい。今の 3 つの鍵の範囲は変えない）を足す。タブが無いときは鍵を足さず、`tables.present = false`（（1.1）確定では G に触らない）。`55` で `options` に渡されていなければ読む。（1.1）`51` は `reviewWriteCustomer_(review)` を読取の前へ移した（回数は同じ）。税の 2 つは `sheetRowsFromValues_` を通さず読んだ値のまま返す。
+  - （1.1）**画面のまとめて確定（`80` の `webAppResolveReviews`）は、取引先の表を自分で 1 回読んで `55` に渡す**ので、`55` の中では読取が起きない。そこで `80` が、§2.3 の顧客で 2 つのタブがあれば、その 1 回に税の 2 つの鍵を足し、表を `options.taxTables` で `55` に渡す（タブが無ければ `present: false` を渡す。§2.3 でない顧客は今とまったく同じ）。`55` は `options.taxTables` があればそれを使う。無ければ、§2.3 の顧客（**まとめの顧客**で判定。監査 Low-1）で `ADOPT_EXISTING_PARTNER` があるときだけ、今の `missingMasters` の読取に鍵を足す。読取が無い（取引先の表が全部渡されて `taxTables` が無い）ときだけ `readTaxTablesDirect_()` で 1 回読む（+1。`97` の呼出しなど）。件ごとの決め直しは、その件の `reviewWriteCustomer_` の結果が §2.3 のときだけ。
   - `51` の `fixDateAmount_`：今は材料を読まないので、§2.3 の顧客のときだけ 1 回（`sheetsReadRanges_` で 2 つの範囲）読む（+1。測ってテストに固定する）。
 - 1 件ずつの `RESOLVE_WITHOUT_PARTNER`・`RESOLVE_PARTNER_UNKNOWN`・計上・対象外は決め直さない（取引先も日付も金額も変わらない）。
 
@@ -330,7 +334,9 @@ C（`spec_account_code.md` §9）と同じ所に G を足す。**条件は「G �
 2. `systemOwnedColumnsAreEmpty_`（複製元の行は G も空）。
 3. `clearTransactionRows`（取消・読取確認の失敗・対象外で行を空にするとき）。
 
-`releaseReservedRows`（取引 ID だけ）は変えない。`58` の行を詰める所は今も G を動かしている（変えない）。
+4. （1.1、監査 Low-3）`57` の「対象外」のまとめ（`excludeBatchClearColumns_`・`excludeBatchEmptyValues_`）。空にする列と読み返しの両方に G。
+
+`releaseReservedRows`（取引 ID だけ）は変えない。`58` の行を詰める所は今も G を動かしている（変えない）。（1.1）`53` の取消の読み返し（`53` の 96 行あたり、空を期待する `{b, f, i, k, m}`）は G・C を見ていない（G は `clearTransactionRows` で空になる。読み返しに足すかは第 2 段）。
 
 既存のテストが「G を消さない」「消す列はこれだけ」を前提にしていたら、**期待値を直してよい**（直したテストと理由を全部報告する）。
 
@@ -348,6 +354,14 @@ C（`spec_account_code.md` §9）と同じ所に G を足す。**条件は「G �
 ## 9. 運用関数（`48`。すべて既定は見るだけ。`apply === true` のときだけ書く）
 
 共通の手順（`apply`）：`withScriptLock_` の中で読み直し → 検査 → **監査を先に書く**（`appendAudit`、種類 `SETTING`、`targetType` は各項、`reason` は各項。書けなければ何も書かない）→ RAW で書く → 読み返して確かめる（違えば `WRITE_VERIFY_FAILED` を返す。書いた値は戻さない）。戻り値に `applied: true/false`。**取引の値（店名・金額・用途）は返さない。**
+
+（1.1）実装で決めたこと：
+- 名前の最後に `_` を付けない（`clasp run-function` で呼ぶ）。初めに `loadSettingsFromProperties()`、実行者は `activeUserEmail_()`、返す前に報告を `Logger.log`（`59` の運用関数と同じ形）。止めるときは例外でなく報告の `stoppedBy`。
+- 監査はロックの中で `appendAuditUnlocked_`（`appendAudit` は同じロックを取り直すため）。`targetType`・`targetId`：§9.1＝`SETTING`・`TAX_TABLES`、§9.3＝`PARTNER`・取引先名、§9.4＝`CUSTOMER`・顧客 ID、§9.5＝`TEMPLATE`・雛形の ID。
+- `stoppedBy` のコード：`HEADER_MISMATCH`・`WORD_REQUIRED`・`PARTNER_NAME_REQUIRED`・`CUSTOMER_REQUIRED`・`MARK_INVALID`・`CUSTOMER_NOT_FOUND`・`ARGUMENT_INVALID`・`TABLES_MISSING`・`PARTNER_NAME_NOT_KNOWN`・`DUPLICATE_ROWS`・`ROW_INVALID`・`NO_TAX_COLUMN`・`TEMPLATE_INVALID`・`TEMPLATE_MISSING`・`NO_ROWS`・`AUDIT_WRITE_FAILED`・`WRITE_FAILED`・`WRITE_VERIFY_FAILED`。
+- §9.1：**中身が全部空のタブ**（タブを作った直後に見出しの書込が失敗した残り）は、見出しの無いタブとして見出しを書く（`47` の直しと同じ考え）。中身があって見出しが違えば `HEADER_MISMATCH`。2 つともそろっていれば `ALREADY_SET`（監査なし）。
+- §9.3：`customerId` が空（共通の印）なら、共通取引先一覧だけで分類し、`KNOWN` でなくても、どれかの顧客の取引先一覧に同じ文字の有効な名前があれば `KNOWN`。行の選び方：同じ鍵・同じ顧客 ID で D がはっきり `FALSE` でない行が 0 → 足す（D＝`true`）、1 → B・E・F を書き直す（D が読めない行は `ROW_INVALID`）、2 以上 → `DUPLICATE_ROWS`。表が無い・見出しが違えば `TABLES_MISSING`（ここでは作らない）。
+- §9.4・§9.5：`customerId` が空は `CUSTOMER_REQUIRED`。§9.5：G が無い・G が AL にある顧客は `NO_TAX_COLUMN`。見出し行は `customer.headerRow`。
 
 ### 9.1 `opsSetupTaxCategoryTables(apply)`
 
@@ -389,7 +403,7 @@ C（`spec_account_code.md` §9）と同じ所に G を足す。**条件は「G �
 7. 確定・日付金額の修正で G が変わるときだけ書き直す。変わらないときは G に触らない。
 8. §2.3 を満たさない顧客・表が無いときの取込は、今とバイト単位で同じ書込・同じ読取回数（返金の行の `対象外` も今のまま）。
 9. 行を空ける 3 か所で G も空にする（G が AL に無い顧客だけ）。AL にある顧客の G には触らない。
-10. 往復：取込・確定（1 件・まとめて）は今と同じ回数。日付・金額の修正は §2.3 の顧客で +1 だけ。
+10. 往復：取込・確定（1 件・まとめて）は今と同じ回数。日付・金額の修正は §2.3 の顧客で +1 だけ。（1.1）例外は 2 つだけ：直接読む道の取込（本番の取込は通らない）と、`55` に取引先の表を全部渡して `taxTables` を渡さない呼出し（`97` など）で、どちらも +1。`getSheetByName` は §2.3 の顧客で 1 実行・1 押下あたり +2（読取の回数ではない）。
 11. 運用関数は見るだけが既定。書くのはロックの中で読み直した後、監査が書けた後だけ。
 12. 用途・店名・金額・取引先名を `outcome`・ログ・監査（運用関数の名前・印を除く）に出さない。
 
@@ -414,6 +428,10 @@ C（`spec_account_code.md` §9）と同じ所に G を足す。**条件は「G �
 - `97` の `opsApplyPartnerDecisions` で確定した行の G（決め直さない。画面ができてから使っていない古い入口）。
 - 国際線の航空券・団体の会費・新聞の定期購読など、科目と言葉で分けられないもの。
 - 飲食料品の税率の改正（§1.4 の 3）。
+- （1.1、監査 Low-5）`52` のファイルの差分から足す取引（`ADOPT_AS_NEW_TRANSACTION`・`APPLY_FILE_DIFF`）は `71` を通らないので、G も C も決まらない。
+- （1.1、監査 Low-2）`97` の 299 行あたりが `55` を呼ぶ。そこから `ADOPT_EXISTING_PARTNER` が来れば G を決め直す（1.0 の §1.3 の「97 は決め直さない」は `opsApplyPartnerDecisions` のこと。`97` は開いて確かめていない）。
+- （1.1、監査 Low-4）決めない言葉の `リボ` は `リボン` にも当たる（G が空になる側＝安全側）。困ったら `リボ払` などに絞る。
+- （1.1）`53` の取消の読み返しに G・C を足すか。
 
 ---
 
@@ -433,6 +451,9 @@ C（`spec_account_code.md` §9）と同じ所に G を足す。**条件は「G �
 12. **gt 12（運用関数）**：§9.1〜9.5 のそれぞれで、見るだけは何も変えない／`apply` で書く・監査が先・監査が書けなければ書かない・読み返し／§9.3 は `KNOWN` でない名前を書かない・2 行あれば止める／§9.1 はあるタブに触らない・見出しが違えば止める／§9.5 は雛形だけに付け、値を変えない。
 13. **gt 13（回数）**：§10 の 10 を測って固定する。
 14. **gt 14（書く値の守り）**：`planned.g` が文字列でない → `buildRowWrite` が `TypeError`。
+15. （1.1）**gt 15（シリアル値）**：取引ログの S にシリアル値を置いて、1 件の確定・まとめて確定（`55`）・画面のまとめて確定（`80`）で G を決め直す／金額だけの修正で G を消さない。
+16. （1.1）**gt 16（`80` の道の値）**：`webAppResolveReviews` を通して、G の値（控70・変わらない件・印の誤り）・確定の件数・取引ログ 46・47。
+（1.1）ほかに足したもの：表が無い・見出しが違うときの確定は G を変えない（gt 6）・`55` は最初の ADOPT の要確認が無くてもほかの件を決め直す（gt 4）・`57` の対象外のまとめで G も空にする（gt 9）。
 
 画面の文（gt 10）は `kw26-ui-helpers.js` の `browserWorld` で `customerFixNoticeLines` を呼んで確かめる（既存の【科目コード】のテストと同じ作り）。
 
@@ -464,6 +485,12 @@ C（`spec_account_code.md` §9）と同じ所に G を足す。**条件は「G �
 - R22：`opsSetPartnerTaxMark` が `KNOWN` でない名前も書く
 - R23：雛形でなく転記シートに入力規則を付ける
 - R24：表の読取を別の往復にする
+- （1.1）R14b：`80` が税の鍵を同じ読取に足さず、`55` に別の往復で読ませる
+- （1.1）R16b：`fixDateAmount_` で、§2.3 でない顧客でも表を読む
+- （1.1）R25：確定でシリアル値を日付に直さない
+- （1.1）R26：`TABLES_MISSING` でも確定で G を空にする
+- （1.1）R27：`80` が `options.taxTables` に `present: false` の表を渡す
+- （1.1）R28：`57` に G を足さない
 
 ## 15. 変えてよいファイル
 
@@ -474,6 +501,7 @@ C（`spec_account_code.md` §9）と同じ所に G を足す。**条件は「G �
 - `src/43_SheetWriter.gs`（§6.3・§7）
 - `src/51_ReviewResolution.gs`・`src/55_PartnerBatchResolution.gs`（§6.2）
 - `src/81_WebAppUi.html`（§8 の 1 行）
+- （1.1）`src/80_WebApp.gs`（`webAppResolveReviews` の 1 か所だけ。§6.2）・`src/57_ReviewExclusionBatch.gs`（§7 の 4）
 - `test/tax-category.test.js`（新規）・`test/gas-stubs.js`（入力規則のスタブなど。足すだけ）
 - 既存のテスト：§7 の期待値だけ
 - ほかのファイルを変えたくなったら止めて報告する。
@@ -502,3 +530,24 @@ C（`spec_account_code.md` §9）と同じ所に G を足す。**条件は「G �
 2. メルカリなどの行：1 万円未満は `課対仕入10%`、1 万円以上は `課対仕入（控70）10%`（2026-10-01 以降の利用日）。
 3. 取引先の要確認をフリマの取引先で確定 → G が変わる。
 4. freee 取込用 Excel を作る → freee のエクセルインポートで税区分のエラーが出ない（輸入の税区分を使う顧客は、先に freee で「課対輸本」を「使用」にする）。
+
+---
+
+## 18. 実装の記録（1.1）
+
+- 2026-11-18、go-job（OpenCode + Go DeepSeek V4.1 Flash）で worktree のブランチ `go/tax-category`（`705f9e4` から）。§16 の 4 回のとおり：1 回目 `d387768`（表と決める関数・§6.3）／2 回目 `aa99494`（取込・§7・§8）／3 回目 `5f2f782`（確定。`80` を足した）／4 回目 `91f4de6`（運用関数）。既存のテストは 1 件も直していない。
+- 各回の後に Claude が差分を読み、worktree の sbx で全体を回した（落ちるのは `test/fixtures/` が無いための ENOENT 97 件だけ）：2192/2289 → 2198/2295 → 2204/2301 → 2221/2318。
+- 監査（Opus 5.5 xhigh、`705f9e4..91f4de6`）：Critical 0・High 1・Medium 1・Low 5。
+  - High-1：取引ログの B がシリアル値で返り、2 回目以降の確定で G が空になる → §6.2 の 2 で直した。
+  - Medium-1：`80` の道で G の値を見るテストが無い → gt 16。
+  - Low-1（`55` の判定）・Low-3（`57`）→ 直した。Low-2・Low-4・Low-5 → §12 に記録。
+  - 記録だけにしていた 4 点への判断：`55` の件ごとの判定は守りとして足した。表が無いときの確定は「変えない」に変えた（§6.2 の 2）。`80` が ADOPT の無い押下でも鍵を足すのは問題なし。直接読む道の +1 は §10.10 の例外として書いた。
+- 監査の直し：go-job の 1 回目が提供元の応答の停止で途中で終わり（48・55 の一部だけ）、続きを起動し直して完了。全体 2229/2326（ENOENT 97 件だけ）。ブランチ `6551391`。
+- 直しの差分の監査（Opus 5.5 xhigh）：Critical 0・High 0・Medium 1・Low 3。4 つの直しはどれも正しいと確かめられた。
+  - M-1：仕様書と注釈（`48` の `taxTablesFromMasterRows_`・`80`）が「表が無いと確定で空にする」のまま → 仕様書は本版で直した。注釈は go-job で直す。
+  - L-1：`57` のテストは道具の関数を直接見る所でしか変異を捕まえない → 読み返しの不一致・「もう空」の判定のテストを足す。
+  - L-2（未確認）：`57` の「前に空にした行」の判定が厳しくなった。`aa99494` より前のコードで止まった対象外のまとめの行に G（返金の `対象外` など）が残っていると、`ALREADY_CLEARED` でなく `DESTINATION_ROW_MISMATCH` で止まる（安全側。人が直す）。
+  - L-3：`55` の件ごとの確かめのテストが無い → 足す。
+  - 参考：`58` の行を詰める所は、`mapping.G` があれば AL に関係なく G を動かす（`taxColumnClearable_` と条件が違う。前からの作り。影響は未確認）。
+- 後始末（go-job）：`48`・`80` の古い注釈を直し、gt 9（`57` の読み返し・「もう空」の判定）・gt 7（`55` の件ごとの確かめ）を足した。worktree で 2232/2329（ENOENT 97 件だけ）。
+- 2026-11-19、利用者の許可でブランチを main `7ff61b7`（別の会話のレシート OCR のコミット。クレカ明細自動仕訳は触らない）の上に付け直し、main へ早送り（`f2f51f7`）。main の全テスト：**2329/2329**（gt 71 件を含む）。
