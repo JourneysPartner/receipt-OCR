@@ -86,7 +86,7 @@ def readings_text(image_items, text_items) -> str
 
 `reconcile`（戻り値の長さは必ず `len(image_items)`。例外を投げない）:
 
-1. 鍵 = `(normalize_date(item.date), item.amount)`。日付が空文字か金額が `None` の明細は鍵なし。金額は `int` のものだけ（`bool` は除く）。
+1. 鍵 = `(normalize_date(item.date), item.amount)`。日付は `YYYY-MM-DD` の実在する日付（`datetime.date.fromisoformat` で読める）になったものだけ、金額は 1 以上の `int`（`bool` は除く）だけ。それ以外の明細は鍵なし。「金額だけ等しい」を見るときの金額も同じ（1 以上の `int`）。
 2. `len(text_items) > len(image_items)` → 全部 `ItemDecision(False, LABEL_COUNT, "文字からは N 件、画像からは M 件", None)`。
 3. `text_items` が空 → 全部 `ItemDecision(False, LABEL_READ, "文字からの読みが無い", None)`。
 4. それ以外は I を先頭から順に:
@@ -133,6 +133,11 @@ def _process_file(self, file, cb, processed_keys, today, now) -> CustomerResult:
 10. dry_run → 書かずに数える: matched で needs_review でない = success、matched で needs_review = low_confidence、
     それ以外 = manual_entry。ログ（step="validate_file"）に summary を入れて返す
 11. pending = 未処理の番号（今と同じ式）。skipped も同じ。空なら返す
+11a. reread = processed_keys の中に、このファイルの番号 0 以上の印が 1 つでもあるか
+     （`f"{file.file_id}:"` で始まり、残りが 0 以上の整数として読める鍵。`:-1` は入れない）。
+     reread が真なら、pending の明細の decision を全部
+     `ItemDecision(False, LABEL_REREAD, "前の回と明細の数か並びが変わった疑い", None)` に置き換える
+     （`LABEL_REREAD = "※再読取要確認"` を reconcile.py に足す）。dry_run の数え方（10）にも同じ置き換えを先に当てる
 12. reservations = cb.reserve_rows(count=len(pending), file_id, file_name, receipt_indices=pending)
 13. 各 (row, rid), idx:
     matched → self._write_item(file, items[idx], corrected[idx], idx, row, rid, cb, ocr, now, today,
@@ -160,6 +165,7 @@ def _process_file(self, file, cb, processed_keys, today, now) -> CustomerResult:
 
 - `RESULT_HEADERS` の最後に `"明細JSON"`。
 - `MULTI_ANSWER_TITLE = "答え_複数"`、`MULTI_ANSWER_HEADERS = ["fileId", "ファイル名", "番号", "正解_日付", "正解_金額", "正解_税率", "正解_店名", "メモ"]`。
+- 「答え」の中身は `read_dicts(title, formatted=True, cells="A:P")` のように範囲を A〜P に限って読む（`read_dicts` に `cells: str | None = None` を足し、`read_values(title, cells, formatted=...)` へ渡す。collect・score の全部の読み出しで）。
 - `ensure_tab(title, headers, *, check_headers=True, prefix_only=False)`: `prefix_only=True` のとき、既にある見出しは先頭 `len(headers)` 個だけを比べる（それより右は見ない）。見出しが空のタブに書くのは今までどおり `A1:<headers の最後の列>` だけ。
 - 「答え」への書き込みは今までどおり `A:P` と個別のセルだけ（`cell_range` の列は `ANSWER_HEADERS` の位置なので P を超えない）。Q より右を消す・書く呼び出しを足さない。
 
@@ -208,8 +214,9 @@ def _field_ok(row, expected, field) -> bool
 
 - 欄の正解率: 分母は「`expected` が 1 件以上で、全部のレシートにその欄の答えがある」ファイル。
 - 日付と金額: 分母は両方の答えが全部にあるファイル。
-- `_auto_counts`（`現行の流れ` と `両読み` の両方）:
-  - 自動の明細 = `明細JSON` のうち `r` が `自動` のもの（`r` が無い行は使わない）。
+- `_auto_counts`（`現行の流れ` と `両読み` の両方。仕様 §7.4 の 1.1 の数え方）:
+  - 自動の明細 = `明細JSON` のうち `r` が `自動` のもの。**行の結果は見ない**（`一部要手入力`・`一部要確認` の行も読む。`_usable_for_read` を通さない）。`明細JSON` が空・壊れている行は自動の明細 0 件。
+  - 結果が `自動` で、自動の明細の数が答えより少ない → `誤って自動`。
   - 日付か金額の答えが欠けたファイル: 結果が `自動` 以外なら `要手入力` に数え、`自動` ならどれにも数えない（今と同じ）。
   - `誤って自動`: 自動の明細を順に、答えのまだ使っていないレシートのうち日付と金額がともに合う最初のものに当てる。当たらない明細が 1 つでもあれば該当。
   - `正しく自動`: 結果が `自動` で、`誤って自動` でなく、件数が答えと同じ。
@@ -248,3 +255,4 @@ def _field_ok(row, expected, field) -> bool
 ## 10. 記録
 
 - 1.0（2026-11-19）: 初版。
+- 1.1（2026-11-19）: 監査の直し（仕様 1.1）。§5 の鍵、§6.2 の 11a、§7.1 の読む範囲、§7.4 の `_auto_counts`。
