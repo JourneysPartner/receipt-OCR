@@ -63,7 +63,7 @@ def image_user_message(version: str, file_name: str) -> str
 
 ## 4. `src/rules/corrections.py`
 
-`CORRECTION_RULES` の最後に、仕様 §6 の 5 つをその順で足す。`RuleCorrector` の処理は変えない（`re.search` なので `^` は「摘要＋空白＋店名」の先頭＝摘要の先頭に当たる。摘要が空だと `filter(None, …)` で店名が先頭になる点はそのままでよい）。
+`CORRECTION_RULES` の最後に、仕様 §6 の 5 つをその順で足す。今ある「収入印紙→租税公課」の `tax_category` は `"非課税"` に変える（仕様 1.2。今あるテストのうち、この決まりの税区分が `対象外` であることを確かめている所は `非課税` に直す）。`RuleCorrector` の処理は変えない（`re.search` なので `^` は「摘要＋空白＋店名」の先頭＝摘要の先頭に当たる。摘要が空だと `filter(None, …)` で店名が先頭になる点はそのままでよい）。
 
 ## 5. `src/processing/reconcile.py`（新規）
 
@@ -255,4 +255,5 @@ def _field_ok(row, expected, field) -> bool
 ## 10. 記録
 
 - 1.0（2026-11-19）: 初版。
+- 1.2（2026-11-19）: 仕様 1.2（収入印紙は非課税、切手と一緒なら分ける）。§3.1 の第 2 版の指示文は仕様 §4.1 の今の文面に合わせる。§4。
 - 1.1（2026-11-19）: 監査の直し（仕様 1.1）。§5 の鍵、§6.2 の 11a、§7.1 の読む範囲、§7.4 の `_auto_counts`。
