@@ -14,6 +14,8 @@ from src.models import DriveFile, OcrResult, ReceiptItem
 
 # 再抽出用 (画像/PDF を直接渡す) MIME 許容リスト
 _RETRY_SUPPORTED_MIMES = ("image/jpeg", "image/png", "image/webp", "application/pdf")
+# 両読みの流れからも使う公開名（元の名前も残す）
+RETRY_SUPPORTED_MIMES = _RETRY_SUPPORTED_MIMES
 
 logger = setup_logger()
 

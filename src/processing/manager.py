@@ -7,6 +7,7 @@
 from datetime import datetime, timedelta, timezone
 
 from src.ai.base import AiExtractor
+from src.ai.gemini import RETRY_SUPPORTED_MIMES
 from src.config import AppConfig
 from src.drive.client import DriveClient
 from src.logging.logger import setup_logger
@@ -22,6 +23,12 @@ from src.models import (
     ReceiptItem,
 )
 from src.ocr.base import OcrEngine
+from src.processing.reconcile import (
+    LABEL_READ,
+    ItemDecision,
+    readings_text,
+    reconcile,
+)
 from src.rules.amount_validation import AmountValidation, build_review_label, validate_amount
 from src.rules.corrections import RuleCorrector
 from src.sheets.client import CashbookClient, MasterSheetClient
@@ -255,6 +262,18 @@ class ProcessingManager:
 
     # ── 1ファイルの処理 ────────────────────────────────
     def _process_file(
+        self,
+        file: DriveFile,
+        cb: CashbookClient,
+        processed_keys: set[str],
+        today: str,
+        now: str,
+    ) -> CustomerResult:
+        if getattr(self._config.ai, "flow", "text_first") == "dual":
+            return self._process_file_dual(file, cb, processed_keys, today, now)
+        return self._process_file_text_first(file, cb, processed_keys, today, now)
+
+    def _process_file_text_first(
         self,
         file: DriveFile,
         cb: CashbookClient,
@@ -534,6 +553,275 @@ class ProcessingManager:
                 )
 
         return result
+
+    # ── 1ファイルの処理（両読み） ──────────────────────────
+    def _process_file_dual(
+        self,
+        file: DriveFile,
+        cb: CashbookClient,
+        processed_keys: set[str],
+        today: str,
+        now: str,
+    ) -> CustomerResult:
+        result = CustomerResult()
+
+        # ファイル単位スキップ
+        if f"{file.file_id}:-1" in processed_keys:
+            result.skipped = 1
+            return result
+
+        # 画像からに使えない MIME は、ダウンロードの前に今までの流れへ回す
+        if file.mime_type not in RETRY_SUPPORTED_MIMES:
+            return self._process_file_text_first(file, cb, processed_keys, today, now)
+
+        # ダウンロード
+        try:
+            file = self._drive.download_file(file)
+        except Exception as e:
+            self._manual_entry(file, cb, f"DL失敗: {e}", today, now)
+            result.manual_entry = 1
+            return result
+
+        # OCR（失敗か空でも止めず、文字は空として進む）
+        ocr = self._ocr.extract_text(file)
+        ocr_ok = not ocr.error and bool(ocr.raw_text.strip())
+        ocr_text = ocr.raw_text if ocr_ok else ""
+
+        # 画像から（1 回だけ。先に呼ぶ）
+        try:
+            image_items = self._ai.extract_from_file(file)
+            image_error = self._ai.last_extraction_error
+        except Exception as e:
+            logger.error(
+                f"両読み 画像からの抽出例外: {file.file_name}: {e}",
+                extra={"step": "dual_image_error", "file_id": file.file_id},
+            )
+            image_items = []
+            image_error = "api_error"
+
+        # 文字から（OCR が失敗か空なら呼ばない。1 回だけ）
+        if ocr_ok:
+            try:
+                text_items = self._ai.extract_receipt_data(ocr, file.file_name)
+                text_error = self._ai.last_extraction_error
+            except Exception as e:
+                logger.error(
+                    f"両読み 文字からの抽出例外: {file.file_name}: {e}",
+                    extra={"step": "dual_text_error", "file_id": file.file_id},
+                )
+                text_items = []
+                text_error = "api_error"
+        else:
+            text_items = []
+            text_error = "ocr_failed"
+
+        # どちらも空 → 今の「抽出失敗」と同じ要確認の行を 1 行
+        if not image_items and not text_items:
+            reason_label = "※OCR/抽出要確認" if not ocr_ok else "※AI抽出要確認"
+            self._manual_entry(
+                file,
+                cb,
+                f"AI抽出失敗（両読み）: 画像={image_error or 'none'}, 文字={text_error or 'none'}",
+                today,
+                now,
+                short_label=reason_label,
+            )
+            result.manual_entry = 1
+            return result
+
+        # 画像からが空で文字からがある → 文字からの明細を全部要確認
+        if not image_items:
+            items = text_items
+            decisions = [
+                ItemDecision(False, LABEL_READ, "画像からの読みが無い", None) for _ in items
+            ]
+        else:
+            items = image_items
+            decisions = reconcile(image_items, text_items, ocr_text)
+
+        corrected = [self._corrector.apply(it) for it in items]
+        # 金額検証（記録用。合ったかどうかの判断には使わない）
+        validations = [validate_amount(it.amount, ocr_text) for it in items]
+        summary = readings_text(image_items, text_items)
+
+        if self._config.dry_run:
+            # validate / dry_run: 書き込みは一切せず、判定のみで結果を集計する。
+            planned_success = 0
+            planned_low = 0
+            planned_manual = 0
+            for i in range(len(items)):
+                if not decisions[i].matched:
+                    planned_manual += 1
+                elif corrected[i].needs_review:
+                    planned_low += 1
+                else:
+                    planned_success += 1
+            result.success = planned_success
+            result.low_confidence = planned_low
+            result.manual_entry = planned_manual
+            logger.info(
+                f"VALIDATE: {file.file_name} → "
+                f"success予定={planned_success}, "
+                f"low_conf予定={planned_low}, "
+                f"manual予定={planned_manual} "
+                f"(total {len(items)} 明細, 両読み: {summary})",
+                extra={"step": "validate_file", "file_id": file.file_id},
+            )
+            return result
+
+        # 未処理明細（番号は使う明細の並び順）
+        pending = [i for i in range(len(items)) if f"{file.file_id}:{i}" not in processed_keys]
+        result.skipped = len(items) - len(pending)
+        if not pending:
+            return result
+
+        # 行予約（予約する行の数 = 未処理の明細の数）
+        reservations = cb.reserve_rows(
+            count=len(pending),
+            file_id=file.file_id,
+            file_name=file.file_name,
+            receipt_indices=pending,
+        )
+
+        for (row, rid), idx in zip(reservations, pending):
+            decision = decisions[idx]
+
+            if decision.matched:
+                try:
+                    is_low = self._write_item(
+                        file,
+                        items[idx],
+                        corrected[idx],
+                        idx,
+                        row,
+                        rid,
+                        cb,
+                        ocr,
+                        now,
+                        today,
+                        validation=validations[idx],
+                        extraction_memo=f"両読み=一致 | {summary}",
+                    )
+                    if is_low:
+                        result.low_confidence += 1
+                    else:
+                        result.success += 1
+                except Exception as e:
+                    logger.error(
+                        f"明細失敗: {file.file_name}[{idx}]: {e}",
+                        extra={"step": "item_error"},
+                    )
+                    try:
+                        cb.write_manual_entry_row(
+                            row,
+                            file.drive_link,
+                            corrected[idx].date or today,
+                            f"明細[{idx}]失敗: {e}",
+                        )
+                        cb.update_reservation_status(rid, ProcessStatus.MANUAL_ENTRY.value)
+                        result.manual_entry += 1
+                    except Exception:
+                        cb.update_reservation_status(rid, ProcessStatus.ERROR.value)
+                        result.errors += 1
+                continue
+
+            try:
+                self._write_dual_review(
+                    file,
+                    items[idx],
+                    corrected[idx],
+                    decision,
+                    idx,
+                    row,
+                    rid,
+                    cb,
+                    ocr,
+                    now,
+                    today,
+                    summary,
+                )
+                result.manual_entry += 1
+            except Exception as e:
+                logger.error(
+                    f"両読み要確認行作成失敗: {file.file_name}[{idx}]: {e}",
+                    extra={"step": "item_error_dual"},
+                )
+                cb.update_reservation_status(rid, ProcessStatus.ERROR.value)
+                result.errors += 1
+
+        # 全明細が成功（success/low_confidence）で、manual_entry/error が1件もなければ
+        # 元ファイル名に 【済】 を付与する
+        fully_successful = (
+            (result.success + result.low_confidence) > 0
+            and result.manual_entry == 0
+            and result.errors == 0
+        )
+        if fully_successful and not self._config.dry_run:
+            try:
+                self._drive.rename_file_as_done(file)
+            except Exception as e:
+                logger.error(
+                    f"【済】付与失敗: {file.file_name}: {e}",
+                    extra={"step": "rename_failed", "file_id": file.file_id},
+                )
+
+        return result
+
+    # ── 両読みで合わなかった明細を manual_entry として書き込む ─────
+    def _write_dual_review(
+        self,
+        file: DriveFile,
+        item: ReceiptItem,
+        corrected: CorrectedItem,
+        decision: ItemDecision,
+        idx: int,
+        row: int,
+        rid: str,
+        cb: CashbookClient,
+        ocr: OcrResult,
+        now: str,
+        today: str,
+        summary: str,
+    ) -> None:
+        """画像からの明細を、両方の読みを残して manual_entry 行にする。"""
+        error_msg = f"両読み要確認（{decision.reason}）: {summary}"
+        logger.warning(
+            f"両読み要確認 → manual_entry: {file.file_name}[{idx}]: {error_msg}",
+            extra={"step": "dual_review", "file_id": file.file_id},
+        )
+        cb.copy_formulas_to_row(row)
+        cb.write_manual_entry_row(
+            row,
+            file.drive_link,
+            corrected.date or today,
+            error_msg,
+            corrected=corrected,
+            short_label=decision.label,
+        )
+        cb.update_reservation_status(rid, ProcessStatus.WRITTEN.value)
+
+        cb.append_ai_log(
+            AiLogRecord(
+                timestamp=now,
+                file_id=file.file_id,
+                file_name=file.file_name,
+                receipt_index=idx,
+                ocr_engine=ocr.engine,
+                ocr_confidence=ocr.confidence,
+                date=item.date or "",
+                amount=str(item.amount) if item.amount else "",
+                vendor=item.vendor or "",
+                description=item.description or "",
+                account=item.account or "",
+                tax_category=item.tax_category or "",
+                corrected_account=corrected.account or "",
+                corrected_tax_category=corrected.tax_category or "",
+                corrections_applied=", ".join(corrected.corrections_applied),
+                needs_review=True,
+                memo=error_msg,
+            )
+        )
+        cb.update_reservation_status(rid, ProcessStatus.MANUAL_ENTRY.value)
 
     @staticmethod
     def _select_retry_item(
