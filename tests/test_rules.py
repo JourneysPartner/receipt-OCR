@@ -157,3 +157,87 @@ class TestRuleCorrector:
         """AI が「租税公課」と返しても車関連文脈で車両費に上書き"""
         r = self.c.apply(_item(description="車検代行 手数料", account="租税公課"))
         assert r.account == "車両費"
+
+
+class TestReadQualityCorrections:
+    """仕様 §6 で足した 5 つの決まり"""
+
+    def setup_method(self):
+        self.c = RuleCorrector(confidence_threshold=0.7)
+
+    def test_rule_order(self):
+        """今ある決まりの後ろに、5 つがこの順で並ぶこと"""
+        from src.rules.corrections import CORRECTION_RULES
+
+        assert [r.name for r in CORRECTION_RULES] == [
+            "燃料費→車両費",
+            "駐車場→旅費交通費",
+            "高速道路→旅費交通費",
+            "コピー・印刷→雑費",
+            "郵便→通信費",
+            "収入印紙→租税公課",
+            "タクシー→旅費交通費",
+            "電車・バス→旅費交通費",
+            "宅配便→通信費",
+            "文具→消耗品費",
+            "弁当→会議費",
+            "車検・自動車関連→車両費",
+            "駐輪場→旅費交通費",
+            "駐車場代・駐輪場代→旅費交通費",
+            "ガソリン代→車両費",
+            "運賃・有料道路→10%",
+            "切手→10%",
+        ]
+
+    def test_jurin(self):
+        r = self.c.apply(_item(description="駐輪場", account="雑費"))
+        assert r.account == "旅費交通費"
+
+    def test_jurinjodai(self):
+        r = self.c.apply(_item(description="駐輪場代（駅前駐輪場）", account="雑費"))
+        assert r.account == "旅費交通費"
+        assert r.tax_category == "課税仕入10%"
+
+    def test_chushajodai_with_jidousha_in_vendor(self):
+        """「自動車」を含む施設名でも、摘要が駐車場代（…）なら旅費交通費"""
+        r = self.c.apply(
+            _item(
+                description="駐車場代（駅前自動二輪駐車場）",
+                vendor="駅前自動車整備",
+                account="雑費",
+            )
+        )
+        assert r.account == "旅費交通費"
+        assert r.tax_category == "課税仕入10%"
+
+    def test_chushajodai_sets_ten_percent(self):
+        r = self.c.apply(_item(description="駐車場代（駅前駐車場）", tax_category="非課税"))
+        assert r.account == "旅費交通費"
+        assert r.tax_category == "課税仕入10%"
+
+    def test_gasolinedai(self):
+        r = self.c.apply(_item(description="ガソリン代", vendor="テスト石油", account="旅費交通費"))
+        assert r.account == "車両費"
+
+    def test_kittedai_tax_is_ten_percent(self):
+        r = self.c.apply(_item(description="切手代", tax_category="非課税", account="雑費"))
+        assert r.tax_category == "課税仕入10%"
+        # 今ある「郵便→通信費」の勘定科目はそのまま
+        assert r.account == "通信費"
+
+    def test_denshadai_tax_is_ten_percent(self):
+        r = self.c.apply(
+            _item(description="電車代（中央駅）", tax_category="非課税", account="雑費")
+        )
+        assert r.tax_category == "課税仕入10%"
+        assert r.account == "旅費交通費"
+
+    def test_other_fares_tax_is_ten_percent(self):
+        for word in ("新幹線代", "バス代", "タクシー代", "有料道路代"):
+            r = self.c.apply(_item(description=word, tax_category="非課税"))
+            assert r.tax_category == "課税仕入10%", word
+
+    def test_shunyuinshidai_is_unchanged(self):
+        r = self.c.apply(_item(description="収入印紙代", account="雑費"))
+        assert r.account == "租税公課"
+        assert r.tax_category == "対象外"

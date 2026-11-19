@@ -1,5 +1,7 @@
 """設定読み込みのテスト"""
 
+import pytest
+
 from src.config import _parse_int_tuple, load_config
 
 
@@ -170,3 +172,45 @@ class TestLoadConfig:
         assert c.template.individual_template_id == "ind1"
         assert c.template.corporate_template_id == "corp1"
         assert c.template.output_folder_id == "folder1"
+
+
+class TestPromptVersionAndFlow:
+    def test_defaults(self, monkeypatch):
+        monkeypatch.delenv("AI_PROMPT_VERSION", raising=False)
+        monkeypatch.delenv("AI_FLOW", raising=False)
+        c = load_config()
+        assert c.ai.prompt_version == "v1"
+        assert c.ai.flow == "text_first"
+
+    def test_blank_values_are_defaults(self, monkeypatch):
+        monkeypatch.setenv("AI_PROMPT_VERSION", "   ")
+        monkeypatch.setenv("AI_FLOW", "  ")
+        c = load_config()
+        assert c.ai.prompt_version == "v1"
+        assert c.ai.flow == "text_first"
+
+    def test_valid_values(self, monkeypatch):
+        monkeypatch.setenv("AI_PROMPT_VERSION", "v2")
+        monkeypatch.setenv("AI_FLOW", "dual")
+        c = load_config()
+        assert c.ai.prompt_version == "v2"
+        assert c.ai.flow == "dual"
+
+    def test_values_are_normalized(self, monkeypatch):
+        monkeypatch.setenv("AI_PROMPT_VERSION", " V2 ")
+        monkeypatch.setenv("AI_FLOW", " Dual ")
+        c = load_config()
+        assert c.ai.prompt_version == "v2"
+        assert c.ai.flow == "dual"
+
+    def test_invalid_prompt_version(self, monkeypatch):
+        monkeypatch.setenv("AI_PROMPT_VERSION", "v3")
+        with pytest.raises(ValueError) as e:
+            load_config()
+        assert "AI_PROMPT_VERSION は 'v1' / 'v2' のいずれか" in str(e.value)
+
+    def test_invalid_flow(self, monkeypatch):
+        monkeypatch.setenv("AI_FLOW", "both")
+        with pytest.raises(ValueError) as e:
+            load_config()
+        assert "AI_FLOW は 'text_first' / 'dual' のいずれか" in str(e.value)

@@ -162,6 +162,10 @@ class AiConfig:
     thinking_level: str | None = None
     # None なら http_options を渡さない（1 回の呼び出しの待ち時間の上限）
     request_timeout_seconds: int | None = None
+    # 指示文の版（"v1" | "v2"）
+    prompt_version: str = "v1"
+    # 読み取りの流れ（"text_first" | "dual"）。今回は設定に入れるだけで使わない
+    flow: str = "text_first"
 
 
 @dataclass(frozen=True)
@@ -262,6 +266,8 @@ def _build_runtime_config() -> RuntimeConfig:
 
 
 THINKING_LEVELS = ("minimal", "low", "medium", "high")
+PROMPT_VERSIONS = ("v1", "v2")
+AI_FLOWS = ("text_first", "dual")
 
 
 def _parse_ai_temperature(raw: str | None) -> float | None:
@@ -285,6 +291,24 @@ def _parse_ai_thinking_level(raw: str | None) -> str | None:
         raise ValueError(
             f"AI_THINKING_LEVEL は {' / '.join(THINKING_LEVELS)} のいずれか (received={raw!r})"
         )
+    return value
+
+
+def _parse_ai_prompt_version(raw: str | None) -> str:
+    if raw is None or not raw.strip():
+        return "v1"
+    value = raw.strip().lower()
+    if value not in PROMPT_VERSIONS:
+        raise ValueError(f"AI_PROMPT_VERSION は 'v1' / 'v2' のいずれか (received={raw!r})")
+    return value
+
+
+def _parse_ai_flow(raw: str | None) -> str:
+    if raw is None or not raw.strip():
+        return "text_first"
+    value = raw.strip().lower()
+    if value not in AI_FLOWS:
+        raise ValueError(f"AI_FLOW は 'text_first' / 'dual' のいずれか (received={raw!r})")
     return value
 
 
@@ -405,6 +429,8 @@ def load_config() -> AppConfig:
             request_timeout_seconds=_parse_ai_request_timeout(
                 os.environ.get("AI_REQUEST_TIMEOUT_SECONDS")
             ),
+            prompt_version=_parse_ai_prompt_version(os.environ.get("AI_PROMPT_VERSION")),
+            flow=_parse_ai_flow(os.environ.get("AI_FLOW")),
         ),
         google_credentials_path=os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
         gemini_api_key=os.environ.get("GEMINI_API_KEY"),

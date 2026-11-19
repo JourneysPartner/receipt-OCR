@@ -105,6 +105,34 @@ CORRECTION_RULES: list[CorrectionRule] = [
         ],
         account="車両費",
     ),
+    # ── 第 2 版の摘要の言葉に対応する決まり ──────────────────────
+    # 必ず最後に置く（後勝ち）。`^` で始まるものは摘要の先頭にだけ当たる。
+    CorrectionRule(
+        name="駐輪場→旅費交通費",
+        patterns=[r"駐輪"],
+        account="旅費交通費",
+    ),
+    CorrectionRule(
+        name="駐車場代・駐輪場代→旅費交通費",
+        patterns=[r"^駐車場代", r"^駐輪場代"],
+        account="旅費交通費",
+        tax_category="課税仕入10%",
+    ),
+    CorrectionRule(
+        name="ガソリン代→車両費",
+        patterns=[r"^ガソリン代"],
+        account="車両費",
+    ),
+    CorrectionRule(
+        name="運賃・有料道路→10%",
+        patterns=[r"^電車代", r"^新幹線代", r"^バス代", r"^タクシー代", r"^有料道路代"],
+        tax_category="課税仕入10%",
+    ),
+    CorrectionRule(
+        name="切手→10%",
+        patterns=[r"切手"],
+        tax_category="課税仕入10%",
+    ),
 ]
 
 

@@ -6,6 +6,7 @@ import time
 from google import genai
 from google.genai import types
 
+from src.ai import prompts
 from src.ai.base import AiExtractor
 from src.config import AiConfig
 from src.logging.logger import setup_logger
@@ -16,27 +17,8 @@ _RETRY_SUPPORTED_MIMES = ("image/jpeg", "image/png", "image/webp", "application/
 
 logger = setup_logger()
 
-SYSTEM_INSTRUCTION = """\
-あなたは日本の経理業務に精通したアシスタントです。
-レシートや領収書のOCRテキストから、以下の情報を正確に抽出してJSON配列で返してください。
-
-1枚のレシートに複数明細がある場合は、複数のオブジェクトに分けてください。
-ただし、通常のレシート（スーパー、コンビニなど）は合計金額で1明細にまとめてください。
-
-各オブジェクトのフィールド:
-- date: 日付 (YYYY-MM-DD 形式。年が不明なら今年と推定)
-- amount: 税込金額 (整数、円単位)
-- vendor: 取引先名
-- description: 摘要（何を買ったか / 何の費用か）
-- account: 勘定科目候補（消耗品費、旅費交通費、通信費、車両費、雑費、\
-租税公課、接待交際費、会議費 など）
-- tax_category: 税区分候補（課税仕入10%、課税仕入8%（軽減）、非課税、対象外 など）
-- confidence: 抽出の信頼度 (0.0〜1.0)
-- is_expense: 支出かどうか (true/false、通常はtrue)
-- memo: 補足（OCR品質が低い部分や推測した箇所の説明）
-
-JSON配列のみを返してください。マークダウンのコードブロックや説明文は不要です。
-"""
+# 今までの名前を残す（第 1 版の指示文）。
+SYSTEM_INSTRUCTION = prompts.SYSTEM_INSTRUCTION_V1
 
 
 class GeminiExtractor(AiExtractor):
@@ -51,9 +33,12 @@ class GeminiExtractor(AiExtractor):
             )
         self._client = genai.Client(**client_kwargs)
 
+    def _prompt_version(self) -> str:
+        return getattr(self._config, "prompt_version", "v1")
+
     def _generate_config(self) -> types.GenerateContentConfig:
         kwargs: dict = {
-            "system_instruction": SYSTEM_INSTRUCTION,
+            "system_instruction": prompts.system_instruction(self._prompt_version()),
             "max_output_tokens": self._config.max_tokens,
         }
         if self._config.temperature is not None:
@@ -108,11 +93,7 @@ class GeminiExtractor(AiExtractor):
             self.last_extraction_error = "ocr_empty"
             return []
 
-        user_msg = (
-            f"以下はレシート画像「{file_name}」のOCRテキストです。\n"
-            f"情報を抽出してJSON配列で返してください。\n\n"
-            f"---\n{ocr_result.raw_text}\n---"
-        )
+        user_msg = prompts.text_user_message(self._prompt_version(), file_name, ocr_result.raw_text)
         try:
             resp = self._generate_content(
                 model=self._config.model,
@@ -161,11 +142,7 @@ class GeminiExtractor(AiExtractor):
             self.last_extraction_error = "empty_content"
             return []
 
-        user_msg = (
-            f"以下はレシート/領収書「{file.file_name}」の画像またはPDFです。\n"
-            "OCR結果は使わず、画像から直接、レシートの情報を読み取って\n"
-            "JSON配列で返してください(金額の桁を特に注意して読んでください)。"
-        )
+        user_msg = prompts.image_user_message(self._prompt_version(), file.file_name)
         try:
             resp = self._generate_content(
                 model=self._config.model,
