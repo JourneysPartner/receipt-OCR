@@ -2517,4 +2517,172 @@ module.exports = ({test, assert, gas}) => {
       gas.context.appendAuditUnlocked_ = realAudit;
     }
   });
+
+  // ---------------- gt 17: §9.5 壊れた入力規則 ----------------
+
+  /** 消えた範囲（`#REF!`）を指す偽の規則。値はすべて架空である。 */
+  function brokenRule(type, allowInvalid, allowInvalidThrows) {
+    return {
+      getCriteriaType() { return type; },
+      getCriteriaValues() { throw new Error('Range not found'); },
+      getAllowInvalid() {
+        if (allowInvalidThrows) throw new Error('Range not found');
+        return allowInvalid;
+      }
+    };
+  }
+
+  test('gt 17: §9.5 見るだけは壊れた規則で止まらず、組と行数を返す', () => {
+    setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [], taxTabs: {marks: [], flags: []}});
+    const sheet = destSheet();
+    sheet.getRange(5, 7).setValue('架空値');
+    sheet.getRange(5, 7, 6, 1).setDataValidation(buildValidation(['対象外', '架空旧名'], false));
+    sheet.getRange(11, 7, 10, 1).setDataValidation(brokenRule('VALUE_IN_RANGE', false, false));
+    gas.stubs.resetWriteLog();
+    const beforeAudit = auditLastRow();
+
+    const report = plain(call('opsSetTaxCategoryValidation', ['C001']));
+    assert.equal(report.stoppedBy, null);
+    assert.equal(report.applied, false);
+    assert.equal(report.groups.length, 3);
+    assert.equal(report.groups[0].broken, false);
+    assert.equal(report.groups[0].from, 5);
+    assert.equal(report.groups[0].to, 10);
+    assert.equal(report.groups[1].broken, true);
+    assert.equal(report.groups[1].type, 'VALUE_IN_RANGE');
+    assert.equal(report.groups[1].values, null);
+    assert.equal(report.groups[1].rangeA1, null);
+    assert.equal(report.groups[1].allowInvalid, false);
+    assert.equal(report.groups[1].from, 11);
+    assert.equal(report.groups[1].to, 20);
+    assert.equal(report.groups[2].type, null);
+    assert.equal(report.groups[2].broken, false);
+    assert.equal(report.groups[2].from, 21);
+    assert.equal(report.groups[2].to, 30);
+    assert.equal(report.brokenRows, 10);
+    assert.equal(report.allowInvalid, false);
+    assert.deepEqual(gas.stubs.getWriteLog(), [], '見るだけは書かない');
+    assert.equal(auditLastRow(), beforeAudit);
+  });
+
+  test('gt 17: §9.5 apply は壊れた規則の行も一覧で上書きし、値を変えない', () => {
+    setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [], taxTabs: {marks: [], flags: []}});
+    const sheet = destSheet();
+    sheet.getRange(5, 7).setValue('架空値');
+    sheet.getRange(5, 7, 6, 1).setDataValidation(buildValidation(['対象外', '架空旧名'], false));
+    sheet.getRange(11, 7, 10, 1).setDataValidation(brokenRule('VALUE_IN_RANGE', false, false));
+    gas.stubs.resetWriteLog();
+    const beforeAudit = auditLastRow();
+
+    const applied = plain(call('opsSetTaxCategoryValidation', ['C001', true]));
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    assert.equal(applied.verified, true);
+    assert.equal(applied.stoppedBy, null);
+    assert.equal(applied.brokenRows, 10);
+    assert.equal(applied.allowInvalid, false);
+
+    const names = plain(evaluate('FREEE_TAX_CATEGORIES_')).map((category) => category.name);
+    assert.equal(names.length, 30);
+    const validations = sheet.getRange(5, 7, 26, 1).getDataValidations();
+    assert.equal(validations.length, 26);
+    validations.forEach((row) => {
+      assert.ok(row[0], '全部の行に規則');
+      assert.equal(row[0].getCriteriaType(), 'VALUE_IN_LIST');
+      assert.deepEqual(Array.from(row[0].getCriteriaValues()[0]), names);
+      assert.equal(row[0].getAllowInvalid(), false);
+    });
+    assert.equal(sheet.getRange(5, 7).getValue(), '架空値', '値を変えない');
+
+    const log = gas.stubs.getWriteLog();
+    const auditIndex = log.findIndex((item) => item.sheetName === '監査ログ');
+    const dataIndex = log.findIndex((item) => item.sheetName === '入力用シート');
+    assert.ok(auditIndex >= 0 && dataIndex > auditIndex, JSON.stringify(log));
+    assert.equal(log.filter((item) => item.sheetName === '入力用シート').length, 1,
+      '入力規則は 1 回で付ける');
+    assert.ok(auditLastRow() > beforeAudit, '監査を書く');
+    const audit = auditLast();
+    assert.equal(audit.type, 'SETTING');
+    assert.equal(audit.targetType, 'TEMPLATE');
+    assert.equal(audit.targetId, 'dest1');
+    assert.equal(audit.reason, 'TAX_VALIDATION');
+  });
+
+  test('gt 17: §9.5 getAllowInvalid も読めない規則は allowInvalid を true にする', () => {
+    setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [], taxTabs: {marks: [], flags: []}});
+    const sheet = destSheet();
+    sheet.getRange(5, 7, 6, 1).setDataValidation(buildValidation(['対象外'], false));
+    sheet.getRange(11, 7, 10, 1).setDataValidation(brokenRule('VALUE_IN_RANGE', null, true));
+    sheet.getRange(21, 7, 10, 1).setDataValidation(buildValidation(['対象外'], false));
+
+    const report = plain(call('opsSetTaxCategoryValidation', ['C001']));
+    assert.equal(report.stoppedBy, null);
+    assert.equal(report.brokenRows, 10);
+    assert.equal(report.groups[1].broken, true);
+    assert.equal(report.groups[1].allowInvalid, null);
+    assert.equal(report.allowInvalid, true);
+
+    const applied = plain(call('opsSetTaxCategoryValidation', ['C001', true]));
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    assert.equal(applied.verified, true);
+    assert.equal(applied.allowInvalid, true);
+    const validations = sheet.getRange(5, 7, 26, 1).getDataValidations();
+    validations.forEach((row) => assert.equal(row[0].getAllowInvalid(), true));
+  });
+
+  test('gt 17: §9.5 全部の行が読めない規則でも allowInvalid は真偽で、行数を数える', () => {
+    setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [], taxTabs: {marks: [], flags: []}});
+    const sheet = destSheet();
+    sheet.getRange(5, 7, 26, 1).setDataValidation(brokenRule('VALUE_IN_RANGE', null, true));
+
+    const report = plain(call('opsSetTaxCategoryValidation', ['C001']));
+    assert.equal(report.stoppedBy, null);
+    assert.equal(report.allowInvalid, true, 'null にしない');
+    assert.equal(report.brokenRows, 26);
+    assert.equal(report.groups.length, 1);
+    assert.equal(report.groups[0].broken, true);
+    assert.equal(report.groups[0].from, 5);
+    assert.equal(report.groups[0].to, 30);
+  });
+
+  test('gt 17: §9.5 読み返しで壊れた規則が残れば WRITE_VERIFY_FAILED（例外にしない）', () => {
+    setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [], taxTabs: {marks: [], flags: []}});
+    const sheet = destSheet();
+    sheet.getRange(5, 7, 6, 1).setDataValidation(buildValidation(['対象外'], false));
+    sheet.getRange(11, 7, 10, 1).setDataValidation(brokenRule('VALUE_IN_RANGE', false, false));
+    const proto = Object.getPrototypeOf(sheet.getRange(5, 7));
+    const real = proto.setDataValidation;
+    proto.setDataValidation = function() { return this; };
+    try {
+      const report = plain(call('opsSetTaxCategoryValidation', ['C001', true]));
+      assert.equal(report.stoppedBy, 'WRITE_VERIFY_FAILED');
+      assert.equal(report.applied, false);
+      assert.equal(report.verified, false);
+    } finally {
+      proto.setDataValidation = real;
+    }
+  });
+
+  test('gt 17: §9.5 壊れた規則は同じ型の値の無い規則と組を分ける', () => {
+    setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [], taxTabs: {marks: [], flags: []}});
+    const sheet = destSheet();
+    sheet.getRange(5, 7, 6, 1).setDataValidation(buildValidation(['対象外'], false));
+    const emptyRange = evaluate('SpreadsheetApp.newDataValidation()')
+      .requireValueInRange(null, true).setAllowInvalid(false).build();
+    sheet.getRange(11, 7, 5, 1).setDataValidation(emptyRange);
+    sheet.getRange(16, 7, 5, 1).setDataValidation(brokenRule('VALUE_IN_RANGE', false, false));
+
+    const report = plain(call('opsSetTaxCategoryValidation', ['C001']));
+    assert.equal(report.stoppedBy, null);
+    assert.equal(report.groups.length, 4);
+    assert.equal(report.groups[1].type, 'VALUE_IN_RANGE');
+    assert.equal(report.groups[1].broken, false);
+    assert.equal(report.groups[1].values, null);
+    assert.equal(report.groups[1].rangeA1, null);
+    assert.equal(report.groups[1].from, 11);
+    assert.equal(report.groups[1].to, 15);
+    assert.equal(report.groups[2].broken, true);
+    assert.equal(report.groups[2].from, 16);
+    assert.equal(report.groups[2].to, 20);
+    assert.equal(report.brokenRows, 5);
+  });
 };

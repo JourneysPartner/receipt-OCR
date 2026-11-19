@@ -1254,36 +1254,73 @@ function opsSetCustomerTaxFlag(customerId, smallAmountUnavailable, apply) {
   }));
 }
 
-/** 入力規則の要約（§9.5。一覧なら値の並び、範囲なら A1 表記）。 */
+/**
+ * 入力規則の要約（§9.5。一覧なら値の並び、範囲なら A1 表記）。
+ * `getCriteriaType()` か `getCriteriaValues()` が例外なら壊れた規則
+ * （消えた範囲を指す `#REF!` など）として、`broken: true` と `values: null`・
+ * `rangeA1: null` を返す。`getAllowInvalid()` の例外は `allowInvalid: null`
+ * だけにする（壊れた規則にはしない）。
+ */
 function taxOpsValidationSummary_(validation) {
   if (!validation) {
-    return {key: 'NONE', type: null, values: null, rangeA1: null, allowInvalid: null};
+    return {key: 'NONE', type: null, values: null, rangeA1: null, allowInvalid: null,
+      broken: false};
   }
-  var type = validation.getCriteriaType ? String(validation.getCriteriaType()) : '';
-  var criteria = validation.getCriteriaValues ? (validation.getCriteriaValues() || []) : [];
+  var broken = false;
+  var type = '';
+  if (validation.getCriteriaType) {
+    try {
+      type = String(validation.getCriteriaType());
+    } catch (error) {
+      type = null;
+      broken = true;
+    }
+  }
+  var criteria = [];
+  if (validation.getCriteriaValues) {
+    try {
+      criteria = validation.getCriteriaValues() || [];
+    } catch (error) {
+      criteria = null;
+      broken = true;
+    }
+  }
   var values = null;
   var rangeA1 = null;
-  if (type === 'VALUE_IN_LIST') {
-    values = (criteria[0] || []).map(function(value) { return String(value); });
-  } else if (type === 'VALUE_IN_RANGE') {
-    var target = criteria[0];
-    rangeA1 = target === null || target === undefined ? null :
-      (typeof target === 'string' ? target :
-        (target.getA1Notation ? String(target.getA1Notation()) : String(target)));
+  if (!broken) {
+    if (type === 'VALUE_IN_LIST') {
+      values = (criteria[0] || []).map(function(value) { return String(value); });
+    } else if (type === 'VALUE_IN_RANGE') {
+      var target = criteria[0];
+      rangeA1 = target === null || target === undefined ? null :
+        (typeof target === 'string' ? target :
+          (target.getA1Notation ? String(target.getA1Notation()) : String(target)));
+    }
   }
-  var allowInvalid = validation.getAllowInvalid ? Boolean(validation.getAllowInvalid()) : null;
+  var allowInvalid = null;
+  if (validation.getAllowInvalid) {
+    try {
+      allowInvalid = Boolean(validation.getAllowInvalid());
+    } catch (error) {
+      allowInvalid = null;
+    }
+  }
   return {
-    key: JSON.stringify([type, values, rangeA1, allowInvalid]),
+    key: broken ? JSON.stringify([type, 'BROKEN', allowInvalid]) :
+      JSON.stringify([type, values, rangeA1, allowInvalid]),
     type: type,
     values: values,
     rangeA1: rangeA1,
-    allowInvalid: allowInvalid
+    allowInvalid: allowInvalid,
+    broken: broken
   };
 }
 
 /**
  * 入力規則を、同じ規則の続く行ごとにまとめる（§9.5。最大 20 組）。
  * あわせて、値のある行と、一覧に無い値（最大 10 個）も返す。
+ * 壊れた規則の行は `brokenRows` で数え、`allowInvalid` が読めない行が
+ * 1 つでもあれば `allowInvalid` は `true`（ばらばらと同じ扱い）にする。
  */
 function taxOpsValidationReport_(range, firstRow) {
   var validations = range.getDataValidations();
@@ -1291,18 +1328,20 @@ function taxOpsValidationReport_(range, firstRow) {
   var groups = [];
   var allowInvalid = [];
   var valueRows = 0;
+  var brokenRows = 0;
   var other = [];
   validations.forEach(function(row, index) {
     var validation = row && row[0] ? row[0] : null;
     var summary = taxOpsValidationSummary_(validation);
     if (validation) allowInvalid.push(summary.allowInvalid);
+    if (summary.broken) brokenRows += 1;
     var last = groups[groups.length - 1];
     if (last && last.key === summary.key) {
       last.to = firstRow + index;
     } else {
       groups.push({key: summary.key, from: firstRow + index, to: firstRow + index,
         type: summary.type, values: summary.values, rangeA1: summary.rangeA1,
-        allowInvalid: summary.allowInvalid});
+        allowInvalid: summary.allowInvalid, broken: summary.broken});
     }
     var cell = values[index] && values[index][0];
     if (cell === '' || cell === null || cell === undefined) return;
@@ -1315,7 +1354,9 @@ function taxOpsValidationReport_(range, firstRow) {
   });
   var allow = true;
   if (allowInvalid.length) {
-    allow = allowInvalid.every(function(value) { return value === allowInvalid[0]; }) ?
+    var unreadable = allowInvalid.some(function(value) { return value === null; });
+    allow = !unreadable &&
+      allowInvalid.every(function(value) { return value === allowInvalid[0]; }) ?
       allowInvalid[0] : true;
   }
   return {
@@ -1324,7 +1365,8 @@ function taxOpsValidationReport_(range, firstRow) {
     rows: validations.length,
     valueRows: valueRows,
     otherValues: other.slice(0, 10),
-    allowInvalid: allow
+    allowInvalid: allow,
+    brokenRows: brokenRows
   };
 }
 
@@ -1358,6 +1400,7 @@ function opsSetTaxCategoryValidation(customerId, apply) {
     valueRows: 0,
     otherValues: [],
     allowInvalid: null,
+    brokenRows: 0,
     verified: false,
     auditId: null
   };
@@ -1422,6 +1465,7 @@ function opsSetTaxCategoryValidation(customerId, apply) {
     report.valueRows = summary.valueRows;
     report.otherValues = summary.otherValues;
     report.allowInvalid = summary.allowInvalid;
+    report.brokenRows = summary.brokenRows;
     return target;
   }
 
