@@ -94,7 +94,7 @@ def readings_text(image_items, text_items) -> str
    - 組が無い明細は、全部の I を見終えてから決める（先に全部の組を作る）: T の未使用の中に金額だけ等しいものがあれば `(False, LABEL_DATE, "日付が食い違う", None)`（その T は使用済みにしない）、無ければ `(False, LABEL_AMOUNT, "金額が食い違う", None)`。
 5. `ocr_text` が空のときの `validate_amount` は `no_candidates` なので通る（OCR が失敗なら T が空で 3 に入るので、実際には起きない）。
 
-`readings_text`: `画像=<日付>/<金額>, … ｜ 文字=<日付>/<金額>, …`。空の値は `?`、明細が無い側は `なし`。各側は最大 10 件、超えた分は `…ほか N 件`。
+`readings_text`: `画像=<日付>/<金額>, … ｜ 文字=<日付>/<金額>, …`。日付が空なら `?`、金額は整数ならそのまま（0 や負も出す）、整数でなければ `?`。明細が無い側は `なし`。各側は最大 10 件、超えた分は `…ほか N 件`。
 
 ## 6. `src/processing/manager.py`
 
