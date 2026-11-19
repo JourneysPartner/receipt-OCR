@@ -166,7 +166,7 @@ class TestReadQualityCorrections:
         self.c = RuleCorrector(confidence_threshold=0.7)
 
     def test_rule_order(self):
-        """今ある決まりの後ろに、5 つがこの順で並ぶこと"""
+        """今ある決まりの後ろに、決まりがこの順で並ぶこと"""
         from src.rules.corrections import CORRECTION_RULES
 
         assert [r.name for r in CORRECTION_RULES] == [
@@ -187,6 +187,7 @@ class TestReadQualityCorrections:
             "ガソリン代→車両費",
             "運賃・有料道路→10%",
             "切手→10%",
+            "車検の印紙→対象外",
         ]
 
     def test_jurin(self):
@@ -311,3 +312,57 @@ class TestKitteAndInshi:
         r = self.c.apply(_item(description="車検 印紙代", account="雑費"))
         assert r.account == "車両費"
         assert "車検・自動車関連→車両費: 勘定科目→車両費" in r.corrections_applied
+
+
+class TestShakenInshi:
+    """2026-11-20 の利用者の決定: 車検・自動車の文脈の印紙だけ対象外。"""
+
+    def setup_method(self):
+        self.c = RuleCorrector(confidence_threshold=0.7)
+
+    def test_shaken_inshidai_is_vehicle_and_out_of_scope(self):
+        r = self.c.apply(_item(description="車検 印紙代", account="雑費", tax_category="非課税"))
+        assert r.account == "車両費"
+        assert r.tax_category == "対象外"
+
+    def test_unyu_shikyoku_inshidai_is_vehicle_and_out_of_scope(self):
+        r = self.c.apply(
+            _item(description="運輸支局 印紙代", vendor="陸運局", tax_category="非課税")
+        )
+        assert r.account == "車両費"
+        assert r.tax_category == "対象外"
+
+    def test_kensa_touroku_inshi_is_vehicle_and_out_of_scope(self):
+        r = self.c.apply(_item(description="検査登録印紙", tax_category="非課税"))
+        assert r.account == "車両費"
+        assert r.tax_category == "対象外"
+
+    def test_jidousha_juryouzei_inshi_is_vehicle_and_out_of_scope(self):
+        r = self.c.apply(_item(description="自動車重量税印紙", tax_category="非課税"))
+        assert r.account == "車両費"
+        assert r.tax_category == "対象外"
+
+    def test_shunyuinshidai_without_car_context_stays_hikazei(self):
+        r = self.c.apply(_item(description="収入印紙代", account="雑費", tax_category="対象外"))
+        assert r.account == "租税公課"
+        assert r.tax_category == "非課税"
+
+    def test_shunyuinshi_at_post_office_stays_hikazei(self):
+        r = self.c.apply(_item(description="収入印紙", vendor="郵便局", tax_category="対象外"))
+        assert r.account == "租税公課"
+        assert r.tax_category == "非課税"
+
+    def test_shaken_daikou_fee_without_inshi_keeps_tax(self):
+        r = self.c.apply(_item(description="車検代行手数料", account="雑費"))
+        assert r.account == "車両費"
+        assert r.tax_category == "課税仕入10%"
+        assert not any(name.startswith("車検の印紙→対象外") for name in r.corrections_applied)
+
+    def test_kittedai_stays_ten_percent(self):
+        r = self.c.apply(_item(description="切手代", tax_category="非課税"))
+        assert r.tax_category == "課税仕入10%"
+
+    def test_inshidai_after_newline_is_vehicle_and_out_of_scope(self):
+        r = self.c.apply(_item(description="車検\n印紙代", tax_category="非課税"))
+        assert r.account == "車両費"
+        assert r.tax_category == "対象外"
