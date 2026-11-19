@@ -1,7 +1,8 @@
 # 相手税区分（G 列）を自動で入れる 第 1 段 仕様書
 
 作成日：2026-11-18
-版：1.2（2026-11-19。§9.5 に壊れた入力規則の扱いを足した。本番の手順 §17.1 の結果を §18 に記録。変えた所は「（1.2）」の印）
+版：1.3（2026-11-19。今ある転記シート（複製）の G の入力規則を直す運用関数 §9.6 を足した。変えた所は「（1.3）」の印）
+1.2（2026-11-19。§9.5 に壊れた入力規則の扱いを足した。本番の手順 §17.1 の結果を §18 に記録。変えた所は「（1.2）」の印）
 1.1（2026-11-18。実装・監査で決めたことを足した。変えた所は「（1.1）」の印。記録は §18）
 1.0（2026-11-18。§1.4 の 1〜3 は利用者が決めた。4 は本番で取引先名を調べてから決める）
 読者：本仕様だけを読んで実装する実装者（AI を含む）。書いてあることは変えない。書いていないことは安全側で決め、決めたことは全部報告する。
@@ -42,6 +43,7 @@
 4. **行を空ける所で G も空にする**（`43`。§7）。
 5. **取込の結果の知らせ**に【税区分】の 1 行（`71`・`81`。§8）。
 6. **雛形の G 列の入力規則**を freee の名前に直す運用関数（§9.5）。
+7. （1.3）**今ある転記シート（複製）の G 列の入力規則**を freee の名前に直す運用関数（§9.6）。値は変えない。
 
 ### 1.3 変えないもの・しないこと
 
@@ -396,6 +398,74 @@ C（`spec_account_code.md` §9）と同じ所に G を足す。**条件は「G �
   - 組に `broken`、報告に `brokenRows`（壊れた規則の行の数）を足す。規則のある行に `allowInvalid` が読めない行が 1 つでもあれば、付ける規則の `allowInvalid` は `true`（ばらばらと同じ扱い。報告の値は必ず真偽）。
   - `apply` は壊れた規則の行もほかの行と同じく上書きする（それで直る）。読み返しで壊れた規則が残れば `WRITE_VERIFY_FAILED`（例外にしない）。例外を受け止めるのはこの 3 つの読み取りだけ。
 
+### 9.6 `opsSetCopiesTaxCategoryValidation(customerId, apply, options)`（1.3。今ある転記シートの G の入力規則）
+
+**理由（利用者の決定 2026-11-19「システムで直す」）：**§17.1 の 2 より前に作った転記シート（複製）の G の入力規則は、複製したときの雛形の旧い一覧のまま（控80・控70 が無い、`不課税` など freee に無い名前がある、TEST01 由来は 634 行目から下が壊れた規則）。システムが書いた `課対仕入（控70）10%` などに警告の印が出る。手で直すとき新しい名前を選べず、旧い名前を選ぶと freee 取込用で止まる。§9.5 は雛形だけを直す（R23 のとおり、§9.5 は変えない）。
+
+**値は変えない。**入力規則だけを §9.5 と同じ規則（`FREEE_TAX_CATEGORIES_` の名前を表の順に 30 個）に置き換える。旧い名前の値（`不課税` など）が残る行は報告するだけ（直すかは利用者。直さなければ freee 取込用の確かめで止まる＝今と同じ）。
+
+#### 9.6.1 引数と、全体を止める確かめ（何も開かない・何も書かない）
+
+- `customerId`：必須。`apply`：**`=== true` のときだけ書く**（`'true'`・`1` は見るだけ）。`options.timeBudgetMs`：省略時 240000。数でなければ 240000、負なら 0（`97` の `opsCheckIntegrityAllDestinations` と同じ読み方）。
+- 初めに `loadSettingsFromProperties()`、実行者は `activeUserEmail_()`、返す前に報告を `taxOpsFinish_` で 1 回だけログへ（§9 の（1.1）と同じ）。止めるときは例外でなく `stoppedBy`。
+- 順に確かめ、外れたらそこで止める：
+  1. `customerId` が空 → `CUSTOMER_REQUIRED`。`taxOpsCustomer_` が `null` → `CUSTOMER_NOT_FOUND`。
+  2. G の列：§9.5 と同じ（1 以上の整数で AL に無い）→ でなければ `NO_TAX_COLUMN`。`customer.headerRow` が 1 以上の整数でなければ `TEMPLATE_INVALID`。
+  3. 見出しの期待値：`schemaHeaderRule_(customer)`（`42`）が `null` → `HEADER_EXPECTATION_MISSING`。
+  4. 雛形の保存場所：`DriveApp.getFileById(customer.destinationSpreadsheetId).getParents()` がちょうど 1 つ（その ID を「雛形の親」とする）。読めない・0・2 以上 → `TEMPLATE_MISSING`。
+  5. 取引ログ：`findRowsByColumnValues_(transactionLogSheet_(), 4, [customerId], TRANSACTION_LOG_WIDTH_)`（D 列＝顧客 ID。Sheets API の読取 2 回）。投げたら `TRANSACTION_LOG_UNREADABLE`。
+
+#### 9.6.2 転記シートの引き方（取引ログから。Drive のフォルダーは探さない）
+
+- 5 で読んだ各行を `txLogFromRecord_` に通す（投げた行は `unreadableTransactions` に数えて飛ばす）。残すのは `String(tx.customerId) === customerId`・`tx.active === true`・状態が `PREPARED`・`WRITING`・`COMMITTED`・`REVIEW_REQUIRED` の行だけ（`80` の `webAppListDestinations`・`61` の `classifyRecordedDestinations_` と同じ）。残した行の数が `transactions`。
+- `recordedDestinationOf_(tx, customer)` が `null`（AC が空の旧い行）、または ID が雛形の ID → `legacyTransactions` に数え、対象にしない（雛形は §9.5 の対象）。
+- ID とシート名（`recordedDestinationOf_` の `sheetName`）の組ごとにまとめ、組ごとに取引の数（`transactionCount`）を持つ。同じ ID で違うシート名なら別の組。
+- 取引が全部無効・取消の転記シートは対象にしない（記帳に使っていない）。
+
+#### 9.6.3 組ごとの確かめ（見るだけでも、`apply` のロックの中でも同じ）
+
+順に確かめ、外れたらその組は**触らない**（`status: 'SKIPPED'`、`problem` に理由のコード）。**ほかの組は続ける。**
+
+1. `DriveApp.getFileById(id)` が投げる → `OPEN_FAILED`。`isTrashed()` が真 → `TRASHED`。
+2. 名前：`String(customer.customerName) + '_'` で始まり、残り（`stamp`）が `/^\d{8}-\d{4}$/` に合う（`80` の `webAppCloneDestination_` が付ける名前）→ でなければ `NAME_MISMATCH`。
+3. 親フォルダー：ちょうど 1 つで、雛形の親と同じ → でなければ `PARENT_MISMATCH`。
+4. `SpreadsheetApp.openById(id)` が投げる → `OPEN_FAILED`。`getSheetByName(sheetName)` が `null` → `SHEET_MISSING`。
+5. 見出し：見出し行（`Number.isInteger(rule.row) ? rule.row : customer.headerRow`）を、`rule.cells` の最大の列まで 1 回で読み、全セルを `schemaHeaderCellMatches_`（`42`）で照らす。1 つでも違えば `HEADER_MISMATCH`（列がずれた転記シートの別の列に規則を付けないため）。
+6. `getMaxRows()` が `headerRow + 1` より小さい → `NO_ROWS`。
+7. G の `headerRow + 1` 行目〜`getMaxRows()` 行目を `taxOpsValidationReport_`（§9.5）で要約する。
+- 2〜7 の読み取りが投げたら（1・4 の `OPEN_FAILED` を除く）`READ_FAILED`。
+- 外れなかった組の状態：
+  - `ALREADY_SET`：組（`groups`）がちょうど 1 つで、`from`＝`headerRow + 1`・`to`＝`getMaxRows()`、`type` が `VALUE_IN_LIST`、`values` が `FREEE_TAX_CATEGORIES_` の名前の並び（順も同じ）、`broken` が偽、`allowInvalid` が真偽（`null` でない）。
+  - `NEEDS_UPDATE`：それ以外。
+
+#### 9.6.4 報告（見るだけ・`apply` とも同じ形）
+
+- 全体：`applied`・`stoppedBy`・`customerId`・`templateId`・`column`・`headerRow`・`transactions`・`legacyTransactions`・`unreadableTransactions`・`copies`（下の配列）・`counts`（`alreadySet`・`needsUpdate`・`skipped`・`applied`・`notReached`）・`auditIds`。
+- `copies` の各要素：`spreadsheetId`・`stamp`（名前の `_` の後。`NAME_MISMATCH` などで分からなければ `null`）・`sheetName`・`transactionCount`・`status`（`ALREADY_SET`・`NEEDS_UPDATE`・`SKIPPED`・`APPLIED`・`NOT_REACHED`）・`problem`・`firstRow`・`lastRow`・`rows`・`groups`（最大 20）・`truncated`・`valueRows`・`otherValues`（一覧に無い値。最大 10）・`otherValueRows`（その行番号。最大 20）・`allowInvalid`（付ける値）・`brokenRows`・`verified`・`auditId`。
+- 並び：`stamp` の昇順、同じ・`null` なら ID の昇順（`null` は最後）。
+- **報告・監査・ログに、顧客名・転記シートの名前・取引の値（店名・金額・用途・取引先名）を出さない**（`stamp` と ID だけ）。
+- `otherValueRows` のために `taxOpsValidationReport_` に `otherValueRows`（一覧に無い値の行番号、最大 20）を足してよい（§9.5 の報告にも出る。ほかの返り値は変えない）。
+
+#### 9.6.5 `apply`
+
+1. まず見るだけと同じこと（§9.6.1〜9.6.3）をロックの外で全部行う。§9.6.1 で止まれば何もしない。
+2. `NEEDS_UPDATE` の組を報告の並びの順に 1 組ずつ、**組ごとに `withScriptLock_` を取って**（長く持たない。取込を止めないため）：
+   1. 始める前に、関数の初めからの経過が `timeBudgetMs` を超えていれば、その組と残りの組を `NOT_REACHED` にし、`stoppedBy: 'TIME_BUDGET'` で終わる（書いた組はそのまま）。`timeBudgetMs` が 0 なら 1 組も書かない。
+   2. ロックの中で §9.6.3 の確かめと要約をやり直す。`SKIPPED` になればそれを記録して次の組へ。`ALREADY_SET` になれば書かずに次の組へ（監査も書かない）。
+   3. その時点の G の値（要約で読んだもの）を控える。
+   4. **監査を先に**（`taxOpsAudit_`）：`type: 'SETTING'`・`targetType: 'DESTINATION'`・`targetId`＝転記シートの ID・`customerId`・`before`＝`{sheetName, firstRow, lastRow, groups, truncated, valueRows, brokenRows}`・`after`＝`{column: columnLetter_(G), firstRow, lastRow, allowInvalid, count: 30}`・`reason: 'TAX_VALIDATION_COPY'` → `SpreadsheetApp.flush()`。投げたら `stoppedBy: 'AUDIT_WRITE_FAILED'` で**全体を止める**（その組と残りは書かない）。
+   5. §9.5 と同じ作り（`requireValueInList(<30 個>, true).setAllowInvalid(<その組の要約の allowInvalid>)`）の規則を、その組の G の範囲に **1 回で**付ける。投げたら `WRITE_FAILED` で全体を止める。
+   6. 読み返し：同じ範囲の `getDataValidations()` が全部の行で `['VALUE_IN_LIST', <30 個>, allowInvalid]`（壊れた規則なし）、かつ `getValues()` が 3 で控えた値と同じ。規則が違えば `WRITE_VERIFY_FAILED`、値が違えば `VALUES_CHANGED` で全体を止める（書いた規則は戻さない）。合えば `status: 'APPLIED'`・`verified: true`。
+3. ロックが取れない（`withScriptLock_` がコールバックに入る前に投げる）→ その組と残りを `NOT_REACHED` にし、`stoppedBy: 'LOCK_UNAVAILABLE'` で止める。コールバックに入った後の例外は 2 の中で受け止めた分（§9.6.3 の `READ_FAILED`・4〜6）のほかは投げ直す。
+4. `applied`：1 組以上 `APPLIED` で、`stoppedBy` が `null`。書く組が無ければ `applied: false`・`stoppedBy: null`。
+5. もう一度回すと、書いた組は `ALREADY_SET`（やり直してよい。監査も増えない）。`TIME_BUDGET` で止まったら、もう一度回せば続きから直る。
+
+#### 9.6.6 触らないもの
+
+- 雛形（§9.5 の対象）・ほかの顧客の転記シート・取引ログに無い転記シート・ゴミ箱の転記シート。
+- G 以外の列・見出し行から上・**G の値**・取引ログ・処理ログ・索引。
+- `80`・`97` は変えない。
+
 ---
 
 ## 10. 安全の条件（テストで確かめる）
@@ -412,6 +482,8 @@ C（`spec_account_code.md` §9）と同じ所に G を足す。**条件は「G �
 10. 往復：取込・確定（1 件・まとめて）は今と同じ回数。日付・金額の修正は §2.3 の顧客で +1 だけ。（1.1）例外は 2 つだけ：直接読む道の取込（本番の取込は通らない）と、`55` に取引先の表を全部渡して `taxTables` を渡さない呼出し（`97` など）で、どちらも +1。`getSheetByName` は §2.3 の顧客で 1 実行・1 押下あたり +2（読取の回数ではない）。
 11. 運用関数は見るだけが既定。書くのはロックの中で読み直した後、監査が書けた後だけ。
 12. 用途・店名・金額・取引先名を `outcome`・ログ・監査（運用関数の名前・印を除く）に出さない。
+13. （1.3）§9.6 が入力規則を付けるのは、その顧客の取引ログの有効な取引が指す転記シートで、名前・親フォルダー・ゴミ箱でない・見出しの確かめを全部通ったものの G の列だけ。雛形・ほかの顧客の転記シート・G 以外の列・G の値には触らない（値は書いた後に読み返して比べる）。
+14. （1.3）§9.6 は転記シートごとに、ロックの中で確かめ直し → 監査 → 規則 → 読み返し。監査・書込・読み返しが 1 つでも失敗したら、残りの転記シートには書かない。もう付いている転記シートには書かない（監査も足さない）。
 
 ---
 
@@ -425,11 +497,15 @@ C（`spec_account_code.md` §9）と同じ所に G を足す。**条件は「G �
 - 顧客の「少額特例を使えない」は顧客マスターでなく別のタブにした（顧客マスターの幅を変えると、顧客登録 `59` の 45 列の書込と読み返しに手が入る）。
 - 2023-09-30 以前のフリマの行は決めない（経過措置の前で、今の記帳には来ない）。
 - 返品・返金（マイナス）は買ったときと同じ税区分（少額特例は絶対値で見る）。カード会社からの返金（AO）は今のまま `対象外`。
+- （1.3）§9.6 の転記シートは取引ログから引く（Drive のフォルダーを探さない）。システムが作り、記帳に使っている転記シートだけを確実に選ぶため。名前・親フォルダーの確かめは画面の一覧（`webAppListDestinations`）と同じにし、見出しの確かめ（`42` の期待値）とゴミ箱の確かめを足した（列がずれた・捨てた転記シートに付けないため）。`80` は変えず、`48` に同じ確かめを持つ（画面の道に手を入れないため）。
+- （1.3）§9.6 の「拒否・警告のみ」（`allowInvalid`）は §9.5 と同じく転記シートごとに今の規則から決める（全部同じならその値、ばらばら・無し・読めなければ警告のみ）。今の作りを変えないため。
+- （1.3）§9.6 はロックを転記シートごとに取る（1 回の実行で数十秒かかり得るので、取込を長く止めない）。1 枚ずつ確かめ直すので、ロックの外の見るだけとロックの中で状態が変わっても安全側（書かない）に倒れる。
+- （1.3）旧い名前の値（`不課税` など）は §9.6 で書き換えない（どの名前にするかは取引ごとの判断で、システムには決められない）。行番号を報告し、直すのは利用者。
 
 ## 12. 第 2 段へ残すこと
 
 - 「設定」の画面で取引先の印・少額特例の印を付ける欄（利用者の決定 2026-11-18）。
-- 印を後から付けた・C を手で直したときに、作成済みの転記シートの G を直す口（今は直さない。freee 取込用を作るときに、システムの決め方と G の違いを注意として出す形も考えられる）。
+- 印を後から付けた・C を手で直したときに、作成済みの転記シートの G の**値**を直す口（今は直さない。freee 取込用を作るときに、システムの決め方と G の違いを注意として出す形も考えられる）。（1.3）**入力規則**は §9.6 で直す。
 - 用途を直す経路（`52` の I 列の書き直し）で C・G を決め直すか（C も今は決め直さない）。
 - `97` の `opsApplyPartnerDecisions` で確定した行の G（決め直さない。画面ができてから使っていない古い入口）。
 - 国際線の航空券・団体の会費・新聞の定期購読など、科目と言葉で分けられないもの。
@@ -461,6 +537,15 @@ C（`spec_account_code.md` §9）と同じ所に G を足す。**条件は「G �
 16. （1.1）**gt 16（`80` の道の値）**：`webAppResolveReviews` を通して、G の値（控70・変わらない件・印の誤り）・確定の件数・取引ログ 46・47。
 （1.1）ほかに足したもの：表が無い・見出しが違うときの確定は G を変えない（gt 6）・`55` は最初の ADOPT の要確認が無くてもほかの件を決め直す（gt 4）・`57` の対象外のまとめで G も空にする（gt 9）。
 17. （1.2）**gt 17（壊れた入力規則）**：`getCriteriaValues()` が投げる偽の規則で、見るだけは止まらず組・`brokenRows`・`allowInvalid` を返す／`apply` は壊れた行も上書きし値を変えない・監査が先／`getAllowInvalid()` も読めない行があれば `true`／全部の行が読めなくても真偽／読み返しで壊れた規則が残れば `WRITE_VERIFY_FAILED`／壊れた規則は同じ型の値の無い規則と組を分ける（6 件）。
+18. （1.3）**gt 18（転記シートの入力規則 §9.6）**：架空の顧客に、取引ログの有効な取引が指す転記シート 3 枚（旧い一覧＋壊れた規則の行・別の旧い一覧・もう 30 個）、AC が空の旧い取引、雛形を指す取引、無効（`active` が偽）の取引だけが指す転記シート、取消（状態が対象外）の取引だけが指す転記シート、ほかの顧客の転記シート（その顧客の取引ログの行）を置く。
+    - (a) 見るだけ：対象は 3 枚だけ（`NEEDS_UPDATE` 2・`ALREADY_SET` 1）、`legacyTransactions` が旧い取引と雛形の数、書込の要求 0・監査の行が増えない・入力規則も値も変わらない。`otherValues`・`otherValueRows` が旧い名前の値と行番号。
+    - (b) `apply`：`NEEDS_UPDATE` の 2 枚の G（`headerRow + 1`〜`getMaxRows()`）が 30 個の一覧（壊れた行も直る）・`allowInvalid` は各枚の今の値（全部「拒否」なら拒否、ばらばらなら警告のみ）。G の値・G 以外の列の規則・見出し行・雛形・ほかの顧客の転記シート・無効や取消の取引だけが指す転記シートは変わらない。`ALREADY_SET` の 1 枚には書込も監査も無い。監査は 2 行で、各枚の書込より前（`targetType: 'DESTINATION'`・`reason: 'TAX_VALIDATION_COPY'`）。各枚の規則の書込は 1 回。もう一度 `apply` → 全部 `ALREADY_SET`・書込 0・監査 0。
+    - (c) 組ごとの確かめ：名前が規則に合わない・親フォルダーが違う・ゴミ箱・シートが無い・見出しが違う・開けない転記シートは、それぞれ `SKIPPED` と理由のコードで触らず、ほかの転記シートには付ける。
+    - (d) 監査が書けない → その枚にも後の枚にも書かない（`AUDIT_WRITE_FAILED`）。規則の読み返しが合わない（付けても変わらない偽の範囲）→ `WRITE_VERIFY_FAILED` で後の枚に書かない。
+    - (e) `timeBudgetMs: 0` → 書かない・`TIME_BUDGET`・全部 `NOT_REACHED`。そのあと既定で回すと全部直る。
+    - (f) 引数：空 → `CUSTOMER_REQUIRED`、無い顧客 → `CUSTOMER_NOT_FOUND`、G が無い・AL にある → `NO_TAX_COLUMN`、見出しの期待値が無い → `HEADER_EXPECTATION_MISSING`、雛形の親が 2 つ → `TEMPLATE_MISSING`、`apply` が `'true'`・`1` → 見るだけ。どれも書込 0。
+    - (g) 値を出さない：取引ログの行に置いた架空の店名・用途・取引先名と、ほかで出ない金額（例 `987654`）・顧客名・転記シートの名前が、報告（`Logger` の出力）と監査に出ない。
+    - (h) §9.5 の `opsSetTaxCategoryValidation` は今までどおり雛形だけに付ける（既存の gt 12 がそのまま通る）。
 
 画面の文（gt 10）は `kw26-ui-helpers.js` の `browserWorld` で `customerFixNoticeLines` を呼んで確かめる（既存の【科目コード】のテストと同じ作り）。
 
@@ -501,6 +586,17 @@ C（`spec_account_code.md` §9）と同じ所に G を足す。**条件は「G �
 - （1.2）R29：`getCriteriaValues()` の try を外す
 - （1.2）R30：「`allowInvalid` が読めない行があれば `true`」を外す
 - （1.2）R31：壊れた規則の `key` を壊れていない規則と同じ形にする
+- （1.3）R32：§9.6 で取引ログの顧客 ID を見ない（ほかの顧客の転記シートにも付ける）
+- （1.3）R33：§9.6 で `active`・状態を見ない（無効・取消の取引だけが指す転記シートにも付ける）
+- （1.3）R34：§9.6 で雛形を指す取引を対象から外さない
+- （1.3）R35：§9.6 で名前の確かめを外す
+- （1.3）R36：§9.6 で親フォルダーの確かめを外す
+- （1.3）R37：§9.6 で見出しの確かめを外す
+- （1.3）R38：§9.6 で監査の前に規則を付ける
+- （1.3）R39：§9.6 で `ALREADY_SET` でも書く
+- （1.3）R40：§9.6 で監査・読み返しの失敗の後も次の転記シートへ進む
+- （1.3）R41：§9.6 で時間の予算を見ない
+- （1.3）R42：§9.6 で `apply` を真偽の `true` でなく真っぽい値で見る
 
 ## 15. 変えてよいファイル
 
@@ -515,6 +611,7 @@ C（`spec_account_code.md` §9）と同じ所に G を足す。**条件は「G �
 - `test/tax-category.test.js`（新規）・`test/gas-stubs.js`（入力規則のスタブなど。足すだけ）
 - 既存のテスト：§7 の期待値だけ
 - ほかのファイルを変えたくなったら止めて報告する。
+- （1.3）§9.6 で変えてよいのは `src/48_TaxCategory.gs`・`test/tax-category.test.js`（gt 18 を足す）・`test/gas-stubs.js`（足すだけ）の 3 つだけ。既存のテストは 1 件も直さない。
 
 ## 16. 実装の分け方（go-job。worktree で）
 
@@ -523,6 +620,7 @@ C（`spec_account_code.md` §9）と同じ所に G を足す。**条件は「G �
 3. 3 回目：確定（§6.2）と gt 6〜8、R14〜R16。
 4. 4 回目：運用関数（§9）と gt 12、R21〜R23。
 5. 監査（Opus 5.5 xhigh）→ 直し → 仕様書 1.1 → ff → main で全テスト → push は利用者に聞く。
+6. （1.3）5 回目：§9.6 と gt 18、R32〜R42。→ Claude が差分を読む → 監査（Opus 5.5 xhigh）→ 直し → 仕様書 1.4 → ff（利用者の許可）→ main で全テスト → push は利用者に聞く → §17.3。
 
 ## 17. 本番での手順と受入
 
@@ -540,6 +638,18 @@ C（`spec_account_code.md` §9）と同じ所に G を足す。**条件は「G �
 2. メルカリなどの行：1 万円未満は `課対仕入10%`、1 万円以上は `課対仕入（控70）10%`（2026-10-01 以降の利用日）。
 3. 取引先の要確認をフリマの取引先で確定 → G が変わる。
 4. freee 取込用 Excel を作る → freee のエクセルインポートで税区分のエラーが出ない（輸入の税区分を使う顧客は、先に freee で「課対輸本」を「使用」にする）。
+
+### 17.3 §9.6 の手順（1.3。Claude。push は利用者に聞いてから）
+
+1. push（`gas-push-N`。前後の pull で一致）。この関数は呼ばれるまで何もしない。
+2. TEST01 で `opsSetCopiesTaxCategoryValidation('TEST01')`（見るだけ）→ 利用者に見せる（転記シートの数・状態ごとの数・`SKIPPED` の理由・旧い名前の値の数と行番号）→ 許可 → `apply` → もう一度見るだけで全部 `ALREADY_SET`。`TIME_BUDGET` で止まったら `apply` をもう一度。
+3. 登録した顧客も 2 と同じ。
+4. 旧い名前の値（`otherValues`）が残る転記シートは、行番号を利用者に伝える（直すかは利用者）。
+
+### 17.4 §9.6 の受入（1.3。利用者）
+
+1. 今ある転記シートを開き、G のセルの選択肢が freee の 30 個（控80・控70 を含む）になっている。
+2. システムが書いた `課対仕入（控70）10%` などのセルに警告の印（赤い三角）が無い。旧い名前（`不課税` など）が残る行には印が出る（§17.3 の 4）。
 
 ---
 
