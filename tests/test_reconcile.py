@@ -1,5 +1,7 @@
 """reconcile（画像からの読みと文字からの読みの照合）のテスト。"""
 
+import pytest
+
 from src.models import ReceiptItem
 from src.processing.reconcile import (
     LABEL_AMOUNT,
@@ -154,6 +156,45 @@ class TestReconcile:
         assert reconcile([], [], "") == []
         # T が多い場合でも戻り値の長さは I の件数
         assert reconcile([], [_item("2025-04-02", 1200)], "") == []
+
+
+class TestReconcileKeys:
+    def test_zero_amount_is_not_matched_even_if_both_are_zero(self):
+        decisions = reconcile([_item("2025-04-02", 0)], [_item("2025-04-02", 0)], "")
+
+        assert decisions[0].matched is False
+        assert decisions[0].label == LABEL_AMOUNT
+        assert decisions[0].text_index is None
+
+    @pytest.mark.parametrize("amount", [-50, -500])
+    def test_negative_amount_is_not_matched(self, amount):
+        decisions = reconcile([_item("2025-04-02", amount)], [_item("2025-04-02", amount)], "")
+
+        assert decisions[0].matched is False
+        assert decisions[0].label == LABEL_AMOUNT
+
+    @pytest.mark.parametrize("date", ["2025-02-30", "R7.5.13", "不明"])
+    def test_unreadable_date_is_not_matched(self, date):
+        decisions = reconcile([_item(date, 1200)], [_item(date, 1200)], "合計 ¥1,200")
+
+        assert decisions[0].matched is False
+        assert decisions[0].label == LABEL_DATE
+        assert decisions[0].text_index is None
+
+    def test_unreadable_date_with_equal_amount_is_date_review(self):
+        decisions = reconcile(
+            [_item("2025-02-30", 1200)], [_item("2025-04-02", 1200)], "合計 ¥1,200"
+        )
+
+        assert decisions[0].matched is False
+        assert decisions[0].label == LABEL_DATE
+        assert decisions[0].text_index is None
+
+    def test_zero_amount_on_the_text_side_does_not_make_a_pair(self):
+        decisions = reconcile([_item("2025-04-02", 1200)], [_item("2025-04-02", 0)], "")
+
+        assert decisions[0].matched is False
+        assert decisions[0].label == LABEL_AMOUNT
 
 
 class TestReadingsText:

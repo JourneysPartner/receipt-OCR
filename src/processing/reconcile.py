@@ -4,6 +4,7 @@ API もファイルも触らない純粋な関数。本番の両読みの流れ�
 """
 
 from dataclasses import dataclass
+from datetime import date as date_type
 
 from src.compare.normalize import normalize_date
 from src.rules.amount_validation import validate_amount
@@ -12,6 +13,7 @@ LABEL_AMOUNT = "※金額要確認"
 LABEL_DATE = "※日付要確認"
 LABEL_COUNT = "※明細数要確認"
 LABEL_READ = "※読み取り要確認"
+LABEL_REREAD = "※再読取要確認"
 
 # readings_text で各側に出す明細の上限
 _MAX_READINGS = 10
@@ -28,16 +30,28 @@ class ItemDecision:
 
 
 def _amount_of(item) -> int | None:
-    """整数の金額だけを返す（bool とその他の型は金額なし）。"""
+    """1 以上の整数の金額だけを返す（bool・0 以下・その他の型は金額なし）。"""
     amount = getattr(item, "amount", None)
-    if isinstance(amount, bool) or not isinstance(amount, int):
+    if isinstance(amount, bool) or not isinstance(amount, int) or amount < 1:
         return None
     return amount
 
 
+def _date_of(item) -> str:
+    """YYYY-MM-DD の実在する日付だけを返す（読めない日付は空）。"""
+    text = normalize_date(getattr(item, "date", None))
+    if not text:
+        return ""
+    try:
+        date_type.fromisoformat(text)
+    except ValueError:
+        return ""
+    return text
+
+
 def _key(item) -> tuple[str, int] | None:
-    """照らす鍵 = (そろえた日付, 金額)。日付が空か金額が無ければ鍵なし。"""
-    date = normalize_date(getattr(item, "date", None))
+    """照らす鍵 = (そろえた日付, 金額)。日付が読めないか金額が無ければ鍵なし。"""
+    date = _date_of(item)
     amount = _amount_of(item)
     if not date or amount is None:
         return None

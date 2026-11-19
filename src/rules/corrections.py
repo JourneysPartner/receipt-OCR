@@ -130,7 +130,7 @@ CORRECTION_RULES: list[CorrectionRule] = [
     ),
     CorrectionRule(
         name="切手→10%",
-        patterns=[r"切手"],
+        patterns=[r"^(?!.*印紙).*(?<!小)切手"],
         tax_category="課税仕入10%",
     ),
 ]

@@ -717,6 +717,39 @@ def test_answer_header_mismatch_inside_a_to_p_still_returns_1():
     assert service.write_calls == []
 
 
+def test_duplicate_answer_header_in_q_does_not_hide_the_persons_answer():
+    service = FakeSheetsService()
+    row = [
+        "FILE_A1234567890",
+        "a.jpg",
+        "テスト用フォルダ",
+        "a.jpg",
+        "",
+        "2026-01-02",
+        "1600",
+        "10%",
+        "テスト商店",
+        "人が記入",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+    ]
+    service.add_tab("答え", columns=26, values=[ANSWER_HEADERS + ["正解_金額"], row])
+
+    code, service = _collect_into(service)
+
+    assert code == 0
+    assert service.tabs["答え"].values[1][6] == "1600"  # G 列の人の答え
+    assert service.tabs["答え"].values[1][16] == ""  # Q 列は読まない・書かない
+    assert _score_into(service) == 0
+    assert service.tabs["答え"].values[1][6] == "1600"
+    assert service.tabs["答え"].values[1][16] == ""
+
+
 # ── 「答え_複数」（Q5） ──────────────────────────────
 def test_multi_answer_tab_is_created_with_header_only():
     service = FakeSheetsService()

@@ -164,7 +164,8 @@ class AiConfig:
     request_timeout_seconds: int | None = None
     # 指示文の版（"v1" | "v2"）
     prompt_version: str = "v1"
-    # 読み取りの流れ（"text_first" | "dual"）。今回は設定に入れるだけで使わない
+    # 読み取りの流れ（"text_first" | "dual"）。dual では画像からと文字からの
+    # 両方を読み、合った明細だけを自動で書く
     flow: str = "text_first"
 
 

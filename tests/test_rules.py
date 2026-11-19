@@ -241,3 +241,27 @@ class TestReadQualityCorrections:
         r = self.c.apply(_item(description="収入印紙代", account="雑費"))
         assert r.account == "租税公課"
         assert r.tax_category == "対象外"
+
+    def test_kitte_with_inshi_is_not_ten_percent(self):
+        """切手と収入印紙を一緒に買った行には「切手→10%」を当てない。"""
+        r = self.c.apply(_item(description="切手・収入印紙", tax_category="対象外", account="雑費"))
+        assert r.tax_category == "対象外"
+        assert r.account == "租税公課"
+
+    def test_kogitte_is_not_ten_percent(self):
+        """「小切手」には「切手→10%」を当てない。"""
+        r = self.c.apply(_item(description="小切手帳", tax_category="非課税"))
+        assert r.tax_category == "非課税"
+
+    def test_kittedai_is_ten_percent(self):
+        r = self.c.apply(_item(description="切手代", tax_category="非課税"))
+        assert r.tax_category == "課税仕入10%"
+
+    def test_amount_then_kitte_is_ten_percent(self):
+        r = self.c.apply(_item(description="110円切手", tax_category="非課税"))
+        assert r.tax_category == "課税仕入10%"
+
+    def test_kittedai_with_inshi_in_vendor_is_not_ten_percent(self):
+        """摘要が切手代でも、店名に「印紙」があれば当てない。"""
+        r = self.c.apply(_item(description="切手代", vendor="印紙", tax_category="非課税"))
+        assert r.tax_category != "課税仕入10%"

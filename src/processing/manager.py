@@ -25,6 +25,7 @@ from src.models import (
 from src.ocr.base import OcrEngine
 from src.processing.reconcile import (
     LABEL_READ,
+    LABEL_REREAD,
     ItemDecision,
     readings_text,
     reconcile,
@@ -35,6 +36,15 @@ from src.sheets.client import CashbookClient, MasterSheetClient
 
 logger = setup_logger()
 JST = timezone(timedelta(hours=9))
+
+
+def _has_numbered_marks(file_id: str, processed_keys: set[str]) -> bool:
+    """このファイルの番号 0 以上の処理済みの印があるか（`:-1` は数えない）。"""
+    prefix = f"{file_id}:"
+    for key in processed_keys:
+        if key.startswith(prefix) and key[len(prefix) :].isdigit():
+            return True
+    return False
 
 
 class ProcessingManager:
@@ -644,6 +654,15 @@ class ProcessingManager:
         validations = [validate_amount(it.amount, ocr_text) for it in items]
         summary = readings_text(image_items, text_items)
 
+        # 未処理明細（番号は使う明細の並び順）
+        pending = [i for i in range(len(items)) if f"{file.file_id}:{i}" not in processed_keys]
+
+        # 読み直し: このファイルの番号 0 以上の印が 1 つでもあれば、
+        # まだ印の無い明細は合っていても自動にしない（二重の転記を避ける。監査 H1）
+        if _has_numbered_marks(file.file_id, processed_keys):
+            reread = ItemDecision(False, LABEL_REREAD, "前の回と明細の数か並びが変わった疑い", None)
+            decisions = [reread if i in pending else d for i, d in enumerate(decisions)]
+
         if self._config.dry_run:
             # validate / dry_run: 書き込みは一切せず、判定のみで結果を集計する。
             planned_success = 0
@@ -669,8 +688,7 @@ class ProcessingManager:
             )
             return result
 
-        # 未処理明細（番号は使う明細の並び順）
-        pending = [i for i in range(len(items)) if f"{file.file_id}:{i}" not in processed_keys]
+        # 未処理明細の数から、処理済みの数を残す
         result.skipped = len(items) - len(pending)
         if not pending:
             return result

@@ -198,6 +198,11 @@ def read_receipts(row: dict) -> list[dict] | None:
     """明細JSON を読む。読みとして使えない行・空・壊れている行は None。"""
     if not _usable_for_read(row):
         return None
+    return _parse_receipts(row)
+
+
+def _parse_receipts(row: dict) -> list[dict] | None:
+    """明細JSON をそのまま読む（行の結果は見ない）。空・壊れている行は None。"""
     raw = _text(row.get("明細JSON"))
     if not raw:
         return None
@@ -279,7 +284,8 @@ def _date_and_amount(
 
 
 def _auto_receipts(row: dict) -> list[dict] | None:
-    receipts = read_receipts(row)
+    """明細JSON の r が `自動` のもの（行の結果は見ない。監査 M3）。"""
+    receipts = _parse_receipts(row)
     if receipts is None:
         return None
     return [item for item in receipts if _text(item.get(RECEIPT_AUTO_KEY)) == AUTO]
@@ -326,7 +332,11 @@ def _auto_counts(
             continue
         auto = _auto_receipts(row)
         if auto is None:
-            manual += 1
+            # 明細JSON が空・壊れている行は自動の明細 0 件として数える
+            auto = []
+        if result == AUTO and len(auto) < len(expected):
+            # レシートが抜けたまま済みになる（監査 M4）
+            wrong += 1
             continue
         if not _assign_auto(auto, expected):
             wrong += 1

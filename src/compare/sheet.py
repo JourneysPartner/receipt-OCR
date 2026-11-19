@@ -31,6 +31,9 @@ ANSWER_HEADERS = [
     "更新",
 ]
 
+# 「答え」を読む範囲（P 列まで。Q 列より右は読まない。監査 M5）
+ANSWER_CELLS = "A:P"
+
 MULTI_ANSWER_TITLE = "答え_複数"
 MULTI_ANSWER_HEADERS = [
     "fileId",
@@ -326,8 +329,10 @@ class CompareSheetClient:
         )
         return result.get("values", [])
 
-    def read_dicts(self, title: str, *, formatted: bool = False) -> list[dict]:
-        values = self.read_values(title, formatted=formatted)
+    def read_dicts(
+        self, title: str, *, formatted: bool = False, cells: str | None = None
+    ) -> list[dict]:
+        values = self.read_values(title, cells, formatted=formatted)
         if not values:
             return []
         headers = [str(h) for h in values[0]]

@@ -34,6 +34,7 @@ from src.compare.pipeline import (
 )
 from src.compare.score import derive_methods, derive_models, estimate_cost, summary_rows
 from src.compare.sheet import (
+    ANSWER_CELLS,
     ANSWER_HEADERS,
     MULTI_ANSWER_HEADERS,
     MULTI_ANSWER_TITLE,
@@ -201,7 +202,9 @@ class CompareRunner:
             return 1
 
         result_rows = self._sheet.read_dicts(result_title)
-        answer_rows = attach_values(self._sheet.read_dicts(answer_title, formatted=True))
+        answer_rows = attach_values(
+            self._sheet.read_dicts(answer_title, formatted=True, cells=ANSWER_CELLS)
+        )
         plan = build_answer_plan(
             answer_title=answer_title,
             existing_rows=answer_rows,
@@ -211,7 +214,9 @@ class CompareRunner:
         )
         self._sheet.batch_update_cells(plan.updates)
         self._sheet.append_rows(answer_title, plan.append_rows, len(ANSWER_HEADERS))
-        answer_rows = attach_values(self._sheet.read_dicts(answer_title, formatted=True))
+        answer_rows = attach_values(
+            self._sheet.read_dicts(answer_title, formatted=True, cells=ANSWER_CELLS)
+        )
 
         # COMPARE_MODELS / COMPARE_METHODS を省いたときは、結果タブの列から並びを作る
         config = self._compare
@@ -388,7 +393,9 @@ class CompareRunner:
 
         answer_rows: list[dict] = []
         try:
-            answer_rows = attach_values(self._sheet.read_dicts(answer_title, formatted=True))
+            answer_rows = attach_values(
+                self._sheet.read_dicts(answer_title, formatted=True, cells=ANSWER_CELLS)
+            )
             plan = build_answer_plan(
                 answer_title=answer_title,
                 existing_rows=answer_rows,
@@ -405,7 +412,9 @@ class CompareRunner:
             )
             self._sheet.batch_update_cells(plan.updates)
             self._sheet.append_rows(answer_title, plan.append_rows, len(ANSWER_HEADERS))
-            answer_rows = attach_values(self._sheet.read_dicts(answer_title, formatted=True))
+            answer_rows = attach_values(
+                self._sheet.read_dicts(answer_title, formatted=True, cells=ANSWER_CELLS)
+            )
         except Exception as error:
             logger.error(
                 f"答えを書けません: {type(error).__name__}: {error}",

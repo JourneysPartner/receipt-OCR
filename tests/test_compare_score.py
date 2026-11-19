@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from src.compare.config import CompareConfig, CompareModel
 from src.compare.score import (
     estimate_cost,
@@ -60,8 +62,8 @@ def _row(
     receipts=None,
 ):
     if receipts is None:
-        auto = "自動" if result in ("成功", "自動") else "要確認"
-        receipts = [_receipt(date=date, amount=amount, tax=tax, vendor=vendor, auto=auto)]
+        # 本番の明細JSON は、自動で通った明細だけが入り、すべて r=自動
+        receipts = [_receipt(date=date, amount=amount, tax=tax, vendor=vendor, auto="自動")]
     return {
         "fileId": file_id,
         "型": model,
@@ -321,6 +323,58 @@ class TestDualMetrics:
         assert metric["正しく自動"] == 0
         assert metric["誤って自動"] == 1
         assert metric["要手入力"] == 0
+
+
+class TestAutoCounting:
+    def test_current_flow_partial_with_wrong_auto_is_wrong(self):
+        answers = [_answer("A", date="2026-01-02", amount="1600")]
+        rows = [_row("A", method="現行の流れ", result="一部要手入力", amount=999)]
+
+        metric = _find(metric_rows(_config(), rows, answers), method="現行の流れ")
+
+        assert metric["正しく自動"] == 0
+        assert metric["誤って自動"] == 1
+        assert metric["要手入力"] == 0
+
+    def test_current_flow_partial_with_matching_auto_is_manual(self):
+        answers = [_answer("A", date="2026-01-02", amount="1600")]
+        rows = [_row("A", method="現行の流れ", result="一部要手入力", amount=1600)]
+
+        metric = _find(metric_rows(_config(), rows, answers), method="現行の流れ")
+
+        assert metric["正しく自動"] == 0
+        assert metric["誤って自動"] == 0
+        assert metric["要手入力"] == 1
+
+    @pytest.mark.parametrize("method", ["両読み", "現行の流れ"])
+    def test_auto_with_fewer_items_than_the_answer_is_wrong(self, method):
+        # 答えは 2 枚、読みは 1 枚で合っている
+        rows = [_row("A", method=method, result="自動", receipts=[MULTI_RECEIPTS[0]])]
+
+        metric = _find(
+            metric_rows(_config(), rows, [], multi_rows=MULTI_ANSWERS[:2]), method=method
+        )
+
+        assert metric["正しく自動"] == 0
+        assert metric["誤って自動"] == 1
+        assert metric["要手入力"] == 0
+
+    def test_the_three_counts_do_not_exceed_the_files(self):
+        answers = [
+            _answer("A", date="2026-01-02", amount="1600"),
+            _answer("B", date="2026-01-02", amount="1600"),
+            _answer("C"),
+        ]
+        rows = [
+            _row("A", method="両読み", result="自動"),
+            _row("B", method="両読み", result="一部要確認", amount=999),
+            _row("C", method="両読み", result="要確認"),
+        ]
+
+        metric = _find(metric_rows(_config(), rows, answers), method="両読み")
+
+        total = metric["正しく自動"] + metric["誤って自動"] + metric["要手入力"]
+        assert total <= 3
 
 
 class TestMultiSummary:

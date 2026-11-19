@@ -63,6 +63,7 @@ class FakeSheet:
         self.appended: list[tuple[str, list[list]]] = []
         self.batch_calls: list[list[dict]] = []
         self.replaced: list[str] = []
+        self.read_calls: list[tuple[str, str | None]] = []
 
     def get_sheet_titles(self):
         return list(self.tabs)
@@ -71,7 +72,8 @@ class FakeSheet:
         if title not in self.tabs:
             self.tabs[title] = [list(headers)]
 
-    def read_dicts(self, title, *, formatted=False):
+    def read_dicts(self, title, *, formatted=False, cells=None):
+        self.read_calls.append((title, cells))
         values = self.tabs.get(title, [])
         if not values:
             return []
@@ -970,3 +972,28 @@ class TestScoreStep:
         messages = " ".join(record.getMessage() for record in records)
         assert "COMPARE_RUN_LABEL を指定してください" in messages
         assert "結果_L1" in messages and "結果_L2" in messages
+
+
+class TestAnswerReadRange:
+    def test_answer_reads_in_collect_and_score_end_at_p(self):
+        file = _file("FILE_A1234567890", "a.jpg")
+        drive = FakeDrive({FOLDER: [file]}, {FOLDER: "テスト用フォルダ"})
+        sheet = FakeSheet()
+
+        code, _ = _collect(sheet, drive, [])
+        assert code == 0
+        collect_reads = [cells for title, cells in sheet.read_calls if title == "答え"]
+        assert collect_reads
+        assert all(cells == "A:P" for cells in collect_reads)
+
+        sheet.read_calls.clear()
+        code, _ = _collect(
+            sheet,
+            drive,
+            [],
+            env=_env(COMPARE_STEP="score", COMPARE_FOLDER_IDS=""),
+        )
+        assert code == 0
+        score_reads = [cells for title, cells in sheet.read_calls if title == "答え"]
+        assert score_reads
+        assert all(cells == "A:P" for cells in score_reads)
