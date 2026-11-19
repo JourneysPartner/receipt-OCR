@@ -1,5 +1,7 @@
 """集計（仕様 §10）のテスト"""
 
+import json
+
 from src.compare.config import CompareConfig, CompareModel
 from src.compare.score import (
     estimate_cost,
@@ -32,6 +34,14 @@ def _answer(file_id, date="", amount="", tax="", vendor="", state=""):
     }
 
 
+def _items_json(receipts):
+    return json.dumps(receipts, ensure_ascii=False, separators=(",", ":"))
+
+
+def _receipt(date="2026-01-02", amount=1600, tax="10%", vendor="テスト商店", auto="自動"):
+    return {"d": date, "a": amount, "t": tax, "v": vendor, "s": "", "c": "", "r": auto}
+
+
 def _row(
     file_id,
     method="文字から",
@@ -47,7 +57,11 @@ def _row(
     output_tokens=100,
     thinking=0,
     model="gemini-test",
+    receipts=None,
 ):
+    if receipts is None:
+        auto = "自動" if result in ("成功", "自動") else "要確認"
+        receipts = [_receipt(date=date, amount=amount, tax=tax, vendor=vendor, auto=auto)]
     return {
         "fileId": file_id,
         "型": model,
@@ -63,6 +77,7 @@ def _row(
         "入力トークン": input_tokens,
         "出力トークン": output_tokens,
         "思考トークン": thinking,
+        "明細JSON": _items_json(receipts),
     }
 
 
@@ -191,6 +206,139 @@ class TestCost:
         assert metric["1本あたりUSD"] == "単価未設定"
 
 
+def _multi(file_id, number, date="", amount="", tax="", vendor=""):
+    return {
+        "fileId": file_id,
+        "ファイル名": f"{file_id}.jpg",
+        "番号": number,
+        "正解_日付": date,
+        "正解_金額": amount,
+        "正解_税率": tax,
+        "正解_店名": vendor,
+        "メモ": "",
+    }
+
+
+MULTI_ANSWERS = [
+    _multi("A", 1, "2026-01-02", "1600", "10%", "テスト商店"),
+    _multi("A", 2, "2026-01-03", "800", "8%", "テスト商店"),
+    _multi("A", 3, "2026-01-04", "1200", "10%", "テスト商店"),
+]
+MULTI_RECEIPTS = [
+    _receipt(date="2026-01-02", amount=1600, tax="10%"),
+    _receipt(date="2026-01-03", amount=800, tax="8%"),
+    _receipt(date="2026-01-04", amount=1200, tax="10%"),
+]
+
+
+class TestMultiReceipts:
+    def test_three_receipts_all_match(self):
+        rows = [_row("A", date="2026-01-02・2026-01-03・2026-01-04", receipts=MULTI_RECEIPTS)]
+        metric = _find(metric_rows(_config(), rows, [], multi_rows=MULTI_ANSWERS))
+        assert metric["日付"] == "1/1 (100.0%)"
+        assert metric["金額"] == "1/1 (100.0%)"
+        assert metric["日付と金額"] == "1/1 (100.0%)"
+
+    def test_one_receipt_read_is_wrong(self):
+        rows = [_row("A", receipts=[MULTI_RECEIPTS[0]])]
+        metric = _find(metric_rows(_config(), rows, [], multi_rows=MULTI_ANSWERS))
+        assert metric["日付"] == "0/1 (0.0%)"
+        assert metric["金額"] == "0/1 (0.0%)"
+
+    def test_count_difference_is_wrong(self):
+        rows = [_row("A", receipts=MULTI_RECEIPTS[:2])]
+        metric = _find(metric_rows(_config(), rows, [], multi_rows=MULTI_ANSWERS))
+        assert metric["金額"] == "0/1 (0.0%)"
+
+    def test_order_difference_still_matches(self):
+        rows = [_row("A", receipts=list(reversed(MULTI_RECEIPTS)))]
+        metric = _find(metric_rows(_config(), rows, [], multi_rows=MULTI_ANSWERS))
+        assert metric["日付"] == "1/1 (100.0%)"
+        assert metric["金額"] == "1/1 (100.0%)"
+
+    def test_file_without_multi_rows_uses_the_answer_row(self):
+        answers = [_answer("B", date="2026-01-02", amount="1600", tax="10%", vendor="テスト商店")]
+        rows = [_row("B")]
+        metric = _find(metric_rows(_config(), rows, answers, multi_rows=MULTI_ANSWERS))
+        assert metric["日付"] == "1/1 (100.0%)"
+        assert metric["金額"] == "1/1 (100.0%)"
+
+
+class TestDualMetrics:
+    def test_correct_auto(self):
+        rows = [
+            _row(
+                "A",
+                method="両読み",
+                result="自動",
+                receipts=MULTI_RECEIPTS,
+            )
+        ]
+        metric = _find(metric_rows(_config(), rows, [], multi_rows=MULTI_ANSWERS), method="両読み")
+        assert metric["正しく自動"] == 1
+        assert metric["誤って自動"] == 0
+        assert metric["要手入力"] == 0
+
+    def test_wrong_auto_when_a_read_receipt_matches_no_answer(self):
+        receipts = [
+            _receipt(date="2026-01-02", amount=1600),
+            _receipt(date="2026-01-03", amount=800),
+            _receipt(date="2026-01-05", amount=999),
+        ]
+        rows = [_row("A", method="両読み", result="一部要確認", receipts=receipts)]
+        metric = _find(metric_rows(_config(), rows, [], multi_rows=MULTI_ANSWERS), method="両読み")
+        assert metric["正しく自動"] == 0
+        assert metric["誤って自動"] == 1
+        assert metric["要手入力"] == 0
+
+    def test_partial_with_matching_auto_is_manual(self):
+        rows = [
+            _row(
+                "A",
+                method="両読み",
+                result="一部要確認",
+                receipts=[_receipt(date="2026-01-02", amount=1600)],
+            )
+        ]
+        metric = _find(metric_rows(_config(), rows, [], multi_rows=MULTI_ANSWERS), method="両読み")
+        assert metric["正しく自動"] == 0
+        assert metric["誤って自動"] == 0
+        assert metric["要手入力"] == 1
+
+    def test_dual_does_not_have_model_read_columns(self):
+        rows = [_row("A", method="両読み", result="自動")]
+        metric = _find(metric_rows(_config(), rows, []), method="両読み")
+        assert metric["失敗"] == ""
+        assert metric["MAX_TOKENS"] == ""
+        assert metric["金額照合NG"] == ""
+
+    def test_current_flow_uses_the_same_counting(self):
+        rows = [_row("A", method="現行の流れ", result="自動", amount=999)]
+        metric = _find(
+            metric_rows(_config(), rows, [_answer("A", "2026-01-02", "1600")]),
+            method="現行の流れ",
+        )
+        assert metric["正しく自動"] == 0
+        assert metric["誤って自動"] == 1
+        assert metric["要手入力"] == 0
+
+
+class TestMultiSummary:
+    def test_dual_row_and_multi_file_row_are_present(self):
+        rows = [_row("A", method="両読み", result="自動", receipts=MULTI_RECEIPTS)]
+        summary = summary_rows(
+            config=_config(),
+            result_rows=rows,
+            answer_rows=[],
+            label="L1",
+            now_text="2026-11-18 12:00:00",
+            multi_rows=MULTI_ANSWERS,
+        )
+        assert summary[5] == ["複数レシートのファイル", 1]
+        methods = [row[1] for row in summary[8:]]
+        assert methods == ["文字から", "画像から", "現行の流れ", "両読み"]
+
+
 def test_format_ratio():
     assert format_ratio(0, 0) == "-"
     assert format_ratio(1, 3) == "1/3 (33.3%)"
@@ -219,9 +367,10 @@ class TestSummary:
         assert summary[1] == ["集計時刻", "2026-11-18 12:00:00"]
         assert summary[3][1] == "日付 1・金額 1・税率 0・店名 0（全 2 本）"
         assert summary[4] == ["要確認のファイル", 1]
-        assert summary[5] == [""]
-        assert summary[6] == SUMMARY_HEADERS
-        methods = [row[1] for row in summary[7:]]
-        assert methods == ["文字から", "画像から", "現行の流れ", "使えない型"]
+        assert summary[5] == ["複数レシートのファイル", 0]
+        assert summary[6] == [""]
+        assert summary[7] == SUMMARY_HEADERS
+        methods = [row[1] for row in summary[8:]]
+        assert methods == ["文字から", "画像から", "現行の流れ", "両読み", "使えない型"]
         assert summary[-1][0] == "gemini-gone"
         assert summary[-1][1] == "使えない型"

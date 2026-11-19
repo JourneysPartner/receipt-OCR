@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 from src.compare.runner import run_compare
 from src.compare.sheet import (
     ANSWER_HEADERS,
+    MULTI_ANSWER_HEADERS,
+    MULTI_ANSWER_TITLE,
     RESULT_HEADERS,
     CompareSheetClient,
     HeaderMismatchError,
@@ -321,7 +323,7 @@ class FakeSheetsService:
             tab = self._tab(title)
             self._check_columns(tab, max(end_col or 0, start_col))
             self._write(tab, start_col, start_row, item["values"])
-        self.write_calls.append(("values.batchUpdate", ""))
+            self.write_calls.append(("values.batchUpdate", item["range"]))
         return {}
 
 
@@ -524,14 +526,14 @@ def _score_into(service, *, label="L1"):
     )
 
 
-def test_collect_finishes_with_new_tabs_of_28_columns():
+def test_collect_finishes_with_new_tabs_of_29_columns():
     service = FakeSheetsService()
     code, service = _collect_into(service)
     assert code == 0
     result_tab = service.tabs["結果_L1"]
-    assert result_tab.columns == 28
+    assert result_tab.columns == 29
     assert result_tab.values[0] == RESULT_HEADERS
-    assert len(result_tab.values) == 1 + 3  # 1 ファイル × (文字・画像・現行)
+    assert len(result_tab.values) == 1 + 4  # 1 ファイル × (文字・画像・現行・両読み)
     assert "集計_L1" in service.tabs
 
 
@@ -542,8 +544,8 @@ def test_collect_finishes_with_existing_26_column_tabs():
     code, service = _collect_into(service)
     assert code == 0
     result_tab = service.tabs["結果_L1"]
-    assert result_tab.columns == 28
-    assert len(result_tab.values) == 1 + 3
+    assert result_tab.columns == 29
+    assert len(result_tab.values) == 1 + 4
     assert ("appendDimension", "結果_L1") in service.write_calls
 
 
@@ -567,7 +569,7 @@ def test_existing_tab_is_expanded_before_reading_the_header():
     service.add_tab("結果_L1", columns=26, values=[RESULT_HEADERS])
     client = CompareSheetClient("R" * 24, service=service, sleep=lambda seconds: None)
     client.ensure_tab("結果_L1", RESULT_HEADERS)
-    assert service.tabs["結果_L1"].columns == 28
+    assert service.tabs["結果_L1"].columns == 29
     assert ("appendDimension", "結果_L1") in service.write_calls
     assert not any(name == "update" for name, _ in service.write_calls)
 
@@ -649,3 +651,136 @@ def test_header_mismatch_raises_from_ensure_tab():
         pass
     else:  # pragma: no cover - 見出しが違えば必ず上げる
         raise AssertionError("HeaderMismatchError should be raised")
+
+
+# ── Q5: 「答え」の P 列より右（Q5） ────────────────────────
+_LAST_ANSWER_COLUMN = len(ANSWER_HEADERS) - 1  # P
+
+
+def _last_column(range_text: str) -> int:
+    cells = range_text.split("!", 1)[1]
+    match = re.match(r"[A-Z]+", cells.split(":")[-1])
+    assert match, range_text
+    return _column_index(match.group(0))
+
+
+def _answer_writes(service):
+    return [
+        (name, range_text)
+        for name, range_text in service.write_calls
+        if name in ("update", "append", "clear", "values.batchUpdate")
+        and range_text.startswith("'答え'!")
+    ]
+
+
+def test_answer_column_with_q_and_beyond_is_allowed_and_untouched():
+    service = FakeSheetsService()
+    extra = ["自由記入", "残す値"]
+    service.add_tab("答え", columns=26, values=[ANSWER_HEADERS + extra])
+    code, service = _collect_into(service)
+    assert code == 0
+    answer = service.tabs["答え"]
+    assert answer.values[0][len(ANSWER_HEADERS) :] == extra
+    assert _answer_writes(service)
+    assert all(
+        _last_column(range_text) <= _LAST_ANSWER_COLUMN for _, range_text in _answer_writes(service)
+    )
+    assert not any(name == "clear" for name, _ in _answer_writes(service))
+
+
+def test_score_keeps_q_and_beyond_of_the_answer_tab():
+    service = FakeSheetsService()
+    code, service = _collect_into(service)
+    assert code == 0
+    extra = ["自由記入", "残す値"]
+    answer = service.tabs["答え"]
+    answer.values[0].extend(extra)
+    answer.values[1].extend(["Qの値", "Rの値"])
+
+    assert _score_into(service) == 0
+    assert service.tabs["答え"].values[0][len(ANSWER_HEADERS) :] == extra
+    assert service.tabs["答え"].values[1][len(ANSWER_HEADERS) :] == ["Qの値", "Rの値"]
+    assert all(
+        _last_column(range_text) <= _LAST_ANSWER_COLUMN for _, range_text in _answer_writes(service)
+    )
+
+
+def test_answer_header_mismatch_inside_a_to_p_still_returns_1():
+    service = FakeSheetsService()
+    service.add_tab(
+        "答え",
+        columns=30,
+        values=[ANSWER_HEADERS[:5] + ["別の列"] + ANSWER_HEADERS[5:] + ["自由記入"]],
+    )
+    code, service = _collect_into(service)
+    assert code == 1
+    assert service.write_calls == []
+
+
+# ── 「答え_複数」（Q5） ──────────────────────────────
+def test_multi_answer_tab_is_created_with_header_only():
+    service = FakeSheetsService()
+    code, service = _collect_into(service)
+    assert code == 0
+    assert service.tabs[MULTI_ANSWER_TITLE].values == [MULTI_ANSWER_HEADERS]
+
+
+def test_existing_multi_answer_rows_are_not_touched():
+    service = FakeSheetsService()
+    row = ["FILE_A1234567890", "a.jpg", 1, "2026-01-02", "1600", "10%", "テスト商店", ""]
+    service.add_tab(MULTI_ANSWER_TITLE, columns=26, values=[MULTI_ANSWER_HEADERS, row])
+    code, service = _collect_into(service)
+    assert code == 0
+    assert service.tabs[MULTI_ANSWER_TITLE].values == [MULTI_ANSWER_HEADERS, row]
+    assert not [
+        (name, range_text)
+        for name, range_text in service.write_calls
+        if range_text.startswith(f"'{MULTI_ANSWER_TITLE}'!")
+    ]
+
+
+def test_multi_answer_header_mismatch_returns_1_without_writes():
+    service = FakeSheetsService()
+    service.add_tab(MULTI_ANSWER_TITLE, columns=26, values=[["fileId", "別の列"]])
+    code, service = _collect_into(service)
+    assert code == 1
+    assert service.write_calls == []
+
+    service = FakeSheetsService()
+    service.add_tab("答え", columns=26, values=[ANSWER_HEADERS])
+    service.add_tab("結果_L1", columns=29, values=[RESULT_HEADERS])
+    service.add_tab(MULTI_ANSWER_TITLE, columns=26, values=[["fileId", "別の列"]])
+    assert _score_into(service) == 1
+    assert service.write_calls == []
+
+
+def test_score_does_not_touch_existing_multi_answer_rows():
+    service = FakeSheetsService()
+    code, service = _collect_into(service)
+    assert code == 0
+    row = ["FILE_A1234567890", "a.jpg", 1, "2026-01-02", "1600", "10%", "テスト商店", ""]
+    service.tabs[MULTI_ANSWER_TITLE].values.append(row)
+    before = [list(values) for values in service.tabs[MULTI_ANSWER_TITLE].values]
+    assert _score_into(service) == 0
+    assert service.tabs[MULTI_ANSWER_TITLE].values == before
+
+
+# ── 古い形の結果タブ（明細JSON が無い） ─────────────────
+def _old_format_service():
+    service = FakeSheetsService()
+    service.add_tab("答え", columns=26, values=[ANSWER_HEADERS])
+    service.add_tab("結果_L1", columns=29, values=[RESULT_HEADERS[:-1]])
+    return service
+
+
+def test_collect_with_old_format_result_tab_returns_1_without_writes():
+    service = _old_format_service()
+    code, service = _collect_into(service)
+    assert code == 1
+    assert service.write_calls == []
+
+
+def test_score_with_old_format_result_tab_returns_1_without_writes():
+    service = _old_format_service()
+    assert _score_into(service) == 1
+    assert service.write_calls == []

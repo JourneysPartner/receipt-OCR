@@ -20,11 +20,13 @@ from src.compare.config import (
 )
 from src.compare.pipeline import (
     METHOD_CURRENT,
+    METHOD_DUAL,
     METHOD_IMAGE,
     METHOD_TEXT,
     AttemptOutcome,
     CompareRow,
     build_current_flow_row,
+    build_dual_row,
     extract_once,
     extract_with_retries,
     make_result_row,
@@ -33,6 +35,8 @@ from src.compare.pipeline import (
 from src.compare.score import derive_methods, derive_models, estimate_cost, summary_rows
 from src.compare.sheet import (
     ANSWER_HEADERS,
+    MULTI_ANSWER_HEADERS,
+    MULTI_ANSWER_TITLE,
     OCR_HEADERS,
     RESULT_HEADERS,
     SUMMARY_HEADERS,
@@ -179,8 +183,21 @@ class CompareRunner:
         # 何かを書く前に 1 行目を読むだけで確かめる（列を足すと「メモ」を上書きしうる）
         if not self._verify_headers(
             titles,
-            [(answer_title, ANSWER_HEADERS), (result_title, RESULT_HEADERS)],
+            [
+                (answer_title, ANSWER_HEADERS, True),
+                (result_title, RESULT_HEADERS, False),
+                (MULTI_ANSWER_TITLE, MULTI_ANSWER_HEADERS, False),
+            ],
         ):
+            return 1
+
+        try:
+            self._sheet.ensure_tab(MULTI_ANSWER_TITLE, MULTI_ANSWER_HEADERS)
+        except HeaderMismatchError as error:
+            logger.error(
+                f"{error}。列を足したり並べ替えたりせずに直してください",
+                extra={"step": "compare_header_mismatch"},
+            )
             return 1
 
         result_rows = self._sheet.read_dicts(result_title)
@@ -203,6 +220,17 @@ class CompareRunner:
         if not config.methods_set:
             config = replace(config, methods=derive_methods(result_rows) or config.methods)
 
+        failed = False
+        multi_rows: list[dict] = []
+        try:
+            multi_rows = self._sheet.read_dicts(MULTI_ANSWER_TITLE, formatted=True)
+        except Exception as error:
+            logger.error(
+                f"答えを読めません: {type(error).__name__}: {error}",
+                extra={"step": "compare_finalize_error"},
+            )
+            failed = True
+
         summary_title = summary_tab_name(label)
         self._sheet.ensure_tab(summary_title, SUMMARY_HEADERS, check_headers=False)
         self._sheet.replace_all(
@@ -213,10 +241,11 @@ class CompareRunner:
                 answer_rows=answer_rows,
                 label=label,
                 now_text=self._now_text(),
+                multi_rows=multi_rows,
             ),
         )
         logger.info(f"比較の集計を更新: {label}", extra={"step": "compare_score"})
-        return 0
+        return 1 if failed else 0
 
     def _run_collect(self) -> int:
         label = self._compare.run_label
@@ -234,17 +263,19 @@ class CompareRunner:
         if not self._verify_headers(
             self._sheet.get_sheet_titles(),
             [
-                (answer_title, ANSWER_HEADERS),
-                (result_title, RESULT_HEADERS),
-                (ocr_title, OCR_HEADERS),
+                (answer_title, ANSWER_HEADERS, True),
+                (result_title, RESULT_HEADERS, False),
+                (ocr_title, OCR_HEADERS, False),
+                (MULTI_ANSWER_TITLE, MULTI_ANSWER_HEADERS, False),
             ],
         ):
             return 1
 
         try:
-            self._sheet.ensure_tab(answer_title, ANSWER_HEADERS)
+            self._sheet.ensure_tab(answer_title, ANSWER_HEADERS, prefix_only=True)
             self._sheet.ensure_tab(result_title, RESULT_HEADERS)
             self._sheet.ensure_tab(ocr_title, OCR_HEADERS)
+            self._sheet.ensure_tab(MULTI_ANSWER_TITLE, MULTI_ANSWER_HEADERS)
         except HeaderMismatchError as error:
             # 列が足されると「メモ」などを上書きしうるので、何も書かずに 1 で終わる
             logger.error(
@@ -383,6 +414,16 @@ class CompareRunner:
             answer_rows = []
             failed = True
 
+        multi_rows: list[dict] = []
+        try:
+            multi_rows = self._sheet.read_dicts(MULTI_ANSWER_TITLE, formatted=True)
+        except Exception as error:
+            logger.error(
+                f"答えを読めません: {type(error).__name__}: {error}",
+                extra={"step": "compare_finalize_error"},
+            )
+            failed = True
+
         try:
             self._sheet.ensure_tab(summary_title, SUMMARY_HEADERS, check_headers=False)
             self._sheet.replace_all(
@@ -394,6 +435,7 @@ class CompareRunner:
                     label=label,
                     now_text=self._now_text(),
                     unusable_models=self._unusable,
+                    multi_rows=multi_rows,
                 ),
             )
         except Exception as error:
@@ -419,17 +461,35 @@ class CompareRunner:
     def _verify_headers(self, titles: list[str], checks) -> bool:
         """既にあるタブの 1 行目を、書く前に読むだけで確かめる（S6）。
 
-        後ろの空のセルは同じとみなす。1 つでも違えばログを出して False。
+        checks の要素は (title, headers, prefix_only)。prefix_only なら先頭 len(headers)
+        個だけを比べる（それより右は見ない）。後ろの空のセルは同じとみなす。
+        1 つでも違えばログを出して False。
         """
         existing = set(titles)
         try:
-            for title, headers in checks:
+            for title, headers, prefix_only in checks:
                 if title not in existing:
                     continue
                 actual = self._sheet.read_header(title)
                 expected = [str(header) for header in headers]
-                if actual and actual != expected:
-                    raise HeaderMismatchError(title, headers, actual)
+                if not actual:
+                    continue
+                compared = actual[: len(expected)] if prefix_only else actual
+                if compared == expected:
+                    continue
+                if (
+                    not prefix_only
+                    and expected
+                    and expected[-1] == "明細JSON"
+                    and actual == expected[:-1]
+                ):
+                    logger.error(
+                        f"タブ '{title}' は古い形です。"
+                        "新しいラベルで collect からやり直してください",
+                        extra={"step": "compare_old_format"},
+                    )
+                    return False
+                raise HeaderMismatchError(title, headers, actual)
         except HeaderMismatchError as error:
             logger.error(
                 f"{error}。列を足したり並べ替えたりせずに直してください",
@@ -559,7 +619,10 @@ class CompareRunner:
                 ai_config = self._model_ai_config(model)
                 extractor = self._resources.extractor(model, ai_config)
                 settings = settings_text(
-                    ai_config.temperature, ai_config.thinking_level, ai_config.max_tokens
+                    ai_config.temperature,
+                    ai_config.thinking_level,
+                    ai_config.max_tokens,
+                    getattr(ai_config, "prompt_version", "v1"),
                 )
                 by_method: dict[str, CompareRow] = {}
                 model_rows: list[CompareRow] = []
@@ -619,6 +682,22 @@ class CompareRunner:
                             ocr_failed=ocr_failed,
                         )
                     )
+                    model_rows.append(
+                        build_dual_row(
+                            run_label=self._compare.run_label,
+                            recorded_at=recorded_at,
+                            file=file,
+                            folder_name=task.folder_name,
+                            model_label=model.label,
+                            model_name=model.name,
+                            text_row=by_method[METHOD_TEXT],
+                            image_row=by_method[METHOD_IMAGE],
+                            ocr_text=ocr.raw_text,
+                            ai_config=ai_config,
+                            settings=settings,
+                            ocr_failed=ocr_failed,
+                        )
+                    )
                 for row in model_rows:
                     if row.cost_usd is None:
                         row.cost_usd = estimate_cost(
@@ -651,11 +730,15 @@ class CompareRunner:
                 continue
             ai_config = self._model_ai_config(model)
             settings = settings_text(
-                ai_config.temperature, ai_config.thinking_level, ai_config.max_tokens
+                ai_config.temperature,
+                ai_config.thinking_level,
+                ai_config.max_tokens,
+                getattr(ai_config, "prompt_version", "v1"),
             )
             methods = list(self._compare.methods)
             if METHOD_TEXT in methods and METHOD_IMAGE in methods:
                 methods.append(METHOD_CURRENT)
+                methods.append(METHOD_DUAL)
             for method in methods:
                 rows.append(
                     CompareRow(

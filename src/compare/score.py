@@ -1,5 +1,6 @@
 """集計（仕様 §10）。"""
 
+import json
 from collections.abc import Iterable
 
 from src.compare.config import CompareConfig, CompareModel
@@ -8,6 +9,8 @@ from src.compare.normalize import (
     FIELD_DATE,
     FIELD_TAX,
     FIELD_VENDOR,
+    normalize_date,
+    parse_amount_cell,
     value_matches_answer,
 )
 from src.compare.sheet import SUMMARY_HEADERS
@@ -15,9 +18,24 @@ from src.compare.sheet import SUMMARY_HEADERS
 METHOD_TEXT_LABEL = "文字から"
 METHOD_IMAGE_LABEL = "画像から"
 METHOD_CURRENT_LABEL = "現行の流れ"
-METHOD_LABELS = (METHOD_TEXT_LABEL, METHOD_IMAGE_LABEL, METHOD_CURRENT_LABEL)
+METHOD_DUAL_LABEL = "両読み"
+METHOD_LABELS = (
+    METHOD_TEXT_LABEL,
+    METHOD_IMAGE_LABEL,
+    METHOD_CURRENT_LABEL,
+    METHOD_DUAL_LABEL,
+)
 SUCCESS = "成功"
 AUTO = "自動"
+
+# 明細JSON の欄名（設計 §7.3）
+RECEIPT_KEYS = {
+    FIELD_DATE: "d",
+    FIELD_AMOUNT: "a",
+    FIELD_TAX: "t",
+    FIELD_VENDOR: "v",
+}
+RECEIPT_AUTO_KEY = "r"
 
 RESULT_COLUMNS = {
     FIELD_DATE: "日付",
@@ -110,67 +128,213 @@ def bottom_rows(result_rows: list[dict]) -> list[dict]:
     return list(latest.values())
 
 
-def _answer(answer_by_file: dict[str, dict], file_id: str, field: str) -> str:
-    return _text((answer_by_file.get(file_id) or {}).get(ANSWER_COLUMNS[field]))
+def _answer_receipt(answer: dict | None) -> dict:
+    if answer is None:
+        return {}
+    return {
+        field: _text(answer.get(ANSWER_COLUMNS[field]))
+        for field in (FIELD_DATE, FIELD_AMOUNT, FIELD_TAX, FIELD_VENDOR)
+    }
 
 
-def _correct(row: dict, field: str, answer: str) -> bool:
-    result = _text(row.get("結果"))
-    if result not in (SUCCESS, AUTO):
-        return False
-    return value_matches_answer(field, row.get(RESULT_COLUMNS[field]), answer)
+def _receipt_value(receipt: dict, field: str):
+    """答え（日本語の欄名）と読み（明細JSON の短い鍵）のどちらからも値を取る。"""
+    if field in receipt:
+        return receipt.get(field)
+    return receipt.get(RECEIPT_KEYS[field])
 
 
-def _accuracy(rows: list[dict], answer_by_file: dict[str, dict], field: str) -> tuple[int, int]:
-    numerator = 0
-    denominator = 0
-    for row in rows:
-        answer = _answer(answer_by_file, _text(row.get("fileId")), field)
-        if not answer:
-            continue
-        denominator += 1
-        if _correct(row, field, answer):
-            numerator += 1
-    return numerator, denominator
-
-
-def _date_and_amount(rows: list[dict], answer_by_file: dict[str, dict]) -> tuple[int, int]:
-    numerator = 0
-    denominator = 0
-    for row in rows:
+def multi_by_file(multi_rows: list[dict] | None) -> dict[str, list[dict]]:
+    """「答え_複数」の行を fileId ごとにまとめる。"""
+    grouped: dict[str, list[dict]] = {}
+    for row in multi_rows or []:
         file_id = _text(row.get("fileId"))
-        date_answer = _answer(answer_by_file, file_id, FIELD_DATE)
-        amount_answer = _answer(answer_by_file, file_id, FIELD_AMOUNT)
-        if not date_answer or not amount_answer:
+        if file_id:
+            grouped.setdefault(file_id, []).append(row)
+    return grouped
+
+
+def expected_receipts(
+    file_id: str,
+    answer_by_file: dict[str, dict],
+    multi: dict[str, list[dict]],
+) -> list[dict]:
+    """このファイルの答え（レシートの並び）。無ければ []。"""
+    rows = multi.get(file_id) or []
+    if rows:
+        numbers = [_int_or_none(row.get("番号")) for row in rows]
+        if all(number is not None for number in numbers):
+            order = sorted(range(len(rows)), key=lambda index: numbers[index])
+        else:
+            order = list(range(len(rows)))
+        return [
+            {
+                FIELD_DATE: _text(rows[index].get("正解_日付")),
+                FIELD_AMOUNT: _text(rows[index].get("正解_金額")),
+                FIELD_TAX: _text(rows[index].get("正解_税率")),
+                FIELD_VENDOR: _text(rows[index].get("正解_店名")),
+            }
+            for index in order
+        ]
+    answer = answer_by_file.get(file_id)
+    if answer is None:
+        return []
+    return [_answer_receipt(answer)]
+
+
+def _usable_for_read(row: dict) -> bool:
+    method = _text(row.get("方式"))
+    result = _text(row.get("結果"))
+    if method in (METHOD_TEXT_LABEL, METHOD_IMAGE_LABEL):
+        return result == SUCCESS
+    if method == METHOD_CURRENT_LABEL:
+        return result == AUTO
+    if method == METHOD_DUAL_LABEL:
+        return True
+    return False
+
+
+def read_receipts(row: dict) -> list[dict] | None:
+    """明細JSON を読む。読みとして使えない行・空・壊れている行は None。"""
+    if not _usable_for_read(row):
+        return None
+    raw = _text(row.get("明細JSON"))
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, list) or not data:
+        return None
+    if any(not isinstance(item, dict) for item in data):
+        return None
+    return list(data)
+
+
+def _sort_key(receipt: dict):
+    amount = parse_amount_cell(_receipt_value(receipt, FIELD_AMOUNT))
+    date = normalize_date(_receipt_value(receipt, FIELD_DATE))
+    if amount is None:
+        return (1, 0, date)
+    return (0, amount, date)
+
+
+def _sorted(receipts: list[dict]) -> list[dict]:
+    """金額（空は最後）→ 日付 の順。"""
+    return sorted(receipts, key=_sort_key)
+
+
+def _field_ok(row: dict, expected: list[dict], field: str) -> bool:
+    read = read_receipts(row)
+    if read is None or len(read) != len(expected):
+        return False
+    return all(
+        value_matches_answer(
+            field, _receipt_value(read_item, field), _receipt_value(expected_item, field)
+        )
+        for read_item, expected_item in zip(_sorted(read), _sorted(expected), strict=True)
+    )
+
+
+def _has_answer(expected: list[dict], fields) -> bool:
+    if not expected:
+        return False
+    return all(_text(_receipt_value(receipt, field)) for receipt in expected for field in fields)
+
+
+def _accuracy(
+    rows: list[dict],
+    answer_by_file: dict[str, dict],
+    multi: dict[str, list[dict]],
+    field: str,
+) -> tuple[int, int]:
+    numerator = 0
+    denominator = 0
+    for row in rows:
+        expected = expected_receipts(_text(row.get("fileId")), answer_by_file, multi)
+        if not _has_answer(expected, (field,)):
             continue
         denominator += 1
-        if _correct(row, FIELD_DATE, date_answer) and _correct(row, FIELD_AMOUNT, amount_answer):
+        if _field_ok(row, expected, field):
             numerator += 1
     return numerator, denominator
 
 
-def _auto_counts(rows: list[dict], answer_by_file: dict[str, dict]) -> tuple[int, int, int]:
+def _date_and_amount(
+    rows: list[dict],
+    answer_by_file: dict[str, dict],
+    multi: dict[str, list[dict]],
+) -> tuple[int, int]:
+    numerator = 0
+    denominator = 0
+    for row in rows:
+        expected = expected_receipts(_text(row.get("fileId")), answer_by_file, multi)
+        if not _has_answer(expected, (FIELD_DATE, FIELD_AMOUNT)):
+            continue
+        denominator += 1
+        if _field_ok(row, expected, FIELD_DATE) and _field_ok(row, expected, FIELD_AMOUNT):
+            numerator += 1
+    return numerator, denominator
+
+
+def _auto_receipts(row: dict) -> list[dict] | None:
+    receipts = read_receipts(row)
+    if receipts is None:
+        return None
+    return [item for item in receipts if _text(item.get(RECEIPT_AUTO_KEY)) == AUTO]
+
+
+def _assign_auto(auto: list[dict], expected: list[dict]) -> bool:
+    """自動の明細を、答えのまだ使っていないレシートに 1 対 1 で当てる。"""
+    used: set[int] = set()
+    for item in auto:
+        for index, expected_item in enumerate(expected):
+            if index in used:
+                continue
+            if value_matches_answer(
+                FIELD_DATE,
+                _receipt_value(item, FIELD_DATE),
+                _receipt_value(expected_item, FIELD_DATE),
+            ) and value_matches_answer(
+                FIELD_AMOUNT,
+                _receipt_value(item, FIELD_AMOUNT),
+                _receipt_value(expected_item, FIELD_AMOUNT),
+            ):
+                used.add(index)
+                break
+        else:
+            return False
+    return True
+
+
+def _auto_counts(
+    rows: list[dict],
+    answer_by_file: dict[str, dict],
+    multi: dict[str, list[dict]],
+) -> tuple[int, int, int]:
     correct = 0
     wrong = 0
     manual = 0
     for row in rows:
+        expected = expected_receipts(_text(row.get("fileId")), answer_by_file, multi)
         result = _text(row.get("結果"))
-        if result in ("要手入力", "一部要手入力"):
+        if not _has_answer(expected, (FIELD_DATE, FIELD_AMOUNT)):
+            # 日付か金額の答えが欠けたファイルは、自動以外を要手入力に数える
+            if result != AUTO:
+                manual += 1
+            continue
+        auto = _auto_receipts(row)
+        if auto is None:
             manual += 1
             continue
-        if result != AUTO:
+        if not _assign_auto(auto, expected):
+            wrong += 1
             continue
-        file_id = _text(row.get("fileId"))
-        date_answer = _answer(answer_by_file, file_id, FIELD_DATE)
-        amount_answer = _answer(answer_by_file, file_id, FIELD_AMOUNT)
-        if not date_answer or not amount_answer:
-            continue
-        if value_matches_answer(FIELD_DATE, row.get("日付"), date_answer) and value_matches_answer(
-            FIELD_AMOUNT, row.get("合計金額"), amount_answer
-        ):
+        if result == AUTO and len(auto) == len(expected):
             correct += 1
         else:
-            wrong += 1
+            manual += 1
     return correct, wrong, manual
 
 
@@ -180,15 +344,16 @@ def _metric(
     method: str,
     rows: list[dict],
     answer_by_file: dict[str, dict],
+    multi: dict[str, list[dict]],
     prices: dict[str, tuple[float, float]],
 ) -> dict:
     files = {_text(row.get("fileId")) for row in rows}
-    date_n, date_m = _accuracy(rows, answer_by_file, FIELD_DATE)
-    amount_n, amount_m = _accuracy(rows, answer_by_file, FIELD_AMOUNT)
-    tax_n, tax_m = _accuracy(rows, answer_by_file, FIELD_TAX)
-    vendor_n, vendor_m = _accuracy(rows, answer_by_file, FIELD_VENDOR)
-    both_n, both_m = _date_and_amount(rows, answer_by_file)
-    auto_ok, auto_bad, manual = _auto_counts(rows, answer_by_file)
+    date_n, date_m = _accuracy(rows, answer_by_file, multi, FIELD_DATE)
+    amount_n, amount_m = _accuracy(rows, answer_by_file, multi, FIELD_AMOUNT)
+    tax_n, tax_m = _accuracy(rows, answer_by_file, multi, FIELD_TAX)
+    vendor_n, vendor_m = _accuracy(rows, answer_by_file, multi, FIELD_VENDOR)
+    both_n, both_m = _date_and_amount(rows, answer_by_file, multi)
+    auto_ok, auto_bad, manual = _auto_counts(rows, answer_by_file, multi)
 
     latencies = [
         value for value in (_int_or_none(row.get("応答ms")) for row in rows) if value is not None
@@ -222,7 +387,7 @@ def _metric(
     cost_sum = None if not has_price or any(cost is None for cost in costs) else sum(costs)
     cost_per_file = cost_sum / len(files) if cost_sum is not None and files else cost_sum
 
-    is_current = method == METHOD_CURRENT_LABEL
+    is_auto = method in (METHOD_CURRENT_LABEL, METHOD_DUAL_LABEL)
     is_model_read = method in (METHOD_TEXT_LABEL, METHOD_IMAGE_LABEL)
     return {
         "型": label,
@@ -236,9 +401,9 @@ def _metric(
         "税率": format_ratio(tax_n, tax_m),
         "店名": format_ratio(vendor_n, vendor_m),
         "日付と金額": format_ratio(both_n, both_m),
-        "正しく自動": auto_ok if is_current else "",
-        "誤って自動": auto_bad if is_current else "",
-        "要手入力": manual if is_current else "",
+        "正しく自動": auto_ok if is_auto else "",
+        "誤って自動": auto_bad if is_auto else "",
+        "要手入力": manual if is_auto else "",
         "平均応答ms": int(sum(latencies) / len(latencies)) if latencies else "",
         "最大応答ms": max(latencies) if latencies else "",
         "入力トークン": input_tokens,
@@ -271,9 +436,11 @@ def metric_rows(
     result_rows: list[dict],
     answer_rows: list[dict],
     unusable_models: list[str] | None = None,
+    multi_rows: list[dict] | None = None,
 ) -> list[dict]:
     latest = bottom_rows(result_rows)
     answer_by_file = {_text(row.get("fileId")): row for row in answer_rows}
+    multi = multi_by_file(multi_rows)
 
     methods: list[str] = []
     if "text" in config.methods:
@@ -282,6 +449,7 @@ def metric_rows(
         methods.append(METHOD_IMAGE_LABEL)
     if len(methods) == 2:
         methods.append(METHOD_CURRENT_LABEL)
+        methods.append(METHOD_DUAL_LABEL)
 
     metrics: list[dict] = []
     for model in config.models:
@@ -300,6 +468,7 @@ def metric_rows(
                     method=method,
                     rows=rows,
                     answer_by_file=answer_by_file,
+                    multi=multi,
                     prices=config.prices,
                 )
             )
@@ -314,9 +483,11 @@ def summary_rows(
     label: str,
     now_text: str,
     unusable_models: list[str] | None = None,
+    multi_rows: list[dict] | None = None,
 ) -> list[list]:
     file_ids = {_text(row.get("fileId")) for row in result_rows if _text(row.get("fileId"))}
     answers_by_file = {_text(row.get("fileId")): row for row in answer_rows}
+    multi = multi_by_file(multi_rows)
     counts = {
         field: sum(
             1
@@ -345,9 +516,12 @@ def summary_rows(
             ),
         ],
         ["要確認のファイル", needs_review],
+        ["複数レシートのファイル", sum(1 for file_id in file_ids if file_id in multi)],
         [""],
         list(SUMMARY_HEADERS),
     ]
-    for metric in metric_rows(config, result_rows, answer_rows, unusable_models):
+    for metric in metric_rows(
+        config, result_rows, answer_rows, unusable_models, multi_rows=multi_rows
+    ):
         rows.append([metric.get(column, "") for column in SUMMARY_HEADERS])
     return rows

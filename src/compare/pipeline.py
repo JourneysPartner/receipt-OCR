@@ -5,14 +5,23 @@
 表の行と現行の流れに組み立てる。
 """
 
+import json
 import time
 from dataclasses import dataclass, field
 
 from src.compare.config import METHOD_LABELS
-from src.compare.normalize import extract_amount, extract_date, extract_tax, extract_vendor
+from src.compare.normalize import (
+    extract_amount,
+    extract_date,
+    extract_tax,
+    extract_vendor,
+    normalize_date,
+    normalize_tax,
+)
 from src.config import AiConfig
 from src.models import CorrectedItem, OcrResult, ReceiptItem
 from src.processing.manager import ProcessingManager
+from src.processing.reconcile import ItemDecision, reconcile
 from src.rules.amount_validation import validate_amount
 from src.rules.corrections import RuleCorrector
 
@@ -36,6 +45,11 @@ RETRYABLE_CODES = (429, 500, 502, 503, 504)
 METHOD_TEXT = "text"
 METHOD_IMAGE = "image"
 METHOD_CURRENT = "current"
+METHOD_DUAL = "dual"
+
+# 明細JSON の上限（これを超えたら空にして「エラー詳細」に理由を残す）
+MAX_ITEMS_JSON = 40000
+ITEMS_JSON_TOO_LONG = "明細JSONが長すぎる"
 
 
 @dataclass
@@ -79,6 +93,7 @@ class CompareRow:
     settings: str = ""
     error_detail: str = ""
     raw_text: str = ""
+    items_json: str = ""
     items: list = field(default_factory=list, repr=False)
 
     @property
@@ -115,13 +130,65 @@ class CompareRow:
             self.settings,
             self.error_detail,
             self.raw_text,
+            self.items_json,
         ]
 
 
-def settings_text(temperature: float | None, thinking_level: str | None, max_tokens: int) -> str:
+def settings_text(
+    temperature: float | None,
+    thinking_level: str | None,
+    max_tokens: int,
+    prompt_version: str = "v1",
+) -> str:
     temperature_text = "none" if temperature is None else f"{temperature:g}"
     thinking_text = thinking_level or "なし"
-    return f"temperature={temperature_text}, thinking={thinking_text}, max_tokens={max_tokens}"
+    text = f"temperature={temperature_text}, thinking={thinking_text}, max_tokens={max_tokens}"
+    if prompt_version and prompt_version != "v1":
+        text += f", prompt={prompt_version}"
+    return text
+
+
+def _json_amount(value) -> int | None:
+    """明細JSON の金額（整数だけ。bool とその他の型は null）。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _matched(decision) -> bool:
+    """ItemDecision（または真偽値）が「自動で書いてよい」か。"""
+    return bool(getattr(decision, "matched", decision))
+
+
+def items_json(items, decisions=None) -> str:
+    """明細を 1 つの JSON 文字列にする（設計 §7.3）。明細なし・4 万字超えは空。"""
+    if not items:
+        return ""
+    data: list[dict] = []
+    for index, item in enumerate(items):
+        entry = {
+            "d": normalize_date(getattr(item, "date", None)),
+            "a": _json_amount(getattr(item, "amount", None)),
+            "t": "・".join(normalize_tax(getattr(item, "tax_category", None))),
+            "v": str(getattr(item, "vendor", "") or ""),
+            "s": str(getattr(item, "description", "") or ""),
+            "c": str(getattr(item, "account", "") or ""),
+        }
+        if decisions is not None:
+            decision = decisions[index] if index < len(decisions) else None
+            entry["r"] = "自動" if _matched(decision) else "要確認"
+        data.append(entry)
+    text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    if len(text) > MAX_ITEMS_JSON:
+        return ""
+    return text
+
+
+def _error_detail(base: str, too_long: bool) -> str:
+    text = str(base or "")[:300]
+    if not too_long:
+        return text
+    return (text + " " + ITEMS_JSON_TOO_LONG).strip()
 
 
 def is_retryable(outcome: AttemptOutcome) -> bool:
@@ -252,6 +319,7 @@ def make_result_row(
     else:
         result = f"失敗:{outcome.error or 'unknown'}"
     error_text = info.get("error")
+    items_json_text = items_json(items)
     return CompareRow(
         run_label=run_label,
         recorded_at=recorded_at,
@@ -278,8 +346,9 @@ def make_result_row(
         output_tokens=info.get("output_tokens"),
         thinking_tokens=info.get("thinking_tokens"),
         settings=settings,
-        error_detail=str(error_text or "")[:300],
+        error_detail=_error_detail(error_text, bool(items) and not items_json_text),
         raw_text=str(info.get("raw_text") or "")[:2000],
+        items_json=items_json_text,
         items=list(items),
     )
 
@@ -418,5 +487,89 @@ def build_current_flow_row(
         output_tokens=_sum_optional([row.output_tokens for row in metadata_rows]),
         thinking_tokens=_sum_optional([row.thinking_tokens for row in metadata_rows]),
         settings=settings,
+        items_json=items_json(corrected, [ItemDecision(True, "", "", None) for _ in corrected]),
+        items=list(corrected),
+    )
+
+
+def build_dual_row(
+    *,
+    run_label: str,
+    recorded_at: str,
+    file,
+    folder_name: str,
+    model_label: str,
+    model_name: str,
+    text_row: CompareRow,
+    image_row: CompareRow,
+    ocr_text: str,
+    ai_config: AiConfig,
+    settings: str,
+    ocr_failed: bool = False,
+) -> CompareRow:
+    """両読み（設計 §7.3）。本番と同じ `reconcile` で決め、API は呼ばない。"""
+    image_items = list(image_row.items)
+    text_items = [] if ocr_failed else list(text_row.items)
+
+    if not image_items and not text_items:
+        result = "要確認"
+        decisions: list[ItemDecision] = []
+        items: list = []
+        amount_validation = "読みなし"
+    else:
+        if not image_items:
+            # 画像からの読みが無い（T だけがある）
+            items = text_items
+            decisions = [
+                ItemDecision(False, "※読み取り要確認", "画像からの読みが無い", None) for _ in items
+            ]
+        else:
+            items = image_items
+            decisions = reconcile(image_items, text_items, "" if ocr_failed else ocr_text)
+        matched = sum(1 for decision in decisions if decision.matched)
+        if matched == len(decisions):
+            result = "自動"
+        elif matched:
+            result = "一部要確認"
+        else:
+            result = "要確認"
+        amount_validation = "・".join(
+            "一致" if decision.matched else decision.label for decision in decisions
+        )
+
+    corrector = RuleCorrector(confidence_threshold=ai_config.confidence_threshold)
+    corrected: list[CorrectedItem] = [corrector.apply(item) for item in items]
+    presented = _present(corrected)
+    items_json_text = items_json(corrected, decisions)
+
+    metadata_rows = [image_row, text_row]
+    return CompareRow(
+        run_label=run_label,
+        recorded_at=recorded_at,
+        file_id=file.file_id,
+        folder_name=folder_name,
+        file_name=file.file_name,
+        model_label=model_label,
+        model_name=model_name,
+        method=METHOD_LABELS[METHOD_DUAL],
+        result=result,
+        finish_reason=image_row.finish_reason or text_row.finish_reason,
+        retries=sum(row.retries for row in metadata_rows),
+        count=len(items),
+        date=presented["date"],
+        amount=presented["amount"],
+        tax=presented["tax"],
+        vendor=presented["vendor"],
+        description=presented["description"],
+        accounts=presented["accounts"],
+        confidence=presented["confidence"],
+        amount_validation=amount_validation,
+        latency_ms=_sum_optional([row.latency_ms for row in metadata_rows]),
+        input_tokens=_sum_optional([row.input_tokens for row in metadata_rows]),
+        output_tokens=_sum_optional([row.output_tokens for row in metadata_rows]),
+        thinking_tokens=_sum_optional([row.thinking_tokens for row in metadata_rows]),
+        settings=settings,
+        error_detail=_error_detail("", bool(corrected) and not items_json_text),
+        items_json=items_json_text,
         items=list(corrected),
     )

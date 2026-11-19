@@ -31,6 +31,18 @@ ANSWER_HEADERS = [
     "更新",
 ]
 
+MULTI_ANSWER_TITLE = "答え_複数"
+MULTI_ANSWER_HEADERS = [
+    "fileId",
+    "ファイル名",
+    "番号",
+    "正解_日付",
+    "正解_金額",
+    "正解_税率",
+    "正解_店名",
+    "メモ",
+]
+
 RESULT_HEADERS = [
     "実行ラベル",
     "記録時刻",
@@ -60,6 +72,7 @@ RESULT_HEADERS = [
     "設定",
     "エラー詳細",
     "生の応答",
+    "明細JSON",
 ]
 
 OCR_HEADERS = [
@@ -226,19 +239,33 @@ class CompareSheetClient:
         )
         return needed
 
-    def ensure_tab(self, title: str, headers: list[str], *, check_headers: bool = True) -> None:
+    def ensure_tab(
+        self,
+        title: str,
+        headers: list[str],
+        *,
+        check_headers: bool = True,
+        prefix_only: bool = False,
+    ) -> None:
         properties = {str(p.get("title", "")): p for p in self.get_sheet_properties()}
         needed = max(len(headers), DEFAULT_COLUMN_COUNT)
         if title in properties:
             # 見出しより列が少なければ先に足してから読む（400 を避ける）
             total_columns = self._expand_columns(properties[title], len(headers))
-            header_last_col = _col_letter(max(total_columns, 1) - 1)
+            if prefix_only:
+                # 先頭 len(headers) 個だけを見る（それより右は読まない）
+                read_columns = min(max(total_columns, 1), len(headers))
+            else:
+                read_columns = max(total_columns, 1)
+            header_last_col = _col_letter(read_columns - 1)
             values = self.read_values(title, f"A1:{header_last_col}1")
             actual = _trim_trailing_empty(values[0]) if values else []
             if actual:
                 if not check_headers:
                     return
-                if actual != [str(header) for header in headers]:
+                expected = [str(header) for header in headers]
+                compared = actual[: len(expected)] if prefix_only else actual
+                if compared != expected:
                     raise HeaderMismatchError(title, headers, actual)
                 return
         else:

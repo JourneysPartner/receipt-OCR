@@ -1,10 +1,14 @@
 """現行の流れの組み立てとやり直し（仕様 §8・§5.5）のテスト"""
 
+import json
+
 from src.compare.pipeline import (
     AttemptOutcome,
     build_current_flow_row,
+    build_dual_row,
     extract_with_retries,
     is_retryable,
+    items_json,
     make_result_row,
     settings_text,
 )
@@ -325,3 +329,125 @@ def test_non_object_json_text_stays_api_error():
 def test_settings_text():
     assert settings_text(0.1, None, 2048) == "temperature=0.1, thinking=なし, max_tokens=2048"
     assert settings_text(None, "high", 4096) == "temperature=none, thinking=high, max_tokens=4096"
+
+
+def test_settings_text_prompt_version():
+    # v1 は今までと同じ文字列、v2 は末尾に版を足す
+    assert settings_text(0.1, None, 2048, "v1") == "temperature=0.1, thinking=なし, max_tokens=2048"
+    assert (
+        settings_text(0.1, None, 2048, "v2")
+        == "temperature=0.1, thinking=なし, max_tokens=2048, prompt=v2"
+    )
+
+
+class TestItemsJson:
+    def test_shape_and_null_amount(self):
+        items = [
+            ReceiptItem(
+                date="2026/1/2",
+                amount=1600,
+                vendor="テスト商店",
+                description="テスト品",
+                account="消耗品費",
+                tax_category="課税仕入10%",
+                confidence=0.9,
+            ),
+            ReceiptItem(date="2026-01-03", amount=None, vendor=None),
+        ]
+        assert items_json(items) == (
+            '[{"d":"2026-01-02","a":1600,"t":"10%","v":"テスト商店","s":"テスト品",'
+            '"c":"消耗品費"},{"d":"2026-01-03","a":null,"t":"","v":"","s":"","c":""}]'
+        )
+
+    def test_decisions_add_auto_or_review(self):
+        items = [_item(), _item(amount=2000)]
+        assert items_json(items, decisions=[True, False]) == (
+            '[{"d":"2026-01-02","a":1600,"t":"10%","v":"テスト商店","s":"テスト品",'
+            '"c":"消耗品費","r":"自動"},{"d":"2026-01-02","a":2000,"t":"10%",'
+            '"v":"テスト商店","s":"テスト品","c":"消耗品費","r":"要確認"}]'
+        )
+
+    def test_over_40000_chars_returns_empty(self):
+        items = [_item(amount=index + 1) for index in range(2000)]
+        assert items_json(items) == ""
+
+    def test_empty_items_is_empty_string(self):
+        assert items_json([]) == ""
+
+
+def _dual(text_items, image_items, *, ocr_text=OCR_TEXT, ocr_failed=False, ai_config=None):
+    return build_dual_row(
+        run_label="L1",
+        recorded_at="2026-11-18 12:00:00",
+        file=FILE,
+        folder_name="テスト用フォルダ",
+        model_label="gemini-test@low",
+        model_name="gemini-test",
+        text_row=_row("text", text_items),
+        image_row=_row("image", image_items, tokens=20),
+        ocr_text=ocr_text,
+        ai_config=ai_config or AiConfig(),
+        settings="temperature=0.1, thinking=low, max_tokens=2048",
+        ocr_failed=ocr_failed,
+    )
+
+
+class TestDualRow:
+    def test_all_matched_is_auto(self):
+        row = _dual([_item()], [_item()])
+        assert row.method == "両読み"
+        assert row.result == "自動"
+        assert row.amount == 1600
+        assert row.amount_validation == "一致"
+        # 応答ms・トークンは文字からと画像からの合計
+        assert row.input_tokens == 30
+        data = json.loads(row.items_json)
+        assert data[0]["r"] == "自動"
+
+    def test_some_matched_is_partial(self):
+        row = _dual([_item()], [_item(), _item(amount=2000)])
+        assert row.result == "一部要確認"
+        assert row.count == 2
+        assert row.amount_validation == "一致・※金額要確認"
+        data = json.loads(row.items_json)
+        assert [item["r"] for item in data] == ["自動", "要確認"]
+
+    def test_none_matched_is_review(self):
+        row = _dual([_item(amount=3000)], [_item(amount=2000)])
+        assert row.result == "要確認"
+        assert row.amount_validation == "※金額要確認"
+
+    def test_image_empty_uses_text_items(self):
+        row = _dual([_item()], [])
+        assert row.result == "要確認"
+        assert row.count == 1
+        assert row.amount == 1600
+        assert row.amount_validation == "※読み取り要確認"
+
+    def test_both_empty(self):
+        row = _dual([], [])
+        assert row.result == "要確認"
+        assert row.count == 0
+        assert row.amount_validation == "読みなし"
+        assert row.items_json == ""
+
+    def test_ocr_failed_uses_image_only(self):
+        row = _dual([], [_item()], ocr_text="", ocr_failed=True)
+        assert row.result == "要確認"
+        assert row.count == 1
+        assert row.amount_validation == "※読み取り要確認"
+
+    def test_correction_changes_table_values(self):
+        item = _item()
+        item.description = "駐車場代"
+        item.account = "雑費"
+        row = _dual([item], [item])
+        assert row.accounts == "旅費交通費"
+        data = json.loads(row.items_json)
+        assert data[0]["c"] == "旅費交通費"
+
+    def test_json_has_r_for_each_item(self):
+        row = _dual([_item()], [_item()])
+        assert json.loads(row.items_json)[0]["r"] == "自動"
+        row = _dual([], [_item(amount=2000)])
+        assert json.loads(row.items_json)[0]["r"] == "要確認"

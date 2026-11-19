@@ -27,7 +27,12 @@ _LABEL_DISALLOWED_RE = re.compile(r"[^A-Za-z0-9_-]")
 
 DEFAULT_MODELS = "gemini-2.5-flash,gemini-3.5-flash-lite,gemini-3.8-flash"
 DEFAULT_METHODS = ("text", "image")
-METHOD_LABELS = {"text": "文字から", "image": "画像から", "current": "現行の流れ"}
+METHOD_LABELS = {
+    "text": "文字から",
+    "image": "画像から",
+    "current": "現行の流れ",
+    "dual": "両読み",
+}
 
 # 2026-11-18 に公式の料金表で確認した既定単価（100 万トークンあたり USD）
 DEFAULT_PRICES: dict[str, tuple[float, float]] = {

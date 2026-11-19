@@ -1,5 +1,6 @@
 """比較モードの実行（S2/S3/S8・続きから・時間切れなど）のテスト"""
 
+import json
 import logging
 import re
 import threading
@@ -66,7 +67,7 @@ class FakeSheet:
     def get_sheet_titles(self):
         return list(self.tabs)
 
-    def ensure_tab(self, title, headers, *, check_headers=True):
+    def ensure_tab(self, title, headers, *, check_headers=True, prefix_only=False):
         if title not in self.tabs:
             self.tabs[title] = [list(headers)]
 
@@ -254,9 +255,14 @@ class TestCollect:
         assert code == 0
         result_rows = sheet.tabs["結果_L1"]
         assert result_rows[0] == RESULT_HEADERS
-        assert len(result_rows) == 1 + 2 * 3  # 2 型 × (文字・画像・現行)
+        assert len(result_rows) == 1 + 2 * 4  # 2 型 × (文字・画像・現行・両読み)
         assert {row[6] for row in result_rows[1:]} == {"m1", "m2"}
-        assert {row[7] for row in result_rows[1:]} == {"文字から", "画像から", "現行の流れ"}
+        assert {row[7] for row in result_rows[1:]} == {
+            "文字から",
+            "画像から",
+            "現行の流れ",
+            "両読み",
+        }
 
         ocr_rows = sheet.tabs["OCR_L1"]
         assert ocr_rows[0] == OCR_HEADERS
@@ -277,6 +283,33 @@ class TestCollect:
         assert all(KEY not in record.getMessage() for record in records)
         assert KEY not in str(sheet.tabs)
         assert all(KEY not in str(call) for call in sheet.batch_calls)
+
+    def test_one_file_writes_text_image_current_and_dual_rows(self):
+        file = _file("FILE_A1234567890", "a.jpg")
+        drive = FakeDrive({FOLDER: [file]}, {FOLDER: "テスト用フォルダ"})
+        sheet = FakeSheet()
+        code, _ = _collect(sheet, drive, [], env=_env(COMPARE_MODELS="m1"))
+        assert code == 0
+        result_rows = sheet.tabs["結果_L1"]
+        assert [row[7] for row in result_rows[1:]] == [
+            "文字から",
+            "画像から",
+            "現行の流れ",
+            "両読み",
+        ]
+        dual = result_rows[-1]
+        assert json.loads(dual[-1])[0]["r"] == "自動"
+
+    def test_prompt_version_is_written_in_settings(self):
+        file = _file("FILE_A1234567890", "a.jpg")
+        drive = FakeDrive({FOLDER: [file]}, {FOLDER: "テスト用フォルダ"})
+        sheet = FakeSheet()
+        config = replace(_app_config(), ai=AiConfig(prompt_version="v2"))
+        code, _ = _collect(sheet, drive, [], config=config, env=_env(COMPARE_MODELS="m1"))
+        assert code == 0
+        settings = [row[25] for row in sheet.tabs["結果_L1"][1:]]
+        assert settings
+        assert all(value.endswith(", prompt=v2") for value in settings)
 
     def test_result_row_has_estimated_cost(self):
         file = _file("FILE_A1234567890", "a.jpg")
@@ -429,8 +462,8 @@ class TestContinuationBottomRow:
         assert m2_rows and all(row[8] == "失敗:file_error" for row in m2_rows)
 
         summary = sheet.tabs["集計_L1"]
-        headers = summary[6]
-        m1_text = next(row for row in summary[7:] if row[0] == "m1" and row[1] == "文字から")
+        headers = summary[7]
+        m1_text = next(row for row in summary[8:] if row[0] == "m1" and row[1] == "文字から")
         assert m1_text[headers.index("失敗")] == 0
 
 
@@ -529,8 +562,8 @@ class TestScoreDerivesModels:
         )
         assert code == 0
         summary = sheet.tabs["集計_L1"]
-        assert any(row[0] == "gemini-3.8-flash@low" for row in summary[7:])
-        assert all(row[0] != "gemini-2.5-flash" for row in summary[7:])
+        assert any(row[0] == "gemini-3.8-flash@low" for row in summary[8:])
+        assert all(row[0] != "gemini-2.5-flash" for row in summary[8:])
 
 
 class TestTimeBudget:
