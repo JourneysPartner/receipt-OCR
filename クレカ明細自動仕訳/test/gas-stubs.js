@@ -475,11 +475,13 @@ class MemorySpreadsheet {
     this.ownerEmail = options.ownerEmail || null; this.activeSheet = null;
     this.appProperties = options.appProperties || null;
     this.createdTime = options.createdTime ? new Date(options.createdTime) : null;
+    this.trashed = options.trashed === true;
     this.counters = {rangeReads: 0, cellsRead: 0};
     for (const spec of options.sheets || []) this.insertSheet(spec.name, spec);
   }
   getId() { return this.id; }
   getName() { return this.name; }
+  isTrashed() { return this.trashed; }
   getUrl() { return `https://docs.google.com/spreadsheets/d/${this.id}`; }
   getOwner() {
     return this.ownerEmail === null ? null : {getEmail: () => this.ownerEmail};
@@ -662,6 +664,7 @@ function createGasStubs() {
       spreadsheet.name = String(name); return this;
     },
     getParents: () => iteratorFor(parentFolderHandles(spreadsheet.getId())),
+    isTrashed: () => spreadsheet.trashed === true,
     getMimeType: () => 'application/vnd.google-apps.spreadsheet',
     makeCopy(name, destinationFolder) {
       let copyName = name;

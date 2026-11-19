@@ -1330,6 +1330,7 @@ function taxOpsValidationReport_(range, firstRow) {
   var valueRows = 0;
   var brokenRows = 0;
   var other = [];
+  var otherRows = [];
   validations.forEach(function(row, index) {
     var validation = row && row[0] ? row[0] : null;
     var summary = taxOpsValidationSummary_(validation);
@@ -1350,6 +1351,7 @@ function taxOpsValidationReport_(range, firstRow) {
     var known = FREEE_TAX_CATEGORIES_.some(function(category) {
       return category.name === text;
     });
+    if (!known) otherRows.push(firstRow + index);
     if (!known && other.indexOf(text) < 0 && other.length < 10) other.push(text);
   });
   var allow = true;
@@ -1365,6 +1367,7 @@ function taxOpsValidationReport_(range, firstRow) {
     rows: validations.length,
     valueRows: valueRows,
     otherValues: other.slice(0, 10),
+    otherValueRows: otherRows.slice(0, 20),
     allowInvalid: allow,
     brokenRows: brokenRows
   };
@@ -1524,4 +1527,420 @@ function opsSetTaxCategoryValidation(customerId, apply) {
     report.applied = true;
     return report;
   }));
+}
+
+/**
+ * §9.6 `opsSetCopiesTaxCategoryValidation(customerId, apply, options)`
+ * （今ある転記シートの G の入力規則）。
+ *
+ * 対象は、その顧客の取引ログの有効な取引（`PREPARED`・`WRITING`・
+ * `COMMITTED`・`REVIEW_REQUIRED`）が指す転記シートだけ。雛形・ほかの顧客・
+ * 取引ログに無い転記シートには触らない。`apply === true` のときだけ、転記
+ * シートごとにロックを取り、確かめ直し → 監査 → 規則を 1 回で付ける →
+ * 読み返し、の順に書く。値は変えない。
+ *
+ * @param {*} customerId
+ * @param {boolean=} apply
+ * @param {{timeBudgetMs: (number|undefined)}=} options
+ * @return {!Object} 報告（`applied` を持つ）
+ */
+function opsSetCopiesTaxCategoryValidation(customerId, apply, options) {
+  var startedAt = Date.now();
+  loadSettingsFromProperties();
+  var actor = activeUserEmail_();
+  var budget = taxOpsCopyBudget_(options);
+  var report = {
+    applied: false,
+    stoppedBy: null,
+    customerId: accountTextValue_(customerId),
+    templateId: null,
+    column: null,
+    headerRow: null,
+    transactions: 0,
+    legacyTransactions: 0,
+    unreadableTransactions: 0,
+    copies: [],
+    counts: {alreadySet: 0, needsUpdate: 0, skipped: 0, applied: 0, notReached: 0},
+    auditIds: []
+  };
+  if (!report.customerId) {
+    report.stoppedBy = 'CUSTOMER_REQUIRED';
+    return taxOpsFinish_(report);
+  }
+  var customer = taxOpsCustomer_(report.customerId);
+  if (!customer) {
+    report.stoppedBy = 'CUSTOMER_NOT_FOUND';
+    return taxOpsFinish_(report);
+  }
+  report.templateId = String(customer.destinationSpreadsheetId || '');
+  report.headerRow = Number(customer.headerRow);
+  var column = Number(customer.columnMapping && customer.columnMapping.G);
+  var excluded = (customer.rowScanExcludedColumns || []).map(Number);
+  if (!Number.isInteger(column) || column < 1 || excluded.indexOf(column) >= 0) {
+    report.stoppedBy = 'NO_TAX_COLUMN';
+    return taxOpsFinish_(report);
+  }
+  report.column = column;
+  if (!Number.isInteger(report.headerRow) || report.headerRow < 1) {
+    report.stoppedBy = 'TEMPLATE_INVALID';
+    return taxOpsFinish_(report);
+  }
+  var rule = schemaHeaderRule_(customer);
+  if (!rule) {
+    report.stoppedBy = 'HEADER_EXPECTATION_MISSING';
+    return taxOpsFinish_(report);
+  }
+  var templateParentId = taxOpsCopyTemplateParent_(report.templateId);
+  if (templateParentId === null) {
+    report.stoppedBy = 'TEMPLATE_MISSING';
+    return taxOpsFinish_(report);
+  }
+  if (!taxOpsCopyTargets_(report, customer)) return taxOpsFinish_(report);
+
+  var names = FREEE_TAX_CATEGORIES_.map(function(category) { return category.name; });
+  report.copies.forEach(function(copy) {
+    taxOpsCopyCheck_(copy, customer, templateParentId, report.headerRow, column, names, rule);
+  });
+  taxOpsCopySort_(report.copies);
+
+  if (apply !== true) {
+    taxOpsCopyCounts_(report);
+    return taxOpsFinish_(report);
+  }
+
+  var pending = report.copies.filter(function(copy) {
+    return copy.status === 'NEEDS_UPDATE';
+  });
+  for (var index = 0; index < pending.length; index += 1) {
+    if (Date.now() - startedAt >= budget) {
+      report.stoppedBy = 'TIME_BUDGET';
+      taxOpsCopyRemaining_(pending, index);
+      break;
+    }
+    var entered = false;
+    var stop = null;
+    try {
+      stop = withScriptLock_(function() {
+        entered = true;
+        return taxOpsCopyApply_(pending[index], customer, templateParentId, report,
+          column, names, rule, actor);
+      });
+    } catch (error) {
+      if (entered) throw error;
+      report.stoppedBy = 'LOCK_UNAVAILABLE';
+      taxOpsCopyRemaining_(pending, index);
+      break;
+    }
+    if (stop) {
+      report.stoppedBy = stop;
+      taxOpsCopyRemaining_(pending, index + 1);
+      break;
+    }
+  }
+  taxOpsCopyCounts_(report);
+  return taxOpsFinish_(report);
+}
+
+/** `options.timeBudgetMs` の読み方（省略時 240000、数でなければ 240000、負なら 0）。 */
+function taxOpsCopyBudget_(options) {
+  var value = options && typeof options === 'object' ? options.timeBudgetMs : undefined;
+  if (typeof value !== 'number' || !isFinite(value)) return 240000;
+  if (value < 0) return 0;
+  return value;
+}
+
+/** Drive の一覧を配列にする（`getParents()` など）。 */
+function taxOpsCopyIterator_(iterator) {
+  var items = [];
+  while (iterator.hasNext()) items.push(iterator.next());
+  return items;
+}
+
+/** 雛形の親フォルダー 1 つ。読めない・0・2 以上は `null`。 */
+function taxOpsCopyTemplateParent_(templateId) {
+  if (!templateId) return null;
+  try {
+    var parents = taxOpsCopyIterator_(DriveApp.getFileById(templateId).getParents());
+    return parents.length === 1 ? String(parents[0].getId()) : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
+ * 取引ログから転記シートの組を作る（§9.6.2）。読めなければ
+ * `TRANSACTION_LOG_UNREADABLE` で `false`。
+ */
+function taxOpsCopyTargets_(report, customer) {
+  var records = [];
+  try {
+    var found = findRowsByColumnValues_(transactionLogSheet_(), 4, [report.customerId],
+      TRANSACTION_LOG_WIDTH_);
+    records = found[report.customerId] || [];
+  } catch (error) {
+    report.stoppedBy = 'TRANSACTION_LOG_UNREADABLE';
+    return false;
+  }
+  var statuses = [TX_STATUS.PREPARED, TX_STATUS.WRITING, TX_STATUS.COMMITTED,
+    TX_STATUS.REVIEW_REQUIRED];
+  var byKey = Object.create(null);
+  var order = [];
+  records.forEach(function(record) {
+    var tx = null;
+    try { tx = txLogFromRecord_(record); } catch (error) {
+      report.unreadableTransactions += 1;
+      return;
+    }
+    if (!tx || String(tx.customerId) !== report.customerId) return;
+    if (tx.active !== true || statuses.indexOf(tx.transactionStatus) < 0) return;
+    report.transactions += 1;
+    var destination = recordedDestinationOf_(tx, customer);
+    if (!destination || destination.spreadsheetId === report.templateId) {
+      report.legacyTransactions += 1;
+      return;
+    }
+    var key = destination.spreadsheetId + '\u0000' + destination.sheetName;
+    if (!byKey[key]) {
+      byKey[key] = {spreadsheetId: destination.spreadsheetId,
+        sheetName: destination.sheetName, transactionCount: 0};
+      order.push(key);
+    }
+    byKey[key].transactionCount += 1;
+  });
+  order.forEach(function(key) {
+    var group = byKey[key];
+    report.copies.push({
+      spreadsheetId: group.spreadsheetId,
+      stamp: null,
+      sheetName: group.sheetName,
+      transactionCount: group.transactionCount,
+      status: 'NEEDS_UPDATE',
+      problem: null,
+      firstRow: null,
+      lastRow: null,
+      rows: 0,
+      groups: [],
+      truncated: false,
+      valueRows: 0,
+      otherValues: [],
+      otherValueRows: [],
+      allowInvalid: null,
+      brokenRows: 0,
+      verified: false,
+      auditId: null
+    });
+  });
+  return true;
+}
+
+/** 組を触らない（§9.6.3）。 */
+function taxOpsCopySkip_(copy, problem) {
+  copy.status = 'SKIPPED';
+  copy.problem = problem;
+  copy.verified = false;
+  return null;
+}
+
+/**
+ * 組を 1 つ確かめる（§9.6.3）。見るだけでもロックの中でも同じ。
+ * 外れたら `SKIPPED` と理由にして `null`、通れば範囲と要約を返す。
+ */
+function taxOpsCopyCheck_(copy, customer, templateParentId, headerRow, column, names, rule) {
+  copy.status = 'NEEDS_UPDATE';
+  copy.problem = null;
+  copy.stamp = null;
+  copy.firstRow = null;
+  copy.lastRow = null;
+  copy.rows = 0;
+  copy.groups = [];
+  copy.truncated = false;
+  copy.valueRows = 0;
+  copy.otherValues = [];
+  copy.otherValueRows = [];
+  copy.allowInvalid = null;
+  copy.brokenRows = 0;
+  copy.verified = false;
+  var file = null;
+  try { file = DriveApp.getFileById(copy.spreadsheetId); } catch (error) {
+    return taxOpsCopySkip_(copy, 'OPEN_FAILED');
+  }
+  try {
+    if (file.isTrashed()) return taxOpsCopySkip_(copy, 'TRASHED');
+    var name = String(file.getName() || '');
+    var prefix = String(customer.customerName) + '_';
+    var stamp = name.slice(prefix.length);
+    if (name.indexOf(prefix) !== 0 || !/^\d{8}-\d{4}$/.test(stamp)) {
+      return taxOpsCopySkip_(copy, 'NAME_MISMATCH');
+    }
+    copy.stamp = stamp;
+    var parents = taxOpsCopyIterator_(file.getParents());
+    if (parents.length !== 1 || String(parents[0].getId()) !== templateParentId) {
+      return taxOpsCopySkip_(copy, 'PARENT_MISMATCH');
+    }
+    var spreadsheet = null;
+    try { spreadsheet = SpreadsheetApp.openById(copy.spreadsheetId); } catch (error) {
+      return taxOpsCopySkip_(copy, 'OPEN_FAILED');
+    }
+    var sheet = spreadsheet.getSheetByName(copy.sheetName);
+    if (!sheet) return taxOpsCopySkip_(copy, 'SHEET_MISSING');
+    var row = Number.isInteger(rule.row) ? rule.row : headerRow;
+    var width = 0;
+    rule.cells.forEach(function(cell) {
+      width = Math.max(width, Number(cell.column));
+    });
+    var header = sheet.getRange(row, 1, 1, Math.max(width, 1)).getValues()[0] || [];
+    var matches = rule.cells.every(function(cell) {
+      return schemaHeaderCellMatches_(header[Number(cell.column) - 1], cell);
+    });
+    if (!matches) return taxOpsCopySkip_(copy, 'HEADER_MISMATCH');
+    var lastRow = Number(sheet.getMaxRows());
+    var firstRow = headerRow + 1;
+    copy.firstRow = firstRow;
+    copy.lastRow = lastRow;
+    if (lastRow < firstRow) return taxOpsCopySkip_(copy, 'NO_ROWS');
+    var range = sheet.getRange(firstRow, column, lastRow - firstRow + 1, 1);
+    var summary = taxOpsValidationReport_(range, firstRow);
+    copy.groups = summary.groups;
+    copy.truncated = summary.truncated;
+    copy.rows = summary.rows;
+    copy.valueRows = summary.valueRows;
+    copy.otherValues = summary.otherValues;
+    copy.otherValueRows = summary.otherValueRows || [];
+    copy.allowInvalid = summary.allowInvalid;
+    copy.brokenRows = summary.brokenRows;
+    copy.status = taxOpsCopyAlreadySet_(summary, names, firstRow, lastRow) ?
+      'ALREADY_SET' : 'NEEDS_UPDATE';
+    return {range: range, summary: summary};
+  } catch (error) {
+    return taxOpsCopySkip_(copy, 'READ_FAILED');
+  }
+}
+
+/** もう 30 個の一覧が 1 組で付いているか（§9.6.3 の `ALREADY_SET`）。 */
+function taxOpsCopyAlreadySet_(summary, names, firstRow, lastRow) {
+  if (summary.groups.length !== 1) return false;
+  var group = summary.groups[0];
+  if (group.from !== firstRow || group.to !== lastRow) return false;
+  if (group.broken || group.type !== 'VALUE_IN_LIST') return false;
+  if (!Array.isArray(group.values) || group.values.length !== names.length) return false;
+  for (var index = 0; index < names.length; index += 1) {
+    if (group.values[index] !== names[index]) return false;
+  }
+  return typeof summary.allowInvalid === 'boolean';
+}
+
+/** 報告の並び（`stamp` の昇順、同じ・`null` なら ID の昇順。`null` は最後）。 */
+function taxOpsCopySort_(copies) {
+  copies.sort(function(a, b) {
+    var left = a.stamp;
+    var right = b.stamp;
+    if (left === null && right !== null) return 1;
+    if (right === null && left !== null) return -1;
+    if (left !== null && right !== null && left !== right) return left < right ? -1 : 1;
+    if (a.spreadsheetId === b.spreadsheetId) {
+      if (a.sheetName === b.sheetName) return 0;
+      return a.sheetName < b.sheetName ? -1 : 1;
+    }
+    return a.spreadsheetId < b.spreadsheetId ? -1 : 1;
+  });
+}
+
+/** 報告の件数（§9.6.4）。 */
+function taxOpsCopyCounts_(report) {
+  var counts = {alreadySet: 0, needsUpdate: 0, skipped: 0, applied: 0, notReached: 0};
+  report.copies.forEach(function(copy) {
+    if (copy.status === 'ALREADY_SET') counts.alreadySet += 1;
+    else if (copy.status === 'SKIPPED') counts.skipped += 1;
+    else if (copy.status === 'APPLIED') counts.applied += 1;
+    else if (copy.status === 'NOT_REACHED') counts.notReached += 1;
+    else counts.needsUpdate += 1;
+  });
+  report.counts = counts;
+  report.applied = counts.applied > 0 && report.stoppedBy === null;
+}
+
+/** まだ書いていない組を `NOT_REACHED` にする（§9.6.5）。 */
+function taxOpsCopyRemaining_(pending, from) {
+  for (var index = from; index < pending.length; index += 1) {
+    if (pending[index].status === 'NEEDS_UPDATE') pending[index].status = 'NOT_REACHED';
+  }
+}
+
+/**
+ * ロックの中の 1 組（§9.6.5 の 2）。確かめ直し → 監査 → 規則 → 読み返し。
+ * 続けるときは `null`、全体を止めるときは理由のコードを返す。
+ */
+function taxOpsCopyApply_(copy, customer, templateParentId, report, column, names, rule, actor) {
+  var checked = null;
+  try {
+    checked = taxOpsCopyCheck_(copy, customer, templateParentId, report.headerRow, column,
+      names, rule);
+  } catch (error) {
+    copy.problem = 'READ_FAILED';
+    return 'READ_FAILED';
+  }
+  if (!checked || copy.status !== 'NEEDS_UPDATE') return null;
+  var range = checked.range;
+  var values = null;
+  try { values = range.getValues(); } catch (error) {
+    copy.problem = 'READ_FAILED';
+    return 'READ_FAILED';
+  }
+  try {
+    copy.auditId = taxOpsAudit_({
+      type: 'SETTING',
+      actor: actor,
+      targetType: 'DESTINATION',
+      targetId: copy.spreadsheetId,
+      customerId: report.customerId,
+      before: {sheetName: copy.sheetName, firstRow: copy.firstRow, lastRow: copy.lastRow,
+        groups: copy.groups, truncated: copy.truncated, valueRows: copy.valueRows,
+        brokenRows: copy.brokenRows},
+      after: {column: columnLetter_(column), firstRow: copy.firstRow, lastRow: copy.lastRow,
+        allowInvalid: copy.allowInvalid, count: names.length},
+      reason: 'TAX_VALIDATION_COPY'
+    });
+    SpreadsheetApp.flush();
+  } catch (error) {
+    copy.problem = 'AUDIT_WRITE_FAILED';
+    return 'AUDIT_WRITE_FAILED';
+  }
+  try {
+    var validation = SpreadsheetApp.newDataValidation()
+      .requireValueInList(names, true)
+      .setAllowInvalid(copy.allowInvalid)
+      .build();
+    range.setDataValidation(validation);
+  } catch (error) {
+    copy.problem = 'WRITE_FAILED';
+    return 'WRITE_FAILED';
+  }
+  var expected = JSON.stringify(['VALUE_IN_LIST', names, copy.allowInvalid]);
+  var validations = null;
+  try { validations = range.getDataValidations(); } catch (error) {
+    copy.problem = 'WRITE_VERIFY_FAILED';
+    return 'WRITE_VERIFY_FAILED';
+  }
+  var ok = validations.length === copy.lastRow - copy.firstRow + 1 &&
+    validations.every(function(row) {
+      var summary = taxOpsValidationSummary_(row && row[0] ? row[0] : null);
+      return JSON.stringify([summary.type, summary.values, summary.allowInvalid]) === expected;
+    });
+  if (!ok) {
+    copy.problem = 'WRITE_VERIFY_FAILED';
+    return 'WRITE_VERIFY_FAILED';
+  }
+  var afterValues = null;
+  try { afterValues = range.getValues(); } catch (error) {
+    copy.problem = 'VALUES_CHANGED';
+    return 'VALUES_CHANGED';
+  }
+  if (JSON.stringify(afterValues) !== JSON.stringify(values)) {
+    copy.problem = 'VALUES_CHANGED';
+    return 'VALUES_CHANGED';
+  }
+  copy.status = 'APPLIED';
+  copy.verified = true;
+  report.auditIds.push(copy.auditId);
+  return null;
 }
