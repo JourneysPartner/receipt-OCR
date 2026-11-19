@@ -56,7 +56,7 @@ CORRECTION_RULES: list[CorrectionRule] = [
         name="収入印紙→租税公課",
         patterns=[r"収入印紙", r"印紙"],
         account="租税公課",
-        tax_category="対象外",
+        tax_category="非課税",
     ),
     CorrectionRule(
         name="タクシー→旅費交通費",

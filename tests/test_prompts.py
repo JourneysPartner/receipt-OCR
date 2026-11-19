@@ -169,6 +169,22 @@ class TestVersion2:
             "画像から直接読み取り、決まりに従って JSON 配列で返してください。"
         )
 
+    def test_exception_line_is_present(self):
+        text = prompts.system_instruction("v2")
+        lines = [line for line in text.splitlines() if line.startswith("- 例外: ")]
+        assert len(lines) == 1
+        line = lines[0]
+        for word in ("収入印紙代", "切手代", "非課税", "課税仕入10%"):
+            assert word in line
+        # 「並べる順は…」の行の前に置く（仕様 §4.1）
+        assert text.index(line) < text.index("- 並べる順は、ページの順")
+
+    def test_tax_category_rule_line(self):
+        assert (
+            "  - 収入印紙・役所の証明書の発行手数料は「非課税」。御祝・御香典は「対象外」。\n"
+            in prompts.system_instruction("v2")
+        )
+
 
 class TestUnknownVersion:
     def test_system_instruction(self):

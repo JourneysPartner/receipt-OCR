@@ -37,7 +37,7 @@ class TestRuleCorrector:
     def test_stamp(self):
         r = self.c.apply(_item(description="収入印紙"))
         assert r.account == "租税公課"
-        assert r.tax_category == "対象外"
+        assert r.tax_category == "非課税"
 
     def test_no_match(self):
         """どのルールにもマッチしなければ AI の account（雑費）のまま"""
@@ -102,10 +102,10 @@ class TestRuleCorrector:
         assert self.c.apply(_item(description="ガソリン")).account == "車両費"
         # 駐車場 → 旅費交通費 は健在
         assert self.c.apply(_item(description="駐車場")).account == "旅費交通費"
-        # 収入印紙 → 租税公課 / 対象外 も健在
+        # 収入印紙 → 租税公課 / 非課税 も健在
         r = self.c.apply(_item(description="収入印紙"))
         assert r.account == "租税公課"
-        assert r.tax_category == "対象外"
+        assert r.tax_category == "非課税"
 
     # ── 車関連 → 車両費 ──────────────────────────────
     def test_jyuryouzei_to_vehicle(self):
@@ -137,7 +137,7 @@ class TestRuleCorrector:
         """車関連文脈なしの印紙代 → 租税公課のまま（既存ルール維持）"""
         r = self.c.apply(_item(description="収入印紙", vendor="郵便局"))
         assert r.account == "租税公課"
-        assert r.tax_category == "対象外"
+        assert r.tax_category == "非課税"
 
     def test_inshi_at_konbini_stays_sozeikouka(self):
         """コンビニで買った印紙 → 租税公課のまま"""
@@ -240,12 +240,12 @@ class TestReadQualityCorrections:
     def test_shunyuinshidai_is_unchanged(self):
         r = self.c.apply(_item(description="収入印紙代", account="雑費"))
         assert r.account == "租税公課"
-        assert r.tax_category == "対象外"
+        assert r.tax_category == "非課税"
 
     def test_kitte_with_inshi_is_not_ten_percent(self):
         """切手と収入印紙を一緒に買った行には「切手→10%」を当てない。"""
         r = self.c.apply(_item(description="切手・収入印紙", tax_category="対象外", account="雑費"))
-        assert r.tax_category == "対象外"
+        assert r.tax_category == "非課税"
         assert r.account == "租税公課"
 
     def test_kogitte_is_not_ten_percent(self):
@@ -265,3 +265,36 @@ class TestReadQualityCorrections:
         """摘要が切手代でも、店名に「印紙」があれば当てない。"""
         r = self.c.apply(_item(description="切手代", vendor="印紙", tax_category="非課税"))
         assert r.tax_category != "課税仕入10%"
+
+
+class TestKitteAndInshi:
+    """2026-11-19 の利用者の決定: 切手は 10%、収入印紙は非課税。"""
+
+    def setup_method(self):
+        self.c = RuleCorrector(confidence_threshold=0.7)
+
+    def test_shunyuinshidai_is_sozeikouka_and_hikazei(self):
+        r = self.c.apply(
+            _item(description="収入印紙代", account="雑費", tax_category="課税仕入10%")
+        )
+        assert r.account == "租税公課"
+        assert r.tax_category == "非課税"
+
+    def test_kittedai_is_ten_percent_even_if_read_as_hikazei(self):
+        r = self.c.apply(_item(description="切手代", account="雑費", tax_category="非課税"))
+        assert r.tax_category == "課税仕入10%"
+        assert r.account == "通信費"
+
+    def test_kitte_and_inshi_in_one_line_uses_inshi_rule_only(self):
+        """分けて読めなかった「切手・収入印紙」の行には、切手の決まりを当てない。"""
+        r = self.c.apply(
+            _item(description="切手・収入印紙", account="雑費", tax_category="課税仕入10%")
+        )
+        assert r.account == "租税公課"
+        assert r.tax_category == "非課税"
+        assert not any(name.startswith("切手→10%") for name in r.corrections_applied)
+
+    def test_inshi_with_shaken_context_is_vehicle_expense(self):
+        r = self.c.apply(_item(description="車検 印紙代", account="雑費"))
+        assert r.account == "車両費"
+        assert "車検・自動車関連→車両費: 勘定科目→車両費" in r.corrections_applied
