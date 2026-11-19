@@ -125,6 +125,17 @@ def test_all_writes_are_raw():
     assert clears and clears[0]["range"].startswith("'集計_L1'")
 
 
+def test_read_dicts_with_cells_reads_only_the_given_range():
+    client = _client()
+    service = client._service
+
+    assert client.read_dicts("答え", formatted=True, cells="A:P") == []
+
+    gets = [kwargs for name, kwargs in service.calls if name == "get"]
+    assert gets and gets[0]["range"] == "'答え'!A:P"
+    assert gets[0]["valueRenderOption"] == "FORMATTED_VALUE"
+
+
 class _HttpError(Exception):
     def __init__(self, status):
         super().__init__(f"status {status}")
@@ -726,7 +737,7 @@ def test_duplicate_answer_header_in_q_does_not_hide_the_persons_answer():
         "a.jpg",
         "",
         "2026-01-02",
-        "1600",
+        "1500",
         "10%",
         "テスト商店",
         "人が記入",
@@ -743,10 +754,10 @@ def test_duplicate_answer_header_in_q_does_not_hide_the_persons_answer():
     code, service = _collect_into(service)
 
     assert code == 0
-    assert service.tabs["答え"].values[1][6] == "1600"  # G 列の人の答え
+    assert service.tabs["答え"].values[1][6] == "1500"  # G 列の人の答え
     assert service.tabs["答え"].values[1][16] == ""  # Q 列は読まない・書かない
     assert _score_into(service) == 0
-    assert service.tabs["答え"].values[1][6] == "1600"
+    assert service.tabs["答え"].values[1][6] == "1500"
     assert service.tabs["答え"].values[1][16] == ""
 
 

@@ -294,6 +294,19 @@ class TestKitteAndInshi:
         assert r.tax_category == "非課税"
         assert not any(name.startswith("切手→10%") for name in r.corrections_applied)
 
+    def test_kitte_and_inshi_with_newline_uses_inshi_rule_only(self):
+        """改行で「切手」と「収入印紙」が並ぶ行にも、切手の決まりを当てない。"""
+        r = self.c.apply(
+            _item(description="切手\n収入印紙", account="雑費", tax_category="課税仕入10%")
+        )
+        assert r.account == "租税公課"
+        assert r.tax_category == "非課税"
+        assert not any(name.startswith("切手→10%") for name in r.corrections_applied)
+
+    def test_kitte_after_newline_is_ten_percent(self):
+        r = self.c.apply(_item(description="郵便料\n切手", account="雑費", tax_category="非課税"))
+        assert r.tax_category == "課税仕入10%"
+
     def test_inshi_with_shaken_context_is_vehicle_expense(self):
         r = self.c.apply(_item(description="車検 印紙代", account="雑費"))
         assert r.account == "車両費"

@@ -164,6 +164,7 @@ class TestReconcileKeys:
 
         assert decisions[0].matched is False
         assert decisions[0].label == LABEL_AMOUNT
+        assert decisions[0].reason == "金額が 0 以下"
         assert decisions[0].text_index is None
 
     @pytest.mark.parametrize("amount", [-50, -500])
@@ -189,6 +190,33 @@ class TestReconcileKeys:
         assert decisions[0].matched is False
         assert decisions[0].label == LABEL_DATE
         assert decisions[0].text_index is None
+
+    def test_date_must_be_written_as_yyyy_mm_dd(self):
+        images = [_item("20250402", 1200)]
+        texts = [_item("20250402", 1200)]
+
+        decisions = reconcile(images, texts, "合計 ¥1,200")
+
+        assert decisions[0].matched is False
+        assert decisions[0].text_index is None
+
+    def test_week_date_is_not_matched(self):
+        images = [_item("2025-W14-3", 1200)]
+        texts = [_item("2025-W14-3", 1200)]
+
+        decisions = reconcile(images, texts, "合計 ¥1,200")
+
+        assert decisions[0].matched is False
+        assert decisions[0].text_index is None
+
+    def test_slash_and_iso_dates_still_match(self):
+        images = [_item("2025/4/2", 1200)]
+        texts = [_item("2025-04-02", 1200)]
+
+        decisions = reconcile(images, texts, "合計 ¥1,200")
+
+        assert decisions[0].matched is True
+        assert decisions[0].label == ""
 
     def test_zero_amount_on_the_text_side_does_not_make_a_pair(self):
         decisions = reconcile([_item("2025-04-02", 1200)], [_item("2025-04-02", 0)], "")
@@ -217,6 +245,16 @@ class TestReadingsText:
         images = [ReceiptItem(date=None, amount=None)]
 
         assert readings_text(images, []) == "画像=?/? ｜ 文字=なし"
+
+    def test_missing_amount_is_question_mark(self):
+        images = [ReceiptItem(date="2025-04-02", amount=None)]
+
+        assert readings_text(images, []) == "画像=2025-04-02/? ｜ 文字=なし"
+
+    def test_zero_and_negative_amounts_are_shown_as_is(self):
+        images = [_item("2025-04-02", 0), _item("2025-04-03", -500)]
+
+        assert readings_text(images, []) == "画像=2025-04-02/0, 2025-04-03/-500 ｜ 文字=なし"
 
     def test_more_than_ten_items(self):
         images = [_item("2025-04-02", i) for i in range(1, 13)]

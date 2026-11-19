@@ -29,22 +29,32 @@ class ItemDecision:
     text_index: int | None  # 組にした文字からの位置（無ければ None）
 
 
+def _integer_amount_of(item) -> int | None:
+    """整数の金額をそのまま返す（bool・その他の型は金額なし。0 以下も返す）。"""
+    amount = getattr(item, "amount", None)
+    if isinstance(amount, bool) or not isinstance(amount, int):
+        return None
+    return amount
+
+
 def _amount_of(item) -> int | None:
     """1 以上の整数の金額だけを返す（bool・0 以下・その他の型は金額なし）。"""
-    amount = getattr(item, "amount", None)
-    if isinstance(amount, bool) or not isinstance(amount, int) or amount < 1:
+    amount = _integer_amount_of(item)
+    if amount is None or amount < 1:
         return None
     return amount
 
 
 def _date_of(item) -> str:
-    """YYYY-MM-DD の実在する日付だけを返す（読めない日付は空）。"""
+    """YYYY-MM-DD の形そのものの実在する日付だけを返す（それ以外は空）。"""
     text = normalize_date(getattr(item, "date", None))
     if not text:
         return ""
     try:
-        date_type.fromisoformat(text)
+        parsed = date_type.fromisoformat(text)
     except ValueError:
+        return ""
+    if parsed.isoformat() != text:
         return ""
     return text
 
@@ -108,6 +118,10 @@ def reconcile(image_items, text_items, ocr_text: str) -> list[ItemDecision]:
     for index in range(total_image):
         if decisions[index] is not None:
             continue
+        raw_amount = _integer_amount_of(images[index])
+        if raw_amount is not None and raw_amount <= 0:
+            decisions[index] = ItemDecision(False, LABEL_AMOUNT, "金額が 0 以下", None)
+            continue
         amount = _amount_of(images[index])
         date_only = False
         if amount is not None:
@@ -128,7 +142,7 @@ def reconcile(image_items, text_items, ocr_text: str) -> list[ItemDecision]:
 
 def _reading(item) -> str:
     date = normalize_date(getattr(item, "date", None)) or "?"
-    amount = _amount_of(item)
+    amount = _integer_amount_of(item)
     return f"{date}/{amount if amount is not None else '?'}"
 
 
