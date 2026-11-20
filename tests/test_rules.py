@@ -178,7 +178,7 @@ class TestReadQualityCorrections:
             "収入印紙→租税公課",
             "タクシー→旅費交通費",
             "電車・バス→旅費交通費",
-            "宅配便→通信費",
+            "宅配便→荷造運賃",
             "文具→消耗品費",
             "弁当→会議費",
             "車検・自動車関連→車両費",
@@ -189,6 +189,7 @@ class TestReadQualityCorrections:
             "切手→10%",
             "車検の印紙→対象外",
             "梱包資材代→消耗品費",
+            "配送料→荷造運賃",
         ]
 
     def test_jurin(self):
@@ -306,8 +307,8 @@ class TestReadQualityCorrections:
         r = self.c.apply(_item(description="梱包資材代", vendor="", account="雑費"))
         assert r.account == "消耗品費"
 
-    def test_haisouryou_at_yamato_stays_tsushinhi(self):
-        """送料は今までどおり通信費（梱包資材の決まりは当たらない）。"""
+    def test_haisouryou_at_yamato_is_packing_freight(self):
+        """送料は荷造運賃（梱包資材の決まりは当たらない）。"""
         r = self.c.apply(
             _item(
                 description="配送料（化粧品）",
@@ -315,12 +316,13 @@ class TestReadQualityCorrections:
                 account="消耗品費",
             )
         )
-        assert r.account == "通信費"
+        assert r.account == "荷造運賃"
 
     def test_konpou_shizai_not_at_head_does_not_match(self):
         """摘要の先頭に無い「梱包資材代」には当たらない。"""
         r = self.c.apply(_item(description="宅急便 梱包資材代", vendor=""))
-        assert r.account == "通信費"
+        assert r.account == "荷造運賃"
+        assert r.account != "消耗品費"
 
     def test_konpou_shizai_does_not_change_tax_category(self):
         """梱包資材代の決まりは税区分を変えない。"""
@@ -334,6 +336,85 @@ class TestReadQualityCorrections:
         assert r.tax_category == "課税仕入10%"
         assert not any(
             name.startswith("梱包資材代→消耗品費: 税区分→") for name in r.corrections_applied
+        )
+
+    def test_haisouryou_at_post_office_is_packing_freight(self):
+        """郵便局の店名でも、摘要が配送料なら荷造運賃。"""
+        r = self.c.apply(
+            _item(description="配送料（書類）", vendor="架空町郵便局", account="通信費")
+        )
+        assert r.account == "荷造運賃"
+
+    def test_haisouryou_without_vendor_overrides_ai_zappi(self):
+        """店名が無くても、摘要が配送料なら荷造運賃。"""
+        r = self.c.apply(_item(description="配送料", vendor="", account="雑費"))
+        assert r.account == "荷造運賃"
+
+    def test_yuupack_at_post_office_is_packing_freight(self):
+        """郵便局の店名でも、摘要がゆうパックなら荷造運賃（第 1 版の摘要）。"""
+        r = self.c.apply(_item(description="ゆうパック", vendor="架空町郵便局", account="通信費"))
+        assert r.account == "荷造運賃"
+
+    def test_takkyuubin_unchin_at_yamato_is_packing_freight(self):
+        """ヤマトの店名と宅急便の摘要なら荷造運賃（第 1 版の摘要）。"""
+        r = self.c.apply(
+            _item(description="宅急便運賃", vendor="ヤマト 架空営業所", account="通信費")
+        )
+        assert r.account == "荷造運賃"
+
+    def test_sagawa_soiryou_is_packing_freight(self):
+        """佐川の摘要なら荷造運賃。"""
+        r = self.c.apply(_item(description="佐川 送料", account="雑費"))
+        assert r.account == "荷造運賃"
+
+    def test_letterpack_at_post_office_stays_tsushinhi(self):
+        """レターパックは今までどおり通信費。"""
+        r = self.c.apply(_item(description="レターパック代", vendor="架空町郵便局", account="雑費"))
+        assert r.account == "通信費"
+
+    def test_kittedai_at_post_office_stays_tsushinhi(self):
+        """切手代は今までどおり通信費・課税仕入10%。"""
+        r = self.c.apply(_item(description="切手代", vendor="架空町郵便局", account="雑費"))
+        assert r.account == "通信費"
+        assert r.tax_category == "課税仕入10%"
+
+    def test_yuubindai_at_post_office_stays_tsushinhi(self):
+        """郵便代は今までどおり通信費。"""
+        r = self.c.apply(
+            _item(description="郵便代（簡易書留）", vendor="架空町郵便局", account="雑費")
+        )
+        assert r.account == "通信費"
+
+    def test_konpou_shizai_at_post_office_without_yuupack_is_shoumouhinhi(self):
+        """郵便局で買った箱でも、摘要にゆうパックが無ければ消耗品費。"""
+        r = self.c.apply(
+            _item(description="梱包資材代（箱）", vendor="架空町郵便局", account="通信費")
+        )
+        assert r.account == "消耗品費"
+
+    def test_konpou_shizai_for_yuupack_at_post_office_is_shoumouhinhi(self):
+        """摘要にゆうパックがあっても、梱包資材の決まりが最後近くで勝つ。"""
+        r = self.c.apply(
+            _item(
+                description="梱包資材代（ゆうパック用の箱）",
+                vendor="架空町郵便局",
+                account="通信費",
+            )
+        )
+        assert r.account == "消耗品費"
+
+    def test_haisouryou_does_not_change_tax_category(self):
+        """配送料の決まりは税区分を変えない。"""
+        r = self.c.apply(
+            _item(
+                description="配送料（書類）",
+                vendor="架空町郵便局",
+                tax_category="課税仕入10%",
+            )
+        )
+        assert r.tax_category == "課税仕入10%"
+        assert not any(
+            name.startswith("配送料→荷造運賃: 税区分→") for name in r.corrections_applied
         )
 
 

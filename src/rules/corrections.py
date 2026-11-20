@@ -69,9 +69,9 @@ CORRECTION_RULES: list[CorrectionRule] = [
         account="旅費交通費",
     ),
     CorrectionRule(
-        name="宅配便→通信費",
-        patterns=[r"宅急便", r"宅配便", r"ヤマト", r"佐川", r"クロネコ"],
-        account="通信費",
+        name="宅配便→荷造運賃",
+        patterns=[r"宅急便", r"宅配便", r"ヤマト", r"佐川", r"クロネコ", r"ゆうパック"],
+        account="荷造運賃",
     ),
     CorrectionRule(
         name="文具→消耗品費",
@@ -142,11 +142,18 @@ CORRECTION_RULES: list[CorrectionRule] = [
         ],
         tax_category="対象外",
     ),
-    # 梱包資材は消耗品費（2026-11-20 利用者の決定）。宅配便・郵便の通信費より後なので上書きする。
+    # 梱包資材は消耗品費（2026-11-20 利用者の決定）。
+    # 宅配便・郵便の通信費・荷造運賃より後なので上書きする。
     CorrectionRule(
         name="梱包資材代→消耗品費",
         patterns=[r"^梱包資材代"],
         account="消耗品費",
+    ),
+    # 配送料は荷造運賃（2026-11-20 利用者の決定）。郵便局の店名で通信費になっても上書きする。
+    CorrectionRule(
+        name="配送料→荷造運賃",
+        patterns=[r"^配送料"],
+        account="荷造運賃",
     ),
 ]
 
