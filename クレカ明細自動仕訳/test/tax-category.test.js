@@ -3237,4 +3237,74 @@ module.exports = ({test, assert, gas}) => {
       assert.ok(audits.indexOf(secret) < 0, secret + ' must not appear in audits');
     });
   });
+
+  test('gt 18: §9.6 規則を付けた後に値が変われば VALUES_CHANGED で止め、後の転記シートに書かない', () => {
+    twoCopies18World();
+    const sheet = destSheet('copyA');
+    const proto = Object.getPrototypeOf(sheet.getRange(5, 7));
+    const realValidation = proto.setDataValidation;
+    proto.setDataValidation = function(validation) {
+      const applied = realValidation.call(this, validation);
+      if (this.sheet.getParent().getId() === 'copyA' && this.getRow() === 5 &&
+          this.getColumn() === 7 && this.getNumRows() === 26) {
+        this.sheet.getRange(6, 7).setValue('規則の後に変わった値');
+      }
+      return applied;
+    };
+    try {
+      gas.stubs.resetWriteLog();
+      const beforeAudit = auditLastRow();
+      const report = plain(call('opsSetCopiesTaxCategoryValidation', ['C001', true]));
+      assert.equal(report.stoppedBy, 'VALUES_CHANGED');
+      assert.equal(report.applied, false);
+      assert.deepEqual(report.counts,
+        {alreadySet: 0, needsUpdate: 1, skipped: 0, applied: 0, notReached: 1});
+      assert.equal(report.copies[0].spreadsheetId, 'copyA');
+      assert.equal(report.copies[0].status, 'NEEDS_UPDATE');
+      assert.equal(report.copies[0].problem, 'VALUES_CHANGED');
+      assert.equal(report.copies[0].verified, false);
+      assert.equal(report.copies[1].status, 'NOT_REACHED');
+      assert.equal(dataRuleWrites18('copyB').length, 0, '後の枚に書かない');
+      assert.equal(master('監査ログ').getDataRange().getValues()
+        .filter((row) => row[11] === 'TAX_VALIDATION_COPY').length, 1, '監査は書く');
+      assert.ok(auditLastRow() > beforeAudit);
+    } finally {
+      proto.setDataValidation = realValidation;
+    }
+  });
+
+  test('gt 18: §9.6 規則の書込が失敗したら WRITE_FAILED で止め、後の転記シートに書かない', () => {
+    twoCopies18World();
+    const sheet = destSheet('copyA');
+    const proto = Object.getPrototypeOf(sheet.getRange(5, 7));
+    const realValidation = proto.setDataValidation;
+    proto.setDataValidation = function(validation) {
+      if (this.sheet.getParent().getId() === 'copyA' && this.getRow() === 5 &&
+          this.getColumn() === 7 && this.getNumRows() === 26) {
+        throw new Error('write down');
+      }
+      return realValidation.call(this, validation);
+    };
+    try {
+      gas.stubs.resetWriteLog();
+      const beforeAudit = auditLastRow();
+      const report = plain(call('opsSetCopiesTaxCategoryValidation', ['C001', true]));
+      assert.equal(report.stoppedBy, 'WRITE_FAILED');
+      assert.equal(report.applied, false);
+      assert.deepEqual(report.counts,
+        {alreadySet: 0, needsUpdate: 1, skipped: 0, applied: 0, notReached: 1});
+      assert.equal(report.copies[0].spreadsheetId, 'copyA');
+      assert.equal(report.copies[0].status, 'NEEDS_UPDATE');
+      assert.equal(report.copies[0].problem, 'WRITE_FAILED');
+      assert.equal(report.copies[1].status, 'NOT_REACHED');
+      assert.equal(dataRuleWrites18('copyB').length, 0, '後の枚に書かない');
+      assert.equal(master('監査ログ').getDataRange().getValues()
+        .filter((row) => row[11] === 'TAX_VALIDATION_COPY').length, 1, '監査は先に書く');
+      assert.ok(auditLastRow() > beforeAudit);
+      assert.deepEqual(Array.from(destSheet('copyA').getRange(5, 7, 26, 1)
+        .getDataValidations()[0][0].getCriteriaValues()[0]), ['旧い一覧'], '規則は変わらない');
+    } finally {
+      proto.setDataValidation = realValidation;
+    }
+  });
 };
