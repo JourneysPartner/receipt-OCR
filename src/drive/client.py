@@ -27,8 +27,10 @@ class DriveClient:
 
     # 成功時にファイル名先頭へ付与するプレフィックス
     DONE_PREFIX = "【済】"
+    # 全部が重複していたときに付けるプレフィックス
+    DUPLICATE_PREFIX = "【重複】"
     # 既にこれらで始まっていれば二重付与しない
-    _ALREADY_DONE_PREFIXES = ("[済]", "【済】")
+    _ALREADY_DONE_PREFIXES = ("[済]", "【済】", "【重複】")
 
     # 再帰探索の MIME type
     _FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -199,6 +201,69 @@ class DriveClient:
         # インメモリのオブジェクトも更新しておく
         file.file_name = new_name
         return new_name
+
+    def rename_file_as_duplicate(self, file: DriveFile) -> str | None:
+        """全部が重複していたファイルの先頭に `【重複】` を付与する。
+
+        既に [済] / 【済】 / 【重複】 で始まる場合は何もしない。
+        戻り値: 新しいファイル名（付与した場合）、または None（付与しなかった場合）
+        """
+        if getattr(self, "_read_only", False):
+            raise RuntimeError(
+                "読取り専用の DriveClient では rename_file_as_duplicate を使えません"
+            )
+        if any(file.file_name.startswith(p) for p in self._ALREADY_DONE_PREFIXES):
+            logger.info(
+                f"rename スキップ（既に済/重複プレフィックス付き）: {file.file_name}",
+                extra={"step": "drive_rename_skip", "file_id": file.file_id},
+            )
+            return None
+
+        new_name = f"{self.DUPLICATE_PREFIX}{file.file_name}"
+        self._service.files().update(
+            fileId=file.file_id,
+            body={"name": new_name},
+        ).execute()
+        logger.info(
+            f"rename（重複）: {file.file_name} → {new_name}",
+            extra={"step": "drive_rename_duplicate", "file_id": file.file_id},
+        )
+        file.file_name = new_name
+        return new_name
+
+    def append_description_lines(self, file: DriveFile, lines: list[str]) -> list[str]:
+        """ファイルの説明欄に、まだ無い行だけを後ろへ足す（既存の文は消さない）。
+
+        戻り値: 実際に足した行（同じ文が既にあれば足さない）。
+        """
+        if getattr(self, "_read_only", False):
+            raise RuntimeError(
+                "読取り専用の DriveClient では append_description_lines を使えません"
+            )
+        additions = [line for line in lines if line]
+        if not additions:
+            return []
+        resp = self._service.files().get(fileId=file.file_id, fields="description").execute()
+        current = resp.get("description") or ""
+        current_lines = current.split("\n") if current else []
+        new_lines = [line for line in additions if line not in current_lines]
+        if not new_lines:
+            return []
+        text = current
+        if text and not text.endswith("\n"):
+            text = f"{text}\n"
+        joined = "\n".join(new_lines)
+        text = f"{text}{joined}"
+
+        self._service.files().update(
+            fileId=file.file_id,
+            body={"description": text},
+        ).execute()
+        logger.info(
+            f"説明欄を更新: {file.file_name} (+{len(new_lines)} 行)",
+            extra={"step": "drive_description", "file_id": file.file_id},
+        )
+        return new_lines
 
     def download_file(self, file: DriveFile) -> DriveFile:
         """ファイルをメモリにダウンロードする"""

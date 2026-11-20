@@ -35,7 +35,20 @@ ANSWER_HEADERS = [
 ANSWER_CELLS = "A:P"
 
 MULTI_ANSWER_TITLE = "答え_複数"
+# 1.7: B と C の間に `ファイル`（リンク）を足した 9 列。
 MULTI_ANSWER_HEADERS = [
+    "fileId",
+    "ファイル名",
+    "ファイル",
+    "番号",
+    "正解_日付",
+    "正解_金額",
+    "正解_税率",
+    "正解_店名",
+    "メモ",
+]
+# 1.6 までの 8 列（`ファイル` が無い）。今あるタブはこの並びでも通す。
+MULTI_ANSWER_HEADERS_OLD = [
     "fileId",
     "ファイル名",
     "番号",
@@ -144,6 +157,19 @@ def _trim_trailing_empty(row) -> list[str]:
     while values and (values[-1] is None or str(values[-1]) == ""):
         values.pop()
     return [str(value) if value is not None else "" for value in values]
+
+
+def multi_answer_layout(header) -> dict[str, int] | None:
+    """「答え_複数」の見出しが通る並びか。通れば 欄名 → 位置 を返す。
+
+    1.7 の 9 列（`ファイル` あり）と 1.6 までの 8 列（`ファイル` なし）を通す。
+    `メモ` より右の列は利用者のメモなので、あってもそのまま受け入れる。
+    """
+    values = _trim_trailing_empty(header)
+    for expected in (MULTI_ANSWER_HEADERS, MULTI_ANSWER_HEADERS_OLD):
+        if values[: len(expected)] == expected:
+            return {name: index for index, name in enumerate(expected)}
+    return None
 
 
 def _status_code(error) -> int | None:
@@ -310,6 +336,95 @@ class CompareSheetClient:
         if not values:
             return []
         return _trim_trailing_empty(values[0])
+
+    def ensure_multi_answer_tab(self) -> None:
+        """「答え_複数」を用意する（仕様 1.7 §7.2）。
+
+        無ければ 1.7 の 9 列の見出しだけ作る。既にあれば、1.7 の 9 列か
+        1.6 までの 8 列のどちらかを通す。`メモ` より右は見ない・書かない。
+        どちらでもなければ `HeaderMismatchError`（何も書かない）。
+        """
+        properties = {str(p.get("title", "")): p for p in self.get_sheet_properties()}
+        needed = max(len(MULTI_ANSWER_HEADERS), DEFAULT_COLUMN_COUNT)
+        if MULTI_ANSWER_TITLE in properties:
+            actual = self.read_multi_answer_header()
+            if actual:
+                if multi_answer_layout(actual) is None:
+                    raise HeaderMismatchError(MULTI_ANSWER_TITLE, MULTI_ANSWER_HEADERS, actual)
+                return
+            # 空のタブに書く前に、見出しが収まる列数を足す
+            self._expand_columns(properties[MULTI_ANSWER_TITLE], len(MULTI_ANSWER_HEADERS))
+        else:
+            self._execute(
+                lambda: self._sheets.batchUpdate(
+                    spreadsheetId=self._spreadsheet_id,
+                    body={
+                        "requests": [
+                            {
+                                "addSheet": {
+                                    "properties": {
+                                        "title": MULTI_ANSWER_TITLE,
+                                        "gridProperties": {"columnCount": needed},
+                                    }
+                                }
+                            }
+                        ]
+                    },
+                ).execute()
+            )
+
+        last_col = _col_letter(len(MULTI_ANSWER_HEADERS) - 1)
+        self._execute(
+            lambda: (
+                self._sheets.values()
+                .update(
+                    spreadsheetId=self._spreadsheet_id,
+                    range=f"'{MULTI_ANSWER_TITLE}'!A1:{last_col}1",
+                    valueInputOption="RAW",
+                    body={"values": [MULTI_ANSWER_HEADERS]},
+                )
+                .execute()
+            )
+        )
+
+    def read_multi_answer_header(self) -> list[str]:
+        """「答え_複数」の見出しを、`メモ` までだけ読む。
+
+        1.6 までの 8 列なら `メモ`（H）まで。1.7 の 9 列なら `メモ`（I）まで。
+        それより右は読まない。
+        """
+        values = self.read_values(MULTI_ANSWER_TITLE, "A1:H1")
+        first = _trim_trailing_empty(values[0]) if values else []
+        if first == MULTI_ANSWER_HEADERS_OLD:
+            return first
+        if first != MULTI_ANSWER_HEADERS[: len(first)]:
+            return first
+        if first != MULTI_ANSWER_HEADERS[:8]:
+            return first
+        values = self.read_values(MULTI_ANSWER_TITLE, "A1:I1")
+        return _trim_trailing_empty(values[0]) if values else []
+
+    def read_multi_answer_rows(self) -> list[dict]:
+        """「答え_複数」の行を、見出しの名前で読む（`メモ` より右は読まない）。"""
+        header = self.read_multi_answer_header()
+        layout = multi_answer_layout(header)
+        if layout is None:
+            if not header:
+                return []
+            raise HeaderMismatchError(MULTI_ANSWER_TITLE, MULTI_ANSWER_HEADERS, header)
+        last_column = max(layout.values())
+        cells = f"A:{_col_letter(last_column)}"
+        values = self.read_values(MULTI_ANSWER_TITLE, cells, formatted=True)
+        if not values:
+            return []
+        names = [str(value) for value in values[0][: last_column + 1]]
+        rows: list[dict] = []
+        for offset, row in enumerate(values[1:], start=2):
+            padded = list(row) + [""] * (len(names) - len(row))
+            item = {names[index]: padded[index] for index in range(len(names))}
+            item["_row"] = offset
+            rows.append(item)
+        return rows
 
     def read_values(
         self, title: str, cells: str | None = None, *, formatted: bool = False

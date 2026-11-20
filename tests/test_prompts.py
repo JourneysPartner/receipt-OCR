@@ -185,6 +185,19 @@ class TestVersion2:
             in prompts.system_instruction("v2")
         )
 
+    def test_time_and_receipt_no_fields_are_present(self):
+        """仕様 §4: 第 2 版に time と receipt_no の説明がある。"""
+        text = prompts.system_instruction("v2")
+        assert "- time: 支払い・発行の時刻を HH:MM（24 時間）。" in text
+        assert "精算（支払い）の時刻。書いていなければ空。" in text
+        assert "- receipt_no: そのレシート 1 枚ごとに変わる番号" in text
+        assert (
+            "店の登録番号（T＋13 桁）・電話番号・車室番号・レジ番号・担当者番号は入れない。" in text
+        )
+        # 第 1 版には足さない
+        assert "receipt_no" not in prompts.system_instruction("v1")
+        assert "- time:" not in prompts.system_instruction("v1")
+
 
 class TestUnknownVersion:
     def test_system_instruction(self):

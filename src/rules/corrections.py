@@ -172,6 +172,8 @@ class RuleCorrector:
             original=item,
             date=item.date,
             amount=item.amount,
+            time=item.time,
+            receipt_no=item.receipt_no,
             vendor=item.vendor,
             description=item.description,
             account=item.account,

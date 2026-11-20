@@ -7,6 +7,7 @@ from src.compare.runner import run_compare
 from src.compare.sheet import (
     ANSWER_HEADERS,
     MULTI_ANSWER_HEADERS,
+    MULTI_ANSWER_HEADERS_OLD,
     MULTI_ANSWER_TITLE,
     RESULT_HEADERS,
     CompareSheetClient,
@@ -828,3 +829,87 @@ def test_score_with_old_format_result_tab_returns_1_without_writes():
     service = _old_format_service()
     assert _score_into(service) == 1
     assert service.write_calls == []
+
+
+# ── 「答え_複数」の見出し（1.7） ───────────────────────
+def _multi_answer_row() -> list:
+    return [
+        "FILE_A1234567890",
+        "a.jpg",
+        "https://drive.google.com/file/d/FILE_A1234567890/view",
+        1,
+        "2026-01-02",
+        "1600",
+        "10%",
+        "テスト商店",
+        "",
+    ]
+
+
+def test_new_multi_answer_header_is_accepted():
+    service = FakeSheetsService()
+    service.add_tab(
+        MULTI_ANSWER_TITLE,
+        columns=26,
+        values=[MULTI_ANSWER_HEADERS, _multi_answer_row()],
+    )
+    code, service = _collect_into(service)
+    assert code == 0
+    assert service.tabs[MULTI_ANSWER_TITLE].values == [
+        MULTI_ANSWER_HEADERS,
+        _multi_answer_row(),
+    ]
+
+
+def test_old_multi_answer_header_is_accepted():
+    service = FakeSheetsService()
+    old_row = [
+        "FILE_A1234567890",
+        "a.jpg",
+        1,
+        "2026-01-02",
+        "1600",
+        "10%",
+        "テスト商店",
+        "",
+    ]
+    service.add_tab(
+        MULTI_ANSWER_TITLE,
+        columns=26,
+        values=[MULTI_ANSWER_HEADERS_OLD, old_row],
+    )
+    code, service = _collect_into(service)
+    assert code == 0
+    assert service.tabs[MULTI_ANSWER_TITLE].values == [MULTI_ANSWER_HEADERS_OLD, old_row]
+    assert _score_into(service) == 0
+    assert service.tabs[MULTI_ANSWER_TITLE].values == [MULTI_ANSWER_HEADERS_OLD, old_row]
+
+
+def test_columns_right_of_memo_are_accepted_and_untouched():
+    service = FakeSheetsService()
+    header = MULTI_ANSWER_HEADERS + ["利用者のメモ"]
+    row = _multi_answer_row() + ["消さないで"]
+    service.add_tab(MULTI_ANSWER_TITLE, columns=26, values=[header, row])
+    code, service = _collect_into(service)
+    assert code == 0
+    assert service.tabs[MULTI_ANSWER_TITLE].values == [header, row]
+    assert _score_into(service) == 0
+    assert service.tabs[MULTI_ANSWER_TITLE].values == [header, row]
+
+
+def test_missing_multi_answer_tab_gets_the_new_header():
+    service = FakeSheetsService()
+    code, service = _collect_into(service)
+    assert code == 0
+    assert service.tabs[MULTI_ANSWER_TITLE].values[0] == MULTI_ANSWER_HEADERS
+    assert MULTI_ANSWER_HEADERS == [
+        "fileId",
+        "ファイル名",
+        "ファイル",
+        "番号",
+        "正解_日付",
+        "正解_金額",
+        "正解_税率",
+        "正解_店名",
+        "メモ",
+    ]

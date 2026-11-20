@@ -59,8 +59,9 @@ class TestCustomerRow:
 
 class TestProcessStatus:
     def test_all_values(self):
-        assert len(ProcessStatus) == 8
+        assert len(ProcessStatus) == 9
         assert ProcessStatus.WRITTEN == "written"
+        assert ProcessStatus.DUPLICATE == "duplicate"
 
 
 class TestDriveFile:

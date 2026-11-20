@@ -68,6 +68,24 @@ class TestParseResponse:
     def test_invalid(self):
         assert _ext()._parse_response("not json", "t.jpg") == []
 
+    def test_missing_time_and_receipt_no_parse_as_empty(self):
+        r = _ext()._parse_response(
+            '[{"date":"2026-01-15","amount":1080,"vendor":"テスト商店","confidence":0.9}]',
+            "t.jpg",
+        )
+        assert len(r) == 1
+        assert r[0].time is None
+        assert r[0].receipt_no is None
+
+    def test_time_and_receipt_no_are_parsed(self):
+        r = _ext()._parse_response(
+            '[{"date":"2026-01-15","amount":1080,"vendor":"テスト商店",'
+            '"time":"9:05","receipt_no":"0012","confidence":0.9}]',
+            "t.jpg",
+        )
+        assert r[0].time == "9:05"
+        assert r[0].receipt_no == "0012"
+
 
 class TestExtractFromFile:
     """画像/PDFを直接渡す再抽出ルート"""

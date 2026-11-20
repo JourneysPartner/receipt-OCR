@@ -20,9 +20,19 @@ from src.models import (
     OcrResult,
     ProcessRecord,
     ProcessStatus,
+    ReceiptDetails,
     ReceiptItem,
 )
 from src.ocr.base import OcrEngine
+from src.processing.duplicates import (
+    SAME_FILE_DUPLICATE_NOTE,
+    ReceiptSource,
+    description_line,
+    details_of,
+    is_same_voucher,
+    same_file_duplicate_indices,
+    source_of,
+)
 from src.processing.reconcile import (
     LABEL_READ,
     LABEL_REREAD,
@@ -32,7 +42,7 @@ from src.processing.reconcile import (
 )
 from src.rules.amount_validation import AmountValidation, build_review_label, validate_amount
 from src.rules.corrections import RuleCorrector
-from src.sheets.client import CashbookClient, MasterSheetClient
+from src.sheets.client import CashbookClient, MasterSheetClient, ProcessLogHeaderError
 
 logger = setup_logger()
 JST = timezone(timedelta(hours=9))
@@ -208,16 +218,150 @@ class ProcessingManager:
             f"(マスター読み取り対象は data_start_row 以降)"
         )
 
+    # ── 重複の判断（仕様 §3・§5・§6） ─────────────────────
+    def _load_duplicate_sources(self, cb: CashbookClient) -> list[ReceiptSource]:
+        """同じ顧客の処理管理から、照らす相手（§6.1）を読む。"""
+        try:
+            records = cb.get_duplicate_candidates()
+        except Exception as e:
+            logger.error(
+                f"重複の照らす相手を読めません: {e}",
+                extra={"step": "duplicate_history_error"},
+            )
+            return []
+        if not isinstance(records, list):
+            return []
+        sources: list[ReceiptSource] = []
+        for record in records:
+            details = getattr(record, "details", None)
+            index = getattr(record, "receipt_index", None)
+            if not isinstance(details, ReceiptDetails) or not isinstance(index, int):
+                continue
+            sources.append(
+                source_of(
+                    str(getattr(record, "file_id", "")),
+                    str(getattr(record, "file_name", "")),
+                    index,
+                    details,
+                )
+            )
+        return sources
+
+    @staticmethod
+    def _details_for_items(
+        items: list[ReceiptItem],
+        text_items: list[ReceiptItem] | None = None,
+        decisions: list[ItemDecision] | None = None,
+    ) -> dict[int, ReceiptDetails]:
+        """明細ごとの処理管理の値。両読みでは画像から、空なら文字から。"""
+        details: dict[int, ReceiptDetails] = {}
+        texts = list(text_items or [])
+        for index, item in enumerate(items):
+            fallback = None
+            if texts:
+                text_index = None
+                if decisions is not None and index < len(decisions):
+                    text_index = decisions[index].text_index
+                if text_index is None and index < len(texts):
+                    text_index = index
+                if text_index is not None and text_index < len(texts):
+                    fallback = texts[text_index]
+            details[index] = details_of(item, fallback)
+        return details
+
+    @staticmethod
+    def _cross_file_duplicates(
+        file: DriveFile,
+        details: dict[int, ReceiptDetails],
+        indices: list[int],
+        known: list[ReceiptSource],
+    ) -> dict[int, ReceiptSource]:
+        """別のファイルの明細と同じ証憑になる明細 → 重複元（§6.2）。"""
+        duplicates: dict[int, ReceiptSource] = {}
+        for index in indices:
+            item = source_of(file.file_id, file.file_name, index, details[index])
+            for source in known:
+                if source.file_id == file.file_id:
+                    continue
+                if is_same_voucher(item, source):
+                    duplicates[index] = source
+                    break
+        return duplicates
+
+    def _log_duplicate_decisions(
+        self,
+        file: DriveFile,
+        same_file: set[int],
+        cross_file: dict[int, ReceiptSource],
+    ) -> None:
+        for index in sorted(same_file):
+            logger.info(
+                f"重複（同じファイル内）: {file.file_name}[{index}] → {SAME_FILE_DUPLICATE_NOTE}",
+                extra={"step": "duplicate_decision", "file_id": file.file_id},
+            )
+        for index, source in sorted(cross_file.items()):
+            logger.info(
+                f"重複（別のファイル）: {file.file_name}[{index}] → {source.key}",
+                extra={"step": "duplicate_decision", "file_id": file.file_id},
+            )
+
+    def _append_duplicate_records(
+        self,
+        file: DriveFile,
+        cb: CashbookClient,
+        details: dict[int, ReceiptDetails],
+        cross_file: dict[int, ReceiptSource],
+        now: str,
+    ) -> None:
+        """重複の明細は記帳せず、状態 `duplicate` の記録を 1 行ずつ書く（§6.2）。"""
+        for index, source in sorted(cross_file.items()):
+            cb.append_process_record(
+                ProcessRecord(
+                    file_id=file.file_id,
+                    file_name=file.file_name,
+                    receipt_index=index,
+                    mime_type=file.mime_type,
+                    processed_at=now,
+                    status=ProcessStatus.DUPLICATE.value,
+                    source_folder_id=file.folder_id,
+                    details=details[index],
+                    duplicate_of=source.key,
+                )
+            )
+
+    def _write_duplicate_descriptions(
+        self,
+        file: DriveFile,
+        cross_file: dict[int, ReceiptSource],
+    ) -> None:
+        if not cross_file:
+            return
+        lines = [description_line(index, source) for index, source in sorted(cross_file.items())]
+        try:
+            self._drive.append_description_lines(file, lines)
+        except Exception as e:
+            logger.error(
+                f"説明欄の更新失敗: {file.file_name}: {e}",
+                extra={"step": "description_failed", "file_id": file.file_id},
+            )
+
+    def _remember_booked(
+        self,
+        known: list[ReceiptSource],
+        file: DriveFile,
+        details: dict[int, ReceiptDetails],
+        indices: list[int],
+    ) -> None:
+        """同じ実行の中で先に処理した明細も、後のファイルの照らす相手にする。"""
+        for index in indices:
+            known.append(source_of(file.file_id, file.file_name, index, details[index]))
+
     # ── 1顧客の処理 ────────────────────────────────
     def _process_customer(self, cust: CustomerRow) -> CustomerResult:
         now_str = datetime.now(JST).isoformat()
         today = datetime.now(JST).strftime("%Y-%m-%d")
 
         logger.info(f"顧客処理開始: {cust.customer_name}", extra={"step": "customer_start"})
-
-        # validate モードではマスターのF/I列を実書き換えしない（運用混乱防止）
-        if not self._config.runtime.is_validate:
-            self._master.update_customer_status(cust.row_number, "処理中", now_str)
 
         cashbook_id = cust.spreadsheet_id
         if not cashbook_id:
@@ -233,10 +377,24 @@ class ProcessingManager:
             credentials_path=self._config.google_credentials_path,
         )
 
-        cb.ensure_log_sheets_exist()
+        # 見出しが違えば、マスターの「処理中」も含めて何も書かずに止める（D6）。
+        # 見出しを読めない等のその他の失敗は、今までどおりこの後の処理に任せる。
+        try:
+            cb.ensure_log_sheets_exist(write=False)
+        except ProcessLogHeaderError:
+            raise
+        except Exception:
+            pass
+
+        # validate モードではマスターのF/I列を実書き換えしない（運用混乱防止）
+        if not self._config.runtime.is_validate:
+            self._master.update_customer_status(cust.row_number, "処理中", now_str)
+
+        cb.ensure_log_sheets_exist(write=not self._config.dry_run)
         ttl = self._config.reservation_ttl_minutes
-        cb.cleanup_stale_reservations(ttl_minutes=ttl)
-        cb.recover_stale_written(ttl_minutes=ttl)
+        if not self._config.dry_run:
+            cb.cleanup_stale_reservations(ttl_minutes=ttl)
+            cb.recover_stale_written(ttl_minutes=ttl)
 
         # レシートファイル取得
         files = self._drive.list_files(folder_id)
@@ -247,11 +405,20 @@ class ProcessingManager:
             return CustomerResult()
 
         processed_keys = cb.get_processed_keys()
+        # 別のファイルの重複を照らす相手（§6.1）。同じ実行で先に処理した分も足していく。
+        known_sources = self._load_duplicate_sources(cb)
 
         # 全ファイルを処理し、結果を集計
         total = CustomerResult()
         for file in files:
-            file_result = self._process_file(file, cb, processed_keys, today, now_str)
+            file_result = self._process_file(
+                file,
+                cb,
+                processed_keys,
+                today,
+                now_str,
+                known_receipts=known_sources,
+            )
             total.success += file_result.success
             total.low_confidence += file_result.low_confidence
             total.manual_entry += file_result.manual_entry
@@ -278,10 +445,16 @@ class ProcessingManager:
         processed_keys: set[str],
         today: str,
         now: str,
+        *,
+        known_receipts: list[ReceiptSource] | None = None,
     ) -> CustomerResult:
         if getattr(self._config.ai, "flow", "text_first") == "dual":
-            return self._process_file_dual(file, cb, processed_keys, today, now)
-        return self._process_file_text_first(file, cb, processed_keys, today, now)
+            return self._process_file_dual(
+                file, cb, processed_keys, today, now, known_receipts=known_receipts
+            )
+        return self._process_file_text_first(
+            file, cb, processed_keys, today, now, known_receipts=known_receipts
+        )
 
     def _process_file_text_first(
         self,
@@ -290,8 +463,11 @@ class ProcessingManager:
         processed_keys: set[str],
         today: str,
         now: str,
+        *,
+        known_receipts: list[ReceiptSource] | None = None,
     ) -> CustomerResult:
         result = CustomerResult()
+        known = known_receipts if known_receipts is not None else []
 
         # ファイル単位スキップ
         if f"{file.file_id}:-1" in processed_keys:
@@ -383,13 +559,22 @@ class ProcessingManager:
             adopted=adopted_extraction_engine,
         )
 
+        details_by_index = self._details_for_items(items)
+        same_file_duplicates = same_file_duplicate_indices(items)
+
         if self._config.dry_run:
             # validate / dry_run: 書き込みは一切せず、判定のみで結果を集計する。
             # 予定件数を CustomerResult に詰めて返す（success/manual の候補件数が分かるよう）。
+            cross_file = self._cross_file_duplicates(
+                file, details_by_index, list(range(len(items))), known
+            )
+            self._log_duplicate_decisions(file, same_file_duplicates, cross_file)
             planned_success = 0
             planned_low = 0
             planned_manual = 0
             for i in range(len(corrected)):
+                if i in cross_file:
+                    continue
                 v = validations[i]
                 if v.should_manual_entry:
                     planned_manual += 1
@@ -400,11 +585,19 @@ class ProcessingManager:
             result.success = planned_success
             result.low_confidence = planned_low
             result.manual_entry = planned_manual
+            result.skipped = len(cross_file)
+            self._remember_booked(
+                known,
+                file,
+                details_by_index,
+                [i for i in range(len(items)) if i not in cross_file],
+            )
             logger.info(
                 f"VALIDATE: {file.file_name} → "
                 f"success予定={planned_success}, "
                 f"low_conf予定={planned_low}, "
-                f"manual予定={planned_manual} "
+                f"manual予定={planned_manual}, "
+                f"重複予定={len(cross_file)} "
                 f"(total {len(corrected)} 明細, {extraction_memo})",
                 extra={"step": "validate_file", "file_id": file.file_id},
             )
@@ -412,8 +605,25 @@ class ProcessingManager:
 
         # 未処理明細
         pending = [i for i in range(len(corrected)) if f"{file.file_id}:{i}" not in processed_keys]
-        result.skipped = len(corrected) - len(pending)
-        if not pending:
+        cross_file = self._cross_file_duplicates(file, details_by_index, pending, known)
+        bookable = [i for i in pending if i not in cross_file]
+        result.skipped = (len(corrected) - len(pending)) + len(cross_file)
+
+        if cross_file:
+            try:
+                self._append_duplicate_records(file, cb, details_by_index, cross_file, now)
+            except Exception as e:
+                logger.error(
+                    f"重複の記録失敗: {file.file_name}: {e}",
+                    extra={"step": "duplicate_record_failed", "file_id": file.file_id},
+                )
+                result.errors += len(cross_file)
+
+        if not bookable:
+            if cross_file:
+                self._write_duplicate_descriptions(file, cross_file)
+                if len(cross_file) == len(items):
+                    self._rename_as_duplicate(file)
             return result
 
         # ── Gemini 再抽出（amount_validation NG 時の第二段） ─────
@@ -421,7 +631,7 @@ class ProcessingManager:
         retry_items: list[ReceiptItem] = []
         retry_attempted = False
         if self._config.ai.enable_amount_validation_retry and any(
-            validations[i].should_manual_entry for i in pending
+            validations[i].should_manual_entry for i in bookable
         ):
             retry_attempted = True
             try:
@@ -436,21 +646,34 @@ class ProcessingManager:
                     extra={"step": "ai_retry_error", "file_id": file.file_id},
                 )
 
-        # 行予約
+        # 行予約（重複の明細は予約しない）
         reservations = cb.reserve_rows(
-            count=len(pending),
+            count=len(bookable),
             file_id=file.file_id,
             file_name=file.file_name,
-            receipt_indices=pending,
+            receipt_indices=bookable,
         )
+        if reservations:
+            try:
+                reservation_details = [
+                    (rid, details_by_index[idx]) for (_row, rid), idx in zip(reservations, bookable)
+                ]
+                cb.write_receipt_details(reservation_details)
+            except Exception as e:
+                logger.error(
+                    f"処理管理の欄の書き込み失敗: {file.file_name}: {e}",
+                    extra={"step": "receipt_details_failed", "file_id": file.file_id},
+                )
 
-        for (row, rid), idx in zip(reservations, pending):
+        booked_indices: list[int] = []
+        for (row, rid), idx in zip(reservations, bookable):
             primary_validation = validations[idx]
             cur_item = items[idx]
             cur_corrected = corrected[idx]
             cur_validation = primary_validation
             adopted_engine = "primary"
             retry_validation: AmountValidation | None = None
+            duplicate_note = SAME_FILE_DUPLICATE_NOTE if idx in same_file_duplicates else None
 
             # 再抽出の採用判定: primary で NG だった明細だけ retry を試す
             if primary_validation.should_manual_entry and retry_items:
@@ -495,8 +718,10 @@ class ProcessingManager:
                         retry_attempted=retry_attempted,
                         retry_validation=retry_validation,
                         adopted_engine=adopted_engine,
+                        duplicate_note=duplicate_note,
                     )
                     result.manual_entry += 1
+                    booked_indices.append(idx)
                 except Exception as e:
                     logger.error(
                         f"金額検証NG行作成失敗: {file.file_name}[{idx}]: {e}",
@@ -524,27 +749,35 @@ class ProcessingManager:
                     retry_validation=retry_validation,
                     adopted_engine=adopted_engine,
                     extraction_memo=extraction_memo,
+                    duplicate_note=duplicate_note,
                 )
                 if is_low:
                     result.low_confidence += 1
                 else:
                     result.success += 1
+                booked_indices.append(idx)
             except Exception as e:
                 logger.error(
                     f"明細失敗: {file.file_name}[{idx}]: {e}", extra={"step": "item_error"}
                 )
                 try:
+                    message = f"明細[{idx}]失敗: {e}"
+                    if duplicate_note:
+                        message = f"{message}／{duplicate_note}"
                     cb.write_manual_entry_row(
                         row,
                         file.drive_link,
                         cur_corrected.date or today,
-                        f"明細[{idx}]失敗: {e}",
+                        message,
                     )
                     cb.update_reservation_status(rid, ProcessStatus.MANUAL_ENTRY.value)
                     result.manual_entry += 1
+                    booked_indices.append(idx)
                 except Exception:
                     cb.update_reservation_status(rid, ProcessStatus.ERROR.value)
                     result.errors += 1
+
+        self._remember_booked(known, file, details_by_index, booked_indices)
 
         # 全明細が成功（success/low_confidence）で、manual_entry/error が1件もなければ
         # 元ファイル名に 【済】 を付与する
@@ -553,7 +786,10 @@ class ProcessingManager:
             and result.manual_entry == 0
             and result.errors == 0
         )
-        if fully_successful and not self._config.dry_run:
+        self._write_duplicate_descriptions(file, cross_file)
+        if len(cross_file) == len(items) and items:
+            self._rename_as_duplicate(file)
+        elif fully_successful and not self._config.dry_run:
             try:
                 self._drive.rename_file_as_done(file)
             except Exception as e:
@@ -564,6 +800,17 @@ class ProcessingManager:
 
         return result
 
+    def _rename_as_duplicate(self, file: DriveFile) -> None:
+        if self._config.dry_run:
+            return
+        try:
+            self._drive.rename_file_as_duplicate(file)
+        except Exception as e:
+            logger.error(
+                f"【重複】付与失敗: {file.file_name}: {e}",
+                extra={"step": "rename_duplicate_failed", "file_id": file.file_id},
+            )
+
     # ── 1ファイルの処理（両読み） ──────────────────────────
     def _process_file_dual(
         self,
@@ -572,8 +819,11 @@ class ProcessingManager:
         processed_keys: set[str],
         today: str,
         now: str,
+        *,
+        known_receipts: list[ReceiptSource] | None = None,
     ) -> CustomerResult:
         result = CustomerResult()
+        known = known_receipts if known_receipts is not None else []
 
         # ファイル単位スキップ
         if f"{file.file_id}:-1" in processed_keys:
@@ -582,7 +832,9 @@ class ProcessingManager:
 
         # 画像からに使えない MIME は、ダウンロードの前に今までの流れへ回す
         if file.mime_type not in RETRY_SUPPORTED_MIMES:
-            return self._process_file_text_first(file, cb, processed_keys, today, now)
+            return self._process_file_text_first(
+                file, cb, processed_keys, today, now, known_receipts=known
+            )
 
         # ダウンロード
         try:
@@ -653,6 +905,9 @@ class ProcessingManager:
         # 金額検証（記録用。合ったかどうかの判断には使わない）
         validations = [validate_amount(it.amount, ocr_text) for it in items]
         summary = readings_text(image_items, text_items)
+        fallback_items = text_items if image_items else []
+        details_by_index = self._details_for_items(items, fallback_items, decisions)
+        same_file_duplicates = same_file_duplicate_indices(items)
 
         # 未処理明細（番号は使う明細の並び順）
         pending = [i for i in range(len(items)) if f"{file.file_id}:{i}" not in processed_keys]
@@ -665,10 +920,16 @@ class ProcessingManager:
 
         if self._config.dry_run:
             # validate / dry_run: 書き込みは一切せず、判定のみで結果を集計する。
+            cross_file = self._cross_file_duplicates(
+                file, details_by_index, list(range(len(items))), known
+            )
+            self._log_duplicate_decisions(file, same_file_duplicates, cross_file)
             planned_success = 0
             planned_low = 0
             planned_manual = 0
             for i in range(len(items)):
+                if i in cross_file:
+                    continue
                 if not decisions[i].matched:
                     planned_manual += 1
                 elif corrected[i].needs_review:
@@ -678,31 +939,69 @@ class ProcessingManager:
             result.success = planned_success
             result.low_confidence = planned_low
             result.manual_entry = planned_manual
+            result.skipped = len(cross_file)
+            self._remember_booked(
+                known,
+                file,
+                details_by_index,
+                [i for i in range(len(items)) if i not in cross_file],
+            )
             logger.info(
                 f"VALIDATE: {file.file_name} → "
                 f"success予定={planned_success}, "
                 f"low_conf予定={planned_low}, "
-                f"manual予定={planned_manual} "
+                f"manual予定={planned_manual}, "
+                f"重複予定={len(cross_file)} "
                 f"(total {len(items)} 明細, 両読み: {summary})",
                 extra={"step": "validate_file", "file_id": file.file_id},
             )
             return result
 
-        # 未処理明細の数から、処理済みの数を残す
-        result.skipped = len(items) - len(pending)
-        if not pending:
+        # 未処理明細の数から、処理済みの数を残す。重複は予約しない。
+        cross_file = self._cross_file_duplicates(file, details_by_index, pending, known)
+        bookable = [i for i in pending if i not in cross_file]
+        result.skipped = (len(items) - len(pending)) + len(cross_file)
+
+        if cross_file:
+            try:
+                self._append_duplicate_records(file, cb, details_by_index, cross_file, now)
+            except Exception as e:
+                logger.error(
+                    f"重複の記録失敗: {file.file_name}: {e}",
+                    extra={"step": "duplicate_record_failed", "file_id": file.file_id},
+                )
+                result.errors += len(cross_file)
+
+        if not bookable:
+            if cross_file:
+                self._write_duplicate_descriptions(file, cross_file)
+                if len(cross_file) == len(items):
+                    self._rename_as_duplicate(file)
             return result
 
-        # 行予約（予約する行の数 = 未処理の明細の数）
+        # 行予約（予約する行の数 = 記帳する明細の数）
         reservations = cb.reserve_rows(
-            count=len(pending),
+            count=len(bookable),
             file_id=file.file_id,
             file_name=file.file_name,
-            receipt_indices=pending,
+            receipt_indices=bookable,
         )
+        if reservations:
+            try:
+                reservation_details = [
+                    (rid, details_by_index[idx]) for (_row, rid), idx in zip(reservations, bookable)
+                ]
+                cb.write_receipt_details(reservation_details)
+            except Exception as e:
+                logger.error(
+                    f"処理管理の欄の書き込み失敗: {file.file_name}: {e}",
+                    extra={"step": "receipt_details_failed", "file_id": file.file_id},
+                )
 
-        for (row, rid), idx in zip(reservations, pending):
+        booked_indices: list[int] = []
+        for (row, rid), idx in zip(reservations, bookable):
             decision = decisions[idx]
+            duplicate_note = SAME_FILE_DUPLICATE_NOTE if idx in same_file_duplicates else None
 
             if decision.matched:
                 try:
@@ -719,25 +1018,31 @@ class ProcessingManager:
                         today,
                         validation=validations[idx],
                         extraction_memo=f"両読み=一致 | {summary}",
+                        duplicate_note=duplicate_note,
                     )
                     if is_low:
                         result.low_confidence += 1
                     else:
                         result.success += 1
+                    booked_indices.append(idx)
                 except Exception as e:
                     logger.error(
                         f"明細失敗: {file.file_name}[{idx}]: {e}",
                         extra={"step": "item_error"},
                     )
                     try:
+                        message = f"明細[{idx}]失敗: {e}"
+                        if duplicate_note:
+                            message = f"{message}／{duplicate_note}"
                         cb.write_manual_entry_row(
                             row,
                             file.drive_link,
                             corrected[idx].date or today,
-                            f"明細[{idx}]失敗: {e}",
+                            message,
                         )
                         cb.update_reservation_status(rid, ProcessStatus.MANUAL_ENTRY.value)
                         result.manual_entry += 1
+                        booked_indices.append(idx)
                     except Exception:
                         cb.update_reservation_status(rid, ProcessStatus.ERROR.value)
                         result.errors += 1
@@ -757,8 +1062,10 @@ class ProcessingManager:
                     now,
                     today,
                     summary,
+                    duplicate_note=duplicate_note,
                 )
                 result.manual_entry += 1
+                booked_indices.append(idx)
             except Exception as e:
                 logger.error(
                     f"両読み要確認行作成失敗: {file.file_name}[{idx}]: {e}",
@@ -767,6 +1074,8 @@ class ProcessingManager:
                 cb.update_reservation_status(rid, ProcessStatus.ERROR.value)
                 result.errors += 1
 
+        self._remember_booked(known, file, details_by_index, booked_indices)
+
         # 全明細が成功（success/low_confidence）で、manual_entry/error が1件もなければ
         # 元ファイル名に 【済】 を付与する
         fully_successful = (
@@ -774,7 +1083,10 @@ class ProcessingManager:
             and result.manual_entry == 0
             and result.errors == 0
         )
-        if fully_successful and not self._config.dry_run:
+        self._write_duplicate_descriptions(file, cross_file)
+        if len(cross_file) == len(items) and items:
+            self._rename_as_duplicate(file)
+        elif fully_successful and not self._config.dry_run:
             try:
                 self._drive.rename_file_as_done(file)
             except Exception as e:
@@ -800,9 +1112,13 @@ class ProcessingManager:
         now: str,
         today: str,
         summary: str,
+        *,
+        duplicate_note: str | None = None,
     ) -> None:
         """画像からの明細を、両方の読みを残して manual_entry 行にする。"""
         error_msg = f"両読み要確認（{decision.reason}）: {summary}"
+        if duplicate_note:
+            error_msg = f"{error_msg}／{duplicate_note}"
         logger.warning(
             f"両読み要確認 → manual_entry: {file.file_name}[{idx}]: {error_msg}",
             extra={"step": "dual_review", "file_id": file.file_id},
@@ -942,10 +1258,19 @@ class ProcessingManager:
         retry_validation: AmountValidation | None = None,
         adopted_engine: str = "primary",
         extraction_memo: str | None = None,
+        duplicate_note: str | None = None,
     ) -> bool:
         """戻り値: True なら低信頼"""
         cb.copy_formulas_to_row(row)
         cb.write_cashbook_row(row, corrected, file.drive_link)
+        if duplicate_note:
+            try:
+                cb.write_error_detail(row, duplicate_note)
+            except Exception as e:
+                logger.error(
+                    f"重複の注記に失敗: {file.file_name}[{idx}]: {e}",
+                    extra={"step": "duplicate_note_failed", "file_id": file.file_id},
+                )
         cb.update_reservation_status(rid, ProcessStatus.WRITTEN.value)
 
         memo = corrected.memo or ""
@@ -1006,6 +1331,7 @@ class ProcessingManager:
         retry_attempted: bool = False,
         retry_validation: AmountValidation | None = None,
         adopted_engine: str = "primary",
+        duplicate_note: str | None = None,
     ) -> None:
         """金額検証で NG になった明細を、詳細をO列に残して manual_entry 行にする。
         candidate（corrected）の取引先・摘要・税区分・勘定科目コード等は
@@ -1022,6 +1348,8 @@ class ProcessingManager:
             f"金額検証NG ({validation.status}): {validation.reason} / "
             f"OCR候補: {validation.matched_candidates} | {retry_memo}"
         )
+        if duplicate_note:
+            error_msg = f"{error_msg}／{duplicate_note}"
         logger.warning(
             f"金額検証NG → manual_entry: {file.file_name}[{idx}]: {error_msg}",
             extra={"step": "amount_invalid", "file_id": file.file_id},

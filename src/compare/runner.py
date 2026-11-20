@@ -43,6 +43,7 @@ from src.compare.sheet import (
     SUMMARY_HEADERS,
     CompareSheetClient,
     HeaderMismatchError,
+    multi_answer_layout,
 )
 from src.config import AiConfig, AppConfig
 from src.drive.client import DriveClient
@@ -193,7 +194,7 @@ class CompareRunner:
             return 1
 
         try:
-            self._sheet.ensure_tab(MULTI_ANSWER_TITLE, MULTI_ANSWER_HEADERS)
+            self._ensure_multi_answer()
         except HeaderMismatchError as error:
             logger.error(
                 f"{error}。列を足したり並べ替えたりせずに直してください",
@@ -228,7 +229,7 @@ class CompareRunner:
         failed = False
         multi_rows: list[dict] = []
         try:
-            multi_rows = self._sheet.read_dicts(MULTI_ANSWER_TITLE, formatted=True)
+            multi_rows = self._read_multi_answers()
         except Exception as error:
             logger.error(
                 f"答えを読めません: {type(error).__name__}: {error}",
@@ -280,7 +281,7 @@ class CompareRunner:
             self._sheet.ensure_tab(answer_title, ANSWER_HEADERS, prefix_only=True)
             self._sheet.ensure_tab(result_title, RESULT_HEADERS)
             self._sheet.ensure_tab(ocr_title, OCR_HEADERS)
-            self._sheet.ensure_tab(MULTI_ANSWER_TITLE, MULTI_ANSWER_HEADERS)
+            self._ensure_multi_answer()
         except HeaderMismatchError as error:
             # 列が足されると「メモ」などを上書きしうるので、何も書かずに 1 で終わる
             logger.error(
@@ -425,7 +426,7 @@ class CompareRunner:
 
         multi_rows: list[dict] = []
         try:
-            multi_rows = self._sheet.read_dicts(MULTI_ANSWER_TITLE, formatted=True)
+            multi_rows = self._read_multi_answers()
         except Exception as error:
             logger.error(
                 f"答えを読めません: {type(error).__name__}: {error}",
@@ -461,6 +462,26 @@ class CompareRunner:
         return 1 if failed else 0
 
     # ── 準備 ────────────────────────────────────
+    def _ensure_multi_answer(self) -> None:
+        ensure = getattr(self._sheet, "ensure_multi_answer_tab", None)
+        if ensure is not None:
+            ensure()
+            return
+        self._sheet.ensure_tab(MULTI_ANSWER_TITLE, MULTI_ANSWER_HEADERS)
+
+    def _read_multi_answers(self) -> list[dict]:
+        reader = getattr(self._sheet, "read_multi_answer_rows", None)
+        if reader is not None:
+            return reader()
+        return self._sheet.read_dicts(MULTI_ANSWER_TITLE, formatted=True)
+
+    def _read_header_for(self, title: str) -> list[str]:
+        if title == MULTI_ANSWER_TITLE:
+            reader = getattr(self._sheet, "read_multi_answer_header", None)
+            if reader is not None:
+                return reader()
+        return self._sheet.read_header(title)
+
     def _now_text(self) -> str:
         return self._jst_now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -479,9 +500,14 @@ class CompareRunner:
             for title, headers, prefix_only in checks:
                 if title not in existing:
                     continue
-                actual = self._sheet.read_header(title)
+                actual = self._read_header_for(title)
                 expected = [str(header) for header in headers]
                 if not actual:
+                    continue
+                if title == MULTI_ANSWER_TITLE:
+                    # 1.7 の 9 列か 1.6 までの 8 列。メモより右は見ない。
+                    if multi_answer_layout(actual) is None:
+                        raise HeaderMismatchError(title, headers, actual)
                     continue
                 compared = actual[: len(expected)] if prefix_only else actual
                 if compared == expected:

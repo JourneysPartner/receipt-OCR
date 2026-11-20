@@ -51,7 +51,7 @@ class DriveConfig:
     )
     # このプレフィックスで始まるファイル名は list_files で除外する
     # （既に処理済みで人手で印をつけたファイル等を再処理しない）
-    excluded_file_name_prefixes: tuple[str, ...] = ("[済]", "【済】")
+    excluded_file_name_prefixes: tuple[str, ...] = ("[済]", "【済】", "【重複】")
 
 
 @dataclass(frozen=True)

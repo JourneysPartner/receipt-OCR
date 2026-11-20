@@ -13,6 +13,7 @@ class ProcessStatus(StrEnum):
     RESERVED = "reserved"
     WRITTEN = "written"
     EXPIRED = "expired"
+    DUPLICATE = "duplicate"
 
 
 @dataclass
@@ -100,6 +101,8 @@ class OcrResult:
 class ReceiptItem:
     date: str | None = None
     amount: int | None = None
+    time: str | None = None
+    receipt_no: str | None = None
     vendor: str | None = None
     description: str | None = None
     account: str | None = None
@@ -114,6 +117,8 @@ class CorrectedItem:
     original: ReceiptItem
     date: str | None = None
     amount: int | None = None
+    time: str | None = None
+    receipt_no: str | None = None
     vendor: str | None = None
     description: str | None = None
     account: str | None = None
@@ -123,6 +128,17 @@ class CorrectedItem:
     corrections_applied: list[str] = field(default_factory=list)
     needs_review: bool = False
     memo: str | None = None
+
+
+@dataclass
+class ReceiptDetails:
+    """処理管理の L..Q 列に書く、レシート 1 枚分の値（そろえる前）。"""
+
+    date: str = ""
+    time: str = ""
+    amount: int | None = None
+    vendor: str = ""
+    receipt_no: str = ""
 
 
 @dataclass
@@ -138,6 +154,8 @@ class ProcessRecord:
     retryable: bool = False
     source_folder_id: str = ""
     reservation_id: str = ""
+    details: ReceiptDetails = field(default_factory=ReceiptDetails)
+    duplicate_of: str = ""
 
 
 @dataclass

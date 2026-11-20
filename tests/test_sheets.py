@@ -74,7 +74,15 @@ class TestProcessLogLayout:
         assert PROCESS_LOG_HEADERS[_PL_STATUS] == "status"
         assert PROCESS_LOG_HEADERS[_PL_CASHBOOK_ROW] == "cashbookRow"
         assert PROCESS_LOG_HEADERS[_PL_RESERVATION_ID] == "reservationId"
-        assert _PL_RESERVATION_ID == len(PROCESS_LOG_HEADERS) - 1
+        assert _PL_RESERVATION_ID == 10
+        assert PROCESS_LOG_HEADERS[_PL_RESERVATION_ID + 1 :] == [
+            "receiptDate",
+            "receiptTime",
+            "amount",
+            "vendor",
+            "receiptNo",
+            "duplicateOf",
+        ]
 
 
 class TestStatuses:

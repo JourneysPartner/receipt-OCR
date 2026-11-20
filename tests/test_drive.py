@@ -112,6 +112,19 @@ class TestListFilesRecursive:
         names = [f.file_name for f in result]
         assert names == ["receipt.jpg"]
 
+    def test_duplicate_prefix_excluded(self):
+        """【重複】 も 【済】 と同じく処理対象から外す"""
+        dc = _make_client(
+            {
+                "root": [
+                    _file_entry("f1", "receipt.jpg"),
+                    _file_entry("f2", "【重複】 二重.jpg"),
+                ]
+            }
+        )
+        result = dc.list_files("root")
+        assert [f.file_name for f in result] == ["receipt.jpg"]
+
     def test_shortcut_not_followed(self):
         """Drive ショートカットは辿らない"""
         dc = _make_client(
@@ -225,3 +238,52 @@ class TestRenameFileAsDone:
 
     def test_drive_scope_includes_write(self):
         assert "https://www.googleapis.com/auth/drive" in DriveClient.SCOPES
+
+
+# ================================================================
+# 重複のファイル名・説明欄
+# ================================================================
+def _make_description_client(description: str = ""):
+    dc = DriveClient.__new__(DriveClient)
+    dc._config = DriveConfig()
+    dc._service = MagicMock()
+    files = dc._service.files.return_value
+    files.get.return_value.execute.return_value = {"description": description}
+    return dc, files
+
+
+def _duplicate_file(name: str = "receipt.jpg") -> DriveFile:
+    return DriveFile(file_id="dup1", file_name=name, mime_type="image/jpeg", folder_id="f1")
+
+
+class TestRenameFileAsDuplicate:
+    def test_adds_duplicate_prefix(self):
+        dc, files = _make_description_client()
+        f = _duplicate_file()
+        new = dc.rename_file_as_duplicate(f)
+        assert new == "【重複】receipt.jpg"
+        files.update.assert_called_once_with(fileId="dup1", body={"name": "【重複】receipt.jpg"})
+        assert f.file_name == "【重複】receipt.jpg"
+
+    def test_skip_when_already_prefixed(self):
+        dc, files = _make_description_client()
+        assert dc.rename_file_as_duplicate(_duplicate_file("【重複】receipt.jpg")) is None
+        files.update.assert_not_called()
+
+    def test_excluded_prefix_in_default_config(self):
+        assert "【重複】" in DriveConfig().excluded_file_name_prefixes
+
+
+class TestAppendDescriptionLines:
+    def test_appends_without_removing_existing_text(self):
+        dc, files = _make_description_client("既存の説明")
+        added = dc.append_description_lines(_duplicate_file(), ["重複: 1 枚目 → 重複元 X"])
+        assert added == ["重複: 1 枚目 → 重複元 X"]
+        files.update.assert_called_once_with(
+            fileId="dup1", body={"description": "既存の説明\n重複: 1 枚目 → 重複元 X"}
+        )
+
+    def test_does_not_append_the_same_line_twice(self):
+        dc, files = _make_description_client("既存の説明\n重複: 1 枚目 → 重複元 X")
+        assert dc.append_description_lines(_duplicate_file(), ["重複: 1 枚目 → 重複元 X"]) == []
+        files.update.assert_not_called()

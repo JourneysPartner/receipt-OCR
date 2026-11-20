@@ -197,6 +197,8 @@ class GeminiExtractor(AiExtractor):
                     ReceiptItem(
                         date=entry.get("date"),
                         amount=_safe_int(entry.get("amount")),
+                        time=entry.get("time"),
+                        receipt_no=entry.get("receipt_no"),
                         vendor=entry.get("vendor"),
                         description=entry.get("description"),
                         account=entry.get("account"),

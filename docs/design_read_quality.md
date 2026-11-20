@@ -164,7 +164,7 @@ def _process_file(self, file, cb, processed_keys, today, now) -> CustomerResult:
 ### 7.1 `sheet.py`
 
 - `RESULT_HEADERS` の最後に `"明細JSON"`。
-- `MULTI_ANSWER_TITLE = "答え_複数"`、`MULTI_ANSWER_HEADERS = ["fileId", "ファイル名", "番号", "正解_日付", "正解_金額", "正解_税率", "正解_店名", "メモ"]`。
+- `MULTI_ANSWER_TITLE = "答え_複数"`、`MULTI_ANSWER_HEADERS = ["fileId", "ファイル名", "ファイル", "番号", "正解_日付", "正解_金額", "正解_税率", "正解_店名", "メモ"]`（1.7）。1.6 までの 8 列（`ファイル` なし）も `MULTI_ANSWER_HEADERS_OLD` として通す。`メモ` より右の列は読まない・書かない。
 - 「答え」の中身は `read_dicts(title, formatted=True, cells="A:P")` のように範囲を A〜P に限って読む（`read_dicts` に `cells: str | None = None` を足し、`read_values(title, cells, formatted=...)` へ渡す。collect・score の全部の読み出しで）。
 - `ensure_tab(title, headers, *, check_headers=True, prefix_only=False)`: `prefix_only=True` のとき、既にある見出しは先頭 `len(headers)` 個だけを比べる（それより右は見ない）。見出しが空のタブに書くのは今までどおり `A1:<headers の最後の列>` だけ。
 - 「答え」への書き込みは今までどおり `A:P` と個別のセルだけ（`cell_range` の列は `ANSWER_HEADERS` の位置なので P を超えない）。Q より右を消す・書く呼び出しを足さない。

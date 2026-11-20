@@ -14,6 +14,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from src.compare.normalize import parse_amount_cell
 from src.config import MasterConfig, SheetsConfig
 from src.logging.logger import setup_logger
 from src.models import (
@@ -22,12 +23,14 @@ from src.models import (
     CustomerRow,
     ProcessRecord,
     ProcessStatus,
+    ReceiptDetails,
 )
 
 logger = setup_logger()
 JST = timezone(timedelta(hours=9))
 
 # ── 処理管理シート ─────────────────────────────────
+# A..K は今までどおり。L..Q は重複の判断に使う欄（仕様 §6.4）。
 PROCESS_LOG_HEADERS = [
     "fileId",
     "fileName",
@@ -40,13 +43,35 @@ PROCESS_LOG_HEADERS = [
     "retryable",
     "sourceFolderId",
     "reservationId",
+    "receiptDate",
+    "receiptTime",
+    "amount",
+    "vendor",
+    "receiptNo",
+    "duplicateOf",
 ]
 _PL_FILE_ID = 0
+_PL_FILE_NAME = 1
 _PL_RECEIPT_INDEX = 2
 _PL_PROCESSED_AT = 4
 _PL_STATUS = 5
 _PL_CASHBOOK_ROW = 6
 _PL_RESERVATION_ID = 10
+_PL_RECEIPT_DATE = 11
+_PL_RECEIPT_TIME = 12
+_PL_AMOUNT = 13
+_PL_VENDOR = 14
+_PL_RECEIPT_NO = 15
+_PL_DUPLICATE_OF = 16
+
+# 重複を照らす相手にする状態（記帳した・記帳中の明細。仕様 §6.1）
+_DUPLICATE_SOURCE_STATUSES = {
+    ProcessStatus.SUCCESS.value,
+    ProcessStatus.LOW_CONFIDENCE.value,
+    ProcessStatus.MANUAL_ENTRY.value,
+    ProcessStatus.WRITTEN.value,
+    ProcessStatus.RESERVED.value,
+}
 
 AI_LOG_HEADERS = [
     "timestamp",
@@ -80,7 +105,39 @@ _DONE_STATUSES = {
     ProcessStatus.LOW_CONFIDENCE.value,
     ProcessStatus.MANUAL_ENTRY.value,
     ProcessStatus.WRITTEN.value,
+    ProcessStatus.DUPLICATE.value,
 }
+
+
+class ProcessLogHeaderError(RuntimeError):
+    """処理管理タブの L..Q の見出しが決まった並びと違う（仕様 §6.4・D6）。"""
+
+    def __init__(self, expected: list[str], actual: list[str]):
+        self.expected = list(expected)
+        self.actual = list(actual)
+        super().__init__("処理管理タブの L..Q の見出しが決まった並びと違います")
+
+
+def _log_cell(value) -> str:
+    """USER_ENTERED でも数値・日付に変えないよう、先頭に ' を付けた文字列にする。"""
+    if value is None:
+        return ""
+    text = str(value)
+    if not text:
+        return ""
+    if text.startswith("'"):
+        return text
+    return f"'{text}"
+
+
+def _plain_cell(value) -> str:
+    """表から読んだ値の先頭の ' を外し、前後の空白を除く。"""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text.startswith("'"):
+        text = text[1:]
+    return text
 
 
 def _build_sheets_service(credentials_path: str | None = None):
@@ -303,7 +360,7 @@ class CashbookClient:
                 self._sheets.values()
                 .get(
                     spreadsheetId=self._spreadsheet_id,
-                    range=f"'{sheet}'!A:K",
+                    range=f"'{sheet}'!A:Q",
                 )
                 .execute()
             )
@@ -696,6 +753,58 @@ class CashbookClient:
                 keys.add(f"{row[_PL_FILE_ID]}:{row[_PL_RECEIPT_INDEX]}")
         return keys
 
+    def get_duplicate_candidates(self) -> list[ProcessRecord]:
+        """重複を照らす相手（仕様 §6.1）の明細を返す。
+
+        L..Q の欄が埋まっていて、状態が記帳した・記帳中のものだけ。
+        `duplicate` の記録は相手にしない（重複の重複を作らない）。
+        """
+        values = self._read_process_log_all()
+        records: list[ProcessRecord] = []
+        for row in values[1:]:
+            if len(row) <= _PL_STATUS:
+                continue
+            status = _plain_cell(row[_PL_STATUS])
+            if status not in _DUPLICATE_SOURCE_STATUSES:
+                continue
+
+            def cell(index: int) -> str:
+                return _plain_cell(row[index]) if index < len(row) else ""
+
+            receipt_date = cell(_PL_RECEIPT_DATE)
+            receipt_time = cell(_PL_RECEIPT_TIME)
+            amount_text = cell(_PL_AMOUNT)
+            vendor = cell(_PL_VENDOR)
+            receipt_no = cell(_PL_RECEIPT_NO)
+            # 欄が空の古い記録は相手にしない
+            if not receipt_date or not amount_text or not vendor:
+                continue
+            try:
+                receipt_index = int(float(cell(_PL_RECEIPT_INDEX)))
+            except ValueError:
+                continue
+            amount = parse_amount_cell(amount_text)
+            if amount is None:
+                continue
+
+            records.append(
+                ProcessRecord(
+                    file_id=cell(_PL_FILE_ID),
+                    file_name=cell(_PL_FILE_NAME),
+                    receipt_index=receipt_index,
+                    status=status,
+                    details=ReceiptDetails(
+                        date=receipt_date,
+                        time=receipt_time,
+                        amount=amount,
+                        vendor=vendor,
+                        receipt_no=receipt_no,
+                    ),
+                    duplicate_of=cell(_PL_DUPLICATE_OF),
+                )
+            )
+        return records
+
     def append_process_record(self, record: ProcessRecord) -> None:
         sheet = self._config.process_log_sheet_name
         row = [
@@ -711,12 +820,96 @@ class CashbookClient:
             record.source_folder_id,
             record.reservation_id,
         ]
+        details = record.details
+        new_cells = [
+            _log_cell(details.date),
+            _log_cell(details.time),
+            _log_cell(details.amount),
+            _log_cell(details.vendor),
+            _log_cell(details.receipt_no),
+            _log_cell(record.duplicate_of),
+        ]
+        if any(new_cells):
+            # A..K は今までどおり。L..Q は ' 付きの文字列で足す。
+            self._sheets.values().append(
+                spreadsheetId=self._spreadsheet_id,
+                range=f"'{sheet}'!A:Q",
+                valueInputOption="USER_ENTERED",
+                insertDataOption="INSERT_ROWS",
+                body={"values": [row + new_cells]},
+            ).execute()
+            return
         self._sheets.values().append(
             spreadsheetId=self._spreadsheet_id,
             range=f"'{sheet}'!A:K",
             valueInputOption="USER_ENTERED",
             insertDataOption="INSERT_ROWS",
             body={"values": [row]},
+        ).execute()
+
+    def write_receipt_details(
+        self,
+        updates: list[tuple[str, ReceiptDetails]],
+    ) -> None:
+        """予約した行の L..P に、レシート 1 枚分の値を書く（仕様 §6.4）。
+
+        `updates` は `(reservationId, 値)`。値の空の欄は書かない。
+        `duplicateOf`（Q）は重複の記録だけなので、ここでは触らない。
+        """
+        if not updates:
+            return
+        values = self._read_process_log_all()
+        row_by_rid: dict[str, int] = {}
+        for i, row in enumerate(values[1:], start=2):
+            if len(row) > _PL_RESERVATION_ID:
+                row_by_rid[_plain_cell(row[_PL_RESERVATION_ID])] = i
+
+        sheet = self._config.process_log_sheet_name
+        data: list[dict] = []
+        for reservation_id, details in updates:
+            row_number = row_by_rid.get(reservation_id)
+            if row_number is None:
+                continue
+            cells = [
+                (_PL_RECEIPT_DATE, details.date),
+                (_PL_RECEIPT_TIME, details.time),
+                (_PL_AMOUNT, details.amount),
+                (_PL_VENDOR, details.vendor),
+                (_PL_RECEIPT_NO, details.receipt_no),
+            ]
+            for column, value in cells:
+                text = _log_cell(value)
+                if not text:
+                    continue
+                data.append(
+                    {
+                        "range": f"'{sheet}'!{_col_letter(column)}{row_number}",
+                        "values": [[text]],
+                    }
+                )
+        if data:
+            self._sheets.values().batchUpdate(
+                spreadsheetId=self._spreadsheet_id,
+                body={"valueInputOption": "USER_ENTERED", "data": data},
+            ).execute()
+
+    # ── エラー詳細（O 列） ─────────────────────────────
+    def write_error_detail(self, row: int, text: str) -> None:
+        """O 列（`error_detail_column`）に文を書く。空なら何もしない。
+
+        同じファイルの中で 2 枚目以降の重複の注記に使う（仕様 §5）。
+        """
+        err_col = self._config.error_detail_column
+        if err_col is None or err_col in set(self._config.protected_columns):
+            return
+        if not text:
+            return
+        sheet = self.cashbook_sheet_name
+        self._sheets.values().update(
+            spreadsheetId=self._spreadsheet_id,
+            range=f"'{sheet}'!{_col_letter(err_col)}{row}",
+            valueInputOption="USER_ENTERED",
+            body={"values": [[text]]},
         ).execute()
 
     # ── AI詳細ログ ─────────────────────────────────
@@ -750,17 +943,91 @@ class CashbookClient:
         ).execute()
 
     # ── シート初期化 ───────────────────────────────
-    def ensure_log_sheets_exist(self) -> None:
+    def ensure_log_sheets_exist(self, *, write: bool = True) -> None:
+        """処理管理・AI詳細ログのタブと見出しを用意する。
+
+        `write=False`（validate / dry_run）では何も書かず、見出しが違えば
+        同じように例外にする（D5・D6）。
+        """
         meta = self._sheets.get(
             spreadsheetId=self._spreadsheet_id,
             fields="sheets.properties.title",
         ).execute()
         existing = {s["properties"]["title"] for s in meta.get("sheets", [])}
-        self._ensure_sheet(self._config.process_log_sheet_name, PROCESS_LOG_HEADERS, existing)
-        self._ensure_sheet(self._config.ai_log_sheet_name, AI_LOG_HEADERS, existing)
+        self._ensure_process_log_sheet(existing, write=write)
+        self._ensure_sheet(self._config.ai_log_sheet_name, AI_LOG_HEADERS, existing, write=write)
 
-    def _ensure_sheet(self, name: str, headers: list[str], existing: set[str]) -> None:
+    def _ensure_process_log_sheet(self, existing: set[str], *, write: bool = True) -> None:
+        """処理管理タブを用意し、L..Q の見出しを確かめる（仕様 §6.4・D6）。
+
+        L1 から右が空なら見出しを足す。違う見出しがあれば何も書かずに例外。
+        `write=False` では足さずに確かめるだけ。
+        """
+        name = self._config.process_log_sheet_name
         if name not in existing:
+            if not write:
+                return
+            self._sheets.batchUpdate(
+                spreadsheetId=self._spreadsheet_id,
+                body={"requests": [{"addSheet": {"properties": {"title": name}}}]},
+            ).execute()
+            self._sheet_id_cache.clear()
+
+        rng = f"'{name}'!A1:{_col_letter(len(PROCESS_LOG_HEADERS) - 1)}1"
+        r = (
+            self._sheets.values()
+            .get(
+                spreadsheetId=self._spreadsheet_id,
+                range=rng,
+            )
+            .execute()
+        )
+        values = r.get("values") or []
+        actual = list(values[0]) if values else []
+        if not actual:
+            if not write:
+                return
+            self._sheets.values().update(
+                spreadsheetId=self._spreadsheet_id,
+                range=rng,
+                valueInputOption="RAW",
+                body={"values": [PROCESS_LOG_HEADERS]},
+            ).execute()
+            return
+
+        expected_tail = PROCESS_LOG_HEADERS[_PL_RECEIPT_DATE:]
+        actual_tail = [
+            str(value).strip() if value is not None else "" for value in actual[_PL_RECEIPT_DATE:]
+        ]
+        actual_tail += [""] * (len(expected_tail) - len(actual_tail))
+        if not any(actual_tail):
+            if not write:
+                return
+            tail_range = (
+                f"'{name}'!{_col_letter(_PL_RECEIPT_DATE)}1:"
+                f"{_col_letter(len(PROCESS_LOG_HEADERS) - 1)}1"
+            )
+            self._sheets.values().update(
+                spreadsheetId=self._spreadsheet_id,
+                range=tail_range,
+                valueInputOption="RAW",
+                body={"values": [expected_tail]},
+            ).execute()
+            return
+        if actual_tail != expected_tail:
+            raise ProcessLogHeaderError(expected_tail, actual_tail)
+
+    def _ensure_sheet(
+        self,
+        name: str,
+        headers: list[str],
+        existing: set[str],
+        *,
+        write: bool = True,
+    ) -> None:
+        if name not in existing:
+            if not write:
+                return
             self._sheets.batchUpdate(
                 spreadsheetId=self._spreadsheet_id,
                 body={"requests": [{"addSheet": {"properties": {"title": name}}}]},
@@ -775,7 +1042,7 @@ class CashbookClient:
             )
             .execute()
         )
-        if r.get("values"):
+        if r.get("values") or not write:
             return
         self._sheets.values().update(
             spreadsheetId=self._spreadsheet_id,
