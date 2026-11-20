@@ -142,6 +142,12 @@ CORRECTION_RULES: list[CorrectionRule] = [
         ],
         tax_category="対象外",
     ),
+    # 梱包資材は消耗品費（2026-11-20 利用者の決定）。宅配便・郵便の通信費より後なので上書きする。
+    CorrectionRule(
+        name="梱包資材代→消耗品費",
+        patterns=[r"^梱包資材代"],
+        account="消耗品費",
+    ),
 ]
 
 
