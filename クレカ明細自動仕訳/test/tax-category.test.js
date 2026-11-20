@@ -2871,7 +2871,7 @@ module.exports = ({test, assert, gas}) => {
     assert.deepEqual(report.copies.map((copy) => copy.stamp),
       ['20261001-1200', '20261002-1300', '20261003-1400']);
     assert.deepEqual(report.counts,
-      {alreadySet: 1, needsUpdate: 2, skipped: 0, applied: 0, notReached: 0});
+      {alreadySet: 1, needsUpdate: 2, skipped: 0, applied: 0, notReached: 0, beforeStart: 0});
 
     const first = report.copies[0];
     assert.equal(first.status, 'NEEDS_UPDATE');
@@ -2885,6 +2885,7 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(first.groups.length, 3);
     assert.deepEqual(first.otherValues, ['不課税', '旧い名前']);
     assert.deepEqual(first.otherValueRows, [5, 7]);
+    assert.equal(first.otherValueRowCount, 2);
     assert.equal(report.copies[1].status, 'NEEDS_UPDATE');
     assert.equal(report.copies[1].allowInvalid, true);
     assert.equal(report.copies[2].status, 'ALREADY_SET');
@@ -2907,7 +2908,7 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(applied.stoppedBy, null);
     assert.equal(applied.applied, true, JSON.stringify(applied));
     assert.deepEqual(applied.counts,
-      {alreadySet: 1, needsUpdate: 0, skipped: 0, applied: 2, notReached: 0});
+      {alreadySet: 1, needsUpdate: 0, skipped: 0, applied: 2, notReached: 0, beforeStart: 0});
     assert.equal(applied.auditIds.length, 2);
     assert.equal(applied.copies[0].status, 'APPLIED');
     assert.equal(applied.copies[0].verified, true);
@@ -2970,7 +2971,7 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(again.stoppedBy, null);
     assert.equal(again.applied, false);
     assert.deepEqual(again.counts,
-      {alreadySet: 3, needsUpdate: 0, skipped: 0, applied: 0, notReached: 0});
+      {alreadySet: 3, needsUpdate: 0, skipped: 0, applied: 0, notReached: 0, beforeStart: 0});
     assert.deepEqual(gas.stubs.getWriteLog(), []);
     assert.equal(auditLastRow(), auditCount);
   });
@@ -2999,7 +3000,7 @@ module.exports = ({test, assert, gas}) => {
       assert.equal(byId.copyA.status, 'ALREADY_SET');
       assert.equal(byId.copyB.status, 'APPLIED');
       assert.deepEqual(report.counts,
-        {alreadySet: 1, needsUpdate: 0, skipped: 0, applied: 1, notReached: 0});
+        {alreadySet: 1, needsUpdate: 0, skipped: 0, applied: 1, notReached: 0, beforeStart: 0});
       assert.equal(dataRuleWrites18('copyA').length, 0, 'ALREADY_SET には書かない');
       assert.equal(dataRuleWrites18('copyB').length, 1);
       const audits = master('監査ログ').getDataRange().getValues()
@@ -3087,7 +3088,11 @@ module.exports = ({test, assert, gas}) => {
     gas.stubs.resetWriteLog();
     const beforeAudit = auditLastRow();
     const realAudit = gas.context.appendAuditUnlocked_;
-    gas.context.appendAuditUnlocked_ = function() { throw new Error('audit down'); };
+    let auditAttempts = 0;
+    gas.context.appendAuditUnlocked_ = function() {
+      auditAttempts += 1;
+      throw new Error('audit down');
+    };
     try {
       const stopped = plain(call('opsSetCopiesTaxCategoryValidation', ['C001', true]));
       assert.equal(stopped.stoppedBy, 'AUDIT_WRITE_FAILED');
@@ -3096,16 +3101,26 @@ module.exports = ({test, assert, gas}) => {
         item.kind === 'range.setDataValidation'), []);
       assert.equal(auditLastRow(), beforeAudit);
       assert.equal(stopped.counts.applied, 0);
+      assert.equal(stopped.copies[0].status, 'NEEDS_UPDATE');
+      assert.equal(stopped.copies[1].status, 'NOT_REACHED');
+      assert.equal(auditAttempts, 1, '監査は 1 回しか試みない');
+      assert.deepEqual(stopped.auditIds, []);
     } finally {
       gas.context.appendAuditUnlocked_ = realAudit;
     }
 
-    // 規則を付けても変わらない（読み返しが合わない）→ 後の枚に書かない。
+    // 規則を付けても変わらない（1 枚目の範囲だけ読み返しが合わない）→ 後の枚に書かない。
     twoCopies18World();
     const sheet = destSheet('copyA');
     const proto = Object.getPrototypeOf(sheet.getRange(5, 7));
     const realValidation = proto.setDataValidation;
-    proto.setDataValidation = function() { return this; };
+    proto.setDataValidation = function(validation) {
+      if (this.sheet.getParent().getId() === 'copyA' && this.getRow() === 5 &&
+          this.getColumn() === 7 && this.getNumRows() === 26) {
+        return this;
+      }
+      return realValidation.call(this, validation);
+    };
     try {
       gas.stubs.resetWriteLog();
       const report = plain(call('opsSetCopiesTaxCategoryValidation', ['C001', true]));
@@ -3149,7 +3164,7 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(stopped.stoppedBy, 'TIME_BUDGET');
     assert.equal(stopped.applied, false);
     assert.deepEqual(stopped.counts,
-      {alreadySet: 0, needsUpdate: 0, skipped: 0, applied: 0, notReached: 2});
+      {alreadySet: 0, needsUpdate: 0, skipped: 0, applied: 0, notReached: 2, beforeStart: 0});
     assert.equal(stopped.copies[0].status, 'NOT_REACHED');
     assert.equal(stopped.copies[1].status, 'NOT_REACHED');
     assert.deepEqual(gas.stubs.getWriteLog(), []);
@@ -3159,7 +3174,7 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(applied.stoppedBy, null);
     assert.equal(applied.applied, true, JSON.stringify(applied));
     assert.deepEqual(applied.counts,
-      {alreadySet: 0, needsUpdate: 0, skipped: 0, applied: 2, notReached: 0});
+      {alreadySet: 0, needsUpdate: 0, skipped: 0, applied: 2, notReached: 0, beforeStart: 0});
     copyRules18(destSheet('copyA'), false);
     copyRules18(destSheet('copyB'), true);
   });
@@ -3204,7 +3219,7 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(asText.stoppedBy, null);
     assert.equal(asText.applied, false);
     assert.deepEqual(asText.counts,
-      {alreadySet: 0, needsUpdate: 2, skipped: 0, applied: 0, notReached: 0});
+      {alreadySet: 0, needsUpdate: 2, skipped: 0, applied: 0, notReached: 0, beforeStart: 0});
     const asOne = plain(call('opsSetCopiesTaxCategoryValidation', ['C001', 1]));
     assert.equal(asOne.stoppedBy, null);
     assert.equal(asOne.applied, false);
@@ -3222,7 +3237,8 @@ module.exports = ({test, assert, gas}) => {
     place18('parent', ['dest1', 'copyA']);
     tx18({id: 'GT18_SECRET', destinationId: 'copyA', merchant: '架空秘密店',
       purpose: '架空秘密用途', amount: 987654});
-    gas.evaluate('transactionLogSheet_().getRange(2, 16).setValue("架空秘密取引先")');
+    // 取引先名は取引ログの予定値の列（T、v[19]）に置く（店名 P を上書きしない）。
+    gas.evaluate('transactionLogSheet_().getRange(2, 20).setValue("架空秘密取引先")');
 
     gas.stubs.resetWriteLog();
     const report = plain(call('opsSetCopiesTaxCategoryValidation', ['C001', true]));
@@ -3236,6 +3252,8 @@ module.exports = ({test, assert, gas}) => {
       assert.ok(logs.indexOf(secret) < 0, secret + ' must not appear in logs');
       assert.ok(audits.indexOf(secret) < 0, secret + ' must not appear in audits');
     });
+    assert.equal(gas.evaluate('transactionLogSheet_().getRange(2, 16).getValue()'), '架空秘密店',
+      '(n) 店名を上書きしない');
   });
 
   test('gt 18: §9.6 規則を付けた後に値が変われば VALUES_CHANGED で止め、後の転記シートに書かない', () => {
@@ -3258,15 +3276,23 @@ module.exports = ({test, assert, gas}) => {
       assert.equal(report.stoppedBy, 'VALUES_CHANGED');
       assert.equal(report.applied, false);
       assert.deepEqual(report.counts,
-        {alreadySet: 0, needsUpdate: 1, skipped: 0, applied: 0, notReached: 1});
+        {alreadySet: 0, needsUpdate: 1, skipped: 0, applied: 0, notReached: 1, beforeStart: 0});
       assert.equal(report.copies[0].spreadsheetId, 'copyA');
       assert.equal(report.copies[0].status, 'NEEDS_UPDATE');
       assert.equal(report.copies[0].problem, 'VALUES_CHANGED');
       assert.equal(report.copies[0].verified, false);
       assert.equal(report.copies[1].status, 'NOT_REACHED');
       assert.equal(dataRuleWrites18('copyB').length, 0, '後の枚に書かない');
-      assert.equal(master('監査ログ').getDataRange().getValues()
-        .filter((row) => row[11] === 'TAX_VALIDATION_COPY').length, 1, '監査は書く');
+      const auditRows = master('監査ログ').getDataRange().getValues()
+        .filter((row) => row[11] === 'TAX_VALIDATION_COPY');
+      assert.equal(auditRows.length, 1, '監査は書く');
+      assert.deepEqual(report.auditIds, [auditRows[0][0]], '止まった組の監査 ID も残す');
+      const before = JSON.parse(String(auditRows[0][9]));
+      assert.ok(before.groups.length > 0);
+      before.groups.forEach((group) => {
+        assert.equal(Object.prototype.hasOwnProperty.call(group, 'key'), false,
+          '監査の before に key を出さない');
+      });
       assert.ok(auditLastRow() > beforeAudit);
     } finally {
       proto.setDataValidation = realValidation;
@@ -3292,19 +3318,401 @@ module.exports = ({test, assert, gas}) => {
       assert.equal(report.stoppedBy, 'WRITE_FAILED');
       assert.equal(report.applied, false);
       assert.deepEqual(report.counts,
-        {alreadySet: 0, needsUpdate: 1, skipped: 0, applied: 0, notReached: 1});
+        {alreadySet: 0, needsUpdate: 1, skipped: 0, applied: 0, notReached: 1, beforeStart: 0});
       assert.equal(report.copies[0].spreadsheetId, 'copyA');
       assert.equal(report.copies[0].status, 'NEEDS_UPDATE');
       assert.equal(report.copies[0].problem, 'WRITE_FAILED');
       assert.equal(report.copies[1].status, 'NOT_REACHED');
       assert.equal(dataRuleWrites18('copyB').length, 0, '後の枚に書かない');
-      assert.equal(master('監査ログ').getDataRange().getValues()
-        .filter((row) => row[11] === 'TAX_VALIDATION_COPY').length, 1, '監査は先に書く');
+      const auditRows = master('監査ログ').getDataRange().getValues()
+        .filter((row) => row[11] === 'TAX_VALIDATION_COPY');
+      assert.equal(auditRows.length, 1, '監査は先に書く');
+      assert.deepEqual(report.auditIds, [auditRows[0][0]], '書けなかった組の監査 ID も残す');
       assert.ok(auditLastRow() > beforeAudit);
       assert.deepEqual(Array.from(destSheet('copyA').getRange(5, 7, 26, 1)
         .getDataValidations()[0][0].getCriteriaValues()[0]), ['旧い一覧'], '規則は変わらない');
     } finally {
       proto.setDataValidation = realValidation;
     }
+  });
+
+  test('gt 18: §9.6 見るだけでも時間の予算を見て残りを開かず、resumeAfter から続きを回す', () => {
+    threeCopies18World();
+    const realNow = gas.context.Date.now;
+    const realCheck = gas.context.taxOpsCopyCheck_;
+    let now = 5000000;
+    let advanced = false;
+    gas.context.Date.now = () => now;
+    gas.context.taxOpsCopyCheck_ = function(copy) {
+      const result = realCheck.apply(this, arguments);
+      if (!advanced && copy.spreadsheetId === 'copyA') {
+        advanced = true;
+        // 既定の 180000 を超え、1.3 の 240000 では超えない大きさ。
+        now += 200000;
+      }
+      return result;
+    };
+    try {
+      gas.stubs.resetWriteLog();
+      gas.stubs.resetDriveOps();
+      const first = plain(call('opsSetCopiesTaxCategoryValidation', ['C001']));
+      assert.equal(first.stoppedBy, 'TIME_BUDGET');
+      assert.equal(first.applied, false);
+      assert.deepEqual(first.counts,
+        {alreadySet: 0, needsUpdate: 1, skipped: 0, applied: 0, notReached: 2, beforeStart: 0});
+      assert.equal(first.resumeAfter, 'copyA');
+      assert.equal(first.startAfter, null);
+      assert.deepEqual(first.copies.map((copy) => copy.spreadsheetId),
+        ['copyA', 'copyB', 'copyC']);
+      assert.equal(first.copies[1].status, 'NOT_REACHED');
+      assert.equal(first.copies[2].status, 'NOT_REACHED');
+      assert.equal(gas.stubs.getOpenedSpreadsheetIds().indexOf('copyB'), -1,
+        '予算の後の組は開かない');
+      assert.equal(gas.stubs.getOpenedSpreadsheetIds().indexOf('copyC'), -1,
+        '予算の後の組は開かない');
+      const filesOpened = gas.stubs.getDriveOps()
+        .filter((item) => item.op === 'getFileById').map((item) => item.id);
+      assert.equal(filesOpened.indexOf('copyB'), -1, '予算の後の組は開かない');
+      assert.equal(filesOpened.indexOf('copyC'), -1, '予算の後の組は開かない');
+      assert.deepEqual(gas.stubs.getWriteLog(), [], '見るだけは書かない');
+    } finally {
+      gas.context.Date.now = realNow;
+      gas.context.taxOpsCopyCheck_ = realCheck;
+    }
+
+    // 前の回の resumeAfter から続きを回す（扱い終えた組は開かない）。
+    gas.stubs.resetDriveOps();
+    const rest = plain(call('opsSetCopiesTaxCategoryValidation', ['C001', false,
+      {startAfter: 'copyA'}]));
+    assert.equal(rest.stoppedBy, null);
+    assert.equal(rest.startAfter, 'copyA');
+    assert.equal(rest.resumeAfter, null);
+    assert.equal(rest.counts.beforeStart, 1);
+    assert.deepEqual(rest.copies.map((copy) => copy.spreadsheetId), ['copyB', 'copyC']);
+    assert.equal(rest.copies[0].status, 'NEEDS_UPDATE');
+    assert.equal(rest.copies[1].status, 'ALREADY_SET');
+    assert.equal(gas.stubs.getOpenedSpreadsheetIds().indexOf('copyA'), -1,
+      'startAfter の組は開かない');
+    assert.equal(gas.stubs.getDriveOps().filter((item) => item.op === 'getFileById')
+      .map((item) => item.id).indexOf('copyA'), -1, 'startAfter の組は開かない');
+  });
+
+  test('gt 18: §9.6 apply は書いた後に予算で止まり、resumeAfter から残りだけを書く', () => {
+    twoCopies18World();
+    const realNow = gas.context.Date.now;
+    const realCheck = gas.context.taxOpsCopyCheck_;
+    let now = 6000000;
+    let advanced = false;
+    gas.context.Date.now = () => now;
+    gas.context.taxOpsCopyCheck_ = function(copy) {
+      const result = realCheck.apply(this, arguments);
+      if (!advanced && copy.spreadsheetId === 'copyA') {
+        advanced = true;
+        now += 200000;
+      }
+      return result;
+    };
+    try {
+      gas.stubs.resetWriteLog();
+      const first = plain(call('opsSetCopiesTaxCategoryValidation', ['C001', true]));
+      assert.equal(first.stoppedBy, 'TIME_BUDGET');
+      assert.equal(first.applied, false, '止まった回は applied にしない');
+      assert.deepEqual(first.counts,
+        {alreadySet: 0, needsUpdate: 0, skipped: 0, applied: 1, notReached: 1, beforeStart: 0});
+      assert.equal(first.copies[0].status, 'APPLIED');
+      assert.equal(first.copies[0].verified, true);
+      assert.equal(first.copies[1].status, 'NOT_REACHED');
+      assert.equal(first.auditIds.length, 1);
+      assert.equal(first.resumeAfter, 'copyA');
+      assert.equal(dataRuleWrites18('copyB').length, 0, '残りは書かない');
+      copyRules18(destSheet('copyA'), false);
+      assert.deepEqual(Array.from(destSheet('copyB').getRange(5, 7, 26, 1)
+        .getDataValidations()[0][0].getCriteriaValues()[0]), ['別の旧い一覧']);
+    } finally {
+      gas.context.Date.now = realNow;
+      gas.context.taxOpsCopyCheck_ = realCheck;
+    }
+
+    const auditBefore = master('監査ログ').getDataRange().getValues()
+      .filter((row) => row[11] === 'TAX_VALIDATION_COPY').length;
+    gas.stubs.resetWriteLog();
+    gas.stubs.resetDriveOps();
+    const rest = plain(call('opsSetCopiesTaxCategoryValidation', ['C001', true,
+      {startAfter: 'copyA'}]));
+    assert.equal(rest.stoppedBy, null);
+    assert.equal(rest.applied, true, JSON.stringify(rest));
+    assert.deepEqual(rest.counts,
+      {alreadySet: 0, needsUpdate: 0, skipped: 0, applied: 1, notReached: 0, beforeStart: 1});
+    assert.deepEqual(rest.copies.map((copy) => copy.spreadsheetId), ['copyB']);
+    assert.equal(rest.auditIds.length, 1);
+    copyRules18(destSheet('copyB'), true);
+    assert.equal(gas.stubs.getOpenedSpreadsheetIds().indexOf('copyA'), -1,
+      'startAfter の組は開かない');
+    assert.equal(gas.stubs.getDriveOps().filter((item) => item.op === 'getFileById')
+      .map((item) => item.id).indexOf('copyA'), -1, 'startAfter の組は開かない');
+    assert.equal(master('監査ログ').getDataRange().getValues()
+      .filter((row) => row[11] === 'TAX_VALIDATION_COPY').length, auditBefore + 1);
+  });
+
+  /** 同じ ID でシート名だけ違う 2 組（§9.6.2）。 */
+  function createTwoSheetCopy18(id, name, sheetNames) {
+    gas.stubs.createSpreadsheet(id, {name: name, sheets: sheetNames.map((sheetName) => ({
+      name: sheetName, values: copy18Values(), maxRows: 30, maxColumns: 30}))});
+    sheetNames.forEach((sheetName) => {
+      gas.stubs.getSpreadsheet(id).getSheetByName(sheetName)
+        .getRange(5, 7, 26, 1).setDataValidation(oldRule18(['旧い一覧'], false));
+    });
+  }
+
+  test('gt 18: §9.6 同じ ID でシート名が 2 つの組は時間の境目でも分けずに扱う', () => {
+    setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [], taxTabs: {marks: [], flags: []}});
+    createTwoSheetCopy18('copyPair', COPY_PREFIX_18 + '20261007-1800', ['A', 'B']);
+    place18('parent', ['dest1', 'copyPair']);
+    tx18({id: 'GT18_PAIR_A', destinationId: 'copyPair', destinationSheet: 'A', status: 'PREPARED'});
+    tx18({id: 'GT18_PAIR_B', destinationId: 'copyPair', destinationSheet: 'B', status: 'COMMITTED'});
+
+    const realNow = gas.context.Date.now;
+    const realCheck = gas.context.taxOpsCopyCheck_;
+    let now = 7000000;
+    let advanced = false;
+    gas.context.Date.now = () => now;
+    gas.context.taxOpsCopyCheck_ = function(copy) {
+      const result = realCheck.apply(this, arguments);
+      if (!advanced) {
+        advanced = true;
+        now += 200000;
+      }
+      return result;
+    };
+    try {
+      gas.stubs.resetDriveOps();
+      const report = plain(call('opsSetCopiesTaxCategoryValidation', ['C001']));
+      assert.equal(report.stoppedBy, null, JSON.stringify(report));
+      assert.deepEqual(report.copies.map((copy) => copy.spreadsheetId),
+        ['copyPair', 'copyPair']);
+      assert.deepEqual(report.copies.map((copy) => copy.sheetName), ['A', 'B']);
+      assert.equal(report.copies[0].status, 'NEEDS_UPDATE');
+      assert.equal(report.copies[1].status, 'NEEDS_UPDATE', '同じ ID は時間を見ずに続ける');
+      assert.equal(report.counts.needsUpdate, 2);
+      assert.equal(report.counts.notReached, 0);
+      assert.equal(report.resumeAfter, null);
+      assert.equal(gas.stubs.getOpenedSpreadsheetIds()
+        .filter((id) => id === 'copyPair').length, 2);
+    } finally {
+      gas.context.Date.now = realNow;
+      gas.context.taxOpsCopyCheck_ = realCheck;
+    }
+  });
+
+  test('gt 18: §9.6 timeBudgetMs の読み方（省略・数でない → 180000、負 → 0）', () => {
+    assert.equal(call('taxOpsCopyBudget_', [undefined]), 180000);
+    assert.equal(call('taxOpsCopyBudget_', [{}]), 180000);
+    assert.equal(call('taxOpsCopyBudget_', [{timeBudgetMs: '180000'}]), 180000);
+    assert.equal(call('taxOpsCopyBudget_', [{timeBudgetMs: NaN}]), 180000);
+    assert.equal(call('taxOpsCopyBudget_', [{timeBudgetMs: Infinity}]), 180000);
+    assert.equal(call('taxOpsCopyBudget_', [{timeBudgetMs: -1}]), 0);
+    assert.equal(call('taxOpsCopyBudget_', [{timeBudgetMs: 0}]), 0);
+    assert.equal(call('taxOpsCopyBudget_', [{timeBudgetMs: 1234}]), 1234);
+  });
+
+  test('gt 18: §9.6 ALREADY_SET の組ではロックを取らず、NEEDS_UPDATE だけ 1 組 1 回', () => {
+    threeCopies18World();
+    const lock = gas.stubs.getScriptLock();
+    lock.reset();
+    const report = plain(call('opsSetCopiesTaxCategoryValidation', ['C001', true]));
+    assert.equal(report.stoppedBy, null);
+    assert.equal(report.applied, true, JSON.stringify(report));
+    assert.equal(lock.tryCount, 2, 'NEEDS_UPDATE の 2 枚だけロックを取る');
+
+    lock.reset();
+    const again = plain(call('opsSetCopiesTaxCategoryValidation', ['C001', true]));
+    assert.deepEqual(again.counts,
+      {alreadySet: 3, needsUpdate: 0, skipped: 0, applied: 0, notReached: 0, beforeStart: 0});
+    assert.equal(lock.tryCount, 0, 'ALREADY_SET ではロックを取らない');
+  });
+
+  test('gt 18: §9.6 ALREADY_SET はその組の allowInvalid で見て、並び・欠け・読めない値は NEEDS_UPDATE', () => {
+    function oneCopyWithRule(rule) {
+      setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [], taxTabs: {marks: [], flags: []}});
+      createCopy18('copyA', COPY_PREFIX_18 + '20261008-1900', {
+        gValues: {5: '架空の値'},
+        groups: [{from: 5, rows: 26, rule: rule}]
+      });
+      place18('parent', ['dest1', 'copyA']);
+      tx18({id: 'GT18_ALREADY', destinationId: 'copyA'});
+      return plain(call('opsSetCopiesTaxCategoryValidation', ['C001']));
+    }
+
+    const reversed = oneCopyWithRule(oldRule18(names18().slice().reverse(), false));
+    assert.equal(reversed.copies[0].status, 'NEEDS_UPDATE', '並びが違う');
+    assert.equal(reversed.copies[0].allowInvalid, false);
+
+    const missing = oneCopyWithRule(oldRule18(names18().slice(0, 29), false));
+    assert.equal(missing.copies[0].status, 'NEEDS_UPDATE', '1 つ足りない');
+
+    const unreadable = {
+      getCriteriaType() { return 'VALUE_IN_LIST'; },
+      getCriteriaValues() { return [names18().slice()]; },
+      getAllowInvalid() { throw new Error('Range not found'); }
+    };
+    const seen = oneCopyWithRule(unreadable);
+    assert.equal(seen.copies[0].status, 'NEEDS_UPDATE', '組の allowInvalid が読めない');
+    assert.equal(seen.copies[0].allowInvalid, true, '付けるのは警告のみ');
+
+    const applied = plain(call('opsSetCopiesTaxCategoryValidation', ['C001', true]));
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    copyRules18(destSheet('copyA'), true);
+    assert.equal(destSheet('copyA').getRange(5, 7).getValue(), '架空の値', '値を変えない');
+  });
+
+  test('gt 18: §9.6 想定外の例外は報告をログに出してから投げ直す', () => {
+    twoCopies18World();
+    const realApply = gas.context.taxOpsCopyApply_;
+    gas.context.taxOpsCopyApply_ = function(copy) {
+      if (copy.spreadsheetId === 'copyB') throw new Error('unexpected');
+      return realApply.apply(this, arguments);
+    };
+    try {
+      gas.stubs.resetWriteLog();
+      gas.stubs.clearLogs();
+      let thrown = null;
+      try {
+        call('opsSetCopiesTaxCategoryValidation', ['C001', true]);
+      } catch (error) {
+        thrown = error;
+      }
+      assert.ok(thrown, '例外を投げ直す');
+      assert.equal(String(thrown.message), 'unexpected');
+
+      const logged = gas.stubs.getLogLines()
+        .filter((line) => String(line).indexOf('{"applied"') === 0);
+      assert.equal(logged.length, 1, '報告をログに 1 回出す');
+      const report = JSON.parse(logged[0]);
+      assert.equal(report.stoppedBy, 'UNEXPECTED_ERROR');
+      assert.equal(report.copies[0].status, 'APPLIED');
+      assert.equal(report.copies[1].status, 'NOT_REACHED');
+      assert.equal(report.auditIds.length, 1);
+      const audits = master('監査ログ').getDataRange().getValues()
+        .filter((row) => row[11] === 'TAX_VALIDATION_COPY');
+      assert.equal(audits.length, 1, 'APPLIED の監査は残る');
+      assert.equal(report.auditIds[0], audits[0][0]);
+      assert.equal(dataRuleWrites18('copyB').length, 0, '残りは書かない');
+    } finally {
+      gas.context.taxOpsCopyApply_ = realApply;
+    }
+  });
+
+  test('gt 18: §9.6 取引ログが読めない・顧客の設定が不正なら止める', () => {
+    twoCopies18World();
+    const realFind = gas.context.findRowsByColumnValues_;
+    gas.context.findRowsByColumnValues_ = function() { throw new Error('tx log down'); };
+    try {
+      gas.stubs.resetWriteLog();
+      const report = plain(call('opsSetCopiesTaxCategoryValidation', ['C001', true]));
+      assert.equal(report.stoppedBy, 'TRANSACTION_LOG_UNREADABLE');
+      assert.equal(report.copies.length, 0);
+      assert.deepEqual(gas.stubs.getWriteLog(), []);
+    } finally {
+      gas.context.findRowsByColumnValues_ = realFind;
+    }
+
+    twoCopies18World();
+    const realOpsCustomer = gas.context.taxOpsCustomer_;
+    gas.context.taxOpsCustomer_ = function(customerId) {
+      const found = realOpsCustomer.apply(this, arguments);
+      return found ? Object.assign({}, found, {headerRow: 0}) : found;
+    };
+    try {
+      gas.stubs.resetWriteLog();
+      const invalid = plain(call('opsSetCopiesTaxCategoryValidation', ['C001', true]));
+      assert.equal(invalid.stoppedBy, 'TEMPLATE_INVALID');
+      assert.deepEqual(gas.stubs.getWriteLog(), []);
+    } finally {
+      gas.context.taxOpsCustomer_ = realOpsCustomer;
+    }
+  });
+
+  test('gt 18: §9.6 組の NO_ROWS・READ_FAILED は SKIPPED にしてほかを続け、読めない取引は数える', () => {
+    // NO_ROWS（行が headerRow + 1 より少ない）→ SKIPPED、次の組は書く。
+    setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [], taxTabs: {marks: [], flags: []}});
+    const noRows = createCopy18('copyA', COPY_PREFIX_18 + '20261009-1000', {
+      groups: [{from: 5, rows: 26, rule: oldRule18(['旧い一覧'], false)}]
+    });
+    noRows.maxRows = 4;
+    createCopy18('copyB', COPY_PREFIX_18 + '20261009-1100', {
+      groups: [{from: 5, rows: 26, rule: oldRule18(['別の旧い一覧'], false)}]
+    });
+    place18('parent', ['dest1', 'copyA', 'copyB']);
+    tx18({id: 'GT18_NOROWS', destinationId: 'copyA'});
+    tx18({id: 'GT18_GOOD_ROWS', destinationId: 'copyB'});
+    gas.stubs.resetWriteLog();
+    const report = plain(call('opsSetCopiesTaxCategoryValidation', ['C001', true]));
+    assert.equal(report.applied, true, JSON.stringify(report));
+    assert.equal(report.copies[0].status, 'SKIPPED');
+    assert.equal(report.copies[0].problem, 'NO_ROWS');
+    assert.equal(report.copies[1].status, 'APPLIED');
+    assert.equal(dataRuleWrites18('copyA').length, 0);
+
+    // READ_FAILED（組の G の読み取りが投げる）→ SKIPPED、次の組は書く。
+    twoCopies18World();
+    const sheet = destSheet('copyA');
+    const proto = Object.getPrototypeOf(sheet.getRange(5, 7));
+    const realValidations = proto.getDataValidations;
+    proto.getDataValidations = function() {
+      if (this.sheet.getParent().getId() === 'copyA') throw new Error('read down');
+      return realValidations.call(this);
+    };
+    try {
+      gas.stubs.resetWriteLog();
+      const readFailed = plain(call('opsSetCopiesTaxCategoryValidation', ['C001', true]));
+      assert.equal(readFailed.applied, true, JSON.stringify(readFailed));
+      assert.equal(readFailed.copies[0].status, 'SKIPPED');
+      assert.equal(readFailed.copies[0].problem, 'READ_FAILED');
+      assert.equal(readFailed.copies[1].status, 'APPLIED');
+      assert.equal(dataRuleWrites18('copyA').length, 0);
+    } finally {
+      proto.getDataValidations = realValidations;
+    }
+
+    // 取引ログの 1 行が読めない → unreadableTransactions に数え、ほかは続ける。
+    twoCopies18World();
+    const realTx = gas.context.txLogFromRecord_;
+    gas.context.txLogFromRecord_ = function(record) {
+      if (record && record.values && String(record.values[0]) === 'GT18_UNREADABLE') {
+        throw new Error('record down');
+      }
+      return realTx.apply(this, arguments);
+    };
+    tx18({id: 'GT18_UNREADABLE', destinationId: 'copyA'});
+    try {
+      const unreadable = plain(call('opsSetCopiesTaxCategoryValidation', ['C001']));
+      assert.equal(unreadable.stoppedBy, null);
+      assert.equal(unreadable.unreadableTransactions, 1);
+      assert.equal(unreadable.transactions, 2);
+      assert.equal(unreadable.counts.needsUpdate, 2);
+    } finally {
+      gas.context.txLogFromRecord_ = realTx;
+    }
+  });
+
+  test('gt 18: §9.6 otherValueRowCount は総数で、otherValueRows は 20 まで', () => {
+    setupWorld({accounts: GT_ACCOUNTS, sheetEntries: [], taxTabs: {marks: [], flags: []}});
+    const gValues = {};
+    for (let row = 5; row <= 26; row += 1) gValues[row] = '架空不明値' + row;
+    createCopy18('copyA', COPY_PREFIX_18 + '20261009-1200', {
+      gValues: gValues,
+      groups: [{from: 5, rows: 26, rule: oldRule18(['旧い一覧'], false)}]
+    });
+    place18('parent', ['dest1', 'copyA']);
+    tx18({id: 'GT18_OTHER_ROWS', destinationId: 'copyA'});
+
+    const report = plain(call('opsSetCopiesTaxCategoryValidation', ['C001']));
+    const copy = report.copies[0];
+    assert.equal(copy.valueRows, 22);
+    assert.equal(copy.otherValueRowCount, 22);
+    assert.equal(copy.otherValueRows.length, 20);
+    assert.equal(copy.otherValueRows[0], 5);
+    assert.equal(copy.otherValueRows[19], 24);
+    assert.equal(copy.otherValues.length, 10);
   });
 };
