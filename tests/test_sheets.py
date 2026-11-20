@@ -389,6 +389,19 @@ class TestWriteCashbookRow:
         ranges = [d["range"] for d in batch.call_args.kwargs["body"]["data"]]
         assert not any("!O10" in r for r in ranges)
 
+    def test_same_file_note_goes_into_the_same_batch_update(self):
+        """§11.4: 同じファイルの中の注記も、行を書く 1 回の batchUpdate に入れる。"""
+        cb, batch = _make_client()
+        cb.write_cashbook_row(
+            row=10,
+            item=self._item(),
+            file_link="l",
+            error_detail="同じ内容の行があります（二重スキャンかも）",
+        )
+        sent = {d["range"]: d["values"] for d in batch.call_args.kwargs["body"]["data"]}
+        assert sent["'入力用'!O10"] == [["同じ内容の行があります（二重スキャンかも）"]]
+        batch.assert_called_once()
+
     def test_d_and_n_protected_in_normal_write(self):
         cb, batch = _make_client()
         cb.write_cashbook_row(row=10, item=self._item(), file_link="l")

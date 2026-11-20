@@ -368,6 +368,36 @@ class CashbookClient:
             return []
         return r.get("values", [])
 
+    def _process_log_tab_exists(self) -> bool:
+        name = self._config.process_log_sheet_name
+        meta = self._sheets.get(
+            spreadsheetId=self._spreadsheet_id,
+            fields="sheets.properties.title",
+        ).execute()
+        return any(
+            str(s.get("properties", {}).get("title", "")) == name for s in meta.get("sheets", [])
+        )
+
+    def _read_process_log_strict(self) -> list[list[str]]:
+        """顧客の始めに読む処理管理（仕様 §11.5）。
+
+        タブがあるのに読めないときは例外にする（429 などもそのまま上げる）。
+        タブが無い（dry_run の新しい出納帳）ときだけ空。ほかの呼び出し元は
+        `_read_process_log_all` のまま変えない。
+        """
+        if not self._process_log_tab_exists():
+            return []
+        sheet = self._config.process_log_sheet_name
+        r = (
+            self._sheets.values()
+            .get(
+                spreadsheetId=self._spreadsheet_id,
+                range=f"'{sheet}'!A:Q",
+            )
+            .execute()
+        )
+        return r.get("values", [])
+
     # ── 有効予約 ───────────────────────────────────
     def get_active_reservations(self) -> dict[int, list[ActiveReservation]]:
         values = self._read_process_log_all()
@@ -444,8 +474,15 @@ class CashbookClient:
         file_id: str,
         file_name: str,
         receipt_indices: list[int],
+        details: dict[int, ReceiptDetails] | None = None,
     ) -> list[tuple[int, str]]:
+        """行を予約し、L〜P も同じ 1 回の追記で書く（仕様 §11.4）。
+
+        `details` は明細の番号（`receipt_indices` の値）→ 処理管理に書く値。
+        渡さなければ L〜P は空（今までの呼び方）。
+        """
         now = datetime.now(JST).isoformat()
+        details = details or {}
         for attempt in range(3):
             rows = self.find_available_rows(count)
             reservations: list[tuple[int, str]] = []
@@ -460,6 +497,7 @@ class CashbookClient:
                         status=ProcessStatus.RESERVED.value,
                         cashbook_row=row,
                         reservation_id=rid,
+                        details=details.get(idx, ReceiptDetails()),
                     )
                 )
                 reservations.append((row, rid))
@@ -494,6 +532,7 @@ class CashbookClient:
                     status=ProcessStatus.RESERVED.value,
                     cashbook_row=row,
                     reservation_id=rid,
+                    details=details.get(idx, ReceiptDetails()),
                 )
             )
             res.append((row, rid))
@@ -615,11 +654,19 @@ class CashbookClient:
         ).execute()
 
     # ── 出納帳: 通常行 ─────────────────────────────────
-    def write_cashbook_row(self, row: int, item: CorrectedItem, file_link: str) -> int:
+    def write_cashbook_row(
+        self,
+        row: int,
+        item: CorrectedItem,
+        file_link: str,
+        *,
+        error_detail: str | None = None,
+    ) -> int:
         """実シート構成に合わせた書き込み:
         A=リンク, B=日付, C=勘定科目コード（変換可能時のみ）,
         D=保護(数式), F=取引先, G=税区分, K=摘要, M=支出金額, N=保護(数式)。
         vals に含まれないフィールドは一切書き込まない（既存値/数式を保護する）。
+        `error_detail` は O 列（同じファイルの中の重複の注記。仕様 §5・§11.4）。
         """
         sheet = self.cashbook_sheet_name
         col_map = self._config.cashbook_column_map
@@ -653,6 +700,14 @@ class CashbookClient:
             for fn, ci in col_map.items()
             if ci not in prot and fn in vals
         ]
+        err_col = self._config.error_detail_column
+        if error_detail and err_col is not None and err_col not in prot:
+            data.append(
+                {
+                    "range": f"'{sheet}'!{_col_letter(err_col)}{row}",
+                    "values": [[error_detail]],
+                }
+            )
         if data:
             self._sheets.values().batchUpdate(
                 spreadsheetId=self._spreadsheet_id,
@@ -744,7 +799,7 @@ class CashbookClient:
 
     # ── 重複防止 ───────────────────────────────────
     def get_processed_keys(self) -> set[str]:
-        values = self._read_process_log_all()
+        values = self._read_process_log_strict()
         keys: set[str] = set()
         for row in values[1:]:
             if len(row) < 6:
@@ -759,7 +814,7 @@ class CashbookClient:
         L..Q の欄が埋まっていて、状態が記帳した・記帳中のものだけ。
         `duplicate` の記録は相手にしない（重複の重複を作らない）。
         """
-        values = self._read_process_log_all()
+        values = self._read_process_log_strict()
         records: list[ProcessRecord] = []
         for row in values[1:]:
             if len(row) <= _PL_STATUS:
@@ -845,71 +900,6 @@ class CashbookClient:
             valueInputOption="USER_ENTERED",
             insertDataOption="INSERT_ROWS",
             body={"values": [row]},
-        ).execute()
-
-    def write_receipt_details(
-        self,
-        updates: list[tuple[str, ReceiptDetails]],
-    ) -> None:
-        """予約した行の L..P に、レシート 1 枚分の値を書く（仕様 §6.4）。
-
-        `updates` は `(reservationId, 値)`。値の空の欄は書かない。
-        `duplicateOf`（Q）は重複の記録だけなので、ここでは触らない。
-        """
-        if not updates:
-            return
-        values = self._read_process_log_all()
-        row_by_rid: dict[str, int] = {}
-        for i, row in enumerate(values[1:], start=2):
-            if len(row) > _PL_RESERVATION_ID:
-                row_by_rid[_plain_cell(row[_PL_RESERVATION_ID])] = i
-
-        sheet = self._config.process_log_sheet_name
-        data: list[dict] = []
-        for reservation_id, details in updates:
-            row_number = row_by_rid.get(reservation_id)
-            if row_number is None:
-                continue
-            cells = [
-                (_PL_RECEIPT_DATE, details.date),
-                (_PL_RECEIPT_TIME, details.time),
-                (_PL_AMOUNT, details.amount),
-                (_PL_VENDOR, details.vendor),
-                (_PL_RECEIPT_NO, details.receipt_no),
-            ]
-            for column, value in cells:
-                text = _log_cell(value)
-                if not text:
-                    continue
-                data.append(
-                    {
-                        "range": f"'{sheet}'!{_col_letter(column)}{row_number}",
-                        "values": [[text]],
-                    }
-                )
-        if data:
-            self._sheets.values().batchUpdate(
-                spreadsheetId=self._spreadsheet_id,
-                body={"valueInputOption": "USER_ENTERED", "data": data},
-            ).execute()
-
-    # ── エラー詳細（O 列） ─────────────────────────────
-    def write_error_detail(self, row: int, text: str) -> None:
-        """O 列（`error_detail_column`）に文を書く。空なら何もしない。
-
-        同じファイルの中で 2 枚目以降の重複の注記に使う（仕様 §5）。
-        """
-        err_col = self._config.error_detail_column
-        if err_col is None or err_col in set(self._config.protected_columns):
-            return
-        if not text:
-            return
-        sheet = self.cashbook_sheet_name
-        self._sheets.values().update(
-            spreadsheetId=self._spreadsheet_id,
-            range=f"'{sheet}'!{_col_letter(err_col)}{row}",
-            valueInputOption="USER_ENTERED",
-            body={"values": [[text]]},
         ).execute()
 
     # ── AI詳細ログ ─────────────────────────────────

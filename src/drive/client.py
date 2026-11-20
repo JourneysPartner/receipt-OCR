@@ -72,7 +72,10 @@ class DriveClient:
         if not folder_id:
             raise ValueError("folder_id が空です")
 
-        excluded_prefixes = self._config.excluded_file_name_prefixes
+        # `【重複】` は環境変数の値にかかわらず常に除外する（仕様 §11.8）。
+        excluded_prefixes = list(self._config.excluded_file_name_prefixes)
+        if self.DUPLICATE_PREFIX not in excluded_prefixes:
+            excluded_prefixes.append(self.DUPLICATE_PREFIX)
         target_mimes = set(self._config.supported_mime_types)
 
         # 「対象MIME or フォルダMIME」を1クエリでまとめて取得

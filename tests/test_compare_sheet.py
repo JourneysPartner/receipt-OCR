@@ -1,5 +1,6 @@
 """比較の表への書込み（S5: すべて RAW）のテスト"""
 
+import json
 import re
 from datetime import UTC, datetime
 
@@ -10,6 +11,7 @@ from src.compare.sheet import (
     MULTI_ANSWER_HEADERS_OLD,
     MULTI_ANSWER_TITLE,
     RESULT_HEADERS,
+    SUMMARY_HEADERS,
     CompareSheetClient,
     HeaderMismatchError,
     cell_range,
@@ -913,3 +915,100 @@ def test_missing_multi_answer_tab_gets_the_new_header():
         "正解_店名",
         "メモ",
     ]
+
+
+# ── 集計が「答え_複数」を実際に使う（§11.11） ──────────────
+def _dual_score_service() -> FakeSheetsService:
+    service = FakeSheetsService()
+    answer = [""] * len(ANSWER_HEADERS)
+    answer[0] = "FILE_A1234567890"
+    answer[1] = "a.jpg"
+    answer[5] = "2026-01-02"
+    answer[6] = "1600"
+    answer[7] = "10%"
+    answer[8] = "テスト商店"
+    service.add_tab("答え", columns=26, values=[ANSWER_HEADERS, answer])
+
+    receipts = [
+        {
+            "d": "2026-01-02",
+            "a": 1600,
+            "t": "10%",
+            "v": "テスト商店",
+            "s": "",
+            "c": "",
+            "r": "自動",
+        },
+        {
+            "d": "2026-01-03",
+            "a": 800,
+            "t": "8%",
+            "v": "テスト商店",
+            "s": "",
+            "c": "",
+            "r": "自動",
+        },
+    ]
+    result = [""] * len(RESULT_HEADERS)
+    values = {
+        "実行ラベル": "L1",
+        "記録時刻": "2026-11-18 12:00:00",
+        "fileId": "FILE_A1234567890",
+        "ファイル": "https://drive.google.com/file/d/FILE_A1234567890/view",
+        "フォルダ": "テスト",
+        "ファイル名": "a.jpg",
+        "型": "gemini-test",
+        "方式": "両読み",
+        "結果": "自動",
+        "件数": 2,
+        "明細JSON": json.dumps(receipts, ensure_ascii=False),
+    }
+    for name, value in values.items():
+        result[RESULT_HEADERS.index(name)] = value
+    service.add_tab("結果_L1", columns=29, values=[RESULT_HEADERS, result])
+
+    service.add_tab(
+        MULTI_ANSWER_TITLE,
+        columns=26,
+        values=[
+            MULTI_ANSWER_HEADERS,
+            _multi_answer_row(),
+            [
+                "FILE_A1234567890",
+                "a.jpg",
+                "https://drive.google.com/file/d/FILE_A1234567890/view",
+                2,
+                "2026-01-03",
+                "800",
+                "8%",
+                "テスト商店",
+                "",
+            ],
+        ],
+    )
+    return service
+
+
+def test_score_uses_multi_answer_rows_read_through_the_sheet_client():
+    service = _dual_score_service()
+
+    assert _score_into(service) == 0
+
+    summary = service.tabs["集計_L1"].values
+    assert ["複数レシートのファイル", 1] in summary
+    dual = next(row for row in summary if len(row) > 1 and row[1] == "両読み")
+    assert dual[SUMMARY_HEADERS.index("正しく自動")] == 1
+
+
+def test_read_multi_answer_rows_stops_at_memo():
+    service = FakeSheetsService()
+    header = MULTI_ANSWER_HEADERS + ["利用者のメモ", "正解_金額"]
+    row = _multi_answer_row() + ["残す値", "999"]
+    service.add_tab(MULTI_ANSWER_TITLE, columns=26, values=[header, row])
+    client = CompareSheetClient("R" * 24, service=service, sleep=lambda seconds: None)
+
+    rows = client.read_multi_answer_rows()
+
+    assert set(rows[0]) == set(MULTI_ANSWER_HEADERS) | {"_row"}
+    assert rows[0]["正解_金額"] == "1600"
+    assert rows[0]["メモ"] == ""

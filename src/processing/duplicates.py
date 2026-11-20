@@ -17,9 +17,11 @@ from src.models import ReceiptDetails
 SAME_FILE_DUPLICATE_NOTE = "同じ内容の行があります（二重スキャンかも）"
 
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
+_TIME_COLON_RE = re.compile(r"^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$")
+_TIME_JP_RE = re.compile(r"^(\d{1,2})時(?:(\d{1,2})分?)?$")
 _RECEIPT_NO_STRIP = set("-‐－ー")
 _RECEIPT_NO_SPACE = set(" \t\r\n\u3000")
+_TIME_PERIODS = (("午前", False), ("午後", True), ("AM", False), ("PM", True))
 
 
 @dataclass(frozen=True)
@@ -62,15 +64,46 @@ def _clean_text(value) -> str:
 
 
 def normalize_time(value) -> str:
-    """`H:MM`・`HH:MM` を `HH:MM` にそろえる。読めなければ空。"""
-    text = unicodedata.normalize("NFKC", _clean_text(value))
-    match = _TIME_RE.match(text)
-    if not match:
+    """時刻を `HH:MM` にそろえる（仕様 §11.2）。読めなければ空。
+
+    `H:MM`・`HH:MM`・`HH:MM:SS`（秒は捨てる）・`17時32分`・`17時`（分 00）・
+    `午前`／`午後`（`AM`／`PM`）付きを受ける。時は 0〜29（深夜の営業日の書き方）。
+    """
+    text = unicodedata.normalize("NFKC", _clean_text(value)).strip()
+    if not text:
         return ""
-    hour, minute = (int(part) for part in match.groups())
-    if hour > 23 or minute > 59:
+    upper = text.upper()
+    period: bool | None = None
+    for prefix, is_pm in _TIME_PERIODS:
+        if upper.startswith(prefix):
+            period = is_pm
+            text = text[len(prefix) :].strip()
+            break
+    match = _TIME_COLON_RE.match(text)
+    if match:
+        hour, minute = int(match.group(1)), int(match.group(2))
+    else:
+        match = _TIME_JP_RE.match(text)
+        if not match:
+            return ""
+        hour = int(match.group(1))
+        minute = int(match.group(2) or 0)
+    if period is not None:
+        if hour > 12:
+            return ""
+        if period:
+            hour = 12 if hour == 12 else hour + 12
+        elif hour == 12:
+            hour = 0
+    if hour > 29 or minute > 59:
         return ""
     return f"{hour:02d}:{minute:02d}"
+
+
+def _raw_time_key(value) -> str:
+    """そろえられない時刻どうしを比べるための、NFKC・空白除去の文字列。"""
+    text = unicodedata.normalize("NFKC", _clean_text(value))
+    return "".join(char for char in text if not char.isspace())
 
 
 def normalize_receipt_no(value) -> str:
@@ -124,10 +157,18 @@ def is_same_voucher(left, right) -> bool:
     if not vendor_matches(_value(left, "vendor"), _value(right, "vendor")):
         return False
 
-    left_time = normalize_time(_value(left, "time"))
-    right_time = normalize_time(_value(right, "time"))
-    if left_time and right_time and left_time != right_time:
-        return False
+    left_raw_time = _clean_text(_value(left, "time"))
+    right_raw_time = _clean_text(_value(right, "time"))
+    left_time = normalize_time(left_raw_time)
+    right_time = normalize_time(right_raw_time)
+    if left_time and right_time:
+        if left_time != right_time:
+            return False
+    elif left_raw_time and right_raw_time:
+        # 両方に時刻の文字があるのに、どちらかがそろえられない。
+        # 「時刻なし」にせず、NFKC・空白除去の元の文字で比べる（仕様 §11.2）。
+        if _raw_time_key(left_raw_time) != _raw_time_key(right_raw_time):
+            return False
 
     left_no = normalize_receipt_no(_value(left, "receipt_no"))
     right_no = normalize_receipt_no(_value(right, "receipt_no"))
@@ -149,15 +190,22 @@ def same_file_duplicate_indices(items) -> set[int]:
     return duplicates
 
 
-def details_of(item, fallback=None) -> ReceiptDetails:
+_DETAIL_FIELDS = ("date", "time", "amount", "vendor", "receipt_no")
+
+
+def details_of(item, fallback=None, *, fill=_DETAIL_FIELDS) -> ReceiptDetails:
     """明細から、処理管理に書く値を取り出す。
 
-    `fallback` を渡すと、空の欄だけそちらで埋める（両読みの文字からの値）。
+    `fallback` を渡すと、`fill` に入れた欄だけ、空のときにそちらで埋める
+    （両読みで組になった文字からの値。仕様 §11.1）。
     """
 
     def pick(name: str, default=""):
         own = _value(item, name)
-        other = _value(fallback, name) if fallback is not None else None
+        if name not in fill:
+            other = None
+        else:
+            other = _value(fallback, name) if fallback is not None else None
         if name == "amount":
             if own is not None:
                 return own
@@ -203,4 +251,12 @@ def description_line(duplicate_index: int, source: ReceiptSource) -> str:
     return (
         f"重複: {duplicate_index + 1} 枚目 → 重複元 {source.file_name} "
         f"{source.drive_link}（{source.index + 1} 枚目）"
+    )
+
+
+def cross_file_duplicate_note(source: ReceiptSource) -> str:
+    """前の回の印があるファイルで、別のファイルと同じ証憑のときに O 列へ足す文（§11.3）。"""
+    return (
+        "別のファイルに同じ内容の明細があります"
+        f"（重複元 {source.file_name} {source.index + 1} 枚目）"
     )

@@ -125,9 +125,10 @@ class TestDualAllMatched:
         mocks["ai"].extract_receipt_data.assert_called_once()
         assert result.success == 1
         assert result.manual_entry == 0
-        cb.reserve_rows.assert_called_once_with(
-            count=1, file_id="fid-1", file_name="receipt-1.jpg", receipt_indices=[0]
-        )
+        reserved = cb.reserve_rows.call_args.kwargs
+        assert reserved["count"] == 1
+        assert reserved["receipt_indices"] == [0]
+        assert reserved["details"][0].amount == 1200
         cb.write_cashbook_row.assert_called_once()
         cb.write_manual_entry_row.assert_not_called()
         mocks["drive"].rename_file_as_done.assert_called_once()
@@ -312,9 +313,10 @@ class TestDualProcessedKeys:
         assert result.skipped == 1
         assert result.success == 0
         assert result.manual_entry == 1
-        cb.reserve_rows.assert_called_once_with(
-            count=1, file_id="fid-1", file_name="receipt-1.jpg", receipt_indices=[1]
-        )
+        reserved = cb.reserve_rows.call_args.kwargs
+        assert reserved["count"] == 1
+        assert reserved["receipt_indices"] == [1]
+        assert reserved["details"][1].amount == 900
         cb.write_cashbook_row.assert_not_called()
         cb.write_manual_entry_row.assert_called_once()
         assert cb.write_manual_entry_row.call_args[1]["short_label"] == "※再読取要確認"
@@ -382,9 +384,9 @@ class TestDualReread:
         assert result.success == 0
         assert result.manual_entry == 1
         assert result.errors == 0
-        cb.reserve_rows.assert_called_once_with(
-            count=1, file_id="fid-1", file_name="receipt-1.jpg", receipt_indices=[1]
-        )
+        reserved = cb.reserve_rows.call_args.kwargs
+        assert reserved["count"] == 1
+        assert reserved["receipt_indices"] == [1]
         cb.write_cashbook_row.assert_not_called()
         cb.write_manual_entry_row.assert_called_once()
         assert cb.write_manual_entry_row.call_args[1]["short_label"] == "※再読取要確認"
@@ -407,9 +409,9 @@ class TestDualReread:
         assert result.skipped == 2
         assert result.success == 0
         assert result.manual_entry == 1
-        cb.reserve_rows.assert_called_once_with(
-            count=1, file_id="fid-1", file_name="receipt-1.jpg", receipt_indices=[2]
-        )
+        reserved = cb.reserve_rows.call_args.kwargs
+        assert reserved["count"] == 1
+        assert reserved["receipt_indices"] == [2]
         cb.write_cashbook_row.assert_not_called()
         cb.write_manual_entry_row.assert_called_once()
         assert cb.write_manual_entry_row.call_args[1]["short_label"] == "※再読取要確認"

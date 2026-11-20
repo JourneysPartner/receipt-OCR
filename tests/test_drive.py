@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock
 
-from src.config import DriveConfig
+from src.config import DriveConfig, load_config
 from src.drive.client import DriveClient
 from src.models import DriveFile
 
@@ -123,6 +123,24 @@ class TestListFilesRecursive:
             }
         )
         result = dc.list_files("root")
+        assert [f.file_name for f in result] == ["receipt.jpg"]
+
+    def test_duplicate_prefix_excluded_even_when_env_sets_other_prefixes(self, monkeypatch):
+        """§11.8: `【重複】` は EXCLUDED_FILE_NAME_PREFIXES の値にかかわらず除外する。"""
+        monkeypatch.setenv("EXCLUDED_FILE_NAME_PREFIXES", "DONE:")
+        dc = _make_client(
+            {
+                "root": [
+                    _file_entry("f1", "receipt.jpg"),
+                    _file_entry("f2", "DONE: 済み.jpg"),
+                    _file_entry("f3", "【重複】 二重.jpg"),
+                ]
+            },
+            config=load_config().drive,
+        )
+
+        result = dc.list_files("root")
+
         assert [f.file_name for f in result] == ["receipt.jpg"]
 
     def test_shortcut_not_followed(self):
