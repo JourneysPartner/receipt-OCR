@@ -723,3 +723,12 @@ C（`spec_account_code.md` §9）と同じ所に G を足す。**条件は「G �
   - M1：時間の予算に見るだけの段階が入り、転記シートの多い顧客では `apply` が 1 枚も進まない・見るだけでも 6 分を超え得る → §9.6.5 を書き直した（1 組ずつ・見るだけでも予算・`startAfter`／`resumeAfter`・既定 180 秒）。
   - L1（`ALREADY_SET` の `allowInvalid` の見方）・L2（`auditIds`）・L3（値の読み直しと届かない try）・L4（投げ直す前に報告をログへ）・L5（`otherValueRowCount`）・L6（監査の `key`）→ §9.6 を直した。L7・L8 → §11・§12 に記録。
   - テストの穴 T1〜T4 → gt 18 の (i)〜(n)。
+- 変異（go-job）：1.3 のコードで R32〜R44（R43・R44 はテストを 2 件足して赤）→ 直しの後のコードで R32〜R50 を全部もう一度、全部赤。直しの go-job は 115 分で時間切れ（報告なし）で、Claude がログ（編集と全体の結果の並び）と差分から確かめた（R32 は 1 回目の入れ方が効かず、入れ直して赤）。
+- 直しの後の全体（worktree の sbx）：2259/2356（ENOENT 97 件だけ、gt 18 は 21 件）→ ブランチ `36dce54`。
+- 直しの差分の監査（Opus 5.5 xhigh、`2e3a431..36dce54`）：Critical 0・High 0・Medium 0・Low 4・テストの穴（Low）4。M1・L1・L2・L4・L5・L6 は直った、L3 は一部。Low は記録だけ（次に §9.6 に手を入れるときに直す）：
+  - Low-1：`UNEXPECTED_ERROR` のとき `taxOpsCopyCounts_` を呼ばずに報告をログへ出すので、ログの `counts` が古い（組ごとの状態と `auditIds` は正しい）。
+  - Low-2：`taxOpsCopyApply_` の `taxOpsCopyCheck_` を囲む try は届かない（届くと `NEEDS_UPDATE` のまま `READ_FAILED`）。
+  - Low-3（推測）：監査の行を書いた後の `flush` が投げると `AUDIT_WRITE_FAILED` で、その ID は `auditIds` に入らない（`copy.auditId` にはある）。
+  - Low-4（推測）：同じ ID のシート名が多いと、組ごとのロック待ち（最大 60 秒）が予算の外で積もる（実際にはまれ）。
+  - テストの穴：`UNEXPECTED_ERROR` の `counts`・`resumeAfter` の 2 場面（1 組目の前で止まる・止まる直前が `SKIPPED`／`ALREADY_SET`）・ロックの外の確かめの後に値が変わる場合・`txLogFromRecord_` の差し替えが try の外（3679 行目あたり）。
+- 2026-11-20、利用者の許可でブランチを main（`f942495`、別の会話のレシート OCR のコミット）の上に付け直し、main へ早送り（`113d5a9`）。main の全テスト：2355/2356。落ちたのは `ac 6`（`test/phase6-account-code.test.js`）だけで、2 回の取込の取引ログの行を時刻の列（登録日時）も含めて比べるため、PC が遅く秒をまたぐと落ちる前からのゆらぎ（今回の変更と関係なし。worktree の sbx でも 1 回同じ形で落ち、次の回は通った）。もう一度流して **2356/2356**（gt 18 は 21 件）。
