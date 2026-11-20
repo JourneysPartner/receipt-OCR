@@ -7,9 +7,9 @@ import threading
 from dataclasses import replace
 from datetime import UTC, datetime
 
-from src.compare.config import CompareModel
+from src.compare.config import CompareModel, load_compare_config
 from src.compare.pipeline import CompareRow
-from src.compare.runner import _ThreadResources, run_compare
+from src.compare.runner import CompareRunner, _ThreadResources, run_compare
 from src.compare.sheet import ANSWER_HEADERS, OCR_HEADERS, RESULT_HEADERS
 from src.config import (
     AiConfig,
@@ -997,3 +997,40 @@ class TestAnswerReadRange:
         score_reads = [cells for title, cells in sheet.read_calls if title == "答え"]
         assert score_reads
         assert all(cells == "A:P" for cells in score_reads)
+
+
+class TestModelAiConfigThinking:
+    """§9.1: `@` の無い型は AI_THINKING_LEVEL に従い、`@` があればそちらが優先。"""
+
+    @staticmethod
+    def _ai_configs(env):
+        cfg = load_compare_config(env)
+        runner = CompareRunner(
+            _app_config(),
+            cfg,
+            sheet=None,
+            drive_factory=None,
+            ocr_factory=None,
+            extractor_factory=None,
+            model_checker=None,
+        )
+        return cfg, [runner._model_ai_config(model) for model in cfg.models]
+
+    def test_model_without_at_uses_default_low(self):
+        cfg, ai_configs = self._ai_configs(_env(COMPARE_MODELS="m1"))
+        assert cfg.thinking_level == "low"
+        assert cfg.models[0].thinking_level is None
+        assert ai_configs[0].thinking_level == "low"
+
+    def test_thinking_level_none_makes_model_without_at_send_no_thinking(self):
+        cfg, ai_configs = self._ai_configs(_env(COMPARE_MODELS="m1", AI_THINKING_LEVEL="none"))
+        assert cfg.thinking_level is None
+        assert ai_configs[0].thinking_level is None
+
+    def test_at_level_wins_over_default_low(self):
+        _, ai_configs = self._ai_configs(_env(COMPARE_MODELS="m1@high"))
+        assert ai_configs[0].thinking_level == "high"
+
+    def test_at_level_wins_over_thinking_level_none(self):
+        _, ai_configs = self._ai_configs(_env(COMPARE_MODELS="m1@medium", AI_THINKING_LEVEL="none"))
+        assert ai_configs[0].thinking_level == "medium"

@@ -48,8 +48,10 @@
 - マスター・出納帳には触れない。Drive は読取り専用で、【済】も付けない。書くのは `COMPARE_RESULT_SPREADSHEET_ID` の表だけ
 - 実行は Cloud Console の「オーバーライドして実行」から。`RUN_MODE=compare`・`COMPARE_RESULT_SPREADSHEET_ID`・`COMPARE_FOLDER_IDS`・`COMPARE_RUN_LABEL` を入れ、タスクのタイムアウトを 3600 秒にする。**`RUN_MODE=compare` を書き忘れると本番の記帳が動く**（`COMPARE_` の値が残っていれば止まる）
 - 表には「答え」「答え_複数」「結果_<ラベル>」「OCR_<ラベル>」「集計_<ラベル>」のタブができる。答えを確かめたら `COMPARE_STEP=score` で集計し直す
-- `AI_PROMPT_VERSION`（`v1` / `v2`）で指示文の版を選ぶ。既定は `v1`
-- `AI_FLOW`（`text_first` / `dual`）で本番の流れを選ぶ。既定は `text_first`。比較ではこの設定に関係なく、結果に方式 `両読み`（画像からの読みと文字からの読みを照らし、合った明細だけを自動とする）の行も出す
+- `AI_MODEL`（既定 `gemini-3.5-flash-lite`）・`AI_PROMPT_VERSION`（`v1` / `v2`、既定 `v2`）で型と指示文の版を選ぶ
+- `AI_FLOW`（`text_first` / `dual`）で本番の流れを選ぶ。既定は `dual`。比較ではこの設定に関係なく、結果に方式 `両読み`（画像からの読みと文字からの読みを照らし、合った明細だけを自動とする）の行も出す
+- `AI_THINKING_LEVEL`（`minimal` / `low` / `medium` / `high` / `none`）で考える量を選ぶ。既定は `low`、`none` は考える量（`thinking_config`）を送らない。比較で `COMPARE_MODELS` の要素に `@考える量` が無いときもこの値に従う
+- 以前の動きに戻すときは `AI_MODEL=gemini-2.5-flash`・`AI_PROMPT_VERSION=v1`・`AI_FLOW=text_first`・`AI_THINKING_LEVEL=none` を渡す
 - 「答え_複数」タブは、1 つのファイルに複数のレシートが入っているときだけ使う。`fileId` / `ファイル名` / `番号` / `正解_日付` / `正解_金額` / `正解_税率` / `正解_店名` / `メモ` の見出しで、1 枚 = 1 行（`番号` の順）。行が無いファイルは「答え」の 1 行を 1 枚分の答えとして使う
 - 「答え」タブは A〜P 列が見出し。P 列より右は自由に列を足してよい（見出しの検査も読み書きも A〜P だけ）
 - 結果タブの見出しの最後は `明細JSON`。`明細JSON` が無い古い形の結果タブは、collect の続きからも score も止まる。新しい `COMPARE_RUN_LABEL` で collect からやり直す
@@ -507,7 +509,7 @@ gcloud run jobs execute receipt-ocr-job --region=asia-northeast1
 | `OCR_FALLBACK_CONFIDENCE_THRESHOLD` | | 0.6 | この conf 未満で fallback 試行 |
 | `ENABLE_EXTRACTION_RETRY` | | true | AI 抽出 0件 / parse_error 時の Gemini 再抽出 |
 | `ENABLE_AMOUNT_VALIDATION_RETRY` | | true | amount_validation NG 時の Gemini 再抽出 |
-| `AI_MODEL` | | gemini-2.5-flash | Gemini モデル |
+| `AI_MODEL` | | gemini-3.5-flash-lite | Gemini モデル |
 | `AI_CONFIDENCE_THRESHOLD` | | 0.7 | 信頼度閾値 |
 | `RESERVATION_TTL_MINUTES` | | 30 | 予約有効期限(分) |
 | `DRY_RUN` | | false | 書き込みスキップ |

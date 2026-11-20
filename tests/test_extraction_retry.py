@@ -27,6 +27,7 @@ def _make_manager(
         ai=AiConfig(
             enable_extraction_retry=extraction_retry,
             enable_amount_validation_retry=amount_retry,
+            flow="text_first",
         ),
     )
     mocks = {

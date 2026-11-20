@@ -46,7 +46,7 @@ class TestDefaults:
         assert cfg.time_budget_seconds == 3300
         assert cfg.prices == DEFAULT_PRICES
         assert cfg.temperature == 0.1
-        assert cfg.thinking_level is None
+        assert cfg.thinking_level == "low"
         assert cfg.max_tokens == 2048
         assert cfg.request_timeout_seconds is None
         assert cfg.effective_request_timeout == 180
@@ -224,5 +224,5 @@ class TestRunModeCompare:
             monkeypatch.delenv(name, raising=False)
         config = load_config()
         assert config.ai.temperature == 0.1
-        assert config.ai.thinking_level is None
+        assert config.ai.thinking_level == "low"
         assert config.ai.request_timeout_seconds is None

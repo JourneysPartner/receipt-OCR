@@ -147,7 +147,7 @@ class OcrConfig:
 @dataclass(frozen=True)
 class AiConfig:
     engine: str = "gemini"
-    model: str = "gemini-2.5-flash"
+    model: str = "gemini-3.5-flash-lite"
     max_tokens: int = 2048
     confidence_threshold: float = 0.7
     # 金額検証 NG（digit_inflation / missing_in_ocr）の時に
@@ -159,14 +159,14 @@ class AiConfig:
     # None なら temperature を送らない（既定は今までどおり 0.1）
     temperature: float | None = 0.1
     # None なら thinking_config を送らない
-    thinking_level: str | None = None
+    thinking_level: str | None = "low"
     # None なら http_options を渡さない（1 回の呼び出しの待ち時間の上限）
     request_timeout_seconds: int | None = None
     # 指示文の版（"v1" | "v2"）
-    prompt_version: str = "v1"
+    prompt_version: str = "v2"
     # 読み取りの流れ（"text_first" | "dual"）。dual では画像からと文字からの
     # 両方を読み、合った明細だけを自動で書く
-    flow: str = "text_first"
+    flow: str = "dual"
 
 
 @dataclass(frozen=True)
@@ -286,18 +286,21 @@ def _parse_ai_temperature(raw: str | None) -> float | None:
 
 def _parse_ai_thinking_level(raw: str | None) -> str | None:
     if raw is None or not raw.strip():
-        return None
+        return "low"
     value = raw.strip().lower()
+    if value == "none":
+        return None
     if value not in THINKING_LEVELS:
         raise ValueError(
-            f"AI_THINKING_LEVEL は {' / '.join(THINKING_LEVELS)} のいずれか (received={raw!r})"
+            f"AI_THINKING_LEVEL は {' / '.join(THINKING_LEVELS)} / none のいずれか "
+            f"(received={raw!r})"
         )
     return value
 
 
 def _parse_ai_prompt_version(raw: str | None) -> str:
     if raw is None or not raw.strip():
-        return "v1"
+        return "v2"
     value = raw.strip().lower()
     if value not in PROMPT_VERSIONS:
         raise ValueError(f"AI_PROMPT_VERSION は 'v1' / 'v2' のいずれか (received={raw!r})")
@@ -306,7 +309,7 @@ def _parse_ai_prompt_version(raw: str | None) -> str:
 
 def _parse_ai_flow(raw: str | None) -> str:
     if raw is None or not raw.strip():
-        return "text_first"
+        return "dual"
     value = raw.strip().lower()
     if value not in AI_FLOWS:
         raise ValueError(f"AI_FLOW は 'text_first' / 'dual' のいずれか (received={raw!r})")
@@ -416,7 +419,7 @@ def load_config() -> AppConfig:
         ),
         ai=AiConfig(
             engine=os.environ.get("AI_ENGINE", "gemini"),
-            model=os.environ.get("AI_MODEL", "gemini-2.5-flash"),
+            model=os.environ.get("AI_MODEL", "gemini-3.5-flash-lite"),
             max_tokens=int(os.environ.get("AI_MAX_TOKENS", "2048")),
             confidence_threshold=float(os.environ.get("AI_CONFIDENCE_THRESHOLD", "0.7")),
             enable_amount_validation_retry=os.environ.get(

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from src.ai.gemini import GeminiExtractor
-from src.config import AiConfig
+from src.config import AiConfig, load_config
 from src.models import DriveFile, OcrResult
 
 
@@ -27,11 +27,11 @@ def _ocr():
 
 
 class TestDefaults:
-    def test_default_config_sends_temperature_0_1_without_thinking_or_http_options(self):
+    def test_without_thinking_sends_temperature_0_1_and_no_http_options(self):
         client = MagicMock()
         client.models.generate_content.return_value = _response()
         with patch("src.ai.gemini.genai.Client", return_value=client) as ctor:
-            extractor = GeminiExtractor(AiConfig(), api_key="fake")
+            extractor = GeminiExtractor(AiConfig(thinking_level=None), api_key="fake")
         ctor.assert_called_once_with(api_key="fake")
         extractor.extract_receipt_data(_ocr(), "a.jpg")
         call = client.models.generate_content.call_args.kwargs
@@ -39,6 +39,22 @@ class TestDefaults:
         assert config.temperature == 0.1
         assert config.thinking_config is None
         assert config.max_output_tokens == 2048
+
+    def test_env_restore_to_previous_config_sends_no_thinking(self, monkeypatch):
+        monkeypatch.setenv("AI_MODEL", "gemini-2.5-flash")
+        monkeypatch.setenv("AI_PROMPT_VERSION", "v1")
+        monkeypatch.setenv("AI_FLOW", "text_first")
+        monkeypatch.setenv("AI_THINKING_LEVEL", "none")
+        config = load_config().ai
+        client = MagicMock()
+        client.models.generate_content.return_value = _response()
+        with patch("src.ai.gemini.genai.Client", return_value=client):
+            extractor = GeminiExtractor(config, api_key="fake")
+        extractor.extract_receipt_data(_ocr(), "a.jpg")
+        call = client.models.generate_content.call_args.kwargs
+        assert call["config"].thinking_config is None
+        assert call["model"] == "gemini-2.5-flash"
+        assert extractor.last_call_info["model"] == "gemini-2.5-flash"
 
     def test_thinking_and_timeout_are_passed(self):
         client = MagicMock()
@@ -77,7 +93,7 @@ class TestLastCallInfo:
         items = extractor.extract_receipt_data(_ocr(), "a.jpg")
         assert items
         info = extractor.last_call_info
-        assert info["model"] == "gemini-2.5-flash"
+        assert info["model"] == "gemini-3.5-flash-lite"
         assert info["finish_reason"] == "STOP"
         assert info["prompt_tokens"] == 11
         assert info["output_tokens"] == 5

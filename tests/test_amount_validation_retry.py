@@ -22,7 +22,7 @@ def _make_manager(*, retry_enabled: bool = True) -> tuple[ProcessingManager, dic
         drive=DriveConfig(),
         sheets=SheetsConfig(),
         ocr=OcrConfig(),
-        ai=AiConfig(enable_amount_validation_retry=retry_enabled),
+        ai=AiConfig(enable_amount_validation_retry=retry_enabled, flow="text_first"),
     )
     mocks = {
         "drive": MagicMock(),

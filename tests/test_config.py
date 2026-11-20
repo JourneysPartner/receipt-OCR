@@ -2,7 +2,12 @@
 
 import pytest
 
-from src.config import _parse_int_tuple, load_config
+from src.config import (
+    AiConfig,
+    _parse_ai_thinking_level,
+    _parse_int_tuple,
+    load_config,
+)
 
 
 class TestParseIntTuple:
@@ -179,15 +184,15 @@ class TestPromptVersionAndFlow:
         monkeypatch.delenv("AI_PROMPT_VERSION", raising=False)
         monkeypatch.delenv("AI_FLOW", raising=False)
         c = load_config()
-        assert c.ai.prompt_version == "v1"
-        assert c.ai.flow == "text_first"
+        assert c.ai.prompt_version == "v2"
+        assert c.ai.flow == "dual"
 
     def test_blank_values_are_defaults(self, monkeypatch):
         monkeypatch.setenv("AI_PROMPT_VERSION", "   ")
         monkeypatch.setenv("AI_FLOW", "  ")
         c = load_config()
-        assert c.ai.prompt_version == "v1"
-        assert c.ai.flow == "text_first"
+        assert c.ai.prompt_version == "v2"
+        assert c.ai.flow == "dual"
 
     def test_valid_values(self, monkeypatch):
         monkeypatch.setenv("AI_PROMPT_VERSION", "v2")
@@ -214,3 +219,86 @@ class TestPromptVersionAndFlow:
         with pytest.raises(ValueError) as e:
             load_config()
         assert "AI_FLOW は 'text_first' / 'dual' のいずれか" in str(e.value)
+
+
+AI_DEFAULT_ENV = (
+    "AI_MODEL",
+    "AI_PROMPT_VERSION",
+    "AI_FLOW",
+    "AI_THINKING_LEVEL",
+)
+
+
+class TestAiDefaults:
+    def test_load_config_defaults(self, monkeypatch):
+        for name in AI_DEFAULT_ENV:
+            monkeypatch.delenv(name, raising=False)
+        c = load_config()
+        assert c.ai.model == "gemini-3.5-flash-lite"
+        assert c.ai.prompt_version == "v2"
+        assert c.ai.flow == "dual"
+        assert c.ai.thinking_level == "low"
+
+    def test_ai_config_defaults(self):
+        ai = AiConfig()
+        assert ai.model == "gemini-3.5-flash-lite"
+        assert ai.prompt_version == "v2"
+        assert ai.flow == "dual"
+        assert ai.thinking_level == "low"
+
+    def test_other_defaults_unchanged(self, monkeypatch):
+        for name in AI_DEFAULT_ENV:
+            monkeypatch.delenv(name, raising=False)
+        c = load_config()
+        assert c.ai.engine == "gemini"
+        assert c.ai.max_tokens == 2048
+        assert c.ai.temperature == 0.1
+        assert c.ai.confidence_threshold == 0.7
+        assert c.ai.enable_amount_validation_retry is True
+        assert c.ai.enable_extraction_retry is True
+        assert c.ai.request_timeout_seconds is None
+
+    def test_env_restores_previous_behavior(self, monkeypatch):
+        monkeypatch.setenv("AI_MODEL", "gemini-2.5-flash")
+        monkeypatch.setenv("AI_PROMPT_VERSION", "v1")
+        monkeypatch.setenv("AI_FLOW", "text_first")
+        monkeypatch.setenv("AI_THINKING_LEVEL", "none")
+        c = load_config()
+        assert c.ai.model == "gemini-2.5-flash"
+        assert c.ai.prompt_version == "v1"
+        assert c.ai.flow == "text_first"
+        assert c.ai.thinking_level is None
+
+
+class TestAiThinkingLevel:
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            (None, "low"),
+            ("", "low"),
+            ("   ", "low"),
+            ("none", None),
+            ("NONE", None),
+            (" None ", None),
+            ("low", "low"),
+            ("HIGH", "high"),
+        ],
+    )
+    def test_values(self, raw, expected):
+        assert _parse_ai_thinking_level(raw) == expected
+
+    def test_invalid_value_raises(self):
+        with pytest.raises(ValueError) as e:
+            _parse_ai_thinking_level("max")
+        assert "AI_THINKING_LEVEL" in str(e.value)
+
+    def test_load_config_none_means_no_thinking(self, monkeypatch):
+        monkeypatch.setenv("AI_THINKING_LEVEL", "NONE")
+        c = load_config()
+        assert c.ai.thinking_level is None
+
+    def test_load_config_invalid_value_raises(self, monkeypatch):
+        monkeypatch.setenv("AI_THINKING_LEVEL", "max")
+        with pytest.raises(ValueError) as e:
+            load_config()
+        assert "AI_THINKING_LEVEL" in str(e.value)

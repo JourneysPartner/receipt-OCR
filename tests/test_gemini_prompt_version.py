@@ -46,7 +46,7 @@ class TestSystemInstruction:
     def test_v1(self):
         client = MagicMock()
         client.models.generate_content.return_value = _response()
-        extractor = _extractor(AiConfig(), client)
+        extractor = _extractor(AiConfig(prompt_version="v1"), client)
         extractor.extract_receipt_data(_ocr(), "テスト領収書.jpg")
         config = client.models.generate_content.call_args.kwargs["config"]
         assert config.system_instruction == prompts.SYSTEM_INSTRUCTION_V1
@@ -65,7 +65,7 @@ class TestUserMessages:
     def test_text_v1(self):
         client = MagicMock()
         client.models.generate_content.return_value = _response()
-        extractor = _extractor(AiConfig(), client)
+        extractor = _extractor(AiConfig(prompt_version="v1"), client)
         extractor.extract_receipt_data(_ocr(), "テスト領収書.jpg")
         kwargs = client.models.generate_content.call_args.kwargs
         assert kwargs["contents"] == prompts.text_user_message(
@@ -85,7 +85,7 @@ class TestUserMessages:
     def test_image_v1(self):
         client = MagicMock()
         client.models.generate_content.return_value = _response()
-        extractor = _extractor(AiConfig(), client)
+        extractor = _extractor(AiConfig(prompt_version="v1"), client)
         extractor.extract_from_file(_file())
         kwargs = client.models.generate_content.call_args.kwargs
         assert kwargs["contents"][1] == prompts.image_user_message("v1", "テスト領収書.jpg")

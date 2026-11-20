@@ -23,7 +23,7 @@ def _make_manager() -> tuple[ProcessingManager, dict[str, MagicMock]]:
         drive=DriveConfig(),
         sheets=SheetsConfig(),
         ocr=OcrConfig(),
-        ai=AiConfig(),
+        ai=AiConfig(flow="text_first"),
     )
     mocks = {
         "drive": MagicMock(),
