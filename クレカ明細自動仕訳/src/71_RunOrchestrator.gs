@@ -961,10 +961,16 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
           // カード会社からの返金（AO列）にも相手取引先は無い。
           // 店名の規則（ｍａｊｉｃａチャージ）に当たった取引も、私用と分かって
           // いるので取引先を立てない（spec_account_by_merchant §3.3）。
+          // 用途の当たりは、取引先を立てるかを決める前に求める（§5.2）。
+          // 優先の言葉だけでコードが 1 つに決まった行は取引先を立てない。
           var merchantRule = accountMasters ? merchantAccountRule_(tx.merchantOriginal) : null;
+          var purposeResolution = accountMasters && !merchantRule ?
+            resolveAccountCode_(tx.purpose, customer, accountMasters, accountSheetList) :
+            null;
           var cashback = isCashbackMerchant(customer, tx.merchantOriginal);
           var exempt = cashback || isPartnerExemptPurpose(customer, tx.purpose) ||
-            Boolean(merchantRule && merchantRule.withoutPartner === true);
+            Boolean(merchantRule && merchantRule.withoutPartner === true) ||
+            Boolean(purposeResolution && purposeResolution.priority === true);
           // AN列の用途は、店名ではなくカード名で取引先を照合する。
           // 「基本カード年会費」はどのカードでも同じ文字列なので、店名で
           // 辞書を作ると全カードの年会費が1つの取引先へ潰れる。
@@ -991,10 +997,12 @@ function processDiscoveredFile_(runId, customer, candidate, options) {
           if (accountMasters) {
             // 引くのはメモタグを付けた後の I 列ではなく、取引の使用用途である（§7）。
             // 店名の規則に当たれば、用途の言葉より先にその規則で決める。
+            // そうでなければ、上で求めた用途の当たりをそのまま使う
+            // （`resolveAccountCode_` を 2 回呼ばない）。
             accountResolution = merchantRule ?
               resolveMerchantAccountCode_(merchantRule, customer, accountMasters,
                 accountSheetList) :
-              resolveAccountCode_(tx.purpose, customer, accountMasters, accountSheetList);
+              purposeResolution;
             // 決まった行だけ C に数を入れる。決まらない行の列には触らない
             // ── `undefined` は「書かない」であり、空文字とは違う。
             planned.c = accountResolution.status === ACCOUNT_RESOLUTION_STATUS_.MATCHED ?

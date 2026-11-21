@@ -111,7 +111,7 @@ const TAX_RATE_PERIODS_ = Object.freeze([
 ]);
 
 /** 軽減 8% の言葉（§3.3。利用者の決定 2026-11-18）。 */
-const TAX_REDUCED_WORDS_ = Object.freeze(['食品', '食材', '食料品', '食料']);
+const TAX_REDUCED_WORDS_ = Object.freeze(['食品', '食材', '食料品', '食料', 'サプリ']);
 
 /** 軽減にしない言葉（§3.3）。 */
 const TAX_REDUCED_EXCLUDE_WORDS_ = Object.freeze([

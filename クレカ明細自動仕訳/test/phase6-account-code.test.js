@@ -218,10 +218,11 @@ module.exports = ({test, assert, gas}) => {
     assert.deepEqual(plain(resolve('スマホ代')), {status: 'MATCHED', code: 843, word: 'スマホ'});
     assert.deepEqual(plain(resolve('高速代')), {status: 'MATCHED', code: 842, word: '高速'});
     assert.deepEqual(plain(resolve('私用 仕入', customer({customerCategory: 'INDIVIDUAL'}))),
-      {status: 'MATCHED', code: 294, word: '私用'});
-    assert.deepEqual(plain(resolve('私用 仕入')), {status: 'MATCHED', code: 362, word: '私用'});
+      {status: 'MATCHED', code: 294, word: '私用', priority: true});
+    assert.deepEqual(plain(resolve('私用 仕入')),
+      {status: 'MATCHED', code: 362, word: '私用', priority: true});
     assert.deepEqual(plain(resolve('仕入 私用分', customer({customerCategory: 'INDIVIDUAL'}))),
-      {status: 'MATCHED', code: 294, word: '私用'});
+      {status: 'MATCHED', code: 294, word: '私用', priority: true});
 
     const commonOnly = mastersFrom(ACCOUNTS, [{word: '仕入', code: 712}]);
     assert.equal(call('resolveAccountCode_', ['月額利用料', customer(), commonOnly, list]).status, 'NO_MATCH');
@@ -727,14 +728,14 @@ module.exports = ({test, assert, gas}) => {
     const dry = plain(call('opsSeedAccountMasters', []));
     assert.equal(dry.applied, false);
     assert.equal(dry.accounts.toAdd.length, 39);
-    assert.equal(dry.words.toAdd.length, 84);
+    assert.equal(dry.words.toAdd.length, 99);
     assert.equal(accounts.getLastRow(), 1);
     assert.equal(words.getLastRow(), 1);
 
     const applied = plain(call('opsSeedAccountMasters', [true]));
     assert.equal(applied.applied, true);
     assert.equal(accounts.getLastRow(), 40);
-    assert.equal(words.getLastRow(), 85);
+    assert.equal(words.getLastRow(), 100);
     assert.notEqual(accounts.getRange(1, 2).getValue(), '');
     assert.notEqual(words.getRange(1, 2).getValue(), '');
     assert.equal(words.getRange(2, 6).getValue(), true);

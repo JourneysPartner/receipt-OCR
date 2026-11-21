@@ -137,7 +137,7 @@ module.exports = ({test, assert, gas}) => {
 
   test('gt 1: 言葉の表と少額特例・印の 4 つの値・見出し', () => {
     assert.deepEqual(plain(evaluate('TAX_REDUCED_WORDS_')),
-      ['食品', '食材', '食料品', '食料']);
+      ['食品', '食材', '食料品', '食料', 'サプリ']);
     assert.deepEqual(plain(evaluate('TAX_REDUCED_EXCLUDE_WORDS_')),
       ['酒', 'アルコール', 'ビール', 'ワイン', '外食', 'イートイン']);
     assert.deepEqual(plain(evaluate('TAX_UNDECIDED_WORDS_')), ['消費税', 'リボ', '分割']);

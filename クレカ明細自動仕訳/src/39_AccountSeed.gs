@@ -63,11 +63,23 @@ var MERCHANT_ACCOUNT_RULES_ = Object.freeze([
     merchant: 'ｍａｊｉｃａチャージ',
     codes: Object.freeze({INDIVIDUAL: 294, CORPORATE: 362}),
     withoutPartner: true
+  }),
+  Object.freeze({
+    merchant: '楽天キャッシュ　チャージ',
+    codes: Object.freeze({INDIVIDUAL: 294, CORPORATE: 362}),
+    withoutPartner: true
   })
 ]);
 
+/** 仕入れの言葉と一緒なら仕入れに譲る優先の言葉（金券系。利用者の決定 2026-11-21）。 */
+var ACCOUNT_YIELD_TO_PURCHASE_WORDS_ = Object.freeze([
+  '金券', 'ギフトカード', 'ギフト券', '商品券', 'QUOカード', 'クオカード'
+]);
+/** 仕入高のコード。 */
+var ACCOUNT_PURCHASE_CODE_ = 712;
+
 var ACCOUNT_SEED_WORDS_ = Object.freeze([
-  // 共通・優先なし（66 行）
+  // 共通・優先なし（67 行）
   {word: '仕入', code: 712, category: '共通', priority: false},
   {word: '仕入代', code: 712, category: '共通', priority: false},
   {word: '商品代', code: 712, category: '共通', priority: false},
@@ -134,7 +146,8 @@ var ACCOUNT_SEED_WORDS_ = Object.freeze([
   {word: 'ガソリン', code: 851, category: '共通', priority: false},
   {word: '燃料', code: 851, category: '共通', priority: false},
   {word: '給油', code: 851, category: '共通', priority: false},
-  // 個人だけ・優先（9 行）
+  {word: '梱包', code: 852, category: '共通', priority: false},
+  // 個人だけ・優先（16 行）
   {word: '私用', code: 294, category: '個人だけ', priority: true},
   {word: '私的', code: 294, category: '個人だけ', priority: true},
   {word: 'プライベート', code: 294, category: '個人だけ', priority: true},
@@ -144,7 +157,14 @@ var ACCOUNT_SEED_WORDS_ = Object.freeze([
   {word: '県民税', code: 294, category: '個人だけ', priority: true},
   {word: '住民税', code: 294, category: '個人だけ', priority: true},
   {word: '所得税', code: 294, category: '個人だけ', priority: true},
-  // 法人だけ・優先（9 行）
+  {word: '投資信託', code: 294, category: '個人だけ', priority: true},
+  {word: '金券', code: 294, category: '個人だけ', priority: true},
+  {word: 'ギフトカード', code: 294, category: '個人だけ', priority: true},
+  {word: 'ギフト券', code: 294, category: '個人だけ', priority: true},
+  {word: '商品券', code: 294, category: '個人だけ', priority: true},
+  {word: 'QUOカード', code: 294, category: '個人だけ', priority: true},
+  {word: 'クオカード', code: 294, category: '個人だけ', priority: true},
+  // 法人だけ・優先（16 行）
   {word: '私用', code: 362, category: '法人だけ', priority: true},
   {word: '私的', code: 362, category: '法人だけ', priority: true},
   {word: 'プライベート', code: 362, category: '法人だけ', priority: true},
@@ -153,5 +173,12 @@ var ACCOUNT_SEED_WORDS_ = Object.freeze([
   {word: '市民税', code: 362, category: '法人だけ', priority: true},
   {word: '県民税', code: 362, category: '法人だけ', priority: true},
   {word: '住民税', code: 362, category: '法人だけ', priority: true},
-  {word: '所得税', code: 362, category: '法人だけ', priority: true}
+  {word: '所得税', code: 362, category: '法人だけ', priority: true},
+  {word: '投資信託', code: 362, category: '法人だけ', priority: true},
+  {word: '金券', code: 362, category: '法人だけ', priority: true},
+  {word: 'ギフトカード', code: 362, category: '法人だけ', priority: true},
+  {word: 'ギフト券', code: 362, category: '法人だけ', priority: true},
+  {word: '商品券', code: 362, category: '法人だけ', priority: true},
+  {word: 'QUOカード', code: 362, category: '法人だけ', priority: true},
+  {word: 'クオカード', code: 362, category: '法人だけ', priority: true}
 ]);

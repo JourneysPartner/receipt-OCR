@@ -535,8 +535,11 @@ function appendAccountListEntries_(customer, fileId, leaseId, entries) {
  * @param {!Object} customer 顧客マスターの行
  * @param {!Object} masters {accounts, words}
  * @param {?Map<number,string>|?Object} sheetList 転記シートの科目一覧
- * @return {{status:string, code:?number, word:?string, name:?string}}
+ * @return {{status:string, code:?number, word:?string, name:?string,
+ *   priority:(boolean|undefined)}}
  *   `NEEDS_LIST_ENTRY` のときだけ `code` と `name`（科目一覧の科目名）が入る。
+ *   `priority` は、優先の言葉だけでコードが 1 つに決まったとき（仕入れに
+ *   譲った §5.0 の 3 を除く）だけ `true`。ほかのときは付かない。
  */
 function resolveAccountCode_(purpose, customer, masters, sheetList) {
   var key = usageWordKey_(purpose);
@@ -574,9 +577,29 @@ function resolveAccountCode_(purpose, customer, masters, sheetList) {
     return {status: ACCOUNT_RESOLUTION_STATUS_.INVALID_ENTRY, code: null, word: null};
   }
 
-  // 私用系の言葉はどこにあっても優先する。
+  // 私用系の言葉はどこにあっても優先する。金券系の言葉だけは、仕入高
+  // （712）の優先でない言葉と一緒なら、その仕入れに譲る（§5.0）。
   var preferred = hits.filter(function(hit) { return hit.row.priority === true; });
-  if (preferred.length) hits = preferred;
+  var usedPriority = false;
+  if (preferred.length) {
+    var yieldKeys = (ACCOUNT_YIELD_TO_PURCHASE_WORDS_ || []).map(function(word) {
+      return usageWordKey_(word);
+    });
+    var purchaseHits = hits.filter(function(hit) {
+      return hit.row.priority !== true && hit.row.code === ACCOUNT_PURCHASE_CODE_;
+    });
+    var yieldsToPurchase = purchaseHits.length > 0 && preferred.every(function(hit) {
+      return yieldKeys.indexOf(hit.row.key) >= 0;
+    });
+    if (yieldsToPurchase) {
+      // 金券系の優先の言葉は全部捨てる。この道で決まった結果には priority を
+      // 付けない（取引先は今どおり照合する）。
+      hits = purchaseHits;
+    } else {
+      hits = preferred;
+      usedPriority = true;
+    }
+  }
 
   var firstPosition = Math.min.apply(null, hits.map(function(hit) { return hit.position; }));
   hits = hits.filter(function(hit) { return hit.position === firstPosition; });
@@ -592,25 +615,33 @@ function resolveAccountCode_(purpose, customer, masters, sheetList) {
   }
 
   var code = codes[0];
+  // 優先の言葉だけでコードが 1 つに決まった（AMBIGUOUS を返さなかった）。
+  // その後に返す値には priority を付ける（§5.1）。
+  var withPriority = function(result) {
+    if (usedPriority) result.priority = true;
+    return result;
+  };
   var accounts = masters && masters.accounts || [];
   var account = null;
   accounts.forEach(function(row) {
     if (row.code === code && row.valid && row.active) account = row;
   });
   if (!account || !accountCategoryFitsCustomer_(account.category, customerCategory)) {
-    return {status: ACCOUNT_RESOLUTION_STATUS_.INVALID_ENTRY, code: null, word: null};
+    return withPriority({status: ACCOUNT_RESOLUTION_STATUS_.INVALID_ENTRY, code: null,
+      word: null});
   }
   var verdict = accountListVerdict_(sheetList, code, account.name);
   if (verdict.status === ACCOUNT_RESOLUTION_STATUS_.NEEDS_LIST_ENTRY) {
     // 当て方は決まった。あとは一覧に足せば D の VLOOKUP が当たる（§23.2）。
-    return {status: verdict.status, code: code, word: finalists[0].row.word,
-      name: account.name};
+    return withPriority({status: verdict.status, code: code,
+      word: finalists[0].row.word, name: account.name});
   }
   if (verdict.status !== ACCOUNT_RESOLUTION_STATUS_.MATCHED) {
-    return {status: ACCOUNT_RESOLUTION_STATUS_.NOT_IN_SHEET_LIST, code: null, word: null};
+    return withPriority({status: ACCOUNT_RESOLUTION_STATUS_.NOT_IN_SHEET_LIST, code: null,
+      word: null});
   }
-  return {status: ACCOUNT_RESOLUTION_STATUS_.MATCHED, code: code,
-    word: finalists[0].row.word};
+  return withPriority({status: ACCOUNT_RESOLUTION_STATUS_.MATCHED, code: code,
+    word: finalists[0].row.word});
 }
 
 /**
