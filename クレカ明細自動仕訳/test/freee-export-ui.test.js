@@ -222,7 +222,8 @@ module.exports = ({test, assert}) => {
     assert.ok(items[1].indexOf('摘要なし') >= 0, items[1]);
     assert.equal(items[2], 'ほか 33 件');
     assert.equal(w.ids['freee-download'].hidden, true);
-    assert.equal(w.ids['freee-status'].textContent, '');
+    assert.equal(w.ids['freee-status'].textContent,
+      '作れませんでした：直す必要のある行が 2 件あります（下の一覧）。');
     assert.equal(w.ui.state.freeeBusy, false);
   });
 
@@ -352,7 +353,9 @@ module.exports = ({test, assert}) => {
     assert.equal(message.indexOf('行は不明'), -1);
     assert.equal(w.noticeItems().length, 0);
     assert.equal(w.ids['freee-download'].hidden, true);
-    assert.equal(w.ids['freee-status'].textContent, '');
+    assert.equal(w.ids['freee-status'].textContent,
+      '作れませんでした：入力用シートの借方・貸方に数として読めない値があります' +
+      '（12 行目（M 列）・15 行目（L 列）・ほか 1 件）。');
     assert.equal(w.ui.state.freeeBusy, false);
   });
 };
