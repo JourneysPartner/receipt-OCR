@@ -170,8 +170,12 @@ function webAppRecheckCustomerFixFile(customerId, folderId, fileId) {
     rewindFileForReimportAudited_(fileId, selected.scope.userEmail,
       {from: FILE_STATE.CUSTOMER_FIX_REQUIRED, operation: 'RECHECK',
         customerId: String(customerId), reason: 'WEBAPP'});
+    // ショートカットなら指す先の最後の更新者で待ちを決める（§6.3）。
+    var waitLookupId = String(file.getMimeType()) === DRIVE_SHORTCUT_MIME_ ?
+      (String(file.getTargetId() || '') || null) : fileId;
     return {ok: true, fileId: fileId, fileName: fileName, nextState: FILE_STATE.DISCOVERED,
-      waitMinutes: webAppStableWaitMinutes_(file.getLastUpdated().getTime(), Date.now())};
+      waitMinutes: webAppWaitMinutesForFile_(file.getLastUpdated().getTime(), Date.now(),
+        waitLookupId)};
   });
 }
 
@@ -218,9 +222,15 @@ function webAppRecoverStuckFile(customerId, folderId, fileId) {
     var outcome = recoverStuckFile_({fileId: fileId, customerId: String(customerId),
       state: state, originalFileName: row.originalFileName}, scope.userEmail,
       {runId: 'RUN_' + Utilities.getUuid(), audit: {customerId: String(customerId), reason: 'WEBAPP'}});
-    if (outcome.rewound === true) return {ok: true, fileId: fileId, fileName: fileName,
-      nextState: FILE_STATE.DISCOVERED, recovered: (outcome.recovered || []).length,
-      waitMinutes: webAppStableWaitMinutes_(file.getLastUpdated().getTime(), Date.now())};
+    if (outcome.rewound === true) {
+      // ショートカットなら指す先の最後の更新者で待ちを決める（§6.3）。
+      var waitLookupId = String(file.getMimeType()) === DRIVE_SHORTCUT_MIME_ ?
+        (String(file.getTargetId() || '') || null) : fileId;
+      return {ok: true, fileId: fileId, fileName: fileName,
+        nextState: FILE_STATE.DISCOVERED, recovered: (outcome.recovered || []).length,
+        waitMinutes: webAppWaitMinutesForFile_(file.getLastUpdated().getTime(), Date.now(),
+          waitLookupId)};
+    }
     if (outcome.code === 'STATE_CHANGED') return {ok: false, code: 'STATE_CHANGED',
       fileId: fileId, fileName: fileName, state: outcome.currentState,
       stateLabel: menuFileStateLabel_(outcome.currentState)};
@@ -2072,6 +2082,23 @@ function webAppStableWaitMinutes_(updatedMs, nowMs) {
     Math.ceil((10 * 60 * 1000 - (nowMs - updatedMs)) / (60 * 1000)));
 }
 
+/**
+ * 待ちの分。**最後に更新したのがこの呼出しをしている本人なら 0**（§6.3）。
+ * `lookupId` が無いとき（ショートカットの指す先の日時を読めなかったとき）は
+ * Drive を呼ばずに今のまま待つ。呼出しが失敗したときも今のまま待つ
+ * （例外は外へ出さない）。`webAppStableWaitMinutes_` そのものは変えない。
+ */
+function webAppWaitMinutesForFile_(updatedMs, nowMs, lookupId) {
+  var minutes = webAppStableWaitMinutes_(updatedMs, nowMs);
+  if (minutes === 0 || !lookupId) return minutes;
+  try {
+    var meta = Drive.Files.get(String(lookupId),
+      {fields: 'lastModifyingUser(me)', supportsAllDrives: true});
+    if (driveModifiedByMe_(meta)) return 0;
+  } catch (error) { /* 読めなければ今のまま待つ */ }
+  return minutes;
+}
+
 /** ファイル一覧 1 行を作る。 */
 function webAppFolderFile_(file, stateByFileId, nowMs) {
   var fileId = String(file.getId());
@@ -2079,15 +2106,21 @@ function webAppFolderFile_(file, stateByFileId, nowMs) {
   var updated = file.getLastUpdated();
   var updatedMs = updated instanceof Date ? updated.getTime() : new Date(updated).getTime();
   var mime = file.getMimeType();
+  // 待ちを外してよいかは、ショートカットなら指す先の最後の更新者で見る。
+  // 指す先の日時が読めないときは null にして、Drive を呼ばずに今のまま待つ。
+  var waitLookupId = fileId;
   if (mime === DRIVE_SHORTCUT_MIME_) {
     try {
       updated = DriveApp.getFileById(file.getTargetId()).getLastUpdated();
       updatedMs = updated instanceof Date ? updated.getTime() : new Date(updated).getTime();
-    } catch (error) { /* 指す先が読めなければ、走査と同じく自身の日時で待つ */ }
+      waitLookupId = String(file.getTargetId() || '') || null;
+    } catch (error) {
+      waitLookupId = null; /* 指す先が読めなければ、走査と同じく自身の日時で待つ */
+    }
   }
   var supported = mime === DRIVE_SHORTCUT_MIME_ ?
     isImportableDriveFile(fileName, mime, file.getTargetMimeType()) : isImportableDriveFile(fileName, mime);
-  var minutes = webAppStableWaitMinutes_(updatedMs, nowMs);
+  var minutes = webAppWaitMinutesForFile_(updatedMs, nowMs, waitLookupId);
   var stable = minutes === 0;
   var registered = Object.prototype.hasOwnProperty.call(stateByFileId, fileId);
   var state = registered ? stateByFileId[fileId] : null;

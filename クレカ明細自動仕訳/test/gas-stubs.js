@@ -514,6 +514,9 @@ class MemoryDriveFile {
     this.createdTime = options.createdTime ? new Date(options.createdTime) : this.lastUpdated;
     this.revisionId = options.revisionId || null;
     this.appProperties = options.appProperties || null;
+    // 最後に更新した人（`Drive.Files.list`／`get` の `lastModifyingUser(me)`）。
+    // 指定が無ければ今までどおり欄を持たせない（既存テストの形を変えない）。
+    this.lastModifyingUser = options.lastModifyingUser;
     // Drive への書込を数える口（S2・reg 18）。テストの模型だけが使う。
     this.onWrite = typeof options.onWrite === 'function' ? options.onWrite : null;
     // 一覧の File 代用品を展開しても、種類で判定するための口を引き継ぐ。
@@ -1277,15 +1280,20 @@ function createGasStubs() {
   const parentIdsOf = (id) => Array.from(folders.values())
     .filter((folder) => (folder.fileIds || []).map(String).indexOf(String(id)) >= 0)
     .map((folder) => folder.id);
-  const driveFileMeta = (file) => ({
-    id: file.id, name: file.name, mimeType: file.contentType,
-    createdTime: (file.createdTime || file.lastUpdated).toISOString ?
-      (file.createdTime || file.lastUpdated).toISOString() : String(file.createdTime || file.lastUpdated),
-    modifiedTime: file.lastUpdated.toISOString(),
-    size: file.bytes.length, headRevisionId: file.revisionId || 'rev-1',
-    parents: parentIdsOf(file.id),
-    appProperties: file.appProperties || undefined
-  });
+  const driveFileMeta = (file) => {
+    const meta = {
+      id: file.id, name: file.name, mimeType: file.contentType,
+      createdTime: (file.createdTime || file.lastUpdated).toISOString ?
+        (file.createdTime || file.lastUpdated).toISOString() : String(file.createdTime || file.lastUpdated),
+      modifiedTime: file.lastUpdated.toISOString(),
+      size: file.bytes.length, headRevisionId: file.revisionId || 'rev-1',
+      parents: parentIdsOf(file.id),
+      appProperties: file.appProperties || undefined
+    };
+    // 指定した時だけ載せる（既定の形を変えないため）。
+    if (file.lastModifyingUser !== undefined) meta.lastModifyingUser = file.lastModifyingUser;
+    return meta;
+  };
   /** 高度な Drive API が作った Google スプレッドシートの一覧用の形。 */
   const spreadsheetFileMeta = (spreadsheet) => {
     const created = spreadsheet.createdTime || stubNow();

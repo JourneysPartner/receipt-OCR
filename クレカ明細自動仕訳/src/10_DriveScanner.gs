@@ -36,7 +36,7 @@ function driveListPage_(query, pageToken) {
         q: query,
         pageSize: 100,
         pageToken: pageToken || undefined,
-        fields: 'nextPageToken, files(id, name, mimeType, createdTime, modifiedTime, size, headRevisionId, shortcutDetails(targetId,targetMimeType))',
+        fields: 'nextPageToken, files(id, name, mimeType, createdTime, modifiedTime, size, headRevisionId, lastModifyingUser(me), shortcutDetails(targetId,targetMimeType))',
         supportsAllDrives: true,
         includeItemsFromAllDrives: true,
         corpora: 'allDrives'
@@ -59,7 +59,7 @@ function driveShortcutTargetMetadata_(targetId, includeTrashed) {
     try {
       driveScannerCallCount_ += 1;
       return Drive.Files.get(targetId, {
-        fields: 'id,modifiedTime,headRevisionId' + (includeTrashed ? ',trashed' : ''),
+        fields: 'id,modifiedTime,headRevisionId,lastModifyingUser(me)' + (includeTrashed ? ',trashed' : ''),
         supportsAllDrives: true
       });
     } catch (error) {
@@ -70,6 +70,11 @@ function driveShortcutTargetMetadata_(targetId, includeTrashed) {
   }
   throw makeCatalogError_('TRANSIENT_DRIVE_ERROR',
     'Drive target metadata failed after retries: ' + (lastError && lastError.message));
+}
+
+/** 最後に更新したのが、この呼出しをしている本人か。分からなければ false。 */
+function driveModifiedByMe_(file) {
+  return Boolean(file && file.lastModifyingUser && file.lastModifyingUser.me === true);
 }
 
 /**
@@ -169,13 +174,19 @@ function scanUnprocessedFiles(customerId, options) {
           var target = driveShortcutTargetMetadata_(file.shortcutDetails.targetId, false);
           file.modifiedTime = target.modifiedTime || null;
           file.headRevisionId = target.headRevisionId || null;
+          file.lastModifyingUser = target.lastModifyingUser || null;
         } catch (error) {
           // 読めないものも候補に残し、読取で FAILED として利用者へ返す。
+          // 最後に更新した人も分からないので、待ちは外さない。
+          file.lastModifyingUser = null;
         }
       }
       var modified = file.modifiedTime ? new Date(file.modifiedTime).getTime() : 0;
       if (!isFinite(modified)) return false;
       if (modified <= stableBefore) return true;
+      // 最後に更新したのが自分（画面を押した人）なら、待たずに候補へ入れる（§6.2）。
+      // 待ちの材料には入れない。
+      if (driveModifiedByMe_(file)) return true;
       // 10分の判定だけで外れたもの（取り込める種類・未登録かDISCOVERED）を、
       // 候補の配列には触れずに待ちの材料として集める。読めない時刻は従来どおり
       // 候補に残る（modified === 0 は上の条件で候補）。

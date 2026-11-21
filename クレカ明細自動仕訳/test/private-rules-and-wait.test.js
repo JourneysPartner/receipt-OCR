@@ -1,9 +1,8 @@
 'use strict';
 
 /**
- * 私用と同じ扱いの言葉・店名と、優先の言葉で科目が決まる行の取引先
- * （`work/spec_private_rules_and_wait.md` §10 の pvr 1〜10。待ちと画面は
- * 2 回目・3 回目の仕事なので、ここには入れない）。
+ * 私用と同じ扱いの言葉・店名と、優先の言葉で科目が決まる行の取引先、
+ * 取込の待ち（`work/spec_private_rules_and_wait.md` §10 の pvr 1〜15）。
  *
  * 値はすべて架空である。仕様に出る言葉・店名は規則そのものなので使う。
  * 実在の明細の店名・金額・顧客 ID は使わない。
@@ -617,5 +616,306 @@ module.exports = ({test, assert, gas}) => {
     assert.deepEqual(plain(evaluate('ACCOUNT_YIELD_TO_PURCHASE_WORDS_')),
       ['金券', 'ギフトカード', 'ギフト券', '商品券', 'QUOカード', 'クオカード']);
     assert.equal(evaluate('ACCOUNT_PURCHASE_CODE_'), 712);
+  });
+
+  // ---------------- 待ち（§6・pvr 11〜15） ----------------
+
+  const SCAN_NOW_MS = Date.parse('2026-11-21T12:00:00+09:00');
+  const minutesBefore = (minutes) => new Date(SCAN_NOW_MS - minutes * 60 * 1000);
+  const spreadsheetMime = 'application/vnd.google-apps.spreadsheet';
+  const shortcutMime = 'application/vnd.google-apps.shortcut';
+
+  /** 走査の材料だけを作る（顧客とフォルダは pvr の世界のものを使う）。 */
+  function scanWorld(files, indexStates, folderIds) {
+    setupWorld({accounts: false});
+    const ids = Object.keys(files);
+    ids.forEach((fileId) => {
+      gas.stubs.createFile(fileId, Object.assign({bytes: Buffer.from('a'),
+        createdTime: '2026-08-01T00:00:00Z'}, files[fileId]));
+    });
+    gas.stubs.createFolder('folder1', {fileIds: folderIds || ids});
+    const indexSheet = master('恒久ファイルインデックス');
+    Object.keys(indexStates || {}).forEach((fileId) => {
+      const row = blank(13);
+      row[0] = fileId;
+      row[1] = 'C001';
+      row[2] = String(files[fileId].name || '');
+      row[3] = indexStates[fileId];
+      indexSheet.appendRow(row);
+    });
+  }
+
+  function scannerCandidates() {
+    const waiting = [];
+    const candidates = plain(call('scanUnprocessedFiles',
+      ['C001', {now: SCAN_NOW_MS, waiting: waiting}]));
+    return {candidates: candidates, waiting: waiting};
+  }
+
+  function readyAtOf(file) {
+    return file.lastUpdated.getTime() + 10 * 60 * 1000;
+  }
+
+  function iteratorOf(items) {
+    let index = 0;
+    return {hasNext: () => index < items.length, next: () => items[index++]};
+  }
+
+  function withMocks(overrides, fn) {
+    const saved = {};
+    Object.keys(overrides).forEach((name) => {
+      saved[name] = gas.context[name];
+      gas.context[name] = overrides[name];
+    });
+    try {
+      return fn();
+    } finally {
+      Object.keys(saved).forEach((name) => { gas.context[name] = saved[name]; });
+    }
+  }
+
+  // ---------------- pvr 11: 走査の待ち ----------------
+  test('pvr 11: me が true のときだけ待ちを外し、ほかは今と同じく待つ', () => {
+    const files = {
+      mineRecent: {name: '架空_me.csv', lastUpdated: minutesBefore(2),
+        lastModifyingUser: {me: true}},
+      otherRecent: {name: '架空_other.csv', lastUpdated: minutesBefore(2),
+        lastModifyingUser: {me: false}},
+      missingRecent: {name: '架空_missing.csv', lastUpdated: minutesBefore(2)},
+      emptyRecent: {name: '架空_empty.csv', lastUpdated: minutesBefore(2),
+        lastModifyingUser: {}},
+      nullRecent: {name: '架空_null.csv', lastUpdated: minutesBefore(2),
+        lastModifyingUser: null},
+      discRecent: {name: '架空_disc.csv', lastUpdated: minutesBefore(2),
+        lastModifyingUser: {me: false}},
+      oldMine: {name: '架空_old_me.csv', lastUpdated: minutesBefore(30),
+        lastModifyingUser: {me: true}},
+      oldOther: {name: '架空_old_other.csv', lastUpdated: minutesBefore(30),
+        lastModifyingUser: {me: false}}
+    };
+    scanWorld(files, {discRecent: 'DISCOVERED'});
+    const result = scannerCandidates();
+    assert.deepEqual(result.candidates.map((item) => item.fileId).sort(),
+      ['mineRecent', 'oldMine', 'oldOther'],
+      'me が true の 10 分以内と、10 分より前は候補');
+    assert.deepEqual(result.waiting.map((item) => item.fileId).sort(),
+      ['discRecent', 'emptyRecent', 'missingRecent', 'nullRecent', 'otherRecent'],
+      'me が true でない・欄が無い・null・{} は今と同じく待つ');
+    const waitingById = {};
+    result.waiting.forEach((item) => { waitingById[item.fileId] = item; });
+    Object.keys(waitingById).forEach((fileId) => {
+      assert.equal(Date.parse(waitingById[fileId].readyAt), readyAtOf(files[fileId]),
+        fileId + ' の readyAt は今と同じ');
+    });
+    assert.equal(Object.prototype.hasOwnProperty.call(waitingById, 'mineRecent'), false,
+      '待ちを外したファイルは waiting に入れない');
+  });
+
+  // ---------------- pvr 12: ショートカットは指す先で見る ----------------
+  test('pvr 12: ショートカットは指す先の最後の更新者で決め、読めなければ待つ', () => {
+    const files = {
+      targetMine: {name: '架空の指す先A', contentType: spreadsheetMime,
+        lastUpdated: minutesBefore(2), lastModifyingUser: {me: true}},
+      targetOther: {name: '架空の指す先B', contentType: spreadsheetMime,
+        lastUpdated: minutesBefore(2), lastModifyingUser: {me: false}},
+      targetOld: {name: '架空の指す先C', contentType: spreadsheetMime,
+        lastUpdated: minutesBefore(30), lastModifyingUser: {me: false}},
+      shortcutMine: {name: '架空ショートカット1', contentType: shortcutMime,
+        targetId: 'targetMine', targetMimeType: spreadsheetMime,
+        lastUpdated: minutesBefore(30), lastModifyingUser: {me: false}},
+      shortcutOwnOnly: {name: '架空ショートカット2', contentType: shortcutMime,
+        targetId: 'targetOther', targetMimeType: spreadsheetMime,
+        lastUpdated: minutesBefore(2), lastModifyingUser: {me: true}},
+      shortcutUnreadable: {name: '架空ショートカット3', contentType: shortcutMime,
+        targetId: 'missingTarget', targetMimeType: spreadsheetMime,
+        lastUpdated: minutesBefore(2), lastModifyingUser: {me: true}},
+      shortcutOld: {name: '架空ショートカット4', contentType: shortcutMime,
+        targetId: 'targetOld', targetMimeType: spreadsheetMime,
+        lastUpdated: minutesBefore(2), lastModifyingUser: {me: false}}
+    };
+    scanWorld(files, {}, ['shortcutMine', 'shortcutOwnOnly', 'shortcutUnreadable', 'shortcutOld']);
+    const result = scannerCandidates();
+    assert.deepEqual(result.candidates.map((item) => item.fileId).sort(),
+      ['shortcutMine', 'shortcutOld'],
+      '指す先が 10 分より前、または指す先の me が true なら候補');
+    assert.deepEqual(result.waiting.map((item) => item.fileId).sort(),
+      ['shortcutOwnOnly', 'shortcutUnreadable'],
+      'ショートカット自身の me では外さず、指す先が読めないときも待つ');
+    const waitingById = {};
+    result.waiting.forEach((item) => { waitingById[item.fileId] = item; });
+    assert.equal(Date.parse(waitingById.shortcutOwnOnly.readyAt),
+      readyAtOf(files.targetOther), '待ちは指す先の日時で今と同じ');
+    assert.equal(Date.parse(waitingById.shortcutUnreadable.readyAt),
+      readyAtOf(files.shortcutUnreadable), '読めないときは自身の日時で今と同じ');
+  });
+
+  // ---------------- pvr 13: 走査の Drive の呼出し ----------------
+  test('pvr 13: 走査の Drive の呼出しは増えず、fields に lastModifyingUser(me) が入る', () => {
+    const files = {
+      plainFile: {name: '架空_plain.csv', lastUpdated: minutesBefore(30),
+        lastModifyingUser: {me: false}},
+      targetMine: {name: '架空の指す先', contentType: spreadsheetMime,
+        lastUpdated: minutesBefore(2), lastModifyingUser: {me: true}},
+      shortcutMine: {name: '架空ショートカット', contentType: shortcutMime,
+        targetId: 'targetMine', targetMimeType: spreadsheetMime,
+        lastUpdated: minutesBefore(30), lastModifyingUser: {me: false}}
+    };
+    scanWorld(files, {}, ['plainFile', 'shortcutMine']);
+    call('resetDriveScannerCallCount', []);
+    const listRequests = [];
+    const getRequests = [];
+    const driveFiles = gas.context.Drive.Files;
+    const originalList = driveFiles.list;
+    const originalGet = driveFiles.get;
+    driveFiles.list = function(request) {
+      listRequests.push(request);
+      return originalList.call(driveFiles, request);
+    };
+    driveFiles.get = function(fileId, request) {
+      getRequests.push({fileId: String(fileId), request: request});
+      return originalGet.call(driveFiles, fileId, request);
+    };
+    let candidates;
+    try {
+      candidates = plain(call('scanUnprocessedFiles', ['C001', {now: SCAN_NOW_MS}]));
+    } finally {
+      driveFiles.list = originalList;
+      driveFiles.get = originalGet;
+    }
+    assert.deepEqual(candidates.map((item) => item.fileId).sort(),
+      ['plainFile', 'shortcutMine']);
+    assert.equal(listRequests.length, 1, 'フォルダ 1 つにつき 1 回（今と同じ）');
+    assert.equal(getRequests.length, 1, 'ショートカット 1 本につき 1 回（今と同じ）');
+    assert.equal(call('getDriveScannerCallCount', []), 2, 'Drive の呼出しは増えない');
+    listRequests.forEach((request) => {
+      assert.ok(String(request.fields).indexOf('lastModifyingUser(me)') >= 0, request.fields);
+    });
+    getRequests.forEach((request) => {
+      assert.equal(request.fileId, 'targetMine');
+      assert.ok(String(request.request.fields).indexOf('lastModifyingUser(me)') >= 0,
+        request.request.fields);
+    });
+  });
+
+  // ---------------- pvr 14: 画面の一覧 ----------------
+  test('pvr 14: 画面の一覧は 10 分以内だけを 1 回ずつ見て、読めなければ待つ', () => {
+    gas.stubs.reset();
+    const nowMs = Date.now();
+    const at = (minutes) => new Date(nowMs - minutes * 60 * 1000);
+    const put = (fileId, options) => {
+      gas.stubs.createFile(fileId, Object.assign({name: '架空_' + fileId + '.csv',
+        bytes: Buffer.from('a'), createdTime: '2026-08-01T00:00:00Z'}, options));
+      return gas.stubs.getFile(fileId);
+    };
+    const mine = put('f14_mine', {lastUpdated: at(2), lastModifyingUser: {me: true}});
+    const other = put('f14_other', {lastUpdated: at(2), lastModifyingUser: {me: false}});
+    const disc = put('f14_disc', {lastUpdated: at(2), lastModifyingUser: {me: true}});
+    const old = put('f14_old', {lastUpdated: at(20), lastModifyingUser: {me: true}});
+    const failing = put('f14_failing', {lastUpdated: at(2), lastModifyingUser: {me: true}});
+    put('f14_target', {lastUpdated: at(2), lastModifyingUser: {me: true}});
+    const shortcutMine = put('f14_shortcut_mine', {contentType: shortcutMime,
+      targetId: 'f14_target', targetMimeType: spreadsheetMime,
+      lastUpdated: at(30), lastModifyingUser: {me: false}});
+    const shortcutUnreadable = put('f14_shortcut_unreadable', {contentType: shortcutMime,
+      targetId: 'f14_missing_target', targetMimeType: spreadsheetMime,
+      lastUpdated: at(2), lastModifyingUser: {me: true}});
+    const calls = [];
+    const driveFiles = gas.context.Drive.Files;
+    const originalGet = driveFiles.get;
+    driveFiles.get = function(fileId, request) {
+      calls.push({fileId: String(fileId), request: request});
+      if (String(fileId) === 'f14_failing') throw new Error('架空の Drive 障害');
+      return originalGet.call(driveFiles, fileId, request);
+    };
+    let rows;
+    try {
+      rows = {
+        mine: plain(call('webAppFolderFile_', [mine, {}, nowMs])),
+        other: plain(call('webAppFolderFile_', [other, {}, nowMs])),
+        disc: plain(call('webAppFolderFile_', [disc, {f14_disc: 'DISCOVERED'}, nowMs])),
+        old: plain(call('webAppFolderFile_', [old, {}, nowMs])),
+        shortcutMine: plain(call('webAppFolderFile_', [shortcutMine, {}, nowMs])),
+        shortcutUnreadable: plain(call('webAppFolderFile_',
+          [shortcutUnreadable, {}, nowMs]))
+      };
+      rows.failing = plain(call('webAppFolderFile_', [failing, {}, nowMs]));
+    } finally {
+      driveFiles.get = originalGet;
+    }
+    assert.equal(rows.mine.stateLabel, '取込可能');
+    assert.equal(rows.mine.importable, true);
+    assert.equal(rows.other.stateLabel, '取込待ち（あと 8 分）');
+    assert.equal(rows.other.importable, false);
+    assert.equal(rows.disc.stateLabel, '未処理（取込待ち） (DISCOVERED)');
+    assert.equal(rows.disc.importable, true);
+    assert.equal(rows.old.stateLabel, '取込可能');
+    assert.equal(rows.shortcutMine.stateLabel, '取込可能',
+      'ショートカットは指す先の me で待ちを外す');
+    assert.equal(rows.shortcutUnreadable.stateLabel, '取込待ち（あと 8 分）',
+      '指す先の日時が読めないときは Drive を呼ばずに待つ');
+    assert.equal(rows.failing.stateLabel, '取込待ち（あと 8 分）',
+      'Drive が読めないときは今のまま待つ');
+    assert.deepEqual(calls.map((item) => item.fileId),
+      ['f14_mine', 'f14_other', 'f14_disc', 'f14_target', 'f14_failing'],
+      '10 分以内のファイルだけを 1 回ずつ（ショートカットは指す先）');
+    calls.forEach((item) => {
+      assert.equal(item.request.fields, 'lastModifyingUser(me)');
+      assert.equal(item.request.supportsAllDrives, true);
+    });
+  });
+
+  // ---------------- pvr 15: 再検査と復帰の待ち ----------------
+  test('pvr 15: 再検査と復帰の waitMinutes も me が true なら 0、そうでなければ今の値', () => {
+    gas.stubs.reset();
+    const at = (minutes) => new Date(Date.now() - minutes * 60 * 1000);
+    const put = (fileId, lastModifyingUser) => {
+      gas.stubs.createFile(fileId, {name: '架空_' + fileId + '.csv', bytes: Buffer.from('a'),
+        contentType: 'text/csv', lastUpdated: at(3.5), lastModifyingUser: lastModifyingUser,
+        createdTime: '2026-08-01T00:00:00Z'});
+      return gas.stubs.getFile(fileId);
+    };
+    const mine = put('f15_mine', {me: true});
+    const other = put('f15_other', {me: false});
+
+    function recheck(file) {
+      return plain(withMocks({
+        webAppAuthorizeCustomer_: () => ({scope: {userEmail: 'tester@example.com'},
+          customer: {sourceFolderId: 'folder1'}}),
+        webAppDirectChildFolder_: () => ({getFiles: () => iteratorOf([file])}),
+        menuAssertNoLease_: () => {},
+        getFileState: () => 'CUSTOMER_FIX_REQUIRED',
+        rewindFileForReimportAudited_: () => {}
+      }, () => call('webAppRecheckCustomerFixFile',
+        ['C001', 'card14', String(file.getId())])));
+    }
+
+    function recover(file) {
+      return plain(withMocks({
+        authorize: () => ({userEmail: 'tester@example.com',
+          customers: [{sourceFolderId: 'folder1'}]}),
+        webAppDirectChildFolder_: () => ({getFiles: () => iteratorOf([file])}),
+        permanentIndexRowsForScan_: () => [{fileId: String(file.getId()),
+          customerId: 'C001', originalFileName: String(file.getName())}],
+        getFileState: () => 'FAILED',
+        activeLeases_: () => [],
+        recoverStuckFile_: () => ({rewound: true, recovered: []})
+      }, () => call('webAppRecoverStuckFile',
+        ['C001', 'card14', String(file.getId())])));
+    }
+
+    const mineRecheck = recheck(mine);
+    const otherRecheck = recheck(other);
+    const mineRecover = recover(mine);
+    const otherRecover = recover(other);
+    assert.equal(mineRecheck.ok, true, JSON.stringify(mineRecheck));
+    assert.equal(mineRecheck.waitMinutes, 0);
+    assert.equal(otherRecheck.waitMinutes,
+      call('webAppStableWaitMinutes_', [other.getLastUpdated().getTime(), Date.now()]));
+    assert.ok(otherRecheck.waitMinutes > 0);
+    assert.equal(mineRecover.ok, true, JSON.stringify(mineRecover));
+    assert.equal(mineRecover.waitMinutes, 0);
+    assert.equal(otherRecover.waitMinutes,
+      call('webAppStableWaitMinutes_', [other.getLastUpdated().getTime(), Date.now()]));
+    assert.ok(otherRecover.waitMinutes > 0);
   });
 };
