@@ -247,6 +247,17 @@ class TestCandidates:
         assert "1600 ← test/文字から, other/画像から" in candidates["金額"]
         assert "失敗: bad/画像から" in candidates["金額"]
 
+    def test_judge_failures_are_not_candidates(self):
+        # 審判の失敗は「答え」タブの候補に出さない（spec_judge_form §12.3）
+        rows = [
+            _result(method="文字から"),
+            _result(model="gemini-other", method="画像から"),
+            _result(model="gemini-decision-1", method="審判", result="失敗:api_error"),
+        ]
+        candidates = build_candidates(rows)
+        assert "審判" not in candidates["金額"]
+        assert "decision-1" not in candidates["金額"]
+
     def test_vendor_tie_breaks_by_shorter(self):
         plan = build_answer_plan(
             answer_title="答え",

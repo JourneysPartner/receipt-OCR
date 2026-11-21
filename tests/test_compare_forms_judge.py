@@ -2,6 +2,7 @@
 
 import json
 
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -223,6 +224,22 @@ class TestFormC:
         tables = _scenario(judge_row=judge)
         assert _detail(tables, FORM_C, f"{JUDGE} ≥0.90")["成績"] == GRADE_REVIEW
 
+    def test_answer_whose_options_lack_the_base_value_is_review(self):
+        entry = _judge_item()
+        entry["a"]["options"] = ["1500", "other"]
+        judge = _judge_row("F1", [["2026-01-02", 1600]], [entry])
+        tables = _scenario(judge_row=judge)
+        assert _detail(tables, FORM_C, f"{JUDGE} ≥0.90")["成績"] == GRADE_REVIEW
+
+    @pytest.mark.parametrize("raw", ["", "{broken"])
+    def test_unreadable_judge_json_is_review_and_noted(self, raw):
+        judge = _judge_row("F1", [["2026-01-02", 1600]], [_judge_item()])
+        judge["明細JSON"] = raw
+        tables = _scenario(judge_row=judge)
+        metric = _metric(tables, FORM_C, f"{JUDGE} ≥0.90")
+        assert metric["要確認"] == "1/1 (100.0%)"
+        assert "審判の行を読めないファイル 1" in metric["注"]
+
     def test_confidence_below_theta_is_review_and_exact_theta_is_auto(self):
         base = [["2026-01-02", 1600]]
         low = _judge_row("F1", base, [_judge_item(confidence=0.89)])
@@ -418,6 +435,24 @@ def _readings(draw):
 
 
 class TestProperties:
+    @given(_readings())
+    def test_raising_theta_never_adds_auto_items(self, reading):
+        images, texts, judged = reading
+        rows = _base_rows("F1", _items(*images), _items(*texts))
+        rows.append(_judge_row("F1", [[date, amount] for date, amount in images], judged))
+        answer = [_answer("F1", date=images[0][0], amount=images[0][1])]
+        counts = []
+        for theta in (0.0, 0.5, 1.0):
+            tables = _tables(
+                rows,
+                answer,
+                ocr_rows=[_ocr("F1")],
+                thresholds=(theta,),
+            )
+            metric = _metric(tables, FORM_C, f"{JUDGE} ≥{theta:.2f}")
+            counts.append(int(metric["自動の明細"].split("/")[0]))
+        assert counts[0] >= counts[1] >= counts[2]
+
     @given(_readings())
     def test_c_auto_includes_current_auto_and_length_is_ib(self, reading):
         images, texts, judged = reading

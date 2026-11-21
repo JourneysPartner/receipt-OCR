@@ -883,6 +883,7 @@ def _c_note(files: list[ReadingFile], views: dict[str, _JudgeView], d0_by_file) 
     missing = 0
     failed = 0
     failed_counts: dict[str, int] = {}
+    unreadable = 0
     mismatch = 0
     for file in files:
         if not needs_call(file.image_items or [], d0_by_file[file.file_id]):
@@ -893,6 +894,9 @@ def _c_note(files: list[ReadingFile], views: dict[str, _JudgeView], d0_by_file) 
         elif view.state == "failed":
             failed += 1
             failed_counts[view.result] = failed_counts.get(view.result, 0) + 1
+        elif view.state == "bad":
+            # `成功` なのに 明細JSON が空・壊れている（§12.3）
+            unreadable += 1
         elif view.state == "base":
             mismatch += 1
     notes = []
@@ -903,6 +907,8 @@ def _c_note(files: list[ReadingFile], views: dict[str, _JudgeView], d0_by_file) 
             f"{result} {count}" for result, count in sorted(failed_counts.items())
         )
         notes.append(f"審判が失敗したファイル {failed}（{breakdown}）")
+    if unreadable:
+        notes.append(f"審判の行を読めないファイル {unreadable}")
     if mismatch:
         notes.append(f"審判に見せた読みと違うファイル {mismatch}")
     return "、".join(notes)

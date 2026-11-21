@@ -579,6 +579,119 @@ class TestClient:
         assert GEMINI_KEY not in attempt.info["error"]
 
 
+class TestDefaultPost:
+    """`_default_post` を本物の httpx の例外で通す（網は開かない。§12.2）。"""
+
+    URL = GOOGLE_DECISIONS_URL
+
+    def _call(self, handler, *, headers=None):
+        transport = httpx.MockTransport(handler)
+        return judges._default_post(
+            self.URL,
+            headers=headers or {"x-goog-api-key": "fake-gemini-key-AAA"},
+            body={"model": "gemini-decision-1"},
+            timeout=5,
+            transport=transport,
+        )
+
+    @pytest.mark.parametrize(
+        "error",
+        [httpx.ReadTimeout("timed out"), httpx.ConnectError("no route to host")],
+    )
+    def test_network_errors_become_transport_errors(self, error):
+        def handler(request):
+            raise error
+
+        with pytest.raises(JudgeTransportError) as info:
+            self._call(handler)
+        assert type(error).__name__ in str(info.value)
+
+    def test_local_protocol_error_keeps_only_the_type_name(self):
+        def handler(request):
+            raise httpx.LocalProtocolError("Illegal header value b'fake-gemini-key-AAA\\n'")
+
+        with pytest.raises(judges.JudgeProtocolError) as info:
+            self._call(handler)
+        assert str(info.value) == "LocalProtocolError"
+
+    def test_success_through_the_transport(self):
+        def handler(request):
+            return httpx.Response(200, json={"answers": {}})
+
+        response = self._call(handler)
+        assert response.status_code == 200
+
+
+class TestKeyWhitespace:
+    """鍵の前後の空白・改行（§12.2）。"""
+
+    @pytest.mark.parametrize("suffix", ["\n", "\r\n"])
+    def test_trailing_newline_is_not_put_into_the_header(self, suffix):
+        plan = _plan()
+        seen = {}
+
+        def handler(request):
+            seen["key"] = request.headers["x-goog-api-key"]
+            return httpx.Response(
+                200,
+                json={
+                    "answers": _answer_plan(plan),
+                    "usage": {"total_input_tokens": 1},
+                },
+            )
+
+        transport = httpx.MockTransport(handler)
+        raw_key = f"{GEMINI_KEY}{suffix}"
+
+        def post(url, *, headers, body, timeout):
+            return judges._default_post(
+                url, headers=headers, body=body, timeout=timeout, transport=transport
+            )
+
+        client = JudgeClient(GOOGLE_JUDGE, raw_key, post=post)
+        attempt = client.call(_File(), plan)
+        assert attempt.result == "成功"
+        assert seen["key"] == GEMINI_KEY
+        assert "\n" not in seen["key"]
+        assert "\r" not in seen["key"]
+
+    @pytest.mark.parametrize("key", [f"{GEMINI_KEY}\n", f"{GEMINI_KEY}\r\n"])
+    def test_both_the_original_and_the_stripped_key_are_redacted(self, key):
+        plan = _plan()
+
+        def post(url, *, headers, body, timeout):
+            raise JudgeTransportError(f"boom {key} / {GEMINI_KEY}")
+
+        client = JudgeClient(GOOGLE_JUDGE, key, post=post)
+        attempt = client.call(_File(), plan)
+        assert GEMINI_KEY not in attempt.info["error"]
+        assert key not in attempt.info["error"]
+        assert "***" in attempt.info["error"]
+
+    @pytest.mark.parametrize("key", [f"{GEMINI_KEY}\n", f"{GEMINI_KEY}\r\n", "fake\nkey-AAA"])
+    def test_local_protocol_error_is_not_retried_and_has_no_key(self, key):
+        plan = _plan()
+
+        def handler(request):
+            raise httpx.LocalProtocolError(f"Illegal header value {key!r}")
+
+        transport = httpx.MockTransport(handler)
+
+        def post(url, *, headers, body, timeout):
+            return judges._default_post(
+                url, headers=headers, body=body, timeout=timeout, transport=transport
+            )
+
+        client = JudgeClient(GOOGLE_JUDGE, key, post=post)
+        attempt = client.call(_File(), plan)
+        assert attempt.result == "失敗:api_error"
+        assert attempt.error == "api_error"
+        assert attempt.info["error_code"] is None
+        assert attempt.info["error"] == "LocalProtocolError"
+        assert key.strip() not in attempt.info["error"]
+        assert is_retryable(attempt) is False
+
+
 class TestJ2:
     def test_prod_import_does_not_import_the_judges_module(self):
         project_root = Path(__file__).resolve().parents[1]

@@ -1005,10 +1005,20 @@ class CompareRunner:
             result_rows = self._sheet.read_dicts(result_title)
             try:
                 ocr_rows = self._sheet.read_dicts(ocr_title)
-            except Exception:
+            except Exception as error:
+                logger.warning(
+                    "OCR タブを読めません（審判の回は OCR の文字なしで続けます）: "
+                    f"{type(error).__name__}",
+                    extra={"step": "compare_judge_ocr_error"},
+                )
                 ocr_rows = []
             base_label = self._resolve_form_base(result_rows)
             if not base_label:
+                logger.warning(
+                    "主の読み手が決まらないため審判の回を飛ばします（COMPARE_FORM_BASE か"
+                    " 両読みの行を確かめてください）",
+                    extra={"step": "compare_judge_base_missing"},
+                )
                 return True
             files, _ = build_inputs(result_rows, ocr_rows, base_label)
             target_ids = {info.file.file_id for info in infos}
@@ -1028,7 +1038,8 @@ class CompareRunner:
                 plan = judge_module.build_questions(
                     file.image_items or [], file.text_items or [], d0, vendors
                 )
-                if plan.empty and not plan.too_many:
+                # 枚数の質問だけで明細の質問が無いファイルは呼ばない（行も作らない。§12.3）
+                if not plan.items:
                     continue
                 left = [
                     judge
@@ -1043,11 +1054,15 @@ class CompareRunner:
             unavailable: set[str] = set()
             lock = threading.Lock()
             budget_exceeded = False
+            judge_failed = False
             with ThreadPoolExecutor(max_workers=self._compare.max_workers) as executor:
                 iterator = iter(jobs)
                 pending: dict = {}
                 while True:
                     while len(pending) < self._compare.max_workers and not budget_exceeded:
+                        # 並びを最後まで出した後は next() を呼ばない（読み取りの回と同じ）
+                        if iterator is None:
+                            break
                         try:
                             file, plan, judges = next(iterator)
                         except StopIteration:
@@ -1061,11 +1076,24 @@ class CompareRunner:
                         )
                         pending[future] = file
                     if not pending:
-                        break
+                        if budget_exceeded or iterator is None:
+                            break
+                        continue
                     completed, _ = wait(pending, return_when=FIRST_COMPLETED)
                     for future in completed:
-                        pending.pop(future, None)
-                        rows = future.result()
+                        file = pending.pop(future, None)
+                        try:
+                            rows = future.result()
+                        except Exception as error:  # 念のための最終防衛
+                            # ほかのファイルの行は書いてから、この実行を 1 で終える（§12.1）
+                            judge_failed = True
+                            logger.error(
+                                "審判のファイル処理が異常終了: "
+                                f"{getattr(file, 'file_name', '')}: "
+                                f"{type(error).__name__}: {self._redact_secrets(error)}",
+                                extra={"step": "compare_judge_fatal"},
+                            )
+                            continue
                         if rows:
                             self._sheet.append_rows(
                                 result_title,
@@ -1080,7 +1108,7 @@ class CompareRunner:
                     f"{label} で再実行すると続きから",
                     extra={"step": "compare_judge_time_budget"},
                 )
-            return True
+            return not judge_failed
         except Exception as error:
             logger.error(
                 f"審判の回で例外: {type(error).__name__}: {self._redact_secrets(error)}",
@@ -1093,12 +1121,32 @@ class CompareRunner:
 
         rows: list[CompareRow] = []
         recorded_at = self._now_text()
+        with lock:
+            left = [judge for judge in judges if judge.label not in unavailable]
+        if not left:
+            # 使える審判が残っていないファイルは Drive から取らない（§12.3）
+            return rows
+
+        if plan.too_many:
+            # 明細が多すぎるファイルは Drive から取らずに失敗の行だけ書く（§12.3）
+            for judge in left:
+                attempt = judge_module.JudgeAttempt(
+                    result=judge_module.FAIL_TOO_MANY_ITEMS,
+                    info={
+                        "latency_ms": 0,
+                        "prompt_tokens": None,
+                        "output_tokens": 0,
+                        "error": None,
+                        "error_code": None,
+                    },
+                )
+                rows.append(self._judge_row(file, judge, plan, attempt, 0, recorded_at))
+            return rows
+
         try:
             self._resources.drive().download_file(file)
         except Exception as error:
             detail = self._redact_secrets(f"{type(error).__name__}: {error}")[:300]
-            with lock:
-                left = [judge for judge in judges if judge.label not in unavailable]
             for judge in left:
                 rows.append(self._judge_error_row(file, judge, plan, error, recorded_at, detail))
             return rows
@@ -1115,20 +1163,7 @@ class CompareRunner:
                     if judge.label in unavailable:
                         continue
                 try:
-                    if plan.too_many:
-                        attempt = judge_module.JudgeAttempt(
-                            result=judge_module.FAIL_TOO_MANY_ITEMS,
-                            info={
-                                "latency_ms": 0,
-                                "prompt_tokens": None,
-                                "output_tokens": 0,
-                                "error": None,
-                                "error_code": None,
-                            },
-                        )
-                        row = self._judge_row(file, judge, plan, attempt, 0, recorded_at)
-                    else:
-                        row = self._call_judge(file, judge, plan, recorded_at)
+                    row = self._call_judge(file, judge, plan, recorded_at)
                 except Exception as error:
                     logger.error(
                         f"審判の処理で予期しない例外: {file.file_name}: {judge.label}: "

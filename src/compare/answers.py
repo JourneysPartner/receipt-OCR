@@ -88,7 +88,8 @@ def build_candidates(result_rows: list[dict]) -> dict[str, str]:
         failures = [
             f"{short_model(row.get('型'))}/{_text(row.get('方式'))}"
             for row in result_rows
-            if _text(row.get("結果")).startswith("失敗:")
+            # 審判の失敗は答えの候補に出さない（spec_judge_form §12.3）
+            if _text(row.get("結果")).startswith("失敗:") and _text(row.get("方式")) != "審判"
         ]
         if failures:
             parts.append("失敗: " + ", ".join(dict.fromkeys(failures)))

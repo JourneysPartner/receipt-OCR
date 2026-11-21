@@ -63,6 +63,11 @@ class TestAmount:
         assert parse_amount_cell("") is None
         assert parse_amount_cell("abc") is None
 
+    @pytest.mark.parametrize("value", ["inf", "Infinity", "1e999"])
+    def test_infinite_values_are_not_amounts(self, value):
+        # OverflowError は「金額なし」（ほかの読めない文字と同じ。§12.3）
+        assert parse_amount_cell(value) is None
+
 
 class TestTax:
     @pytest.mark.parametrize(

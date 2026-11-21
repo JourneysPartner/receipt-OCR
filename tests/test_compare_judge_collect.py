@@ -5,10 +5,11 @@ import logging
 import re
 
 import httpx
+import pytest
 
 from src.compare.judges import JudgeTransportError
 from src.compare.pipeline import CompareRow
-from src.compare.runner import run_compare
+from src.compare.runner import CompareRunner, run_compare
 from src.compare.sheet import ANSWER_HEADERS, OCR_HEADERS, RESULT_HEADERS
 from src.config import (
     AiConfig,
@@ -583,6 +584,87 @@ class TestCollect:
         assert code == 0
         assert ocr.calls == 0
 
+    def test_four_workers_write_every_row_and_a_rerun_sends_nothing(self):
+        files = [
+            _file("FILE_A1234567890", "a.jpg"),
+            _file("FILE_B1234567890", "b.jpg"),
+            _file("FILE_C1234567890", "c.jpg"),
+        ]
+        drive = FakeDrive(files)
+        sheet = _prepare(FakeSheet(), files)
+        post = FakePost(_success)
+        code, _ = _run(sheet, drive, post=post, env=_env(COMPARE_MAX_WORKERS="4"))
+        assert code == 0
+        assert len(post.calls) == 3
+        assert len(_judge_rows(sheet)) == 3
+        assert sorted(row["fileId"] for row in _judge_rows(sheet)) == sorted(
+            file.file_id for file in files
+        )
+
+        post.calls.clear()
+        sheet.appended.clear()
+        code, _ = _run(sheet, drive, post=post, env=_env(COMPARE_MAX_WORKERS="4"))
+        assert code == 0
+        assert post.calls == []
+        assert len(_judge_rows(sheet)) == 3
+
+    def test_one_files_failure_still_writes_the_other_rows(self, monkeypatch):
+        first = _file("FILE_A1234567890", "a.jpg")
+        second = _file("FILE_B1234567890", "b.jpg")
+        drive = FakeDrive([first, second])
+        sheet = _prepare(FakeSheet(), [first, second])
+        post = FakePost(_success)
+        original = CompareRunner._process_judge_file
+
+        def flaky(self, file, plan, judges, unavailable, lock):
+            if file.file_id == first.file_id:
+                raise RuntimeError(f"boom {GEMINI_KEY}")
+            return original(self, file, plan, judges, unavailable, lock)
+
+        monkeypatch.setattr(CompareRunner, "_process_judge_file", flaky)
+        code, records = _run(sheet, drive, post=post, env=_env(COMPARE_MAX_WORKERS="4"))
+        assert code == 1
+        assert len(post.calls) == 1
+        assert [row["fileId"] for row in _judge_rows(sheet)] == [second.file_id]
+        messages = " ".join(record.getMessage() for record in records)
+        assert GEMINI_KEY not in messages
+
+    def test_a_count_only_plan_is_not_called_or_written(self):
+        file = _file()
+        drive = FakeDrive([file])
+        image = [{"d": "2026-01-02", "a": None}]
+        text = _items(("2026-01-02", 1000), ("2026-01-03", 500))
+        sheet = _prepare(FakeSheet(), [file], image_items=image, text_items=text)
+        post = FakePost(_success)
+        code, _ = _run(sheet, drive, post=post)
+        assert code == 0
+        assert post.calls == []
+        assert _judge_rows(sheet) == []
+
+    def test_too_many_items_is_not_downloaded(self):
+        file = _file()
+        drive = FakeDrive([file])
+        image = _items(*[("2026-01-02", 100 + index) for index in range(21)])
+        text = _items(*[("2026-01-02", 1) for _ in range(21)])
+        sheet = _prepare(FakeSheet(), [file], image_items=image, text_items=text)
+        post = FakePost(_success)
+        code, _ = _run(sheet, drive, post=post)
+        assert code == 0
+        assert post.calls == []
+        assert drive.downloads == []
+        assert _judge_rows(sheet)[0]["結果"] == "失敗:too_many_items"
+
+    def test_no_usable_judge_left_is_not_downloaded(self):
+        first = _file("FILE_A1234567890", "a.jpg")
+        second = _file("FILE_B1234567890", "b.jpg")
+        drive = FakeDrive([first, second])
+        sheet = _prepare(FakeSheet(), [first, second])
+        post = FakePost(lambda url, headers, body: httpx.Response(404, text="not found"))
+        code, _ = _run(sheet, drive, post=post, env=_env(COMPARE_MAX_WORKERS="1"))
+        assert code == 0
+        assert drive.downloads == [first.file_id]
+        assert [row["fileId"] for row in _judge_rows(sheet)] == [first.file_id]
+
 
 class TestKeys:
     def test_missing_google_key_exits_1_without_any_call(self):
@@ -637,6 +719,56 @@ class TestKeys:
         assert code == 0
         assert post.calls == []
         assert drive.downloads == []
+
+    def test_score_with_compare_judges_sends_no_http(self):
+        # J5: score は COMPARE_JUDGES が付いていても審判を呼ばない（§12.3）
+        file = _file()
+        drive = FakeDrive([file])
+        sheet = _prepare(FakeSheet(), [file])
+        post = FakePost(_success)
+        code, _ = _run(
+            sheet,
+            drive,
+            post=post,
+            env=_env(
+                COMPARE_STEP="score",
+                COMPARE_JUDGES="gemini-decision-1",
+            ),
+        )
+        assert code == 0
+        assert post.calls == []
+        assert drive.downloads == []
+
+    @pytest.mark.parametrize("suffix", ["\n", "\r\n"])
+    def test_key_with_a_trailing_newline_is_stripped_and_hidden(self, suffix):
+        file = _file()
+        drive = FakeDrive([file])
+        sheet = _prepare(FakeSheet(), [file])
+        raw_key = f"{GEMINI_KEY}{suffix}"
+
+        def responder(url, headers, body):
+            return httpx.Response(401, text=f"bad key {raw_key} / {GEMINI_KEY}")
+
+        post = FakePost(responder)
+        code, records = _run(
+            sheet,
+            drive,
+            post=post,
+            config=_app_config(gemini_api_key=raw_key),
+        )
+        assert code == 0
+        call = post.calls[0]
+        assert call["headers"]["x-goog-api-key"] == GEMINI_KEY
+        assert "\n" not in call["headers"]["x-goog-api-key"]
+        assert "\r" not in call["headers"]["x-goog-api-key"]
+        rows = _judge_rows(sheet)
+        assert GEMINI_KEY not in rows[0]["エラー詳細"]
+        assert raw_key not in rows[0]["エラー詳細"]
+        assert "***" in rows[0]["エラー詳細"]
+        dumped = json.dumps(sheet.tabs, ensure_ascii=False, default=str)
+        assert GEMINI_KEY not in dumped
+        messages = " ".join(record.getMessage() for record in records)
+        assert GEMINI_KEY not in messages
 
     def test_error_details_and_logs_hide_the_keys(self):
         file = _file()

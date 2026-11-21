@@ -66,6 +66,14 @@ class JudgeTransportError(Exception):
     """つながらない・時間切れ。503 としてやり直す（仕様 §6.1）。"""
 
 
+class JudgeProtocolError(Exception):
+    """ヘッダーの値が不正など（httpx.LocalProtocolError）。
+
+    例外の文には送った値が repr で入るので、表・ログには型の名前だけを残す
+    （仕様 §12.2）。やり直さない。
+    """
+
+
 @dataclass(frozen=True)
 class ChoiceOption:
     key: str
@@ -490,9 +498,16 @@ def build_items_json(plan: JudgePlan, answers, base: list[list]) -> str:
     return text
 
 
-def _default_post(url, *, headers, body, timeout):
+def _default_post(url, *, headers, body, timeout, transport=None):
+    """httpx で送る。テストは `transport=httpx.MockTransport(...)` で網を開かない。"""
     try:
-        return httpx.post(url, headers=headers, json=body, timeout=timeout)
+        if transport is None:
+            return httpx.post(url, headers=headers, json=body, timeout=timeout)
+        with httpx.Client(transport=transport) as client:
+            return client.post(url, headers=headers, json=body, timeout=timeout)
+    except httpx.LocalProtocolError as error:
+        # 文にはヘッダーの値（鍵）が repr で入る。型の名前だけを渡す（§12.2）
+        raise JudgeProtocolError(type(error).__name__) from error
     except httpx.TimeoutException as error:
         raise JudgeTransportError(f"{type(error).__name__}: {error}") from error
     except httpx.TransportError as error:
@@ -514,14 +529,16 @@ class JudgeClient:
     ):
         self.judge = judge
         self.vendor = judge_vendor_or_error(judge.name)
-        self.api_key = api_key or ""
+        original_key = "" if api_key is None else str(api_key)
+        # ヘッダーに入れるのは前後の空白・改行を除いた値（§12.2）
+        self.api_key = original_key.strip()
         self.resolution = resolution
         self.timeout = timeout
         self._post = post or _default_post
         keys = list(redact_keys or ())
-        if api_key:
-            keys.append(api_key)
-        self._redact_keys = tuple(str(key) for key in keys if key)
+        # 元の値・除いた値の両方を伏せる（§12.2）
+        keys.extend((original_key, self.api_key))
+        self._redact_keys = tuple(dict.fromkeys(str(key) for key in keys if key))
 
     def _redact(self, value) -> str:
         return redact_secrets(value, self._redact_keys)
@@ -590,6 +607,14 @@ class JudgeClient:
 
         try:
             response = self._post(url, headers=headers, body=body, timeout=self.timeout)
+        except JudgeProtocolError as error:
+            # 型の名前だけを書き、やり直さない（error_code は None。§12.2）
+            return self._failure(
+                FAIL_API,
+                started,
+                error="api_error",
+                detail=str(error),
+            )
         except JudgeTransportError as error:
             # つながらない・時間切れは 503 としてやり直す（§6.1）
             return self._failure(
