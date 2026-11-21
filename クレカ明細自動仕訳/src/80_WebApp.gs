@@ -796,6 +796,7 @@ function webAppListReviews(customerId, limit, offset) {
         candidates: webAppUniquePartners_(menuReviewCandidates_(review)),
         usageDate: planned ? planned.b : null,
         amount: planned ? planned.m : null,
+        purpose: planned ? planned.i : null,
         learnBlockedBy: learnBlockedBy,
         exclude: {enabled: exclude.enabled, disabledReason: exclude.disabledReason}
       };

@@ -918,4 +918,45 @@ module.exports = ({test, assert, gas}) => {
       call('webAppStableWaitMinutes_', [other.getLastUpdated().getTime(), Date.now()]));
     assert.ok(otherRecover.waitMinutes > 0);
   });
+
+  // ---------------- pvr 16: 要確認の一覧に使用用途 ----------------
+  test('pvr 16: 一覧の rows に予定値の I 列の purpose が付き、取引が無ければ null、読取は増えない', () => {
+    const listing = (purpose) => {
+      const world = setupWorld({category: 'CORPORATE', seedAccounts: true, seedWords: true,
+        sheetEntries: [[712, '仕入高'], [852, '消耗品費']]});
+      world.addFile('fileA', ['2026/01/10,架空店舗P,1000,' + purpose]);
+      const report = importReport(world);
+      assert.equal(report.customers[0].files[0].outcome, 'WRITTEN',
+        JSON.stringify(report.customers[0].files[0]));
+      const tx = transactionsFor('fileA')[0];
+      const txReview = partnerReviews(tx)[0];
+      assert.ok(txReview, purpose);
+      // 取引が無い要確認（取引ログに無い取引 ID）も 1 件混ぜる。
+      const orphan = call('registerReview', [{reviewType: 'PARTNER', customerId: 'C001',
+        customerName: '架空顧客', fileId: 'fileA', fullTxId: 'PVR16_NO_TRANSACTION',
+        sourceRow: 9, merchantOriginal: '架空店舗Q', merchantNormalized: '架空店舗Q',
+        candidates: [], detail: {kind: 'PARTNER', matchedBy: 'NONE', candidates: [], conflict: null}}]);
+      assert.equal(orphan.registered, true, JSON.stringify(orphan));
+      gas.stubs.resetApiCallCounts();
+      const result = plain(call('webAppListReviews', ['C001', 15, 0]));
+      const counts = gas.stubs.getApiCallCounts();
+      const byId = {};
+      result.reviews.forEach((row) => { byId[String(row.reviewId)] = row; });
+      return {tx: byId[String(txReview.reviewId)], orphan: byId[String(orphan.reviewId)],
+        purpose: purpose, rows: result.reviews,
+        batchGet: counts.batchGet, batchUpdate: counts.batchUpdate};
+    };
+    const withPurpose = listing('発送用梱包材');
+    assert.ok(withPurpose.tx, JSON.stringify(withPurpose.rows));
+    assert.equal(withPurpose.tx.purpose, '発送用梱包材');
+    assert.equal(withPurpose.orphan.purpose, null);
+    assert.equal(withPurpose.batchUpdate, 0);
+
+    // 用途の言葉が違っても、一覧の読取の数は同じ（用途のための読取を足していない）。
+    const withOther = listing('梱包');
+    assert.equal(withOther.tx.purpose, '梱包');
+    assert.equal(withOther.orphan.purpose, null);
+    assert.equal(withPurpose.batchGet, withOther.batchGet,
+      JSON.stringify({withPurpose: withPurpose.batchGet, withOther: withOther.batchGet}));
+  });
 };

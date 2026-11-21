@@ -855,6 +855,13 @@
           return '税区分が空の行が ' + count + ' 行あります（freee が勘定科目の税区分を使います）。';
         },
         unbalancedAccepted: '明細と一致しないまま作りました。',
+        // 止めの理由をボタンの横にも出す（仕様 §7）。2 つ以上は件数だけを添える。
+        stopped: function(firstLine, count) {
+          var text = '作れませんでした：' + firstLine;
+          var rest = Math.max(0, (Number(count) || 0) - 1);
+          if (rest > 0) text += '（ほか ' + rest + ' 件。詳しくはページの一番上）';
+          return text;
+        },
         downloaded: function(dateText) { return 'freee 取込用 ダウンロード ' + dateText; },
         expired: '作ってから 30 分たちました。もう一度［freee 取込用 Excel を作る］を押してください。',
         unknownStop: function(code) {
@@ -2319,7 +2326,7 @@
         selectAll.addEventListener('change', onSelectAllVisibleChanged);
         selectAllCell.appendChild(selectAll);
         headRow.appendChild(selectAllCell);
-        ['利用日', '金額', '摘要（元店名）', '推測候補', '取引先', '顧客別に入れる', '元ファイル', '行', '操作']
+        ['利用日', '金額', '摘要（元店名）', '使用用途', '推測候補', '取引先', '顧客別に入れる', '元ファイル', '行', '操作']
           .forEach(function(label) {
             var th = document.createElement('th');
             th.textContent = label;
@@ -2343,7 +2350,8 @@
           checkbox.addEventListener('change', onReviewSelectionChanged);
           selectCell.appendChild(checkbox);
           row.appendChild(selectCell);
-          [formatDate(review.usageDate, false), formatAmount(review.amount), review.merchantOriginal]
+          [formatDate(review.usageDate, false), formatAmount(review.amount), review.merchantOriginal,
+            review.purpose === null || review.purpose === undefined ? '' : review.purpose]
             .forEach(function(value) {
               var td = document.createElement('td');
               td.textContent = value;
@@ -2407,7 +2415,7 @@
         if (!visibleReviews.length) {
           var noMatchRow = document.createElement('tr');
           var noMatchCell = document.createElement('td');
-          noMatchCell.colSpan = 10;
+          noMatchCell.colSpan = 11;
           noMatchCell.textContent = TEXT.noFilteredReviews;
           noMatchRow.appendChild(noMatchCell);
           tbody.appendChild(noMatchRow);
@@ -4024,7 +4032,10 @@
         if (!result || result.ok !== true) {
           var notice = freeeStopNotice(result);
           showNotice(notice.message, 'error', notice.details);
-          el['freee-status'].textContent = '';
+          // ボタンの横にも理由を出す。ページの上だけだと押しても何も起きないように見える。
+          var stops = result && Array.isArray(result.stops) ? result.stops : [];
+          el['freee-status'].textContent = TEXT.freee.stopped(
+            String(notice.message).split('\n')[0], stops.length);
           return;
         }
         var rows = Number(result.rows) || 0;
@@ -4038,7 +4049,7 @@
       } catch (error) {
         if (request === state.freeeRequest) {
           showNotice(failureMessage(error), 'error');
-          el['freee-status'].textContent = '';
+          el['freee-status'].textContent = TEXT.freee.stopped(failureMessage(error), 0);
         }
       } finally {
         if (request === state.freeeRequest) {
