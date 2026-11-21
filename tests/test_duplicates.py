@@ -5,7 +5,7 @@ API・Drive・Sheets はすべて偽物。データは架空のものだけを�
 
 import re
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import pytest
 from googleapiclient.errors import HttpError
@@ -368,6 +368,25 @@ class TestIsSameVoucher:
         assert is_same_voucher(_item(time="午後3:40"), _item(time="15:40"))
         assert is_same_voucher(_item(time="9:05"), _item(time="09:05:30"))
 
+    def test_noon_periods(self):
+        """§12.4: 午前 12 時は 0 時、午後 12 時は 12 時。"""
+        assert normalize_time("午前12:10") == "00:10"
+        assert normalize_time("午後12:10") == "12:10"
+
+    def test_colon_minutes_and_seconds_need_two_digits(self):
+        """§12.1: 分も秒も 2 桁だけ。`10:5` はそろえられず、元の文字で比べる。"""
+        assert normalize_time("10:5") == ""
+        assert normalize_time("10:5:3") == ""
+        assert not is_same_voucher(_item(time="10:5"), _item(time="10:05"))
+        # 日本語の形は今までどおり 1 桁の分を受ける
+        assert normalize_time("17時5分") == "17:05"
+
+    def test_seconds_are_compared_only_when_both_sides_have_them(self):
+        """§12.2: 両方に秒があって違えば別。片方だけなら秒は使わない。"""
+        assert not is_same_voucher(_item(time="10:05:12"), _item(time="10:05:48"))
+        assert is_same_voucher(_item(time="10:05:12"), _item(time="10:05"))
+        assert is_same_voucher(_item(time="10:05:12"), _item(time="10:05:12"))
+
     def test_unreadable_raw_times_are_compared_as_text(self):
         assert not is_same_voucher(_item(time="abc"), _item(time="xyz"))
         assert is_same_voucher(_item(time="abc"), _item(time="ａｂｃ"))
@@ -421,8 +440,13 @@ class TestSameFileDuplicates:
 
         assert result.success == 3
         assert result.manual_entry == 0
-        cb.reserve_rows.assert_called_once()
-        assert cb.reserve_rows.call_args.kwargs["receipt_indices"] == [0, 1, 2]
+        cb.reserve_rows.assert_called_once_with(
+            count=3,
+            file_id="fid-1",
+            file_name="receipt-1.jpg",
+            receipt_indices=[0, 1, 2],
+            details=ANY,
+        )
         # 注記は出納帳の行を書く同じ 1 回（write_cashbook_row）に入る（§11.4）
         notes = [call.kwargs["error_detail"] for call in cb.write_cashbook_row.call_args_list]
         assert notes == [None, SAME_FILE_DUPLICATE_NOTE, SAME_FILE_DUPLICATE_NOTE]
@@ -499,10 +523,14 @@ class TestCrossFileDuplicates:
 
         assert result.success == 1
         assert result.skipped == 1
-        cb.reserve_rows.assert_called_once()
+        cb.reserve_rows.assert_called_once_with(
+            count=1,
+            file_id="fid-1",
+            file_name="receipt-1.jpg",
+            receipt_indices=[1],
+            details=ANY,
+        )
         reserved = cb.reserve_rows.call_args.kwargs
-        assert reserved["count"] == 1
-        assert reserved["receipt_indices"] == [1]
         # 予約の追記に入るのは、記帳する明細（番号 1）の値（§11.4）
         assert reserved["details"][1].amount == 900
         cb.write_cashbook_row.assert_called_once()
@@ -587,6 +615,34 @@ class TestCrossFileDuplicates:
             "重複: 1 枚目 → 重複元 元のレシート.jpg "
             "https://drive.google.com/file/d/src-1/view（1 枚目）"
         ]
+
+    def test_all_duplicate_with_a_failed_record_writes_no_description(self):
+        """§12.3: 全部が重複で記録が 1 件でも書けなければ、説明欄に 1 行も足さない。"""
+        manager, mocks = _make_manager()
+        cb = _cb_mock()
+        items = [_item(), _item(date="2025-04-03", amount=900)]
+        mocks["ocr"].extract_text.return_value = OcrResult(
+            raw_text="合計 ¥1,200 と ¥900", engine="vision", confidence=0.9
+        )
+        cb.append_process_record.side_effect = [None, RuntimeError("429")]
+
+        result = _run_text(
+            manager,
+            mocks,
+            cb,
+            items,
+            known=[
+                _source(),
+                _source(index=1, date="2025-04-03", amount=900),
+            ],
+        )
+
+        assert result.errors == 1
+        assert result.skipped == 2
+        cb.reserve_rows.assert_not_called()
+        cb.write_cashbook_row.assert_not_called()
+        mocks["drive"].rename_file_as_duplicate.assert_not_called()
+        mocks["drive"].append_description_lines.assert_not_called()
 
     def test_early_return_does_not_rename_when_only_some_items_are_duplicates(self):
         """全部が重複でないのに、【重複】を付けない（早期 return の条件）。"""
@@ -905,6 +961,43 @@ class TestProcessLogColumns:
         assert row[2] == 0
         assert row[11:] == [] or not any(row[11:])
 
+    def test_reserve_rows_writes_l_to_p_even_after_three_conflicts(self):
+        """§12.4: 予約が 3 回ぶつかった後の道でも、L〜P を同じ追記で書く。"""
+        cb = CashbookClient.__new__(CashbookClient)
+        cb._config = SheetsConfig()
+        cb._spreadsheet_id = "dummy"
+        cb._sheet_id_cache = {}
+        cb._account_code_cache = {}
+        sheets = MagicMock()
+        cb._sheets = sheets
+        cb.find_available_rows = lambda count: [10]
+        cb.get_active_reservations = lambda: {10: [SimpleNamespace(reservation_id="other")]}
+        cb._get_occupied_rows = lambda: set()
+        cb.update_reservation_status = MagicMock()
+
+        reservations = cb.reserve_rows(
+            count=1,
+            file_id="f1",
+            file_name="a.jpg",
+            receipt_indices=[0],
+            details={
+                0: ReceiptDetails(
+                    date="2026-01-02",
+                    time="9:05",
+                    amount=1200,
+                    vendor="テスト商店",
+                    receipt_no="0012",
+                )
+            },
+        )
+
+        assert len(reservations) == 1
+        assert cb.update_reservation_status.call_count == 3
+        calls = sheets.values.return_value.append.call_args_list
+        assert len(calls) == 4  # 3 回ぶつかった分 + 最後の道
+        last = calls[-1].kwargs["body"]["values"][0]
+        assert last[11:16] == ["'2026-01-02", "'9:05", "'1200", "'テスト商店", "'0012"]
+
 
 # ── 安全の条件 ─────────────────────────────────────────
 class TestSafety:
@@ -949,7 +1042,13 @@ class TestSafety:
 
         _run_text(manager, mocks, cb, items, known=[_source()])
 
-        assert cb.reserve_rows.call_args.kwargs["count"] == 1
+        cb.reserve_rows.assert_called_once_with(
+            count=1,
+            file_id="fid-1",
+            file_name="receipt-1.jpg",
+            receipt_indices=[1],
+            details=ANY,
+        )
         written = [call.args[1].amount for call in cb.write_cashbook_row.call_args_list]
         assert written == [900]
 
@@ -1116,9 +1215,14 @@ class TestDualCrossFile:
 
         assert result.success == 1
         assert result.skipped == 1
+        cb.reserve_rows.assert_called_once_with(
+            count=1,
+            file_id="fid-1",
+            file_name="receipt-1.jpg",
+            receipt_indices=[1],
+            details=ANY,
+        )
         reserved = cb.reserve_rows.call_args.kwargs
-        assert reserved["count"] == 1
-        assert reserved["receipt_indices"] == [1]
         assert reserved["details"][1].amount == 900
         cb.write_cashbook_row.assert_called_once()
         mocks["drive"].rename_file_as_done.assert_called_once()
@@ -1150,8 +1254,13 @@ class TestDualCrossFile:
             ocr_text="合計 ¥1,200 と ¥900",
         )
 
-        reserved = cb.reserve_rows.call_args.kwargs
-        assert reserved["receipt_indices"] == [1]
+        cb.reserve_rows.assert_called_once_with(
+            count=1,
+            file_id="fid-1",
+            file_name="receipt-1.jpg",
+            receipt_indices=[1],
+            details=ANY,
+        )
         booked = [call.args[1].amount for call in cb.write_cashbook_row.call_args_list]
         assert booked == [900]
 
@@ -1176,6 +1285,84 @@ class TestDualCrossFile:
         mocks["drive"].rename_file_as_done.assert_not_called()
         mocks["drive"].append_description_lines.assert_not_called()
         assert any("重複（別のファイル）" in message for message in logged)
+
+    def test_earlier_file_in_the_same_run_is_a_source(self):
+        """§12.4: 両読みで、同じ実行の先のファイルが元になる（`_remember_booked`）。"""
+        manager, mocks = _make_manager(flow="dual")
+        cb = _cb_mock()
+        known: list[ReceiptSource] = []
+
+        first = _run_dual(
+            manager, mocks, cb, [_item()], known=known, file=_file("fid-1", "1枚目.jpg")
+        )
+        second = _run_dual(
+            manager, mocks, cb, [_item()], known=known, file=_file("fid-2", "2枚目.jpg")
+        )
+
+        assert first.success == 1
+        assert second.success == 0
+        assert second.skipped == 1
+        record = cb.append_process_record.call_args[0][0]
+        assert record.file_id == "fid-2"
+        assert record.duplicate_of == "fid-1:0"
+        mocks["drive"].rename_file_as_duplicate.assert_called_once()
+
+    def test_dry_run_with_earlier_marks_does_not_exclude_or_write(self):
+        """§11.3・§12.4: 前の回の印があるファイルの dry_run では外さず、何も書かない。"""
+        manager, mocks = _make_manager(flow="dual", dry_run=True)
+        cb = _cb_mock()
+        items = [_item(), _item(date="2025-04-03", amount=900)]
+        known = [_source(date="2025-04-03", amount=900)]
+
+        result = _run_dual(
+            manager,
+            mocks,
+            cb,
+            items,
+            items,
+            known=known,
+            processed_keys={"F2:0"},
+            file=_file("F2", "2枚目.jpg"),
+        )
+
+        # 印のある番号 0 は外し、番号 1 は別ファイルと一致しても外さない（※ の行の予定）
+        assert result.skipped == 0
+        assert result.success == 1
+        assert result.manual_entry == 1
+        cb.reserve_rows.assert_not_called()
+        cb.write_cashbook_row.assert_not_called()
+        cb.write_manual_entry_row.assert_not_called()
+        cb.append_process_record.assert_not_called()
+        mocks["drive"].rename_file_as_duplicate.assert_not_called()
+        mocks["drive"].rename_file_as_done.assert_not_called()
+        mocks["drive"].append_description_lines.assert_not_called()
+
+    def test_all_duplicate_with_a_failed_record_writes_no_description(self):
+        """§12.3: 全部が重複で記録が 1 件でも書けなければ、説明欄に 1 行も足さない。"""
+        manager, mocks = _make_manager(flow="dual")
+        cb = _cb_mock()
+        items = [_item(), _item(date="2025-04-03", amount=900)]
+        cb.append_process_record.side_effect = [None, RuntimeError("429")]
+
+        result = _run_dual(
+            manager,
+            mocks,
+            cb,
+            items,
+            items,
+            known=[
+                _source(),
+                _source(index=1, date="2025-04-03", amount=900),
+            ],
+            ocr_text="合計 ¥1,200 と ¥900",
+        )
+
+        assert result.errors == 1
+        assert result.skipped == 2
+        cb.reserve_rows.assert_not_called()
+        cb.write_cashbook_row.assert_not_called()
+        mocks["drive"].rename_file_as_duplicate.assert_not_called()
+        mocks["drive"].append_description_lines.assert_not_called()
 
 
 class TestDualDetails:
@@ -1208,8 +1395,14 @@ class TestDualDetails:
 
         assert result.skipped == 1
         assert result.manual_entry == 1
+        cb.reserve_rows.assert_called_once_with(
+            count=1,
+            file_id="fid-1",
+            file_name="receipt-1.jpg",
+            receipt_indices=[1],
+            details=ANY,
+        )
         reserved = cb.reserve_rows.call_args.kwargs
-        assert reserved["receipt_indices"] == [1]
         assert reserved["details"][1].amount is None
         assert reserved["details"][1].date == "2026-01-02"
         # 組にならなかった明細は画像からの値だけ（並びの位置で文字からを借りない）
@@ -1225,6 +1418,13 @@ class TestDualDetails:
         result = _run_dual(manager, mocks, cb, [image], [text])
 
         assert result.success == 1
+        cb.reserve_rows.assert_called_once_with(
+            count=1,
+            file_id="fid-1",
+            file_name="receipt-1.jpg",
+            receipt_indices=[0],
+            details=ANY,
+        )
         details = cb.reserve_rows.call_args.kwargs["details"][0]
         assert details.date == "2025-04-02"
         assert details.amount == 1200
@@ -1233,6 +1433,21 @@ class TestDualDetails:
         # 空の time・receipt_no だけ文字からで埋める
         assert details.time == "15:00"
         assert details.receipt_no == "0012"
+
+    def test_empty_image_vendor_is_not_filled_from_text_and_is_not_a_duplicate(self):
+        """§12.4: 画像からの店名が空なら、組になった文字からで埋めず、重複にもしない。"""
+        manager, mocks = _make_manager(flow="dual")
+        cb = _cb_mock()
+        image = _item(vendor="")
+        text = _item(vendor="テスト商店")
+
+        result = _run_dual(manager, mocks, cb, [image], [text], known=[_source()])
+
+        assert result.success == 1
+        assert result.skipped == 0
+        cb.append_process_record.assert_not_called()
+        details = cb.reserve_rows.call_args.kwargs["details"][0]
+        assert details.vendor == ""
 
 
 class TestDualReread:
@@ -1256,8 +1471,13 @@ class TestDualReread:
         assert result.skipped == 1
         assert result.manual_entry == 1
         assert result.success == 0
-        reserved = cb.reserve_rows.call_args.kwargs
-        assert reserved["receipt_indices"] == [1]
+        cb.reserve_rows.assert_called_once_with(
+            count=1,
+            file_id="F2",
+            file_name="2枚目.jpg",
+            receipt_indices=[1],
+            details=ANY,
+        )
         message = cb.write_manual_entry_row.call_args.args[3]
         assert message.endswith(
             "／別のファイルに同じ内容の明細があります（重複元 元のレシート.jpg 5 枚目）"
@@ -1361,6 +1581,24 @@ class TestCustomerLevel:
         fake_cb.reserve_rows.assert_not_called()
         fake_cb.write_cashbook_row.assert_not_called()
         statuses = [call.args[1] for call in mocks["master"].update_customer_status.call_args_list]
+        assert any(str(status).startswith("エラー:") for status in statuses)
+
+    def test_429_on_ensure_log_sheets_exist_stops_the_customer(self, monkeypatch):
+        """§12.4: 見出しの用意が 429 なら顧客を止め、マスターを「処理中」にしない。"""
+        manager, mocks = _make_manager(flow="text_first")
+        fake_cb = MagicMock()
+        fake_cb.ensure_log_sheets_exist.side_effect = _http_error(429)
+        monkeypatch.setattr("src.processing.manager.CashbookClient", lambda **kwargs: fake_cb)
+        mocks["drive"].list_files.return_value = [_file()]
+        mocks["master"].read_customer_rows.return_value = [_customer()]
+
+        summary = manager.run()
+
+        assert summary["error_customers"] == 1
+        fake_cb.reserve_rows.assert_not_called()
+        fake_cb.write_cashbook_row.assert_not_called()
+        statuses = [call.args[1] for call in mocks["master"].update_customer_status.call_args_list]
+        assert "処理中" not in statuses
         assert any(str(status).startswith("エラー:") for status in statuses)
 
     def test_error_item_is_not_added_as_a_source_for_a_later_file(self):

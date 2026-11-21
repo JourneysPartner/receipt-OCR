@@ -618,6 +618,7 @@ class ProcessingManager:
         result.skipped = (len(corrected) - len(pending)) + len(cross_file)
 
         recorded: dict[int, ReceiptSource] = {}
+        failed = 0
         if cross_file:
             recorded, failed = self._append_duplicate_records(
                 file, cb, details_by_index, cross_file, now
@@ -626,7 +627,9 @@ class ProcessingManager:
 
         if not bookable:
             if cross_file:
-                self._write_duplicate_descriptions(file, recorded)
+                # 全部が重複で記録が 1 件でも書けなければ、説明欄に 1 行も足さない（§12.3）
+                sources = {} if len(cross_file) == len(items) and failed else recorded
+                self._write_duplicate_descriptions(file, sources)
                 if len(cross_file) == len(items) and len(recorded) == len(cross_file):
                     self._rename_as_duplicate(file)
             return result
@@ -781,7 +784,9 @@ class ProcessingManager:
             and result.manual_entry == 0
             and result.errors == 0
         )
-        self._write_duplicate_descriptions(file, recorded)
+        # 全部が重複で記録が 1 件でも書けなければ、説明欄に 1 行も足さない（§12.3）
+        sources = {} if items and len(cross_file) == len(items) and failed else recorded
+        self._write_duplicate_descriptions(file, sources)
         if len(cross_file) == len(items) and len(recorded) == len(cross_file) and items:
             self._rename_as_duplicate(file)
         elif fully_successful and not self._config.dry_run:
@@ -976,6 +981,7 @@ class ProcessingManager:
         self._log_duplicate_decisions(file, same_file_duplicates, cross_file or reread_cross)
 
         recorded: dict[int, ReceiptSource] = {}
+        failed = 0
         if cross_file:
             recorded, failed = self._append_duplicate_records(
                 file, cb, details_by_index, cross_file, now
@@ -984,7 +990,9 @@ class ProcessingManager:
 
         if not bookable:
             if cross_file:
-                self._write_duplicate_descriptions(file, recorded)
+                # 全部が重複で記録が 1 件でも書けなければ、説明欄に 1 行も足さない（§12.3）
+                sources = {} if len(cross_file) == len(items) and failed else recorded
+                self._write_duplicate_descriptions(file, sources)
                 if len(cross_file) == len(items) and len(recorded) == len(cross_file):
                     self._rename_as_duplicate(file)
             return result
@@ -1089,7 +1097,9 @@ class ProcessingManager:
             and result.manual_entry == 0
             and result.errors == 0
         )
-        self._write_duplicate_descriptions(file, recorded)
+        # 全部が重複で記録が 1 件でも書けなければ、説明欄に 1 行も足さない（§12.3）
+        sources = {} if items and len(cross_file) == len(items) and failed else recorded
+        self._write_duplicate_descriptions(file, sources)
         if len(cross_file) == len(items) and len(recorded) == len(cross_file) and items:
             self._rename_as_duplicate(file)
         elif fully_successful and not self._config.dry_run:

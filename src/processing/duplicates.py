@@ -17,7 +17,8 @@ from src.models import ReceiptDetails
 SAME_FILE_DUPLICATE_NOTE = "同じ内容の行があります（二重スキャンかも）"
 
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_TIME_COLON_RE = re.compile(r"^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$")
+# 分も秒も 2 桁だけを受ける（仕様 §12.1）。`10:5` はそろえられない時刻。
+_TIME_COLON_RE = re.compile(r"^(\d{1,2}):(\d{2})(?::(\d{2}))?$")
 _TIME_JP_RE = re.compile(r"^(\d{1,2})時(?:(\d{1,2})分?)?$")
 _RECEIPT_NO_STRIP = set("-‐－ー")
 _RECEIPT_NO_SPACE = set(" \t\r\n\u3000")
@@ -64,14 +65,32 @@ def _clean_text(value) -> str:
 
 
 def normalize_time(value) -> str:
-    """時刻を `HH:MM` にそろえる（仕様 §11.2）。読めなければ空。
+    """時刻を `HH:MM` にそろえる（仕様 §11.2・§12.1）。読めなければ空。
 
     `H:MM`・`HH:MM`・`HH:MM:SS`（秒は捨てる）・`17時32分`・`17時`（分 00）・
     `午前`／`午後`（`AM`／`PM`）付きを受ける。時は 0〜29（深夜の営業日の書き方）。
+    分も秒も 2 桁だけを受けるので `10:5` はそろえられない。
     """
+    parts = _parse_time(value)
+    if parts is None:
+        return ""
+    return f"{parts.hour:02d}:{parts.minute:02d}"
+
+
+@dataclass(frozen=True)
+class _TimeParts:
+    """そろえた時刻。`second` は秒まで読めているときだけ入る（§12.2）。"""
+
+    hour: int
+    minute: int
+    second: int | None = None
+
+
+def _parse_time(value) -> _TimeParts | None:
+    """時刻を時・分・秒に分ける。そろえられなければ None。"""
     text = unicodedata.normalize("NFKC", _clean_text(value)).strip()
     if not text:
-        return ""
+        return None
     upper = text.upper()
     period: bool | None = None
     for prefix, is_pm in _TIME_PERIODS:
@@ -79,25 +98,28 @@ def normalize_time(value) -> str:
             period = is_pm
             text = text[len(prefix) :].strip()
             break
+    second: int | None = None
     match = _TIME_COLON_RE.match(text)
     if match:
         hour, minute = int(match.group(1)), int(match.group(2))
+        if match.group(3) is not None:
+            second = int(match.group(3))
     else:
         match = _TIME_JP_RE.match(text)
         if not match:
-            return ""
+            return None
         hour = int(match.group(1))
         minute = int(match.group(2) or 0)
     if period is not None:
         if hour > 12:
-            return ""
+            return None
         if period:
             hour = 12 if hour == 12 else hour + 12
         elif hour == 12:
             hour = 0
     if hour > 29 or minute > 59:
-        return ""
-    return f"{hour:02d}:{minute:02d}"
+        return None
+    return _TimeParts(hour, minute, second)
 
 
 def _raw_time_key(value) -> str:
@@ -159,10 +181,17 @@ def is_same_voucher(left, right) -> bool:
 
     left_raw_time = _clean_text(_value(left, "time"))
     right_raw_time = _clean_text(_value(right, "time"))
-    left_time = normalize_time(left_raw_time)
-    right_time = normalize_time(right_raw_time)
-    if left_time and right_time:
-        if left_time != right_time:
+    left_parts = _parse_time(left_raw_time)
+    right_parts = _parse_time(right_raw_time)
+    if left_parts is not None and right_parts is not None:
+        if (left_parts.hour, left_parts.minute) != (right_parts.hour, right_parts.minute):
+            return False
+        # 両方に秒まで読めていて秒が違えば別（§12.2）。片方だけなら秒は使わない。
+        if (
+            left_parts.second is not None
+            and right_parts.second is not None
+            and left_parts.second != right_parts.second
+        ):
             return False
     elif left_raw_time and right_raw_time:
         # 両方に時刻の文字があるのに、どちらかがそろえられない。
