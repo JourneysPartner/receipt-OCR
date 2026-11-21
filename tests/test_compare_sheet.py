@@ -253,10 +253,11 @@ def _parse_range(range_text: str):
 
 
 class _FakeTab:
-    def __init__(self, sheet_id: int, title: str, columns: int, values=None):
+    def __init__(self, sheet_id: int, title: str, columns: int, values=None, rows: int = 1000):
         self.sheet_id = sheet_id
         self.title = title
         self.columns = columns
+        self.rows = rows
         self.values: list[list] = [list(row) for row in (values or [])]
 
 
@@ -268,8 +269,8 @@ class FakeSheetsService:
         self.write_calls: list[tuple] = []
         self._next_sheet_id = 1
 
-    def add_tab(self, title, columns=26, values=None):
-        tab = _FakeTab(self._next_sheet_id, title, columns, values)
+    def add_tab(self, title, columns=26, values=None, rows=1000):
+        tab = _FakeTab(self._next_sheet_id, title, columns, values, rows)
         self._next_sheet_id += 1
         self.tabs[title] = tab
         return tab
@@ -285,6 +286,10 @@ class FakeSheetsService:
 
     def _check_columns(self, tab, max_col):
         if max_col is not None and max_col >= tab.columns:
+            raise _FakeApiError(400, "exceeds grid limits")
+
+    def _check_rows(self, tab, needed):
+        if needed > tab.rows:
             raise _FakeApiError(400, "exceeds grid limits")
 
     def read(self, range_text):
@@ -315,6 +320,7 @@ class FakeSheetsService:
             + [start_col + len(row) - 1 for row in values if row]
         )
         self._check_columns(tab, widest)
+        self._check_rows(tab, (start_row or 0) + len(values))
         self._write(tab, start_col, start_row, values)
         self.write_calls.append(("update", range_text))
 
@@ -326,6 +332,7 @@ class FakeSheetsService:
             + [start_col + len(row) - 1 for row in values if row]
         )
         self._check_columns(tab, widest)
+        self._check_rows(tab, len(tab.values) + len(values))
         tab.values.extend([list(row) for row in values])
         self.write_calls.append(("append", range_text))
 
@@ -341,6 +348,7 @@ class FakeSheetsService:
             title, start_col, start_row, end_col, _ = _parse_range(item["range"])
             tab = self._tab(title)
             self._check_columns(tab, max(end_col or 0, start_col))
+            self._check_rows(tab, (start_row or 0) + len(item["values"]))
             self._write(tab, start_col, start_row, item["values"])
             self.write_calls.append(("values.batchUpdate", item["range"]))
         return {}
@@ -385,7 +393,7 @@ class _FakeSpreadsheets:
                         "properties": {
                             "sheetId": tab.sheet_id,
                             "title": tab.title,
-                            "gridProperties": {"rowCount": 1000, "columnCount": tab.columns},
+                            "gridProperties": {"rowCount": tab.rows, "columnCount": tab.columns},
                         }
                     }
                     for tab in self._service.tabs.values()
@@ -406,7 +414,10 @@ class _FakeSpreadsheets:
                 tab = next(
                     tab for tab in service.tabs.values() if tab.sheet_id == append["sheetId"]
                 )
-                tab.columns += int(append["length"])
+                if append["dimension"] == "ROWS":
+                    tab.rows += int(append["length"])
+                else:
+                    tab.columns += int(append["length"])
                 service.write_calls.append(("appendDimension", tab.title))
         return _Exec()
 
@@ -530,16 +541,18 @@ def _collect_into(service, client=None):
     return code, service
 
 
-def _score_into(service, *, label="L1", client=None):
+def _score_into(service, *, label="L1", client=None, **env_overrides):
+    env = {
+        "COMPARE_STEP": "score",
+        "COMPARE_RESULT_SPREADSHEET_ID": RESULT_ID,
+        "COMPARE_FOLDER_IDS": "",
+        "COMPARE_RUN_LABEL": label,
+    }
+    env.update(env_overrides)
     client = client or CompareSheetClient(RESULT_ID, service=service, sleep=lambda seconds: None)
     return run_compare(
         _app_config(),
-        {
-            "COMPARE_STEP": "score",
-            "COMPARE_RESULT_SPREADSHEET_ID": RESULT_ID,
-            "COMPARE_FOLDER_IDS": "",
-            "COMPARE_RUN_LABEL": label,
-        },
+        env,
         sheet_client=client,
         jst_now=lambda: NOW,
     )
@@ -1123,6 +1136,46 @@ def test_score_writes_form_tabs_raw():
     ]
     assert form_writes
     assert all(kwargs["valueInputOption"] == "RAW" for kwargs in form_writes)
+
+
+def _reading_row(file_id, label, method, amount):
+    values = {
+        "実行ラベル": "L1",
+        "記録時刻": "2026-11-18 12:00:00",
+        "fileId": file_id,
+        "ファイル名": f"{file_id}.jpg",
+        "フォルダ": "テスト用フォルダ",
+        "型": label,
+        "方式": method,
+        "結果": "成功",
+        "推定費用USD": "0.001000",
+        "明細JSON": json.dumps([{"d": "2026-01-02", "a": amount}], ensure_ascii=False),
+    }
+    row = [""] * len(RESULT_HEADERS)
+    for name, value in values.items():
+        row[RESULT_HEADERS.index(name)] = value
+    return row
+
+
+def test_more_than_1000_detail_rows_are_given_room_before_the_write():
+    service = FakeSheetsService()
+    base = "gemini-2.5-flash"
+    reader = "claude-r"
+    rows = []
+    for index in range(600):
+        file_id = f"FILE_{index:013d}"
+        rows.append(_reading_row(file_id, base, "画像から", 1600))
+        rows.append(_reading_row(file_id, base, "文字から", 1600))
+        rows.append(_reading_row(file_id, reader, "画像から", 1600))
+    service.add_tab("答え", columns=26, values=[ANSWER_HEADERS])
+    service.add_tab("結果_L1", columns=29, values=[RESULT_HEADERS, *rows])
+
+    assert _score_into(service, COMPARE_FORM_BASE=base) == 0
+
+    detail = service.tabs[form_detail_tab_name("L1")]
+    assert len(detail.values) == 1 + 600 * 3
+    assert detail.rows >= 1 + 600 * 3
+    assert ("appendDimension", form_detail_tab_name("L1")) in service.write_calls
 
 
 def test_old_ocr_tab_without_page_count_still_works():

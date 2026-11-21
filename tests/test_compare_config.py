@@ -218,6 +218,36 @@ class TestReaders:
         )
         assert cfg.form_base is None
 
+    def test_readers_accept_uppercase_thinking_and_keep_the_label(self):
+        cfg = load_compare_config(_env(COMPARE_READERS="claude-haiku-5-5@HIGH,gpt-5.4-mini@Low"))
+        assert [reader.label for reader in cfg.readers] == [
+            "claude-haiku-5-5@HIGH",
+            "gpt-5.4-mini@Low",
+        ]
+        assert [reader.thinking_level for reader in cfg.readers] == ["high", "low"]
+
+    def test_score_does_not_reject_the_same_element_in_both_variables(self):
+        # score は読み手を呼ばない。COMPARE_MODELS を省くと既定の型と当たる（§14.4）
+        env = _env(
+            COMPARE_STEP="score",
+            COMPARE_FOLDER_IDS=None,
+            COMPARE_MODELS=None,
+            COMPARE_READERS="gemini-2.5-flash",
+        )
+        cfg = load_compare_config(env)
+        assert [reader.label for reader in cfg.readers] == ["gemini-2.5-flash"]
+
+    def test_score_does_not_use_the_form_base_from_a_skipped_overlap(self):
+        env = _env(
+            COMPARE_STEP="score",
+            COMPARE_FOLDER_IDS=None,
+            COMPARE_MODELS="gemini-test",
+            COMPARE_READERS="gemini-test",
+        )
+        cfg = load_compare_config(env)
+        assert cfg.form_base == "gemini-test"
+        assert [reader.label for reader in cfg.readers] == ["gemini-test"]
+
     def test_score_with_models_uses_the_first(self):
         cfg = load_compare_config(
             _env(
@@ -227,6 +257,11 @@ class TestReaders:
             )
         )
         assert cfg.form_base == "gemini-test@low"
+
+    @pytest.mark.parametrize("value", ["nan", "NaN", "inf", "-inf", "Infinity"])
+    def test_ocr_price_rejects_nan_and_inf(self, value):
+        with pytest.raises(ValueError, match="COMPARE_OCR_PRICE_PER_PAGE_USD"):
+            load_compare_config(_env(COMPARE_OCR_PRICE_PER_PAGE_USD=value))
 
     @pytest.mark.parametrize(
         "overrides, message",

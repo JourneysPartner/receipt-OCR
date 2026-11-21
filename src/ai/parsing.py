@@ -33,12 +33,12 @@ def _optional_amount(value) -> int | None:
 
 
 def parse_receipt_items(
-    raw: str, file_name: str, *, read_calc_fields: bool = True
+    raw: str, file_name: str, *, read_calc_fields: bool = False
 ) -> tuple[list[ReceiptItem], str | None]:
     """応答文を明細の並びにする。戻り値は (明細, 失敗の種類か None)。
 
-    `read_calc_fields` が偽（指示文が v1・v2）のときは、計算の 4 欄を常に None にする
-    （v1・v2 では本番の動きを変えない）。
+    `read_calc_fields` は既定で偽（指示文が v1・v2 のとき）。真にするのは v3 の
+    呼び出しだけ（仕様 §14.4）。偽のときは計算の 4 欄を常に None にする。
     """
     text = raw
     if text.startswith("```"):

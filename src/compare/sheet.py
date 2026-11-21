@@ -164,6 +164,8 @@ SPREADSHEET_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 DEFAULT_RETRY_SLEEPS = (10, 30, 60)
 # API で作ったタブの既定の列数（A〜Z）。見出しがこれより多いときは足す
 DEFAULT_COLUMN_COUNT = 26
+# API で作ったタブの既定の行数。書く行がこれより多いときは足す（§14.2）
+DEFAULT_ROW_COUNT = 1000
 
 
 class HeaderMismatchError(RuntimeError):
@@ -301,6 +303,37 @@ class CompareSheetClient:
             ).execute()
         )
         return needed
+
+    def _expand_rows(self, properties: dict, needed: int) -> int:
+        """既にあるタブの行数が書く行より少なければ ROWS を足す（§14.2）。"""
+        grid = properties.get("gridProperties") or {}
+        current = int(grid.get("rowCount") or DEFAULT_ROW_COUNT)
+        if current >= needed:
+            return current
+        length = needed - current
+        self._execute(
+            lambda: self._sheets.batchUpdate(
+                spreadsheetId=self._spreadsheet_id,
+                body={
+                    "requests": [
+                        {
+                            "appendDimension": {
+                                "sheetId": properties.get("sheetId"),
+                                "dimension": "ROWS",
+                                "length": length,
+                            }
+                        }
+                    ]
+                },
+            ).execute()
+        )
+        return needed
+
+    def ensure_rows(self, title: str, needed: int) -> None:
+        """`replace_all` の前に、書く行が収まるようタブの行を足す。"""
+        properties = {str(p.get("title", "")): p for p in self.get_sheet_properties()}
+        if title in properties:
+            self._expand_rows(properties[title], needed)
 
     def ensure_tab(
         self,
@@ -526,6 +559,8 @@ class CompareSheetClient:
         )
 
     def replace_all(self, title: str, rows: list[list]) -> None:
+        # タブの行数が書く行より少ないと 400 になるので、先に足す（§14.2）
+        self.ensure_rows(title, len(rows))
         self._execute(
             lambda: (
                 self._sheets.values()

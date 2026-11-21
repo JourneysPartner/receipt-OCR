@@ -26,6 +26,8 @@ RESULT_ID = "R" * 24
 FOLDER = "FOLDER_A1234567890"
 FOLDER_2 = "FOLDER_B1234567890"
 KEY = "FAKE_API_KEY_DO_NOT_LEAK_12345"
+ANTHROPIC_KEY = "fake-anthropic-key-AAA"
+OPENAI_KEY = "fake-openai-key-BBB"
 NOW = datetime(2026, 11, 18, 3, 0, tzinfo=UTC)
 
 
@@ -43,16 +45,18 @@ def _env(**overrides):
     return env
 
 
-def _app_config(master="MASTER_A1234567890"):
-    return AppConfig(
-        master=MasterConfig(spreadsheet_id=master),
-        template=TemplateConfig(),
-        drive=DriveConfig(),
-        sheets=SheetsConfig(),
-        ocr=OcrConfig(),
-        ai=AiConfig(),
-        gemini_api_key=KEY,
-    )
+def _app_config(master="MASTER_A1234567890", **overrides):
+    values = {
+        "master": MasterConfig(spreadsheet_id=master),
+        "template": TemplateConfig(),
+        "drive": DriveConfig(),
+        "sheets": SheetsConfig(),
+        "ocr": OcrConfig(),
+        "ai": AiConfig(),
+        "gemini_api_key": KEY,
+    }
+    values.update(overrides)
+    return AppConfig(**values)
 
 
 class FakeSheet:
@@ -220,7 +224,19 @@ def _extractor_factory(history, items=None):
     return lambda ai_config: FakeExtractor(ai_config.model, history, items)
 
 
-def _collect(sheet, drive, history, *, env=None, config=None, ocr=None, checker=None):
+def _collect(
+    sheet,
+    drive,
+    history,
+    *,
+    env=None,
+    config=None,
+    ocr=None,
+    checker=None,
+    reader_factory=None,
+    reader_checker=None,
+    clock=None,
+):
     records = []
 
     class _Capture(logging.Handler):
@@ -239,12 +255,19 @@ def _collect(sheet, drive, history, *, env=None, config=None, ocr=None, checker=
             ocr_factory=lambda: ocr or FakeOcr(),
             extractor_factory=_extractor_factory(history),
             model_checker=checker or (lambda name: True),
+            reader_factory=reader_factory,
+            reader_checker=reader_checker or (lambda name: True),
             sleep=lambda seconds: None,
+            clock=clock or (lambda: 0),
             jst_now=lambda: NOW,
         )
     finally:
         logger.removeHandler(handler)
     return code, records
+
+
+def _result_rows_by(sheet, model):
+    return [row for row in sheet.tabs.get("結果_L1", [])[1:] if row[6] == model]
 
 
 class TestCollect:
@@ -713,6 +736,268 @@ class TestExceptionWhileRunning:
         code, _ = _collect(sheet, drive, [])
         assert code == 1
         assert "集計_L1" in sheet.replaced
+
+
+class TestReaderFailureIsolation:
+    """§14.1: 読み手の失敗はその読み手の行だけに留める。"""
+
+    def test_factory_failure_keeps_other_rows_and_next_reader_runs(self):
+        file = _file("FILE_A1234567890", "a.jpg")
+        drive = FakeDrive({FOLDER: [file]}, {FOLDER: "テスト用フォルダ"})
+        sheet = FakeSheet()
+        history = []
+
+        def factory(ai_config):
+            if ai_config.model == "claude-r1":
+                raise RuntimeError(f"boom {ANTHROPIC_KEY}")
+            return FakeExtractor(ai_config.model, history)
+
+        code, records = _collect(
+            sheet,
+            drive,
+            history,
+            env=_env(COMPARE_READERS="claude-r1,claude-r2"),
+            config=_app_config(anthropic_api_key=ANTHROPIC_KEY),
+            reader_factory=factory,
+        )
+        assert code == 0
+        # COMPARE_MODELS の行と OCR の行はそのまま残る
+        for model in ("m1", "m2"):
+            rows = _result_rows_by(sheet, model)
+            assert len(rows) == 4
+            assert all(not row[8].startswith("失敗") for row in rows)
+            assert [row[8] for row in rows if row[7] in ("文字から", "画像から")] == [
+                "成功",
+                "成功",
+            ]
+        assert len(sheet.tabs["OCR_L1"]) == 2
+        # 失敗した読み手だけが file_error、次の読み手は動く
+        r1 = _result_rows_by(sheet, "claude-r1")
+        assert [row[8] for row in r1] == ["失敗:file_error"]
+        assert [row[7] for row in r1] == ["画像から"]
+        assert ANTHROPIC_KEY not in r1[0][26]
+        assert [row[8] for row in _result_rows_by(sheet, "claude-r2")] == ["成功"]
+        assert [entry[0] for entry in history if entry[0].startswith("claude")] == ["claude-r2"]
+        assert all(ANTHROPIC_KEY not in record.getMessage() for record in records)
+
+
+class TestReaderTimeBudget:
+    def _done_text_row(self, file, model):
+        return CompareRow(
+            run_label="L1",
+            recorded_at="2026-11-18 12:00:00",
+            file_id=file.file_id,
+            folder_name="テスト用フォルダ",
+            file_name=file.file_name,
+            model_label=model,
+            model_name=model,
+            method="文字から",
+            result="成功",
+        ).to_sheet_row()
+
+    def test_budget_skips_remaining_readers_and_resume_reads_them(self):
+        file = _file("FILE_A1234567890", "a.jpg")
+        drive = FakeDrive({FOLDER: [file]}, {FOLDER: "テスト用フォルダ"})
+        sheet = FakeSheet()
+        sheet.tabs["結果_L1"] = [list(RESULT_HEADERS), self._done_text_row(file, "m1")]
+        env = _env(
+            COMPARE_MODELS="m1",
+            COMPARE_METHODS="text",
+            COMPARE_READERS="claude-r1,claude-r2",
+        )
+        config = _app_config(anthropic_api_key=ANTHROPIC_KEY)
+        history = []
+        ticks = iter([0, 0, 0, 999])
+
+        code, _ = _collect(
+            sheet,
+            drive,
+            history,
+            env=env,
+            config=config,
+            reader_factory=lambda ai_config: FakeExtractor(ai_config.model, history),
+            clock=lambda: next(ticks),
+        )
+        assert code == 0
+        assert [entry[0] for entry in history] == ["claude-r1"]
+        assert [row[8] for row in _result_rows_by(sheet, "claude-r1")] == ["成功"]
+        assert _result_rows_by(sheet, "claude-r2") == []
+        assert len(sheet.tabs["OCR_L1"]) == 1  # 読み手だけなので Vision を呼ばない
+
+        # 続きからでは、呼ばなかった読み手を読む
+        history.clear()
+        code, _ = _collect(
+            sheet,
+            drive,
+            history,
+            env=env,
+            config=config,
+            reader_factory=lambda ai_config: FakeExtractor(ai_config.model, history),
+            clock=lambda: 0,
+        )
+        assert code == 0
+        assert [entry[0] for entry in history] == ["claude-r2"]
+        assert [row[8] for row in _result_rows_by(sheet, "claude-r2")] == ["成功"]
+
+
+class TestSecretsInRowsAndLogs:
+    def test_file_error_details_of_models_and_readers_hide_all_keys(self):
+        class FailingDownloadDrive(FakeDrive):
+            def download_file(self, file):
+                raise RuntimeError(
+                    f"boom {KEY} {ANTHROPIC_KEY} {OPENAI_KEY} sk-fake***************BBB"
+                )
+
+        file = _file("FILE_A1234567890", "a.jpg")
+        drive = FailingDownloadDrive({FOLDER: [file]}, {FOLDER: "テスト用フォルダ"})
+        sheet = FakeSheet()
+        code, records = _collect(
+            sheet,
+            drive,
+            [],
+            env=_env(COMPARE_READERS="claude-r1"),
+            config=_app_config(anthropic_api_key=ANTHROPIC_KEY, openai_api_key=OPENAI_KEY),
+        )
+        assert code == 0
+        rows = sheet.tabs["結果_L1"][1:]
+        assert rows and all(row[8] == "失敗:file_error" for row in rows)
+        for row in rows:
+            for key in (KEY, ANTHROPIC_KEY, OPENAI_KEY):
+                assert key not in row[26]
+            assert "sk-fake" not in row[26]
+        for record in records:
+            for key in (KEY, ANTHROPIC_KEY, OPENAI_KEY):
+                assert key not in record.getMessage()
+            assert "sk-fake" not in record.getMessage()
+
+    def test_collect_fatal_log_hides_all_keys(self):
+        class BrokenAppendSheet(FakeSheet):
+            def append_rows(self, title, rows, columns):
+                if rows:
+                    raise RuntimeError(f"boom {KEY} {ANTHROPIC_KEY} {OPENAI_KEY}")
+                super().append_rows(title, rows, columns)
+
+        file = _file("FILE_A1234567890", "a.jpg")
+        drive = FakeDrive({FOLDER: [file]}, {FOLDER: "テスト用フォルダ"})
+        sheet = BrokenAppendSheet()
+        code, records = _collect(
+            sheet,
+            drive,
+            [],
+            config=_app_config(anthropic_api_key=ANTHROPIC_KEY, openai_api_key=OPENAI_KEY),
+        )
+        assert code == 1
+        messages = " ".join(record.getMessage() for record in records)
+        for key in (KEY, ANTHROPIC_KEY, OPENAI_KEY):
+            assert key not in messages
+
+    def test_run_compare_fatal_log_hides_all_keys(self, monkeypatch):
+        records = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        def boom(self):
+            raise RuntimeError(f"boom {KEY} {ANTHROPIC_KEY} {OPENAI_KEY}")
+
+        monkeypatch.setattr(CompareRunner, "run", boom)
+        handler = _Capture()
+        logger = logging.getLogger("receipt_ocr")
+        logger.addHandler(handler)
+        try:
+            code = run_compare(
+                _app_config(anthropic_api_key=ANTHROPIC_KEY, openai_api_key=OPENAI_KEY),
+                _env(COMPARE_STEP="score", COMPARE_FOLDER_IDS=""),
+                sheet_client=FakeSheet(),
+                jst_now=lambda: NOW,
+            )
+        finally:
+            logger.removeHandler(handler)
+        assert code == 1
+        messages = " ".join(record.getMessage() for record in records)
+        for key in (KEY, ANTHROPIC_KEY, OPENAI_KEY):
+            assert key not in messages
+        assert "比較の実行が異常終了" in messages
+
+
+class TestFormsFailure:
+    class _DetailFailSheet(FakeSheet):
+        def __init__(self):
+            super().__init__()
+            self.fail_detail = False
+
+        def replace_all(self, title, rows):
+            if self.fail_detail and title.startswith("形の明細_"):
+                raise RuntimeError(f"boom {KEY}")
+            super().replace_all(title, rows)
+
+    def test_detail_write_failure_returns_1_for_collect(self):
+        file = _file("FILE_A1234567890", "a.jpg")
+        drive = FakeDrive({FOLDER: [file]}, {FOLDER: "テスト用フォルダ"})
+        sheet = self._DetailFailSheet()
+        sheet.fail_detail = True
+        code, records = _collect(sheet, drive, [])
+        assert code == 1
+        for title in ("結果_L1", "OCR_L1", "答え", "集計_L1", "形_L1"):
+            assert title in sheet.tabs
+        assert "形の明細_L1" not in sheet.replaced
+        messages = " ".join(record.getMessage() for record in records)
+        assert "形を書けません" in messages
+        assert "RuntimeError" in messages
+        assert KEY not in messages
+
+    def test_detail_write_failure_returns_1_for_score(self):
+        file = _file("FILE_A1234567890", "a.jpg")
+        drive = FakeDrive({FOLDER: [file]}, {FOLDER: "テスト用フォルダ"})
+        sheet = self._DetailFailSheet()
+        code, _ = _collect(sheet, drive, [])
+        assert code == 0
+        assert "形の明細_L1" in sheet.replaced
+
+        sheet.fail_detail = True
+        sheet.replaced.clear()
+        code, _ = _collect(
+            sheet,
+            drive,
+            [],
+            env=_env(COMPARE_STEP="score", COMPARE_FOLDER_IDS=""),
+        )
+        assert code == 1
+        assert "集計_L1" in sheet.replaced
+        assert "形_L1" in sheet.replaced
+        assert "形の明細_L1" not in sheet.replaced
+
+    def test_no_base_rows_is_not_a_failure(self):
+        sheet = FakeSheet()
+        sheet.tabs["結果_L1"] = [list(RESULT_HEADERS)]
+        sheet.tabs["結果_L1"].append(
+            CompareRow(
+                run_label="L1",
+                recorded_at="2026-11-18 12:00:00",
+                file_id="FILE_A1234567890",
+                folder_name="テスト用フォルダ",
+                file_name="a.jpg",
+                model_label="claude-r1",
+                model_name="claude-r1",
+                method="画像から",
+                result="成功",
+            ).to_sheet_row()
+        )
+        sheet.tabs["答え"] = [list(ANSWER_HEADERS)]
+        code, records = _collect(
+            sheet,
+            FakeDrive(),
+            [],
+            env=_env(
+                COMPARE_STEP="score",
+                COMPARE_FOLDER_IDS="",
+                COMPARE_FORM_BASE="gemini-base",
+            ),
+        )
+        assert code == 0
+        assert "形_L1" not in sheet.tabs
+        assert any("形のタブは作りません" in record.getMessage() for record in records)
 
 
 class TestModels:

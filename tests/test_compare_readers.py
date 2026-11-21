@@ -1,13 +1,19 @@
 """もう 1 人の読み手（Anthropic・OpenAI）と安全の条件 R1〜R5 のテスト。
 
-SDK は sandbox に入っていないので、偽のモジュールを `sys.modules` に入れる。
+ふだんは偽のモジュールを `sys.modules` に入れる。本物の SDK の署名は、
+import できる環境でだけ確かめる（無ければ skip）。
 """
 
 import base64
 import importlib
+import inspect
 import logging
+import subprocess
 import sys
 from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -339,6 +345,80 @@ class TestEmptyResponse:
         assert reader.last_extraction_error == "parse_error"
 
 
+class TestMalformedItems:
+    """§14.1: 明細にできない返りでも例外を外へ出さない。"""
+
+    @pytest.mark.parametrize("payload", ['["a"]', "[1]", "null", "5"])
+    def test_anthropic_malformed_output_is_api_error(self, monkeypatch, payload):
+        holder = _install_sdk(monkeypatch, "anthropic")
+        holder["response"] = _text_response(payload)
+        reader = AnthropicReader(_config(), api_key=KEY)
+        file = _file()
+        assert reader.extract_from_file(file) == []
+        info = reader.last_call_info
+        assert reader.last_extraction_error == "api_error"
+        assert info["error"]
+        assert info["error_code"] is None  # やり直さない
+        row = make_result_row(
+            run_label="L1",
+            recorded_at="2026-11-20 12:00:00",
+            file=file,
+            folder_name="テスト用フォルダ",
+            model_label="claude-haiku-5-5",
+            model_name="claude-haiku-5-5",
+            method="image",
+            outcome=AttemptOutcome([], reader.last_extraction_error, info),
+            retries=0,
+            settings="x",
+            ocr_text="",
+        )
+        assert row.result == "失敗:api_error"
+        assert row.finish_reason == "end_turn"
+
+    def test_openai_malformed_output_is_api_error_and_not_retried(self, monkeypatch):
+        holder = _install_sdk(monkeypatch, "openai")
+        holder["response"] = _openai_response('["a"]')
+        reader = OpenAIReader(_config("gpt-5.4-mini"), api_key=OPENAI_KEY)
+        assert reader.extract_from_file(_file()) == []
+        assert reader.last_extraction_error == "api_error"
+        assert reader.last_call_info["error"]
+        assert reader.last_call_info["error_code"] is None
+        outcome, retries = extract_with_retries(
+            lambda: extract_once(reader, "image", None, _file()),
+            sleeps=(10, 30, 60),
+            sleep=lambda seconds: None,
+        )
+        assert retries == 0
+        assert outcome.error == "api_error"
+
+
+class TestRedaction:
+    def test_masked_sk_token_is_replaced_in_the_failed_call(self, monkeypatch):
+        holder = _install_sdk(monkeypatch, "openai")
+        message = "Incorrect API key provided: sk-fake***************BBB"
+        holder["respond"] = lambda kwargs: (_ for _ in ()).throw(FakeStatusError(401, message))
+        reader = OpenAIReader(_config("gpt-5.4-mini"), api_key=OPENAI_KEY)
+        assert reader.extract_from_file(_file()) == []
+        text = str(reader.last_call_info)
+        assert "sk-fake" not in text
+        assert "***" in text
+
+    def test_all_three_keys_are_redacted_from_the_failed_call(self, monkeypatch):
+        holder = _install_sdk(monkeypatch, "openai")
+        message = f"boom {GEMINI_KEY} {KEY} {OPENAI_KEY}"
+        holder["respond"] = lambda kwargs: (_ for _ in ()).throw(FakeStatusError(500, message))
+        reader = OpenAIReader(
+            _config("gpt-5.4-mini"),
+            api_key=OPENAI_KEY,
+            redact_keys=(GEMINI_KEY, KEY, OPENAI_KEY),
+        )
+        assert reader.extract_from_file(_file()) == []
+        text = str(reader.last_call_info)
+        assert GEMINI_KEY not in text
+        assert KEY not in text
+        assert OPENAI_KEY not in text
+
+
 class TestRetries:
     def _reader(self, monkeypatch, responses):
         holder = _install_sdk(monkeypatch, "anthropic")
@@ -368,6 +448,12 @@ class TestRetries:
         assert retries == 1
         assert outcome.error is None
         assert outcome.info["error_code"] is None
+
+    def test_529_is_retried(self, monkeypatch):
+        _, reader = self._reader(monkeypatch, [FakeStatusError(529), _text_response()])
+        outcome, retries = self._run(reader)
+        assert retries == 1
+        assert outcome.error is None
 
     def test_400_is_not_retried(self, monkeypatch):
         _, reader = self._reader(monkeypatch, [FakeStatusError(400)])
@@ -657,6 +743,83 @@ class TestR1:
         self._run_main(monkeypatch, "validate")
 
 
+class TestR1Subprocess:
+    def test_importing_src_main_in_a_fresh_process_does_not_import_the_sdks(self):
+        project_root = Path(__file__).resolve().parents[1]
+        code = (
+            "import src.main, sys; "
+            "assert 'anthropic' not in sys.modules and 'openai' not in sys.modules"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+
+
+# requirements.txt の主番号。これより古い SDK でキーワードが無いときだけ skip する。
+REQUIRED_SDK_MAJORS = {"anthropic": 2, "openai": 3}
+
+
+def _installed_major(distribution: str) -> int | None:
+    try:
+        return int(package_version(distribution).split(".", 1)[0])
+    except (PackageNotFoundError, ValueError):
+        return None
+
+
+def _assert_keywords(module_name: str, function, keywords):
+    missing = [
+        keyword for keyword in keywords if keyword not in inspect.signature(function).parameters
+    ]
+    if missing:
+        major = _installed_major(module_name)
+        if major is None or major < REQUIRED_SDK_MAJORS[module_name]:
+            pytest.skip(
+                f"{module_name} の入れた版では {missing} を受け付けません"
+                f"（{package_version(module_name)}）"
+            )
+    assert not missing
+
+
+class TestRealSdkSignatures:
+    """本物の SDK が入っている環境でだけ、この仕様で渡すキーワードを確かめる。"""
+
+    def test_anthropic_client_accepts_api_key_timeout_and_max_retries(self):
+        anthropic = pytest.importorskip("anthropic")
+        _assert_keywords("anthropic", anthropic.Anthropic, ("api_key", "timeout", "max_retries"))
+
+    def test_anthropic_messages_create_accepts_the_payload(self):
+        anthropic = pytest.importorskip("anthropic")
+        _assert_keywords(
+            "anthropic",
+            anthropic.resources.Messages.create,
+            ("model", "max_tokens", "system", "messages", "output_config"),
+        )
+
+    def test_openai_client_accepts_api_key_timeout_and_max_retries(self):
+        openai = pytest.importorskip("openai")
+        _assert_keywords("openai", openai.OpenAI, ("api_key", "timeout", "max_retries"))
+
+    def test_openai_responses_create_accepts_the_payload(self):
+        pytest.importorskip("openai")
+        from openai.resources.responses import Responses
+
+        _assert_keywords(
+            "openai",
+            Responses.create,
+            ("model", "instructions", "input", "max_output_tokens", "reasoning"),
+        )
+
+    def test_api_timeout_error_is_a_connection_error_in_both_sdks(self):
+        anthropic = pytest.importorskip("anthropic")
+        openai = pytest.importorskip("openai")
+        assert issubclass(anthropic.APITimeoutError, anthropic.APIConnectionError)
+        assert issubclass(openai.APITimeoutError, openai.APIConnectionError)
+
+
 class TestR2:
     def test_only_the_requested_vendor_client_is_created(self, monkeypatch):
         anthropic = _install_sdk(monkeypatch, "anthropic")
@@ -673,6 +836,22 @@ class TestR2:
         assert len(anthropic["calls"]) == 1
         assert openai["init"] == []
         assert openai["calls"] == []
+
+    def test_only_gpt_does_not_build_an_anthropic_client(self, monkeypatch):
+        anthropic = _install_sdk(monkeypatch, "anthropic")
+        openai = _install_sdk(monkeypatch, "openai")
+        openai["response"] = _openai_response()
+        sheet = FakeSheet()
+        code, _ = _collect(
+            sheet,
+            env=_env(COMPARE_READERS="gpt-5.4-mini@low"),
+            config=_app_config(anthropic_api_key=KEY, openai_api_key=OPENAI_KEY),
+        )
+        assert code == 0
+        assert anthropic["init"] == []
+        assert anthropic["calls"] == []
+        assert len(openai["init"]) == 1
+        assert len(openai["calls"]) == 1
 
     def test_without_readers_the_reader_factory_is_not_used(self):
         sheet = FakeSheet()
@@ -896,4 +1075,9 @@ class TestParsingShared:
         assert items[0].tax == 145
         assert items[0].tendered == 2000
         assert items[0].change == 400
-        assert parse_receipt_items('[{"amount":1600,"pretax":1455}]', "a.jpg")[0][0].pretax == 1455
+        assert (
+            parse_receipt_items('[{"amount":1600,"pretax":1455}]', "a.jpg", read_calc_fields=True)[
+                0
+            ][0].pretax
+            == 1455
+        )

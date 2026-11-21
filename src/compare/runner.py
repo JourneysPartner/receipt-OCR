@@ -41,6 +41,7 @@ from src.compare.readers import (
     create_compare_reader,
     create_model_checker,
     reader_settings_text,
+    redact_secrets,
 )
 from src.compare.score import derive_methods, derive_models, estimate_cost, summary_rows
 from src.compare.sheet import (
@@ -266,7 +267,7 @@ class CompareRunner:
             multi_rows = self._read_multi_answers()
         except Exception as error:
             logger.error(
-                f"答えを読めません: {type(error).__name__}: {error}",
+                f"答えを読めません: {type(error).__name__}: {self._redact_secrets(error)}",
                 extra={"step": "compare_finalize_error"},
             )
             failed = True
@@ -284,9 +285,9 @@ class CompareRunner:
                 multi_rows=multi_rows,
             ),
         )
-        self._write_forms(label, result_rows, answer_rows, multi_rows)
+        forms_ok = self._write_forms(label, result_rows, answer_rows, multi_rows)
         logger.info(f"比較の集計を更新: {label}", extra={"step": "compare_score"})
-        return 1 if failed else 0
+        return 1 if failed or not forms_ok else 0
 
     def _run_collect(self) -> int:
         label = self._compare.run_label
@@ -441,7 +442,7 @@ class CompareRunner:
             result_rows = self._sheet.read_dicts(result_title)
         except Exception as error:
             logger.error(
-                f"結果を読めません: {type(error).__name__}: {error}",
+                f"結果を読めません: {type(error).__name__}: {self._redact_secrets(error)}",
                 extra={"step": "compare_finalize_error"},
             )
             return 1
@@ -472,7 +473,7 @@ class CompareRunner:
             )
         except Exception as error:
             logger.error(
-                f"答えを書けません: {type(error).__name__}: {error}",
+                f"答えを書けません: {type(error).__name__}: {self._redact_secrets(error)}",
                 extra={"step": "compare_finalize_error"},
             )
             answer_rows = []
@@ -483,7 +484,7 @@ class CompareRunner:
             multi_rows = self._read_multi_answers()
         except Exception as error:
             logger.error(
-                f"答えを読めません: {type(error).__name__}: {error}",
+                f"答えを読めません: {type(error).__name__}: {self._redact_secrets(error)}",
                 extra={"step": "compare_finalize_error"},
             )
             failed = True
@@ -504,17 +505,17 @@ class CompareRunner:
             )
         except Exception as error:
             logger.error(
-                f"集計を書けません: {type(error).__name__}: {error}",
+                f"集計を書けません: {type(error).__name__}: {self._redact_secrets(error)}",
                 extra={"step": "compare_finalize_error"},
             )
             return 1
 
-        self._write_forms(label, result_rows, answer_rows, multi_rows)
+        forms_ok = self._write_forms(label, result_rows, answer_rows, multi_rows)
         logger.info(
             f"比較の collect 完了: {label}（処理 {len(submitted_ids)} 本）",
             extra={"step": "compare_collect"},
         )
-        return 1 if failed else 0
+        return 1 if failed or not forms_ok else 0
 
     # ── 準備 ────────────────────────────────────
     def _ensure_multi_answer(self) -> None:
@@ -544,16 +545,15 @@ class CompareRunner:
         return self._clock() - self._started_at > self._compare.time_budget_seconds
 
     def _redact_secrets(self, value) -> str:
-        """3 つの鍵の値をログ・例外の文・表に出さない（R4・S8）。"""
-        text = str(value)
-        for key in (
+        """3 つの鍵の値と一部を伏せた鍵をログ・表に出さない（R4・S8・§14.4）。"""
+        return redact_secrets(value, self._all_api_keys())
+
+    def _all_api_keys(self) -> tuple:
+        return (
             self._config.gemini_api_key,
             self._config.anthropic_api_key,
             self._config.openai_api_key,
-        ):
-            if key:
-                text = text.replace(str(key), "***")
-        return text
+        )
 
     def _verify_headers(self, titles: list[str], checks) -> bool:
         """既にあるタブの 1 行目を、書く前に読むだけで確かめる（S6）。
@@ -736,6 +736,46 @@ class CompareRunner:
             request_timeout_seconds=self._compare.effective_request_timeout,
         )
 
+    def _reader_ai_settings(self, reader: CompareModel) -> tuple[AiConfig, str]:
+        """読み手の AiConfig と「設定」の欄（Gemini は今までの文字列のまま）。"""
+        if reader.vendor == VENDOR_GEMINI:
+            ai_config = self._model_ai_config(reader)
+            settings = settings_text(
+                ai_config.temperature,
+                ai_config.thinking_level,
+                ai_config.max_tokens,
+                getattr(ai_config, "prompt_version", "v1"),
+            )
+        else:
+            ai_config = self._reader_ai_config(reader)
+            settings = reader_settings_text(
+                reader.vendor,
+                reader.thinking_level,
+                ai_config.max_tokens,
+                getattr(ai_config, "prompt_version", "v1"),
+            )
+        return ai_config, settings
+
+    def _reader_error_row(
+        self, task: _FileTask, reader: CompareModel, error: Exception, recorded_at: str
+    ) -> CompareRow:
+        """その読み手の行だけを `失敗:file_error` にする（§14.1）。"""
+        _, settings = self._reader_ai_settings(reader)
+        detail = self._redact_secrets(f"{type(error).__name__}: {error}")[:300]
+        return CompareRow(
+            run_label=self._compare.run_label,
+            recorded_at=recorded_at,
+            file_id=task.file.file_id,
+            folder_name=task.folder_name,
+            file_name=task.file.file_name,
+            model_label=reader.label,
+            model_name=reader.name,
+            method=METHOD_LABELS[METHOD_IMAGE],
+            result="失敗:file_error",
+            settings=settings,
+            error_detail=detail,
+        )
+
     # ── 1 ファイル（作業スレッド） ────────────────────────
     def _process_file(self, task: _FileTask):
         file = task.file
@@ -871,52 +911,48 @@ class CompareRunner:
                         extra={"step": "compare_time_budget_model"},
                     )
                     break
-                if reader.vendor == VENDOR_GEMINI:
-                    ai_config = self._model_ai_config(reader)
-                    extractor = self._resources.extractor(reader, ai_config)
-                    settings = settings_text(
-                        ai_config.temperature,
-                        ai_config.thinking_level,
-                        ai_config.max_tokens,
-                        getattr(ai_config, "prompt_version", "v1"),
+                # 読み手の失敗はその読み手だけに留める（§14.1）。読み手を作る所も囲む
+                try:
+                    ai_config, settings = self._reader_ai_settings(reader)
+                    if reader.vendor == VENDOR_GEMINI:
+                        extractor = self._resources.extractor(reader, ai_config)
+                    else:
+                        extractor = self._resources.reader(reader, ai_config)
+                    outcome, retries = extract_with_retries(
+                        lambda: extract_once(extractor, METHOD_IMAGE, ocr, file),
+                        sleeps=self._retry_sleeps,
+                        sleep=self._sleep,
+                        should_stop=self._time_over_budget,
                     )
-                else:
-                    ai_config = self._reader_ai_config(reader)
-                    extractor = self._resources.reader(reader, ai_config)
-                    settings = reader_settings_text(
-                        reader.vendor,
-                        reader.thinking_level,
-                        ai_config.max_tokens,
-                        getattr(ai_config, "prompt_version", "v1"),
+                    row = make_result_row(
+                        run_label=self._compare.run_label,
+                        recorded_at=recorded_at,
+                        file=file,
+                        folder_name=task.folder_name,
+                        model_label=reader.label,
+                        model_name=reader.name,
+                        method=METHOD_IMAGE,
+                        outcome=outcome,
+                        retries=retries,
+                        settings=settings,
+                        ocr_text=ocr_text,
                     )
-                outcome, retries = extract_with_retries(
-                    lambda: extract_once(extractor, METHOD_IMAGE, ocr, file),
-                    sleeps=self._retry_sleeps,
-                    sleep=self._sleep,
-                    should_stop=self._time_over_budget,
-                )
-                row = make_result_row(
-                    run_label=self._compare.run_label,
-                    recorded_at=recorded_at,
-                    file=file,
-                    folder_name=task.folder_name,
-                    model_label=reader.label,
-                    model_name=reader.name,
-                    method=METHOD_IMAGE,
-                    outcome=outcome,
-                    retries=retries,
-                    settings=settings,
-                    ocr_text=ocr_text,
-                )
-                if row.cost_usd is None:
-                    row.cost_usd = estimate_cost(
-                        self._compare.prices,
-                        reader.label,
-                        row.input_tokens,
-                        row.output_tokens,
-                        row.thinking_tokens,
+                    if row.cost_usd is None:
+                        row.cost_usd = estimate_cost(
+                            self._compare.prices,
+                            reader.label,
+                            row.input_tokens,
+                            row.output_tokens,
+                            row.thinking_tokens,
+                        )
+                    rows.append(row)
+                except Exception as error:
+                    logger.error(
+                        f"読み手の処理で予期しない例外: {file.file_name}: {reader.label}: "
+                        f"{type(error).__name__}: {self._redact_secrets(error)}",
+                        extra={"step": "compare_reader_error"},
                     )
-                rows.append(row)
+                    rows.append(self._reader_error_row(task, reader, error, recorded_at))
         except Exception as error:
             logger.error(
                 f"ファイル処理で予期しない例外: {file.file_name}: {self._redact_secrets(error)}",
@@ -955,10 +991,15 @@ class CompareRunner:
         result_rows: list[dict],
         answer_rows: list[dict],
         multi_rows: list[dict] | None,
-    ) -> None:
-        """形の 2 つのタブだけを消して書き直す（R6・R8）。"""
+    ) -> bool:
+        """形の 2 つのタブだけを消して書き直す（R6・R8）。
+
+        計算か書き込みに失敗したら、例外の型と伏せた文をログに出して偽を返す
+        （呼んだ実行は終了コード 1。§14.2）。
+        """
         try:
             base_label = self._resolve_form_base(result_rows)
+            # 2 つのタブの行を両方作ってから書く（片方だけ新しくしない）
             tables = build_form_tables(
                 result_rows=result_rows,
                 ocr_rows=self._ocr_rows(label),
@@ -974,7 +1015,7 @@ class CompareRunner:
                     "形のタブは作りません（主の読み手の行がありません）",
                     extra={"step": "compare_forms"},
                 )
-                return
+                return True
             summary_title = form_tab_name(label)
             detail_title = form_detail_tab_name(label)
             self._sheet.ensure_tab(summary_title, FORM_HEADERS, check_headers=False)
@@ -985,11 +1026,13 @@ class CompareRunner:
                 f"形を計算しました: {label}（{len(tables.metrics)} の形）",
                 extra={"step": "compare_forms"},
             )
+            return True
         except Exception as error:
-            logger.warning(
-                f"形を書けません: {type(error).__name__}",
+            logger.error(
+                f"形を書けません: {type(error).__name__}: {self._redact_secrets(error)}",
                 extra={"step": "compare_forms"},
             )
+            return False
 
     def _file_error_rows(
         self, task: _FileTask, error: Exception, recorded_at: str
@@ -1030,22 +1073,7 @@ class CompareRunner:
         for reader in task.readers:
             if reader.label in self._unusable:
                 continue
-            if reader.vendor == VENDOR_GEMINI:
-                ai_config = self._model_ai_config(reader)
-                settings = settings_text(
-                    ai_config.temperature,
-                    ai_config.thinking_level,
-                    ai_config.max_tokens,
-                    getattr(ai_config, "prompt_version", "v1"),
-                )
-            else:
-                ai_config = self._reader_ai_config(reader)
-                settings = reader_settings_text(
-                    reader.vendor,
-                    reader.thinking_level,
-                    ai_config.max_tokens,
-                    getattr(ai_config, "prompt_version", "v1"),
-                )
+            _, settings = self._reader_ai_settings(reader)
             rows.append(
                 CompareRow(
                     run_label=self._compare.run_label,
@@ -1104,11 +1132,10 @@ def _default_reader_checker(config: AppConfig, timeout: int):
 
 
 def _redact_config_secrets(text, config: AppConfig) -> str:
-    value = str(text)
-    for key in (config.gemini_api_key, config.anthropic_api_key, config.openai_api_key):
-        if key:
-            value = value.replace(str(key), "***")
-    return value
+    return redact_secrets(
+        text,
+        (config.gemini_api_key, config.anthropic_api_key, config.openai_api_key),
+    )
 
 
 def _missing_reader_keys(config: AppConfig, compare_config: CompareConfig) -> list[str]:
@@ -1201,7 +1228,17 @@ def run_compare(
     def _default_reader_factory(ai_config):
         vendor = vendor_of(ai_config.model)
         api_key = config.anthropic_api_key if vendor == VENDOR_ANTHROPIC else config.openai_api_key
-        return create_compare_reader(ai_config.model, ai_config, api_key=api_key)
+        return create_compare_reader(
+            ai_config.model,
+            ai_config,
+            api_key=api_key,
+            # どれかの会社の鍵が例外の文に混ざっても伏せる（R4）
+            redact_keys=(
+                config.gemini_api_key,
+                config.anthropic_api_key,
+                config.openai_api_key,
+            ),
+        )
 
     if reader_factory is None:
         reader_factory = _default_reader_factory

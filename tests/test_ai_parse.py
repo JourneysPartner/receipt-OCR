@@ -101,6 +101,7 @@ class TestCalcFields:
         items, _ = parse_receipt_items(
             '{"amount":1600,"pretax":1455,"tax":145,"tendered":2000,"change":400}',
             "t.jpg",
+            read_calc_fields=True,
         )
         assert (items[0].pretax, items[0].tax, items[0].tendered, items[0].change) == (
             1455,
@@ -113,6 +114,7 @@ class TestCalcFields:
         items, _ = parse_receipt_items(
             '{"amount":1600,"pretax":"1455","tax":true,"tendered":-1,"change":1.5}',
             "t.jpg",
+            read_calc_fields=True,
         )
         assert items[0].pretax is None
         assert items[0].tax is None
@@ -120,12 +122,14 @@ class TestCalcFields:
         assert items[0].change is None
 
     def test_negative_change_is_none(self):
-        items, error = parse_receipt_items('{"amount":1600,"change":-200}', "t.jpg")
+        items, error = parse_receipt_items(
+            '{"amount":1600,"change":-200}', "t.jpg", read_calc_fields=True
+        )
         assert error is None
         assert items[0].change is None
 
     def test_zero_is_kept(self):
-        items, _ = parse_receipt_items('{"amount":1600,"change":0}', "t.jpg")
+        items, _ = parse_receipt_items('{"amount":1600,"change":0}', "t.jpg", read_calc_fields=True)
         assert items[0].change == 0
 
     def test_v1_v2_leave_the_fields_none(self):

@@ -13,9 +13,8 @@ from src.compare.normalize import (
     FIELD_DATE,
     normalize_date,
     parse_amount_cell,
-    value_matches_answer,
 )
-from src.compare.score import expected_receipts, format_ratio, multi_by_file
+from src.compare.score import assign_auto, expected_receipts, format_ratio, multi_by_file
 from src.compare.sheet import FORM_DETAIL_HEADERS, FORM_HEADERS
 from src.processing.reconcile import reconcile
 
@@ -52,8 +51,10 @@ class ReadingFile:
     ocr_text: str = ""
     page_count: int = 1
     page_count_known: bool = True
+    has_ocr_row: bool = True
     costs: dict[tuple[str, str], float | None] = field(default_factory=dict)
     dual_flags: list[bool] | None = None
+    dual_saved: bool = False
 
 
 @dataclass
@@ -201,7 +202,12 @@ def build_inputs(result_rows: list[dict], ocr_rows: list[dict], base_label: str)
         text_row = methods.get((base_label, METHOD_TEXT))
         if image_row is None or text_row is None:
             continue
-        ocr_text, page_count, known = ocr_by_file.get(file_id, ("", 1, False))
+        if file_id in ocr_by_file:
+            ocr_text, page_count, known = ocr_by_file[file_id]
+            has_ocr_row = True
+        else:
+            # Vision を呼んでいないファイルは 0 ページで数える（§14.4）
+            ocr_text, page_count, known, has_ocr_row = "", 0, True, False
         costs: dict[tuple[str, str], float | None] = {}
         for (label, method), row in methods.items():
             costs[(label, method)] = _cost_of(row.get("推定費用USD"))
@@ -213,12 +219,7 @@ def build_inputs(result_rows: list[dict], ocr_rows: list[dict], base_label: str)
             readers[label] = items_from_row(row) if _text(row.get("結果")) == SUCCESS else []
 
         dual_row = methods.get((base_label, METHOD_DUAL))
-        dual_flags = None
-        if dual_row is not None:
-            items = items_from_row(dual_row) or []
-            dual_flags = [_text(entry.get("r")) == "自動" for entry in _parse_entries(dual_row)]
-            if len(dual_flags) != len(items):
-                dual_flags = None
+        dual_flags = _saved_dual_flags(dual_row) if dual_row is not None else None
 
         files.append(
             ReadingFile(
@@ -235,25 +236,32 @@ def build_inputs(result_rows: list[dict], ocr_rows: list[dict], base_label: str)
                 ocr_text=ocr_text,
                 page_count=page_count,
                 page_count_known=known,
+                has_ocr_row=has_ocr_row,
                 costs=costs,
                 dual_flags=dual_flags,
+                dual_saved=dual_row is not None,
             )
         )
     files.sort(key=lambda entry: (entry.folder_name, entry.file_name, entry.file_id))
     return files, labels
 
 
-def _parse_entries(row: dict) -> list[dict]:
+def _saved_dual_flags(row: dict) -> list[bool] | None:
+    """保存された `両読み` の `明細JSON` の `r`。比べられなければ None（§14.4）。"""
     raw = _text(row.get("明細JSON"))
     if not raw:
-        return []
+        return None
     try:
         data = json.loads(raw)
     except (TypeError, ValueError):
-        return []
+        return None
     if not isinstance(data, list):
-        return []
-    return [entry for entry in data if isinstance(entry, dict)]
+        return None
+    entries = [entry for entry in data if isinstance(entry, dict)]
+    items = items_from_row(row)
+    if len(entries) != len(items):
+        return None
+    return [_text(entry.get("r")) == "自動" for entry in entries]
 
 
 def _answers(
@@ -270,30 +278,22 @@ def _complete(expected: list[dict]) -> bool:
     )
 
 
-def _assign_auto(auto: list, expected: list[dict]) -> bool:
-    used: set[int] = set()
-    for item in auto:
-        for index, receipt in enumerate(expected):
-            if index in used:
-                continue
-            if value_matches_answer(
-                FIELD_DATE, item.date, receipt.get(FIELD_DATE)
-            ) and value_matches_answer(FIELD_AMOUNT, item.amount, receipt.get(FIELD_AMOUNT)):
-                used.add(index)
-                break
-        else:
-            return False
-    return True
-
-
 def grade(items: list, flags: list[bool], expected: list[dict]) -> str:
-    """§8.3 の 3 つ（重ならない）。答えがそろっていなければ `答えなし`。"""
+    """§8.3 の 3 つ（重ならない）。答えがそろっていなければ `答えなし`。
+
+    `答えなし` の除外だけをここに残し、自動の明細の当て方は `score.py` の
+    同じ関数（`assign_auto`）を使う（§14.4）。
+    """
     if not _complete(expected) or len(items) != len(flags):
         return GRADE_NO_ANSWER
     if not items:
         return GRADE_REVIEW
-    auto = [item for item, flag in zip(items, flags, strict=True) if flag]
-    if not _assign_auto(auto, expected):
+    auto = [
+        {FIELD_DATE: item.date, FIELD_AMOUNT: item.amount}
+        for item, flag in zip(items, flags, strict=True)
+        if flag
+    ]
+    if not assign_auto(auto, expected):
         return GRADE_WRONG
     if all(flags) and len(items) < len(expected):
         return GRADE_WRONG
@@ -345,7 +345,8 @@ def _b(file: ReadingFile, reader: str, expected: list[dict]) -> FileResult:
         for index, decision in enumerate(other):
             if index >= len(flags):
                 break
-            if decision.matched:
+            # D0 で合っていた明細は `一致` のまま（§14.4）
+            if decision.matched and not flags[index]:
                 flags[index] = True
                 labels[index] = "一致（もう1人）"
     return FileResult(
@@ -531,12 +532,23 @@ def build_form_tables(
         vision = result.file.page_count * ocr_price_per_page
         return image + text + vision, image_absent + text_absent
 
-    old_ocr = sum(1 for file in files if not file.page_count_known)
+    old_ocr = sum(1 for file in files if file.has_ocr_row and not file.page_count_known)
+    missing_ocr = sum(1 for file in files if not file.has_ocr_row)
+    uncomparable_dual = sum(
+        1
+        for file, result in zip(files, current_results, strict=True)
+        if file.dual_saved
+        and (file.dual_flags is None or len(file.dual_flags) != len(result.flags))
+    )
     current_note = []
     if missing_base:
         current_note.append(f"主の読みがそろわないファイル {missing_base}")
     if old_ocr:
         current_note.append(f"ページ数の無い古いOCRタブ {old_ocr}（1 ページで数えた）")
+    if missing_ocr:
+        current_note.append(f"OCR の行が無いファイル {missing_ocr}")
+    if uncomparable_dual:
+        current_note.append(f"両読みの保存と比べられないファイル {uncomparable_dual}")
     mismatch = _dual_mismatches(files, current_results)
     if mismatch:
         current_note.append(f"両読みの保存と違うファイル {mismatch}")

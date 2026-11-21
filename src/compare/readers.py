@@ -7,6 +7,7 @@ import しない。画像を送るかどうかは `COMPARE_READERS` にその会
 """
 
 import base64
+import re
 import time
 
 from src.ai import prompts
@@ -28,6 +29,19 @@ DEFAULT_TIMEOUT_SECONDS = 180
 ANTHROPIC_IMAGE_BASE64_LIMIT = 10 * 1024 * 1024
 ANTHROPIC_PDF_LIMIT = 32 * 1024 * 1024
 OPENAI_FILE_LIMIT = 50 * 1024 * 1024
+
+# 一部を伏せた鍵（例 `Incorrect API key provided: sk-fake***************BBB`）も
+# ログ・表に出さない（仕様 §14.4）。`*` か `…` を含む `sk-` の並びだけを置き換える。
+MASKED_KEY_RE = re.compile(r"sk-[A-Za-z0-9_.*…-]*[*…][A-Za-z0-9_.*…-]*")
+
+
+def redact_secrets(value, keys=()) -> str:
+    """鍵の値と、一部を伏せた鍵の並びを `***` にする（R4）。"""
+    text = str(value)
+    for key in keys:
+        if key:
+            text = text.replace(str(key), "***")
+    return MASKED_KEY_RE.sub("***", text)
 
 
 def _prompt_version(config) -> str:
@@ -66,18 +80,19 @@ def _error_code(error, status_cls, connection_cls) -> int | None:
 class _ReaderBase(AiExtractor):
     provider = ""
 
-    def __init__(self, config, api_key: str | None = None):
+    def __init__(self, config, api_key: str | None = None, redact_keys=None):
         super().__init__()
         self._config = config
         self._api_key = api_key
+        keys = list(redact_keys or ())
+        if api_key:
+            keys.append(api_key)
+        self._redact_keys = tuple(str(key) for key in keys if key)
         self.last_call_info: dict | None = None
 
     def _redact(self, value) -> str:
-        """鍵の値を例外の文・ログに出さない（R4）。"""
-        text = str(value)
-        if self._api_key:
-            text = text.replace(str(self._api_key), "***")
-        return text
+        """鍵の値を例外の文・ログに出さない（R4・§14.4）。"""
+        return redact_secrets(value, self._redact_keys)
 
     def extract_receipt_data(self, ocr_result, file_name):
         raise NotImplementedError("読み手は文字からは読みません")
@@ -133,7 +148,11 @@ class _ReaderBase(AiExtractor):
         return False
 
     def _finish_items(self, text: str | None, file_name: str, info: dict) -> list:
-        """返った文を明細にする。文が無ければ `疑似 api_error`（empty_response）。"""
+        """返った文を明細にする。文が無ければ `疑似 api_error`（empty_response）。
+
+        明細にする所で例外が出ても外へ出さない（§14.1）。その読み手だけ
+        `api_error`（やり直さない）にし、伏せた文を `error` に残す。
+        """
         if not text:
             info["raw_text"] = None
             info["error"] = None
@@ -141,10 +160,22 @@ class _ReaderBase(AiExtractor):
             self.last_extraction_error = "api_error"
             return []
         info["raw_text"] = text
+        try:
+            items, error = parse_receipt_items(
+                text, file_name, read_calc_fields=_prompt_version(self._config) == "v3"
+            )
+        except Exception as exception:  # モデルの返りが明細の形でない（§14.1）
+            info["error"] = self._redact(f"{type(exception).__name__}: {exception}")
+            info["error_code"] = None
+            self.last_call_info = info
+            self.last_extraction_error = "api_error"
+            logger.error(
+                f"読み手({self.provider}): {file_name} の返りを明細にできません: "
+                f"{type(exception).__name__}",
+                extra={"step": "compare_reader"},
+            )
+            return []
         self.last_call_info = info
-        items, error = parse_receipt_items(
-            text, file_name, read_calc_fields=_prompt_version(self._config) == "v3"
-        )
         self.last_extraction_error = error
         logger.info(
             f"読み手({self.provider}): {file_name} → {len(items)} 明細 (error={error})",
@@ -169,8 +200,8 @@ class _ReaderBase(AiExtractor):
 class AnthropicReader(_ReaderBase):
     provider = VENDOR_ANTHROPIC
 
-    def __init__(self, config, api_key: str | None = None):
-        super().__init__(config, api_key)
+    def __init__(self, config, api_key: str | None = None, redact_keys=None):
+        super().__init__(config, api_key, redact_keys)
         import anthropic  # R1: 読み手を作るときだけ import する
 
         self._anthropic = anthropic
@@ -261,8 +292,8 @@ class AnthropicReader(_ReaderBase):
 class OpenAIReader(_ReaderBase):
     provider = VENDOR_OPENAI
 
-    def __init__(self, config, api_key: str | None = None):
-        super().__init__(config, api_key)
+    def __init__(self, config, api_key: str | None = None, redact_keys=None):
+        super().__init__(config, api_key, redact_keys)
         import openai  # R1: 読み手を作るときだけ import する
 
         self._openai = openai
@@ -384,15 +415,15 @@ def create_model_checker(
     raise ValueError("Gemini の型は Gemini の models.get で確かめてください")
 
 
-def create_compare_reader(model_name: str, config, api_key: str | None = None):
+def create_compare_reader(model_name: str, config, api_key: str | None = None, redact_keys=None):
     """型名から読み手を作る。Gemini は呼ばない（runner が GeminiExtractor を使う）。"""
     vendor = reader_vendor_or_error(model_name)
     if vendor == VENDOR_GEMINI:
         raise ValueError("Gemini の読み手は GeminiExtractor を使ってください")
     if vendor == VENDOR_ANTHROPIC:
-        return AnthropicReader(config, api_key=api_key)
+        return AnthropicReader(config, api_key=api_key, redact_keys=redact_keys)
     if vendor == VENDOR_OPENAI:
-        return OpenAIReader(config, api_key=api_key)
+        return OpenAIReader(config, api_key=api_key, redact_keys=redact_keys)
     raise ValueError(f"未対応の読み手です: {model_name!r}")
 
 

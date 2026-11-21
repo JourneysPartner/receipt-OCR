@@ -5,6 +5,7 @@
 """
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -223,11 +224,16 @@ def _parse_readers(
     raw: str | None,
     models: tuple[CompareModel, ...],
     default_thinking: str | None,
+    *,
+    check_overlap: bool = True,
 ) -> tuple[CompareModel, ...]:
     """COMPARE_READERS を読む（仕様 §4）。
 
     Gemini は `@` が無ければ AI_THINKING_LEVEL に従う。Anthropic・OpenAI は
     low / medium / high だけ。`@` が無ければ何も送らない（その型の既定）。
+    考える量は `COMPARE_MODELS` と同じく大文字でも受け、表の「型」は
+    書いたまま（§14.4）。score は読み手を呼ばないので、`COMPARE_MODELS` との
+    同じ要素の検査をしない（`check_overlap=False`）。
     """
     text = (raw or "").strip()
     if not text:
@@ -239,8 +245,6 @@ def _parse_readers(
         element = part.strip()
         if not element:
             continue
-        if not _MODEL_ELEMENT_RE.match(element):
-            raise ValueError(f"COMPARE_READERS の要素が不正です (received={element!r})")
         label = element
         name = element
         thinking: str | None = None
@@ -248,7 +252,16 @@ def _parse_readers(
             name, _, level = element.partition("@")
             name = name.strip()
             level = level.strip().lower()
-            thinking = level or None
+            if not level:
+                raise ValueError(f"COMPARE_READERS の @考える量 が空です (received={element!r})")
+            if level not in THINKING_LEVELS:
+                raise ValueError(
+                    f"COMPARE_READERS の考える量は {' / '.join(THINKING_LEVELS)} のいずれか "
+                    f"(received={level!r})"
+                )
+            thinking = level
+        if not _MODEL_NAME_RE.match(name):
+            raise ValueError(f"COMPARE_READERS の要素が不正です (received={element!r})")
         vendor = reader_vendor_or_error(name)
         if vendor == VENDOR_GEMINI:
             if thinking is None:
@@ -259,7 +272,7 @@ def _parse_readers(
                     "COMPARE_READERS の Anthropic・OpenAI の考える量は "
                     "low / medium / high のいずれか (received='minimal')"
                 )
-        if label in base_labels:
+        if check_overlap and label in base_labels:
             raise ValueError(
                 f"COMPARE_READERS と COMPARE_MODELS に同じ要素は書けません (received={label!r})"
             )
@@ -278,6 +291,8 @@ def _require_float(env: dict, name: str, default: float, *, minimum: float) -> f
         value = float(str(raw).strip())
     except ValueError as e:
         raise ValueError(f"{name} は数値でなければなりません (received={raw!r})") from e
+    if not math.isfinite(value):  # nan / inf を受け付けない（§14.4）
+        raise ValueError(f"{name} は有限の数でなければなりません (received={value})")
     if value < minimum:
         raise ValueError(f"{name} は {minimum} 以上でなければなりません (received={value})")
     return value
@@ -396,7 +411,7 @@ def load_compare_config(env, now: datetime | None = None) -> CompareConfig:
 
     default_thinking = _parse_ai_thinking_level(env.get("AI_THINKING_LEVEL"))
     readers_raw = env.get("COMPARE_READERS")
-    readers = _parse_readers(readers_raw, models, default_thinking)
+    readers = _parse_readers(readers_raw, models, default_thinking, check_overlap=step != "score")
     ocr_price = _require_float(
         env,
         "COMPARE_OCR_PRICE_PER_PAGE_USD",

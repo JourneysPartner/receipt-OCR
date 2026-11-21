@@ -291,6 +291,25 @@ class TestB:
         assert detail["呼んだ"] == "はい"
         assert detail["自動の明細"] == 1
 
+    def test_d0_match_keeps_the_plain_label(self):
+        rows = _base_rows(
+            "F1",
+            _items(("2026-01-02", 1600), ("2026-01-02", 500)),
+            _items(("2026-01-02", 1600), ("2026-01-02", 700)),
+        )
+        rows.append(
+            _row("F1", READER, "画像から", _items(("2026-01-02", 1600), ("2026-01-02", 500)))
+        )
+        multi = [
+            {"fileId": "F1", "番号": "1", "正解_日付": "2026-01-02", "正解_金額": "1600"},
+            {"fileId": "F1", "番号": "2", "正解_日付": "2026-01-02", "正解_金額": "500"},
+        ]
+        tables = _tables(rows, [], multi_rows=multi, ocr_rows=[_ocr("F1")])
+        detail = _detail(tables, FORM_B, READER)
+        # D0 で合っていた 1600 は `一致`、D0 が合わず Dx が合った 500 だけ `一致（もう1人）`
+        assert detail["判定"] == "一致・一致（もう1人）"
+        assert detail["自動の明細"] == 2
+
     def test_auto_of_b_includes_auto_of_current(self):
         rows = _base_rows(
             "F1",
@@ -380,6 +399,14 @@ class TestCosts:
         assert "ページ数の無い古いOCRタブ 1" in metric["注"]
 
 
+class TestSharedGrading:
+    def test_forms_use_the_shared_assign_auto(self, monkeypatch):
+        monkeypatch.setattr(forms, "assign_auto", lambda auto, expected: False)
+        rows = _base_rows("F1", _items(("2026-01-02", 1600)), _items(("2026-01-02", 1600)))
+        tables = _tables(rows, [_answer("F1")], ocr_rows=[_ocr("F1")])
+        assert _detail(tables, FORM_CURRENT)["成績"] == GRADE_WRONG
+
+
 class TestDualMismatch:
     def test_saved_dual_difference_is_noted(self):
         rows = _base_rows("F1", _items(("2026-01-02", 1600)), _items(("2026-01-02", 1600)))
@@ -394,6 +421,46 @@ class TestDualMismatch:
         )
         tables = _tables(rows, [_answer("F1")], ocr_rows=[_ocr("F1")])
         assert "両読みの保存と違うファイル 1" in _metric(tables, FORM_CURRENT)["注"]
+
+
+class TestMissingRows:
+    def test_file_without_an_ocr_row_uses_zero_pages_and_is_noted(self):
+        rows = _base_rows("F1", _items(("2026-01-02", 1600)), _items(("2026-01-02", 1600)))
+        tables = _tables(rows, [_answer("F1")], ocr_rows=[], price=0.5)
+        metric = _metric(tables, FORM_CURRENT)
+        assert "OCR の行が無いファイル 1" in metric["注"]
+        assert "ページ数の無い古いOCRタブ" not in metric["注"]
+        assert metric["推定費用USD"] == f"{0.01 + 0.02:.6f}"
+
+    def test_empty_saved_dual_is_noted_as_uncomparable(self):
+        rows = _base_rows("F1", _items(("2026-01-02", 1600)), _items(("2026-01-02", 1600)))
+        dual = _row("F1", BASE, "両読み", _items(("2026-01-02", 1600)))
+        dual["明細JSON"] = ""
+        rows.append(dual)
+        tables = _tables(rows, [_answer("F1")], ocr_rows=[_ocr("F1")])
+        note = _metric(tables, FORM_CURRENT)["注"]
+        assert "両読みの保存と比べられないファイル 1" in note
+        assert "両読みの保存と違うファイル" not in note
+
+    def test_saved_dual_with_a_different_item_count_is_noted_as_uncomparable(self):
+        rows = _base_rows(
+            "F1",
+            _items(("2026-01-02", 1600), ("2026-01-02", 500)),
+            _items(("2026-01-02", 1600), ("2026-01-02", 500)),
+        )
+        rows.append(
+            _row(
+                "F1",
+                BASE,
+                "両読み",
+                _items(("2026-01-02", 1600)),
+                r_flags=["自動"],
+            )
+        )
+        tables = _tables(rows, [_answer("F1")], ocr_rows=[_ocr("F1")])
+        note = _metric(tables, FORM_CURRENT)["注"]
+        assert "両読みの保存と比べられないファイル 1" in note
+        assert "両読みの保存と違うファイル" not in note
 
 
 class TestNoForms:

@@ -291,8 +291,11 @@ def _auto_receipts(row: dict) -> list[dict] | None:
     return [item for item in receipts if _text(item.get(RECEIPT_AUTO_KEY)) == AUTO]
 
 
-def _assign_auto(auto: list[dict], expected: list[dict]) -> bool:
-    """自動の明細を、答えのまだ使っていないレシートに 1 対 1 で当てる。"""
+def assign_auto(auto: list[dict], expected: list[dict]) -> bool:
+    """自動の明細を、答えのまだ使っていないレシートに 1 対 1 で当てる。
+
+    `forms.py` もこの同じ関数を使う（仕様 §14.4。写しを作らない）。
+    """
     used: set[int] = set()
     for item in auto:
         for index, expected_item in enumerate(expected):
@@ -338,7 +341,7 @@ def _auto_counts(
             # レシートが抜けたまま済みになる（監査 M4）
             wrong += 1
             continue
-        if not _assign_auto(auto, expected):
+        if not assign_auto(auto, expected):
             wrong += 1
             continue
         if result == AUTO and len(auto) == len(expected):
