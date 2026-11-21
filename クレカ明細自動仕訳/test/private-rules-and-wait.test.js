@@ -729,22 +729,31 @@ module.exports = ({test, assert, gas}) => {
       shortcutUnreadable: {name: '架空ショートカット3', contentType: shortcutMime,
         targetId: 'missingTarget', targetMimeType: spreadsheetMime,
         lastUpdated: minutesBefore(2), lastModifyingUser: {me: true}},
+      targetNoUser: {name: '架空の指す先D', contentType: spreadsheetMime,
+        lastUpdated: minutesBefore(2)},
+      shortcutTargetNoUser: {name: '架空ショートカット5', contentType: shortcutMime,
+        targetId: 'targetNoUser', targetMimeType: spreadsheetMime,
+        lastUpdated: minutesBefore(30), lastModifyingUser: {me: true}},
       shortcutOld: {name: '架空ショートカット4', contentType: shortcutMime,
         targetId: 'targetOld', targetMimeType: spreadsheetMime,
         lastUpdated: minutesBefore(2), lastModifyingUser: {me: false}}
     };
-    scanWorld(files, {}, ['shortcutMine', 'shortcutOwnOnly', 'shortcutUnreadable', 'shortcutOld']);
+    scanWorld(files, {}, ['shortcutMine', 'shortcutOwnOnly', 'shortcutUnreadable',
+      'shortcutTargetNoUser', 'shortcutOld']);
     const result = scannerCandidates();
     assert.deepEqual(result.candidates.map((item) => item.fileId).sort(),
       ['shortcutMine', 'shortcutOld'],
       '指す先が 10 分より前、または指す先の me が true なら候補');
     assert.deepEqual(result.waiting.map((item) => item.fileId).sort(),
-      ['shortcutOwnOnly', 'shortcutUnreadable'],
-      'ショートカット自身の me では外さず、指す先が読めないときも待つ');
+      ['shortcutOwnOnly', 'shortcutTargetNoUser', 'shortcutUnreadable'],
+      'ショートカット自身の me では外さず、指す先が読めない・欄が無いときも待つ');
     const waitingById = {};
     result.waiting.forEach((item) => { waitingById[item.fileId] = item; });
     assert.equal(Date.parse(waitingById.shortcutOwnOnly.readyAt),
       readyAtOf(files.targetOther), '待ちは指す先の日時で今と同じ');
+    assert.equal(Date.parse(waitingById.shortcutTargetNoUser.readyAt),
+      readyAtOf(files.targetNoUser),
+      '指す先に lastModifyingUser が無いときも、自身の me: true では外さず指す先の日時で待つ');
     assert.equal(Date.parse(waitingById.shortcutUnreadable.readyAt),
       readyAtOf(files.shortcutUnreadable), '読めないときは自身の日時で今と同じ');
   });
@@ -812,6 +821,9 @@ module.exports = ({test, assert, gas}) => {
     const disc = put('f14_disc', {lastUpdated: at(2), lastModifyingUser: {me: true}});
     const old = put('f14_old', {lastUpdated: at(20), lastModifyingUser: {me: true}});
     const failing = put('f14_failing', {lastUpdated: at(2), lastModifyingUser: {me: true}});
+    const completed = put('f14_completed', {lastUpdated: at(2), lastModifyingUser: {me: true}});
+    const unsupported = put('f14_unsupported', {name: '架空_f14_unsupported.pdf',
+      contentType: 'application/pdf', lastUpdated: at(2), lastModifyingUser: {me: true}});
     put('f14_target', {lastUpdated: at(2), lastModifyingUser: {me: true}});
     const shortcutMine = put('f14_shortcut_mine', {contentType: shortcutMime,
       targetId: 'f14_target', targetMimeType: spreadsheetMime,
@@ -836,7 +848,10 @@ module.exports = ({test, assert, gas}) => {
         old: plain(call('webAppFolderFile_', [old, {}, nowMs])),
         shortcutMine: plain(call('webAppFolderFile_', [shortcutMine, {}, nowMs])),
         shortcutUnreadable: plain(call('webAppFolderFile_',
-          [shortcutUnreadable, {}, nowMs]))
+          [shortcutUnreadable, {}, nowMs])),
+        completed: plain(call('webAppFolderFile_',
+          [completed, {f14_completed: 'COMPLETED'}, nowMs])),
+        unsupported: plain(call('webAppFolderFile_', [unsupported, {}, nowMs]))
       };
       rows.failing = plain(call('webAppFolderFile_', [failing, {}, nowMs]));
     } finally {
@@ -855,9 +870,15 @@ module.exports = ({test, assert, gas}) => {
       '指す先の日時が読めないときは Drive を呼ばずに待つ');
     assert.equal(rows.failing.stateLabel, '取込待ち（あと 8 分）',
       'Drive が読めないときは今のまま待つ');
+    assert.equal(rows.completed.stateLabel, '完了 (COMPLETED)',
+      '記帳済みは待ちの分でラベルが変わらない');
+    assert.equal(rows.completed.importable, false);
+    assert.equal(rows.unsupported.stateLabel, '対象外',
+      '取り込めない種類は待ちの分でラベルが変わらない');
+    assert.equal(rows.unsupported.importable, false);
     assert.deepEqual(calls.map((item) => item.fileId),
       ['f14_mine', 'f14_other', 'f14_disc', 'f14_target', 'f14_failing'],
-      '10 分以内のファイルだけを 1 回ずつ（ショートカットは指す先）');
+      '取り込める未登録・DISCOVERED の 10 分以内だけを 1 回ずつ（ショートカットは指す先）');
     calls.forEach((item) => {
       assert.equal(item.request.fields, 'lastModifyingUser(me)');
       assert.equal(item.request.supportsAllDrives, true);
@@ -876,6 +897,17 @@ module.exports = ({test, assert, gas}) => {
     };
     const mine = put('f15_mine', {me: true});
     const other = put('f15_other', {me: false});
+    const targetMine = put('f15_target_mine', {me: true});
+    const targetOther = put('f15_target_other', {me: false});
+    function putShortcut(fileId, targetId) {
+      gas.stubs.createFile(fileId, {name: '架空_' + fileId + '.csv', bytes: Buffer.from('a'),
+        contentType: shortcutMime, targetId: targetId, targetMimeType: spreadsheetMime,
+        lastUpdated: at(3.5), lastModifyingUser: {me: true},
+        createdTime: '2026-08-01T00:00:00Z'});
+      return gas.stubs.getFile(fileId);
+    }
+    const shortcutMine = putShortcut('f15_shortcut_mine', String(targetMine.getId()));
+    const shortcutOther = putShortcut('f15_shortcut_other', String(targetOther.getId()));
 
     function recheck(file) {
       return plain(withMocks({
@@ -907,6 +939,25 @@ module.exports = ({test, assert, gas}) => {
     const otherRecheck = recheck(other);
     const mineRecover = recover(mine);
     const otherRecover = recover(other);
+    const calls = [];
+    const driveFiles = gas.context.Drive.Files;
+    const originalGet = driveFiles.get;
+    driveFiles.get = function(fileId, request) {
+      calls.push(String(fileId));
+      return originalGet.call(driveFiles, fileId, request);
+    };
+    let shortcutMineRecheck;
+    let shortcutOtherRecheck;
+    let shortcutMineRecover;
+    let shortcutOtherRecover;
+    try {
+      shortcutMineRecheck = recheck(shortcutMine);
+      shortcutOtherRecheck = recheck(shortcutOther);
+      shortcutMineRecover = recover(shortcutMine);
+      shortcutOtherRecover = recover(shortcutOther);
+    } finally {
+      driveFiles.get = originalGet;
+    }
     assert.equal(mineRecheck.ok, true, JSON.stringify(mineRecheck));
     assert.equal(mineRecheck.waitMinutes, 0);
     assert.equal(otherRecheck.waitMinutes,
@@ -917,6 +968,20 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(otherRecover.waitMinutes,
       call('webAppStableWaitMinutes_', [other.getLastUpdated().getTime(), Date.now()]));
     assert.ok(otherRecover.waitMinutes > 0);
+
+    assert.deepEqual(calls,
+      ['f15_target_mine', 'f15_target_other', 'f15_target_mine', 'f15_target_other'],
+      '戻す・復帰のショートカットは指す先の ID で Drive に聞く');
+    assert.equal(shortcutMineRecheck.waitMinutes, 0);
+    assert.equal(shortcutMineRecover.waitMinutes, 0);
+    assert.equal(shortcutOtherRecheck.waitMinutes,
+      call('webAppStableWaitMinutes_', [shortcutOther.getLastUpdated().getTime(), Date.now()]),
+      '指す先の me が true でなければ今の値');
+    assert.equal(shortcutOtherRecover.waitMinutes,
+      call('webAppStableWaitMinutes_', [shortcutOther.getLastUpdated().getTime(), Date.now()]),
+      '指す先の me が true でなければ今の値');
+    assert.ok(shortcutOtherRecheck.waitMinutes > 0);
+    assert.ok(shortcutOtherRecover.waitMinutes > 0);
   });
 
   // ---------------- pvr 16: 要確認の一覧に使用用途 ----------------
@@ -953,10 +1018,11 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(withPurpose.batchUpdate, 0);
 
     // 用途の言葉が違っても、一覧の読取の数は同じ（用途のための読取を足していない）。
+    // `purpose` の行を外して測った数（1.0 より前の数）と同じ絶対の数で確かめる。
     const withOther = listing('梱包');
     assert.equal(withOther.tx.purpose, '梱包');
     assert.equal(withOther.orphan.purpose, null);
-    assert.equal(withPurpose.batchGet, withOther.batchGet,
-      JSON.stringify({withPurpose: withPurpose.batchGet, withOther: withOther.batchGet}));
+    assert.equal(withPurpose.batchGet, 6);
+    assert.equal(withOther.batchGet, 6, JSON.stringify(withOther.batchGet));
   });
 };

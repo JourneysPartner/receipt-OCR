@@ -84,6 +84,25 @@ module.exports = ({test, assert}) => {
     assert.equal(single.ids['freee-status'].children[0].tagName, '#TEXT',
       '止めの文は文字として入れる');
 
+    // 止め 1 つで明細の一覧がある。ボタンの横では「（下の一覧）」を外して在りかを添える。
+    const detailed = world({webAppCreateFreeeExport: plain({
+      ok: false, created: false, stage: 'CONTENT', code: 'ROW_PROBLEMS',
+      stops: [{code: 'ROW_PROBLEMS', count: 2}],
+      rowProblems: [{importRow: 2, kind: 'ACCOUNT_EMPTY', column: 'D', value: null,
+        hint: null, date: '2026/11/01', amount: 1200, description: '架空の店'}],
+      rowProblemCount: 2, destinationSpreadsheetId: DEST})});
+    detailed.ui.renderSelection();
+    await detailed.openFinal();
+    await detailed.pressFreee();
+    assert.equal(detailed.ids['freee-status'].textContent,
+      '作れませんでした：直す必要のある行が 2 件あります。（詳しくはページの一番上）');
+    assert.equal(detailed.ids.notice.children[0].textContent,
+      '直す必要のある行が 2 件あります（下の一覧）。',
+      'ページの一番上の知らせは今のまま');
+    assert.equal(detailed.ids['freee-status'].textContent.indexOf('（下の一覧）'), -1,
+      '一覧はページの一番上にあるのでボタンの横では言わない');
+    assert.equal(detailed.ids['freee-status'].children[0].tagName, '#TEXT');
+
     // 止め 2 つ。最初の文だけを出し、残りは件数で添える。
     const two = world({webAppCreateFreeeExport: plain({
       ok: false, created: false, stage: 'CONTENT', code: 'NO_DATA_ROWS',

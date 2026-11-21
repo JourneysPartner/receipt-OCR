@@ -223,7 +223,7 @@ module.exports = ({test, assert}) => {
     assert.equal(items[2], 'ほか 33 件');
     assert.equal(w.ids['freee-download'].hidden, true);
     assert.equal(w.ids['freee-status'].textContent,
-      '作れませんでした：直す必要のある行が 2 件あります（下の一覧）。');
+      '作れませんでした：直す必要のある行が 2 件あります。（詳しくはページの一番上）');
     assert.equal(w.ui.state.freeeBusy, false);
   });
 

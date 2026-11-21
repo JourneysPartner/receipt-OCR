@@ -855,11 +855,13 @@
           return '税区分が空の行が ' + count + ' 行あります（freee が勘定科目の税区分を使います）。';
         },
         unbalancedAccepted: '明細と一致しないまま作りました。',
-        // 止めの理由をボタンの横にも出す（仕様 §7）。2 つ以上は件数だけを添える。
-        stopped: function(firstLine, count) {
+        // 止めの理由をボタンの横にも出す（仕様 §7・§15.4）。2 つ以上は件数だけを添え、
+        // 1 つでも知らせに明細の一覧があるときは、その在りかを添える。
+        stopped: function(firstLine, count, hasDetails) {
           var text = '作れませんでした：' + firstLine;
           var rest = Math.max(0, (Number(count) || 0) - 1);
           if (rest > 0) text += '（ほか ' + rest + ' 件。詳しくはページの一番上）';
+          else if (hasDetails === true) text += '（詳しくはページの一番上）';
           return text;
         },
         downloaded: function(dateText) { return 'freee 取込用 ダウンロード ' + dateText; },
@@ -4033,9 +4035,11 @@
           var notice = freeeStopNotice(result);
           showNotice(notice.message, 'error', notice.details);
           // ボタンの横にも理由を出す。ページの上だけだと押しても何も起きないように見える。
+          // 一覧はページの一番上にあるので、ボタンの横では「（下の一覧）」を外す（§15.4）。
           var stops = result && Array.isArray(result.stops) ? result.stops : [];
+          var firstLine = String(notice.message).split('\n')[0].split('（下の一覧）').join('');
           el['freee-status'].textContent = TEXT.freee.stopped(
-            String(notice.message).split('\n')[0], stops.length);
+            firstLine, stops.length, notice.details.length > 0);
           return;
         }
         var rows = Number(result.rows) || 0;

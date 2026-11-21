@@ -2121,10 +2121,14 @@ function webAppFolderFile_(file, stateByFileId, nowMs) {
   }
   var supported = mime === DRIVE_SHORTCUT_MIME_ ?
     isImportableDriveFile(fileName, mime, file.getTargetMimeType()) : isImportableDriveFile(fileName, mime);
-  var minutes = webAppWaitMinutesForFile_(updatedMs, nowMs, waitLookupId);
-  var stable = minutes === 0;
   var registered = Object.prototype.hasOwnProperty.call(stateByFileId, fileId);
   var state = registered ? stateByFileId[fileId] : null;
+  // 最後の更新者を Drive に見に行くのは、取り込める未登録・DISCOVERED のファイルだけ
+  // （§15.3）。それ以外は結果が変わらないので、今までの待ちの分をそのまま使う。
+  var minutes = supported && (!registered || state === FILE_STATE.DISCOVERED) ?
+    webAppWaitMinutesForFile_(updatedMs, nowMs, waitLookupId) :
+    webAppStableWaitMinutes_(updatedMs, nowMs);
+  var stable = minutes === 0;
   var stateLabel;
   if (registered) {
     stateLabel = state === FILE_STATE.DISCOVERED && supported && !stable ?
