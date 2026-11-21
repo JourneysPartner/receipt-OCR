@@ -100,6 +100,40 @@ OCR_HEADERS = [
     "文字数",
     "OCR文字",
     "エラー",
+    "ページ数",
+]
+# 1.0 までの 8 列（`ページ数` が無い）。続きからも score もこの並びを通す。
+OCR_HEADERS_OLD = OCR_HEADERS[:-1]
+
+FORM_HEADERS = [
+    "形",
+    "もう1人の読み手",
+    "ファイル数",
+    "正しく自動",
+    "誤って自動",
+    "要確認",
+    "明細の数",
+    "自動の明細",
+    "要確認の明細",
+    "もう1人を呼んだ本数",
+    "推定費用USD",
+    "1本あたりUSD",
+    "注",
+]
+
+FORM_DETAIL_HEADERS = [
+    "fileId",
+    "ファイル",
+    "ファイル名",
+    "形",
+    "もう1人の読み手",
+    "成績",
+    "明細の数",
+    "自動の明細",
+    "判定",
+    "読み",
+    "答え",
+    "呼んだ",
 ]
 
 SUMMARY_HEADERS = [
@@ -516,6 +550,14 @@ class CompareSheetClient:
                 .execute()
             )
         )
+
+
+def form_tab_name(label: str) -> str:
+    return f"形_{label}"
+
+
+def form_detail_tab_name(label: str) -> str:
+    return f"形の明細_{label}"
 
 
 def cell_range(title: str, column_index: int, row_number: int) -> str:

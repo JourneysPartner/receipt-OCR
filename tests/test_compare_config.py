@@ -165,6 +165,131 @@ class TestParsing:
         assert cfg.request_timeout_seconds == 45
 
 
+class TestReaders:
+    def test_defaults(self):
+        cfg = load_compare_config(_env())
+        assert cfg.readers == ()
+        assert cfg.form_base == "gemini-2.5-flash"
+        assert cfg.ocr_price_per_page_usd == 0.0015
+        assert cfg.reader_max_tokens == 8192
+
+    def test_default_prices_include_both_readers(self):
+        assert DEFAULT_PRICES["claude-haiku-5-5"] == (0.10, 0.50)
+        assert DEFAULT_PRICES["gpt-5.4-mini"] == (0.75, 4.50)
+
+    def test_reader_vendors_and_thinking(self):
+        cfg = load_compare_config(
+            _env(
+                COMPARE_READERS=(
+                    "gemini-3.7-flash,claude-haiku-5-5@high,gpt-5.4-mini,claude-haiku-5-5@high"
+                ),
+                AI_THINKING_LEVEL="medium",
+            )
+        )
+        assert [reader.label for reader in cfg.readers] == [
+            "gemini-3.7-flash",
+            "claude-haiku-5-5@high",
+            "gpt-5.4-mini",
+        ]
+        assert [reader.vendor for reader in cfg.readers] == [
+            "gemini",
+            "anthropic",
+            "openai",
+        ]
+        assert cfg.readers[0].thinking_level == "medium"  # Gemini は AI_THINKING_LEVEL
+        assert cfg.readers[1].thinking_level == "high"
+        assert cfg.readers[2].thinking_level is None  # @ が無ければ送らない
+
+    def test_form_base_and_costs(self):
+        cfg = load_compare_config(
+            _env(
+                COMPARE_FORM_BASE="gemini-3.5-flash-lite@low",
+                COMPARE_OCR_PRICE_PER_PAGE_USD="0.002",
+                COMPARE_READER_MAX_TOKENS="1024",
+            )
+        )
+        assert cfg.form_base == "gemini-3.5-flash-lite@low"
+        assert cfg.ocr_price_per_page_usd == 0.002
+        assert cfg.reader_max_tokens == 1024
+
+    def test_score_without_models_leaves_form_base_to_the_result_tab(self):
+        cfg = load_compare_config(
+            _env(COMPARE_STEP="score", COMPARE_FOLDER_IDS=None, COMPARE_MODELS=None)
+        )
+        assert cfg.form_base is None
+
+    def test_score_with_models_uses_the_first(self):
+        cfg = load_compare_config(
+            _env(
+                COMPARE_STEP="score",
+                COMPARE_FOLDER_IDS=None,
+                COMPARE_MODELS="gemini-test@low",
+            )
+        )
+        assert cfg.form_base == "gemini-test@low"
+
+    @pytest.mark.parametrize(
+        "overrides, message",
+        [
+            (
+                {"COMPARE_READERS": "mystery-model"},
+                "COMPARE_READERS の型名は gemini- / claude- / gpt- で始めてください",
+            ),
+            (
+                {"COMPARE_READERS": "mystery-model@low"},
+                "COMPARE_READERS の型名は gemini- / claude- / gpt- で始めてください",
+            ),
+            (
+                {"COMPARE_MODELS": "claude-haiku-5-5"},
+                "COMPARE_MODELS には Gemini の型だけを書けます",
+            ),
+            (
+                {"COMPARE_MODELS": "gpt-5.4-mini"},
+                "COMPARE_MODELS には Gemini の型だけを書けます",
+            ),
+            (
+                {"COMPARE_READERS": "claude-haiku-5-5", "COMPARE_MODELS": "claude-haiku-5-5"},
+                "COMPARE_MODELS には Gemini の型だけを書けます",
+            ),
+            (
+                {
+                    "COMPARE_MODELS": "gemini-test",
+                    "COMPARE_READERS": "gemini-test",
+                },
+                "同じ要素",
+            ),
+            (
+                {"COMPARE_READERS": "claude-haiku-5-5@minimal"},
+                "minimal",
+            ),
+            (
+                {"COMPARE_OCR_PRICE_PER_PAGE_USD": "-1"},
+                "COMPARE_OCR_PRICE_PER_PAGE_USD",
+            ),
+            (
+                {"COMPARE_OCR_PRICE_PER_PAGE_USD": "x"},
+                "COMPARE_OCR_PRICE_PER_PAGE_USD",
+            ),
+            (
+                {"COMPARE_READER_MAX_TOKENS": "255"},
+                "COMPARE_READER_MAX_TOKENS",
+            ),
+            (
+                {"COMPARE_FORM_BASE": "  "},
+                None,
+            ),
+        ],
+    )
+    def test_invalid_values(self, overrides, message):
+        if message is None:
+            # 空の COMPARE_FORM_BASE は既定（最初の型）にする
+            cfg = load_compare_config(_env(**overrides))
+            assert cfg.form_base == "gemini-2.5-flash"
+            return
+        with pytest.raises(ValueError, match=re.escape(message)):
+            load_compare_config(_env(**overrides))
+
+
 class TestErrors:
     @pytest.mark.parametrize(
         "overrides, message",

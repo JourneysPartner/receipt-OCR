@@ -1,6 +1,5 @@
 """Gemini API による AI 解析エンジン"""
 
-import json
 import time
 
 from google import genai
@@ -8,6 +7,7 @@ from google.genai import types
 
 from src.ai import prompts
 from src.ai.base import AiExtractor
+from src.ai.parsing import _safe_int, parse_receipt_items
 from src.config import AiConfig
 from src.logging.logger import setup_logger
 from src.models import DriveFile, OcrResult, ReceiptItem
@@ -21,6 +21,8 @@ logger = setup_logger()
 
 # 今までの名前を残す（第 1 版の指示文）。
 SYSTEM_INSTRUCTION = prompts.SYSTEM_INSTRUCTION_V1
+# 今までの名前を残す（テストが `src.ai.gemini` から読む）。
+__all__ = ["RETRY_SUPPORTED_MIMES", "SYSTEM_INSTRUCTION", "GeminiExtractor", "_safe_int"]
 
 
 class GeminiExtractor(AiExtractor):
@@ -172,57 +174,14 @@ class GeminiExtractor(AiExtractor):
             return []
 
     def _parse_response(self, raw: str, file_name: str) -> list[ReceiptItem]:
-        text = raw
-        if text.startswith("```"):
-            lines = text.split("\n")
-            text = "\n".join(lines[1:])
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
-
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError as e:
-            logger.warning(f"JSONパース失敗: {file_name}: {e}", extra={"step": "ai_parse"})
-            self.last_extraction_error = "parse_error"
-            return []
-
-        if isinstance(data, dict):
-            data = [data]
-
-        items = []
-        for entry in data:
-            try:
-                items.append(
-                    ReceiptItem(
-                        date=entry.get("date"),
-                        amount=_safe_int(entry.get("amount")),
-                        time=entry.get("time"),
-                        receipt_no=entry.get("receipt_no"),
-                        vendor=entry.get("vendor"),
-                        description=entry.get("description"),
-                        account=entry.get("account"),
-                        tax_category=entry.get("tax_category"),
-                        confidence=float(entry.get("confidence", 0.0)),
-                        is_expense=entry.get("is_expense", True),
-                        memo=entry.get("memo"),
-                    )
-                )
-            except (ValueError, TypeError) as e:
-                logger.warning(f"明細パース失敗: {file_name}: {e}", extra={"step": "ai_parse"})
-        if not items:
-            self.last_extraction_error = "zero_items"
+        items, error = parse_receipt_items(
+            raw,
+            file_name,
+            read_calc_fields=self._prompt_version() == "v3",
+        )
+        if error is not None:
+            self.last_extraction_error = error
         return items
-
-
-def _safe_int(value) -> int | None:
-    if value is None:
-        return None
-    try:
-        cleaned = str(value).replace(",", "").replace("円", "").replace("¥", "").strip()
-        return int(float(cleaned))
-    except (ValueError, TypeError):
-        return None
 
 
 def _finish_reason(resp) -> str | None:

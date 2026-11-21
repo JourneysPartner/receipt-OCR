@@ -61,6 +61,18 @@ class TestSystemInstruction:
         assert config.system_instruction != prompts.SYSTEM_INSTRUCTION_V1
 
 
+class TestSystemInstructionV3:
+    def test_v3_sends_the_v3_text(self):
+        client = MagicMock()
+        client.models.generate_content.return_value = _response()
+        extractor = _extractor(AiConfig(prompt_version="v3"), client)
+        extractor.extract_receipt_data(_ocr(), "テスト領収書.jpg")
+        config = client.models.generate_content.call_args.kwargs["config"]
+        assert config.system_instruction == prompts.SYSTEM_INSTRUCTION_V3
+        assert "- pretax:" in config.system_instruction
+        assert "- change:" in config.system_instruction
+
+
 class TestUserMessages:
     def test_text_v1(self):
         client = MagicMock()

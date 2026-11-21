@@ -482,6 +482,10 @@ def metric_rows(
                     prices=config.prices,
                 )
             )
+    known = {model.label for model in config.models}
+    for label in unusable_models or []:
+        if label not in known:
+            metrics.append({"型": label, "方式": "使えない型"})
     return metrics
 
 

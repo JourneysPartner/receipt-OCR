@@ -1,6 +1,7 @@
 """AI レスポンスパースのテスト"""
 
 from src.ai.gemini import GeminiExtractor, _safe_int
+from src.ai.parsing import parse_receipt_items
 from src.config import AiConfig
 
 
@@ -85,6 +86,73 @@ class TestParseResponse:
         )
         assert r[0].time == "9:05"
         assert r[0].receipt_no == "0012"
+
+
+class TestCalcFields:
+    def test_missing_fields_are_none(self):
+        items, error = parse_receipt_items('{"amount":1600}', "t.jpg")
+        assert error is None
+        assert items[0].pretax is None
+        assert items[0].tax is None
+        assert items[0].tendered is None
+        assert items[0].change is None
+
+    def test_integers_are_read(self):
+        items, _ = parse_receipt_items(
+            '{"amount":1600,"pretax":1455,"tax":145,"tendered":2000,"change":400}',
+            "t.jpg",
+        )
+        assert (items[0].pretax, items[0].tax, items[0].tendered, items[0].change) == (
+            1455,
+            145,
+            2000,
+            400,
+        )
+
+    def test_bad_values_are_none(self):
+        items, _ = parse_receipt_items(
+            '{"amount":1600,"pretax":"1455","tax":true,"tendered":-1,"change":1.5}',
+            "t.jpg",
+        )
+        assert items[0].pretax is None
+        assert items[0].tax is None
+        assert items[0].tendered is None
+        assert items[0].change is None
+
+    def test_negative_change_is_none(self):
+        items, error = parse_receipt_items('{"amount":1600,"change":-200}', "t.jpg")
+        assert error is None
+        assert items[0].change is None
+
+    def test_zero_is_kept(self):
+        items, _ = parse_receipt_items('{"amount":1600,"change":0}', "t.jpg")
+        assert items[0].change == 0
+
+    def test_v1_v2_leave_the_fields_none(self):
+        items, _ = parse_receipt_items(
+            '{"amount":1600,"pretax":1455,"tax":145,"tendered":2000,"change":400}',
+            "t.jpg",
+            read_calc_fields=False,
+        )
+        assert items[0].pretax is None
+        assert items[0].tax is None
+        assert items[0].tendered is None
+        assert items[0].change is None
+
+    def test_default_config_v2_parses_without_calc_fields(self):
+        extractor = _ext()
+        items = extractor._parse_response(
+            '{"amount":1600,"pretax":1455,"tax":145,"tendered":2000,"change":400}',
+            "t.jpg",
+        )
+        assert items[0].pretax is None
+
+    def test_never_raises(self):
+        items, error = parse_receipt_items(
+            '[{"pretax":null,"tax":[1],"tendered":{},"change":false}]', "t.jpg"
+        )
+        assert error is None
+        assert len(items) == 1
 
 
 class TestExtractFromFile:

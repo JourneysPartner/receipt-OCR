@@ -13,7 +13,7 @@ from src.compare.pipeline import (
     settings_text,
 )
 from src.config import AiConfig
-from src.models import DriveFile, ReceiptItem
+from src.models import CorrectedItem, DriveFile, ReceiptItem
 
 FILE = DriveFile(
     file_id="FILE_A1234567890",
@@ -373,6 +373,45 @@ class TestItemsJson:
 
     def test_empty_items_is_empty_string(self):
         assert items_json([]) == ""
+
+    def test_calc_keys_are_added_only_when_present(self):
+        item = ReceiptItem(
+            date="2026-01-02",
+            amount=1600,
+            vendor="テスト商店",
+            pretax=1455,
+            tax=145,
+            tendered=2000,
+            change=400,
+        )
+        data = json.loads(items_json([item]))
+        assert data[0]["pt"] == 1455
+        assert data[0]["tx"] == 145
+        assert data[0]["td"] == 2000
+        assert data[0]["ch"] == 400
+        # 今ある鍵は変えない
+        assert data[0]["d"] == "2026-01-02"
+        assert data[0]["a"] == 1600
+
+    def test_calc_keys_are_omitted_when_none(self):
+        text = items_json([_item()])
+        assert '"pt"' not in text
+        assert '"tx"' not in text
+        assert '"td"' not in text
+        assert '"ch"' not in text
+
+    def test_corrected_item_reads_the_original_calc_fields(self):
+        original = ReceiptItem(
+            date="2026-01-02", amount=1600, pretax=1455, tax=145, tendered=2000, change=400
+        )
+        corrected = CorrectedItem(original=original, date="2026-01-02", amount=1600)
+        data = json.loads(items_json([corrected]))
+        assert (data[0]["pt"], data[0]["tx"], data[0]["td"], data[0]["ch"]) == (
+            1455,
+            145,
+            2000,
+            400,
+        )
 
 
 def _dual(text_items, image_items, *, ocr_text=OCR_TEXT, ocr_failed=False, ai_config=None):

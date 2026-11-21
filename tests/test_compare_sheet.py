@@ -7,14 +7,19 @@ from datetime import UTC, datetime
 from src.compare.runner import run_compare
 from src.compare.sheet import (
     ANSWER_HEADERS,
+    FORM_DETAIL_HEADERS,
     MULTI_ANSWER_HEADERS,
     MULTI_ANSWER_HEADERS_OLD,
     MULTI_ANSWER_TITLE,
+    OCR_HEADERS,
+    OCR_HEADERS_OLD,
     RESULT_HEADERS,
     SUMMARY_HEADERS,
     CompareSheetClient,
     HeaderMismatchError,
     cell_range,
+    form_detail_tab_name,
+    form_tab_name,
 )
 from src.config import (
     AiConfig,
@@ -499,8 +504,8 @@ def _env():
     }
 
 
-def _collect_into(service):
-    client = CompareSheetClient(RESULT_ID, service=service, sleep=lambda seconds: None)
+def _collect_into(service, client=None):
+    client = client or CompareSheetClient(RESULT_ID, service=service, sleep=lambda seconds: None)
     drive = _CollectDrive(
         [
             DriveFile(
@@ -525,8 +530,8 @@ def _collect_into(service):
     return code, service
 
 
-def _score_into(service, *, label="L1"):
-    client = CompareSheetClient(RESULT_ID, service=service, sleep=lambda seconds: None)
+def _score_into(service, *, label="L1", client=None):
+    client = client or CompareSheetClient(RESULT_ID, service=service, sleep=lambda seconds: None)
     return run_compare(
         _app_config(),
         {
@@ -1012,3 +1017,122 @@ def test_read_multi_answer_rows_stops_at_memo():
     assert set(rows[0]) == set(MULTI_ANSWER_HEADERS) | {"_row"}
     assert rows[0]["正解_金額"] == "1600"
     assert rows[0]["メモ"] == ""
+
+
+# ── 形のタブ（R6・R8） ────────────────────────────────
+class _SpyValues:
+    def __init__(self, inner, calls):
+        self._inner = inner
+        self._calls = calls
+
+    def update(self, **kwargs):
+        self._calls.append(("update", kwargs))
+        return self._inner.update(**kwargs)
+
+    def append(self, **kwargs):
+        self._calls.append(("append", kwargs))
+        return self._inner.append(**kwargs)
+
+    def clear(self, **kwargs):
+        self._calls.append(("clear", kwargs))
+        return self._inner.clear(**kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+class _SpySheets:
+    def __init__(self, inner, calls):
+        self._inner = inner
+        self._calls = calls
+
+    def values(self):
+        return _SpyValues(self._inner.values(), self._calls)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _spy_client(service):
+    client = CompareSheetClient(RESULT_ID, service=service, sleep=lambda seconds: None)
+    calls = []
+    client._sheets = _SpySheets(client._sheets, calls)
+    return client, calls
+
+
+def _snapshot(service, titles):
+    return {
+        title: [list(row) for row in service.tabs[title].values]
+        for title in titles
+        if title in service.tabs
+    }
+
+
+def test_form_tabs_are_written_raw_and_other_tabs_are_unchanged():
+    service = FakeSheetsService()
+    client, calls = _spy_client(service)
+    code, service = _collect_into(service, client=client)
+    assert code == 0
+
+    summary_title = form_tab_name("L1")
+    detail_title = form_detail_tab_name("L1")
+    assert service.tabs[summary_title].values[0] == ["実行ラベル", "L1"]
+    assert service.tabs[summary_title].values[4] == [
+        "形",
+        "もう1人の読み手",
+        "ファイル数",
+        "正しく自動",
+        "誤って自動",
+        "要確認",
+        "明細の数",
+        "自動の明細",
+        "要確認の明細",
+        "もう1人を呼んだ本数",
+        "推定費用USD",
+        "1本あたりUSD",
+        "注",
+    ]
+    assert service.tabs[detail_title].values[0] == FORM_DETAIL_HEADERS
+
+    form_writes = [
+        kwargs
+        for name, kwargs in calls
+        if name in ("update", "append") and str(kwargs.get("range", "")).startswith("'形")
+    ]
+    assert form_writes
+    assert all(kwargs["valueInputOption"] == "RAW" for kwargs in form_writes)
+
+    before = _snapshot(service, ["答え", MULTI_ANSWER_TITLE, "結果_L1", "OCR_L1"])
+    code, service = _collect_into(service, client=client)
+    assert code == 0
+    after = _snapshot(service, ["答え", MULTI_ANSWER_TITLE, "結果_L1", "OCR_L1"])
+    assert after == before
+
+
+def test_score_writes_form_tabs_raw():
+    service = FakeSheetsService()
+    code, service = _collect_into(service)
+    assert code == 0
+
+    client, calls = _spy_client(service)
+    assert _score_into(service, client=client) == 0
+    form_writes = [
+        kwargs
+        for name, kwargs in calls
+        if name in ("update", "append") and str(kwargs.get("range", "")).startswith("'形")
+    ]
+    assert form_writes
+    assert all(kwargs["valueInputOption"] == "RAW" for kwargs in form_writes)
+
+
+def test_old_ocr_tab_without_page_count_still_works():
+    service = FakeSheetsService()
+    service.add_tab("OCR_L1", columns=8, values=[OCR_HEADERS_OLD])
+    code, service = _collect_into(service)
+    assert code == 0
+    # 見出しは書き直さない。行はページ数まで足す
+    assert service.tabs["OCR_L1"].values[0] == OCR_HEADERS_OLD
+    assert any(
+        name == "appendDimension" and title == "OCR_L1" for name, title in service.write_calls
+    )
+    assert len(service.tabs["OCR_L1"].values[1]) == len(OCR_HEADERS)

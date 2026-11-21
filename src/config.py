@@ -210,6 +210,9 @@ class AppConfig:
     ai: AiConfig
     google_credentials_path: str | None = None
     gemini_api_key: str | None = None
+    # 比較のもう 1 人の読み手だけが使う（本番では読まない・使わない）
+    anthropic_api_key: str | None = None
+    openai_api_key: str | None = None
     dry_run: bool = False
     log_level: str = "INFO"
     reservation_ttl_minutes: int = 30
@@ -267,7 +270,7 @@ def _build_runtime_config() -> RuntimeConfig:
 
 
 THINKING_LEVELS = ("minimal", "low", "medium", "high")
-PROMPT_VERSIONS = ("v1", "v2")
+PROMPT_VERSIONS = ("v1", "v2", "v3")
 AI_FLOWS = ("text_first", "dual")
 
 
@@ -303,7 +306,7 @@ def _parse_ai_prompt_version(raw: str | None) -> str:
         return "v2"
     value = raw.strip().lower()
     if value not in PROMPT_VERSIONS:
-        raise ValueError(f"AI_PROMPT_VERSION は 'v1' / 'v2' のいずれか (received={raw!r})")
+        raise ValueError(f"AI_PROMPT_VERSION は 'v1' / 'v2' / 'v3' のいずれか (received={raw!r})")
     return value
 
 
@@ -438,6 +441,8 @@ def load_config() -> AppConfig:
         ),
         google_credentials_path=os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
         gemini_api_key=os.environ.get("GEMINI_API_KEY"),
+        anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
+        openai_api_key=os.environ.get("OPENAI_API_KEY"),
         # validate モードは内部的に dry_run を強制 ON にする
         dry_run=runtime.is_validate or os.environ.get("DRY_RUN", "false").lower() == "true",
         log_level=os.environ.get("LOG_LEVEL", "INFO"),

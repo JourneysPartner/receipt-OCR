@@ -566,6 +566,8 @@ class TestScoreDerivesModels:
         summary = sheet.tabs["集計_L1"]
         assert any(row[0] == "gemini-3.8-flash@low" for row in summary[8:])
         assert all(row[0] != "gemini-2.5-flash" for row in summary[8:])
+        # 主の読み手も、両読みの行がある型のうち最初のものを使う（§4）
+        assert sheet.tabs["形_L1"][2] == ["主の読み手", "gemini-3.8-flash@low"]
 
 
 class TestTimeBudget:

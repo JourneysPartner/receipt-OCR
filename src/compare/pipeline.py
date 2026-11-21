@@ -160,6 +160,25 @@ def _matched(decision) -> bool:
     return bool(getattr(decision, "matched", decision))
 
 
+# 計算の欄（仕様 review_precision §6.1・§6.6）。None は書かない。
+CALC_ITEM_KEYS = (
+    ("pt", "pretax"),
+    ("tx", "tax"),
+    ("td", "tendered"),
+    ("ch", "change"),
+)
+
+
+def _calc_value(item, name: str) -> int | None:
+    """補正後の明細でも、補正前の明細から計算の欄を読む。"""
+    value = getattr(item, name, None)
+    if value is None:
+        original = getattr(item, "original", None)
+        if original is not None:
+            value = getattr(original, name, None)
+    return _json_amount(value)
+
+
 def items_json(items, decisions=None) -> str:
     """明細を 1 つの JSON 文字列にする（設計 §7.3）。明細なし・4 万字超えは空。"""
     if not items:
@@ -177,6 +196,10 @@ def items_json(items, decisions=None) -> str:
         if decisions is not None:
             decision = decisions[index] if index < len(decisions) else None
             entry["r"] = "自動" if _matched(decision) else "要確認"
+        for key, name in CALC_ITEM_KEYS:
+            value = _calc_value(item, name)
+            if value is not None:
+                entry[key] = value
         data.append(entry)
     text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     if len(text) > MAX_ITEMS_JSON:

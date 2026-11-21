@@ -209,10 +209,11 @@ class TestPromptVersionAndFlow:
         assert c.ai.flow == "dual"
 
     def test_invalid_prompt_version(self, monkeypatch):
-        monkeypatch.setenv("AI_PROMPT_VERSION", "v3")
+        # v3 を足したので、誤った値は v4 で確かめる（仕様 review_precision §6.1）
+        monkeypatch.setenv("AI_PROMPT_VERSION", "v4")
         with pytest.raises(ValueError) as e:
             load_config()
-        assert "AI_PROMPT_VERSION は 'v1' / 'v2' のいずれか" in str(e.value)
+        assert "AI_PROMPT_VERSION は 'v1' / 'v2' / 'v3' のいずれか" in str(e.value)
 
     def test_invalid_flow(self, monkeypatch):
         monkeypatch.setenv("AI_FLOW", "both")

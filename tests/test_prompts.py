@@ -3,9 +3,19 @@
 第 1 版の期待値は、このテストに全文を書き写す（prompts の定数を期待値に使わない）。
 """
 
+import hashlib
+
 import pytest
 
 from src.ai import prompts
+
+# 2026-11-20 の worktree の v1・v2（1 字も変えないことを固定する）
+V1_SYSTEM_SHA256 = "d3a259cc2aac057c02ee9ab9caf30b1dd9df2d11ab6a48a2b48d6f1d684c4e07"
+V2_SYSTEM_SHA256 = "fc8ba9080b1282aa0aa970cd9ce8c71c00d6ef5b6e8e1b66c0bd1e60420852f9"
+V1_TEXT_SHA256 = "e6562358a5e3974fd9acabe6153577e7a37ef52d56fcef4770c49c54a15faa33"
+V1_IMAGE_SHA256 = "b7763a4a18a650399d87e5a953eed5da0487b8b20b4c6989f22b778c7c18d517"
+V2_TEXT_SHA256 = "d59773a05a94d74e35c722d9440d99e430b16eab7f79b9b8945bae9fcf0f7bf0"
+V2_IMAGE_SHA256 = "0e8648cff875ccfab9f85eb272129cd0a0bd7e764e9beff0371e2eb83ec36bc3"
 
 V1_SYSTEM_INSTRUCTION = (
     """\
@@ -199,15 +209,53 @@ class TestVersion2:
         assert "- time:" not in prompts.system_instruction("v1")
 
 
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+class TestVersion3:
+    def test_v1_and_v2_are_byte_identical(self):
+        assert _sha256(prompts.SYSTEM_INSTRUCTION_V1) == V1_SYSTEM_SHA256
+        assert _sha256(prompts.SYSTEM_INSTRUCTION_V2) == V2_SYSTEM_SHA256
+        assert (
+            _sha256(prompts.text_user_message("v1", "テスト領収書.jpg", "テスト商店 合計 100円"))
+            == V1_TEXT_SHA256
+        )
+        assert _sha256(prompts.image_user_message("v1", "テスト領収書.jpg")) == V1_IMAGE_SHA256
+        assert (
+            _sha256(prompts.text_user_message("v2", "テスト領収書.jpg", "テスト商店 合計 100円"))
+            == V2_TEXT_SHA256
+        )
+        assert _sha256(prompts.image_user_message("v2", "テスト領収書.jpg")) == V2_IMAGE_SHA256
+
+    def test_v3_system_is_v2_plus_the_four_fields(self):
+        text = prompts.system_instruction("v3")
+        assert text == prompts.SYSTEM_INSTRUCTION_V3
+        assert text.replace(prompts.CALC_FIELD_LINES, "") == prompts.SYSTEM_INSTRUCTION_V2
+        for field in ("- pretax:", "- tax:", "- tendered:", "- change:"):
+            assert field in text
+        assert "書いていなければ null。" in text
+        assert "計算して埋めない。" in text
+
+    def test_v3_user_messages_are_v2(self):
+        assert prompts.text_user_message(
+            "v3", "テスト領収書.jpg", "テスト商店 合計 100円"
+        ) == prompts.text_user_message("v2", "テスト領収書.jpg", "テスト商店 合計 100円")
+        assert prompts.image_user_message("v3", "テスト領収書.jpg") == (
+            prompts.image_user_message("v2", "テスト領収書.jpg")
+        )
+
+
 class TestUnknownVersion:
+    # v3 を足したので、知らない版は v4 で確かめる（仕様 review_precision §6.1）
     def test_system_instruction(self):
         with pytest.raises(ValueError):
-            prompts.system_instruction("v3")
+            prompts.system_instruction("v4")
 
     def test_text_user_message(self):
         with pytest.raises(ValueError):
-            prompts.text_user_message("v3", "a.jpg", "text")
+            prompts.text_user_message("v4", "a.jpg", "text")
 
     def test_image_user_message(self):
         with pytest.raises(ValueError):
-            prompts.image_user_message("v3", "a.jpg")
+            prompts.image_user_message("v4", "a.jpg")

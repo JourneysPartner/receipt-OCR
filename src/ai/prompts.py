@@ -1,7 +1,7 @@
 """AI への指示文（システム指示・依頼文）と摘要の言葉。
 
-版は `v1`（今までの文面）と `v2`（2026-11-19 の利用者の決まりを書いた文面）。
-どちらを使うかは `AiConfig.prompt_version` で決まる。
+版は `v1`（今までの文面）、`v2`（2026-11-19 の利用者の決まりを書いた文面）、
+`v3`（v2 + 計算の 4 欄の説明）。どれを使うかは `AiConfig.prompt_version` で決まる。
 """
 
 SYSTEM_INSTRUCTION_V1: str = """\
@@ -181,12 +181,33 @@ SYSTEM_INSTRUCTION_V2: str = (
 )
 
 
+# 第 3 版で足す計算の欄（仕様 review_precision §6.1）。第 2 版の文は 1 字も変えない。
+CALC_FIELD_LINES: str = (
+    "\n"
+    "■ 計算の欄（レシートに書いてある数だけを入れる。計算して埋めない。無ければ null）\n"
+    "- pretax: 消費税を足す前の金額の合計（「税抜」「外税対象」「小計（税抜）」など）。"
+    "税込の小計は入れない。\n"
+    "- tax: 消費税の額の合計（8% と 10% が分かれていれば足す。「内消費税」も入れる）。\n"
+    "- tendered: お預かり（受け取った金額）。\n"
+    "- change: お釣り。\n"
+    "- どれも整数（円）。レシートに書いてある数だけを入れ、計算して埋めない。"
+    "書いていなければ null。\n"
+)
+
+# 第 3 版 = 第 2 版の文 + 計算の 4 欄の説明。第 2 版の文はそのまま残す。
+SYSTEM_INSTRUCTION_V3: str = SYSTEM_INSTRUCTION_V2.replace(
+    "\n■ 摘要の言葉\n", CALC_FIELD_LINES + "\n■ 摘要の言葉\n"
+)
+
+
 def system_instruction(version: str) -> str:
     if version == "v1":
         return SYSTEM_INSTRUCTION_V1
     if version == "v2":
         return SYSTEM_INSTRUCTION_V2
-    raise ValueError(f"AI_PROMPT_VERSION は 'v1' / 'v2' のいずれか (received={version!r})")
+    if version == "v3":
+        return SYSTEM_INSTRUCTION_V3
+    raise ValueError(f"AI_PROMPT_VERSION は 'v1' / 'v2' / 'v3' のいずれか (received={version!r})")
 
 
 def text_user_message(version: str, file_name: str, ocr_text: str) -> str:
@@ -196,13 +217,13 @@ def text_user_message(version: str, file_name: str, ocr_text: str) -> str:
             f"情報を抽出してJSON配列で返してください。\n\n"
             f"---\n{ocr_text}\n---"
         )
-    if version == "v2":
+    if version in ("v2", "v3"):
         return (
             f"以下はレシート・領収書「{file_name}」の OCR テキストです。"
             f"決まりに従って JSON 配列で返してください。\n\n"
             f"---\n{ocr_text}\n---"
         )
-    raise ValueError(f"AI_PROMPT_VERSION は 'v1' / 'v2' のいずれか (received={version!r})")
+    raise ValueError(f"AI_PROMPT_VERSION は 'v1' / 'v2' / 'v3' のいずれか (received={version!r})")
 
 
 def image_user_message(version: str, file_name: str) -> str:
@@ -212,9 +233,9 @@ def image_user_message(version: str, file_name: str) -> str:
             "OCR結果は使わず、画像から直接、レシートの情報を読み取って\n"
             "JSON配列で返してください(金額の桁を特に注意して読んでください)。"
         )
-    if version == "v2":
+    if version in ("v2", "v3"):
         return (
             f"これはレシート・領収書「{file_name}」の画像または PDF です。"
             "画像から直接読み取り、決まりに従って JSON 配列で返してください。"
         )
-    raise ValueError(f"AI_PROMPT_VERSION は 'v1' / 'v2' のいずれか (received={version!r})")
+    raise ValueError(f"AI_PROMPT_VERSION は 'v1' / 'v2' / 'v3' のいずれか (received={version!r})")

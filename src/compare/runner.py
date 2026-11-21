@@ -4,20 +4,25 @@ import os
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 
 from src.ai.factory import create_ai_extractor
 from src.compare.answers import attach_values, build_answer_plan
 from src.compare.config import (
     METHOD_LABELS,
+    VENDOR_ANTHROPIC,
+    VENDOR_GEMINI,
+    VENDOR_OPENAI,
     CompareConfig,
     CompareModel,
     load_compare_config,
     ocr_tab_name,
     result_tab_name,
     summary_tab_name,
+    vendor_of,
 )
+from src.compare.forms import build_form_tables
 from src.compare.pipeline import (
     METHOD_CURRENT,
     METHOD_DUAL,
@@ -32,17 +37,27 @@ from src.compare.pipeline import (
     make_result_row,
     settings_text,
 )
+from src.compare.readers import (
+    create_compare_reader,
+    create_model_checker,
+    reader_settings_text,
+)
 from src.compare.score import derive_methods, derive_models, estimate_cost, summary_rows
 from src.compare.sheet import (
     ANSWER_CELLS,
     ANSWER_HEADERS,
+    FORM_DETAIL_HEADERS,
+    FORM_HEADERS,
     MULTI_ANSWER_HEADERS,
     MULTI_ANSWER_TITLE,
     OCR_HEADERS,
+    OCR_HEADERS_OLD,
     RESULT_HEADERS,
     SUMMARY_HEADERS,
     CompareSheetClient,
     HeaderMismatchError,
+    form_detail_tab_name,
+    form_tab_name,
     multi_answer_layout,
 )
 from src.config import AiConfig, AppConfig
@@ -77,10 +92,11 @@ def _not_found(error) -> bool:
 class _ThreadResources:
     """Drive と OCR はスレッドごと、GeminiExtractor はスレッドと型の組ごとに作る。"""
 
-    def __init__(self, drive_factory, ocr_factory, extractor_factory):
+    def __init__(self, drive_factory, ocr_factory, extractor_factory, reader_factory=None):
         self._drive_factory = drive_factory
         self._ocr_factory = ocr_factory
         self._extractor_factory = extractor_factory
+        self._reader_factory = reader_factory
         self._local = threading.local()
 
     def drive(self):
@@ -109,12 +125,25 @@ class _ThreadResources:
             extractors[model.label] = extractor
         return extractor
 
+    def reader(self, model: CompareModel, ai_config: AiConfig):
+        """読み手も、スレッドと型の組ごとに作る（§5.2）。"""
+        readers = getattr(self._local, "readers", None)
+        if readers is None:
+            readers = {}
+            self._local.readers = readers
+        reader = readers.get(model.label)
+        if reader is None:
+            reader = self._reader_factory(ai_config)
+            readers[model.label] = reader
+        return reader
+
 
 @dataclass
 class _FileTask:
     file: object
     folder_name: str
     models: list[CompareModel]
+    readers: list[CompareModel] = field(default_factory=list)
 
 
 class CompareRunner:
@@ -128,6 +157,8 @@ class CompareRunner:
         ocr_factory,
         extractor_factory,
         model_checker,
+        reader_checker=None,
+        reader_factory=None,
         sleep=time.sleep,
         clock=time.monotonic,
         jst_now=None,
@@ -143,8 +174,11 @@ class CompareRunner:
         self._started_at = self._clock() if started_at is None else started_at
         self._jst_now = jst_now or (lambda: datetime.now(JST))
         self._retry_sleeps = tuple(retry_sleeps)
-        self._resources = _ThreadResources(drive_factory, ocr_factory, extractor_factory)
+        self._resources = _ThreadResources(
+            drive_factory, ocr_factory, extractor_factory, reader_factory
+        )
         self._model_checker = model_checker
+        self._reader_checker = reader_checker
         self._unusable: list[str] = []
 
     # ── 入口 ────────────────────────────────────
@@ -250,6 +284,7 @@ class CompareRunner:
                 multi_rows=multi_rows,
             ),
         )
+        self._write_forms(label, result_rows, answer_rows, multi_rows)
         logger.info(f"比較の集計を更新: {label}", extra={"step": "compare_score"})
         return 1 if failed else 0
 
@@ -280,7 +315,8 @@ class CompareRunner:
         try:
             self._sheet.ensure_tab(answer_title, ANSWER_HEADERS, prefix_only=True)
             self._sheet.ensure_tab(result_title, RESULT_HEADERS)
-            self._sheet.ensure_tab(ocr_title, OCR_HEADERS)
+            # ページ数の無い古い OCR タブも通す（見出しは書き直さず、列だけ足す）
+            self._sheet.ensure_tab(ocr_title, OCR_HEADERS, check_headers=False)
             self._ensure_multi_answer()
         except HeaderMismatchError as error:
             # 列が足されると「メモ」などを上書きしうるので、何も書かずに 1 で終わる
@@ -298,7 +334,11 @@ class CompareRunner:
 
         try:
             self._check_models()
+            self._check_readers()
             usable = [m for m in self._compare.models if m.label not in self._unusable]
+            usable_readers = [
+                reader for reader in self._compare.readers if reader.label not in self._unusable
+            ]
 
             infos = self._collect_files()
             done = self._done_map(self._sheet.read_dicts(result_title))
@@ -307,6 +347,14 @@ class CompareRunner:
                     model
                     for model in usable
                     if not self._model_done(done, info.file.file_id, model)
+                ]
+                for info in infos
+            }
+            readers_left = {
+                info.file.file_id: [
+                    reader
+                    for reader in usable_readers
+                    if not self._reader_done(done, info.file.file_id, reader)
                 ]
                 for info in infos
             }
@@ -327,10 +375,14 @@ class CompareRunner:
                             budget_exceeded = True
                             break
                         models = models_left[info.file.file_id]
-                        if not models:
+                        readers = readers_left[info.file.file_id]
+                        if not models and not readers:
                             continue  # 全部済みのファイルはダウンロードもしない
                         task = _FileTask(
-                            file=info.file, folder_name=info.folder_name, models=models
+                            file=info.file,
+                            folder_name=info.folder_name,
+                            models=models,
+                            readers=readers,
                         )
                         pending[executor.submit(self._process_file, task)] = task
                         submitted_ids.add(info.file.file_id)
@@ -347,7 +399,8 @@ class CompareRunner:
                             rows, ocr_row = future.result()
                         except Exception as error:  # 念のための最終防衛
                             logger.error(
-                                f"ファイル処理が異常終了: {task.file.file_name}: {error}",
+                                f"ファイル処理が異常終了: {task.file.file_name}: "
+                                f"{self._redact_secrets(error)}",
                                 extra={"step": "compare_file_fatal"},
                             )
                             rows, ocr_row = [], None
@@ -365,7 +418,7 @@ class CompareRunner:
         except Exception as error:
             # 表への追記の失敗など。それまでの結果で答えと集計は書いてから 1 にする
             logger.error(
-                f"比較の実行中に例外: {type(error).__name__}: {error}",
+                f"比較の実行中に例外: {type(error).__name__}: {self._redact_secrets(error)}",
                 extra={"step": "compare_collect_error"},
             )
             failed = True
@@ -374,7 +427,8 @@ class CompareRunner:
             remaining = sum(
                 1
                 for info in infos
-                if info.file.file_id not in submitted_ids and models_left.get(info.file.file_id)
+                if info.file.file_id not in submitted_ids
+                and (models_left.get(info.file.file_id) or readers_left.get(info.file.file_id))
             )
             logger.info(
                 f"時間切れのため新しいファイルを始めません: 残り {remaining} 本。"
@@ -455,6 +509,7 @@ class CompareRunner:
             )
             return 1
 
+        self._write_forms(label, result_rows, answer_rows, multi_rows)
         logger.info(
             f"比較の collect 完了: {label}（処理 {len(submitted_ids)} 本）",
             extra={"step": "compare_collect"},
@@ -488,6 +543,18 @@ class CompareRunner:
     def _time_over_budget(self) -> bool:
         return self._clock() - self._started_at > self._compare.time_budget_seconds
 
+    def _redact_secrets(self, value) -> str:
+        """3 つの鍵の値をログ・例外の文・表に出さない（R4・S8）。"""
+        text = str(value)
+        for key in (
+            self._config.gemini_api_key,
+            self._config.anthropic_api_key,
+            self._config.openai_api_key,
+        ):
+            if key:
+                text = text.replace(str(key), "***")
+        return text
+
     def _verify_headers(self, titles: list[str], checks) -> bool:
         """既にあるタブの 1 行目を、書く前に読むだけで確かめる（S6）。
 
@@ -508,6 +575,9 @@ class CompareRunner:
                     # 1.7 の 9 列か 1.6 までの 8 列。メモより右は見ない。
                     if multi_answer_layout(actual) is None:
                         raise HeaderMismatchError(title, headers, actual)
+                    continue
+                if expected == OCR_HEADERS and actual == OCR_HEADERS_OLD:
+                    # ページ数の無い古い OCR タブも、続きからも score も通す（§5.3）
                     continue
                 compared = actual[: len(expected)] if prefix_only else actual
                 if compared == expected:
@@ -555,6 +625,36 @@ class CompareRunner:
                 self._unusable.append(model.label)
                 logger.warning(
                     f"使えない型のため外します: {model.name}",
+                    extra={"step": "compare_model_missing"},
+                )
+
+    def _check_readers(self) -> None:
+        for reader in self._compare.readers:
+            try:
+                if reader.vendor == VENDOR_GEMINI:
+                    available = self._model_checker(reader.name)
+                elif self._reader_checker is not None:
+                    available = self._reader_checker(reader.name)
+                else:
+                    available = True
+            except Exception as error:
+                if _not_found(error):
+                    self._unusable.append(reader.label)
+                    logger.warning(
+                        f"使えない型のため外します: {reader.name}",
+                        extra={"step": "compare_model_missing"},
+                    )
+                else:
+                    logger.warning(
+                        f"型の有無を確かめられませんでした（外さず続行）: {reader.name} "
+                        f"({type(error).__name__})",
+                        extra={"step": "compare_model_check_error"},
+                    )
+                continue
+            if available is False:
+                self._unusable.append(reader.label)
+                logger.warning(
+                    f"使えない型のため外します: {reader.name}",
                     extra={"step": "compare_model_missing"},
                 )
 
@@ -611,6 +711,20 @@ class CompareRunner:
         methods = {METHOD_LABELS[method] for method in self._compare.methods}
         return methods.issubset(done.get((file_id, model.label), set()))
 
+    def _reader_done(self, done, file_id: str, reader: CompareModel) -> bool:
+        """読み手は `画像から` の行だけで決める（§5.2）。"""
+        return METHOD_LABELS[METHOD_IMAGE] in done.get((file_id, reader.label), set())
+
+    def _reader_ai_config(self, reader: CompareModel) -> AiConfig:
+        return replace(
+            self._config.ai,
+            model=reader.name,
+            temperature=None,
+            thinking_level=reader.thinking_level,
+            max_tokens=self._compare.reader_max_tokens,
+            request_timeout_seconds=self._compare.effective_request_timeout,
+        )
+
     def _model_ai_config(self, model: CompareModel) -> AiConfig:
         thinking = model.thinking_level or self._compare.thinking_level
         return replace(
@@ -630,18 +744,24 @@ class CompareRunner:
         recorded_at = self._now_text()
         try:
             self._resources.drive().download_file(file)
-            ocr = self._resources.ocr().extract_text(file)
-            ocr_failed = bool(ocr.error) or not ocr.raw_text.strip()
-            ocr_row = [
-                self._compare.run_label,
-                file.file_id,
-                file.file_name,
-                ocr.engine,
-                ocr.confidence,
-                len(ocr.raw_text),
-                ocr.raw_text[:40000],
-                ocr.error or "",
-            ]
+            # この回に呼ぶのが読み手だけなら Vision を呼ばない（§5.2）
+            ocr = None
+            ocr_failed = False
+            if task.models:
+                ocr = self._resources.ocr().extract_text(file)
+                ocr_failed = bool(ocr.error) or not ocr.raw_text.strip()
+                ocr_row = [
+                    self._compare.run_label,
+                    file.file_id,
+                    file.file_name,
+                    ocr.engine,
+                    ocr.confidence,
+                    len(ocr.raw_text),
+                    ocr.raw_text[:40000],
+                    ocr.error or "",
+                    getattr(ocr, "page_count", 1) or 1,
+                ]
+            ocr_text = ocr.raw_text if ocr is not None else ""
 
             for model in task.models:
                 if self._time_over_budget():
@@ -675,7 +795,7 @@ class CompareRunner:
                             outcome=outcome,
                             retries=0,
                             settings=settings,
-                            ocr_text=ocr.raw_text,
+                            ocr_text=ocr_text,
                         )
                     else:
                         outcome, retries = extract_with_retries(
@@ -695,7 +815,7 @@ class CompareRunner:
                             outcome=outcome,
                             retries=retries,
                             settings=settings,
-                            ocr_text=ocr.raw_text,
+                            ocr_text=ocr_text,
                         )
                     by_method[method] = row
                     model_rows.append(row)
@@ -711,7 +831,7 @@ class CompareRunner:
                             model_name=model.name,
                             text_row=by_method[METHOD_TEXT],
                             image_row=by_method[METHOD_IMAGE],
-                            ocr_text=ocr.raw_text,
+                            ocr_text=ocr_text,
                             ai_config=ai_config,
                             settings=settings,
                             ocr_failed=ocr_failed,
@@ -727,7 +847,7 @@ class CompareRunner:
                             model_name=model.name,
                             text_row=by_method[METHOD_TEXT],
                             image_row=by_method[METHOD_IMAGE],
-                            ocr_text=ocr.raw_text,
+                            ocr_text=ocr_text,
                             ai_config=ai_config,
                             settings=settings,
                             ocr_failed=ocr_failed,
@@ -743,9 +863,63 @@ class CompareRunner:
                             row.thinking_tokens,
                         )
                 rows.extend(model_rows)
+
+            for reader in task.readers:
+                if self._time_over_budget():
+                    logger.info(
+                        f"時間切れのため残りの読み手を呼びません: {file.file_name}: {reader.label}",
+                        extra={"step": "compare_time_budget_model"},
+                    )
+                    break
+                if reader.vendor == VENDOR_GEMINI:
+                    ai_config = self._model_ai_config(reader)
+                    extractor = self._resources.extractor(reader, ai_config)
+                    settings = settings_text(
+                        ai_config.temperature,
+                        ai_config.thinking_level,
+                        ai_config.max_tokens,
+                        getattr(ai_config, "prompt_version", "v1"),
+                    )
+                else:
+                    ai_config = self._reader_ai_config(reader)
+                    extractor = self._resources.reader(reader, ai_config)
+                    settings = reader_settings_text(
+                        reader.vendor,
+                        reader.thinking_level,
+                        ai_config.max_tokens,
+                        getattr(ai_config, "prompt_version", "v1"),
+                    )
+                outcome, retries = extract_with_retries(
+                    lambda: extract_once(extractor, METHOD_IMAGE, ocr, file),
+                    sleeps=self._retry_sleeps,
+                    sleep=self._sleep,
+                    should_stop=self._time_over_budget,
+                )
+                row = make_result_row(
+                    run_label=self._compare.run_label,
+                    recorded_at=recorded_at,
+                    file=file,
+                    folder_name=task.folder_name,
+                    model_label=reader.label,
+                    model_name=reader.name,
+                    method=METHOD_IMAGE,
+                    outcome=outcome,
+                    retries=retries,
+                    settings=settings,
+                    ocr_text=ocr_text,
+                )
+                if row.cost_usd is None:
+                    row.cost_usd = estimate_cost(
+                        self._compare.prices,
+                        reader.label,
+                        row.input_tokens,
+                        row.output_tokens,
+                        row.thinking_tokens,
+                    )
+                rows.append(row)
         except Exception as error:
             logger.error(
-                f"ファイル処理で予期しない例外: {file.file_name}: {error}",
+                f"ファイル処理で予期しない例外: {file.file_name}: {self._redact_secrets(error)}",
                 extra={"step": "compare_file_error"},
             )
             rows, ocr_row = self._file_error_rows(task, error, recorded_at), ocr_row
@@ -754,11 +928,74 @@ class CompareRunner:
             file.content = b""
         return rows, ocr_row
 
+    def _resolve_form_base(self, result_rows: list[dict]) -> str | None:
+        if self._compare.form_base:
+            return self._compare.form_base
+        for row in result_rows:
+            if str(row.get("方式", "")).strip() == METHOD_LABELS[METHOD_DUAL]:
+                label = str(row.get("型", "")).strip()
+                if label:
+                    return label
+        return None
+
+    def _ocr_rows(self, label: str) -> list[dict]:
+        title = ocr_tab_name(label)
+        try:
+            return self._sheet.read_dicts(title)
+        except Exception as error:
+            logger.warning(
+                f"OCR タブを読めません（形の費用は 1 ページで数えます）: {type(error).__name__}",
+                extra={"step": "compare_forms"},
+            )
+            return []
+
+    def _write_forms(
+        self,
+        label: str,
+        result_rows: list[dict],
+        answer_rows: list[dict],
+        multi_rows: list[dict] | None,
+    ) -> None:
+        """形の 2 つのタブだけを消して書き直す（R6・R8）。"""
+        try:
+            base_label = self._resolve_form_base(result_rows)
+            tables = build_form_tables(
+                result_rows=result_rows,
+                ocr_rows=self._ocr_rows(label),
+                answer_rows=answer_rows,
+                multi_rows=multi_rows,
+                base_label=base_label,
+                ocr_price_per_page=self._compare.ocr_price_per_page_usd,
+                label=label,
+                now_text=self._now_text(),
+            )
+            if tables is None:
+                logger.info(
+                    "形のタブは作りません（主の読み手の行がありません）",
+                    extra={"step": "compare_forms"},
+                )
+                return
+            summary_title = form_tab_name(label)
+            detail_title = form_detail_tab_name(label)
+            self._sheet.ensure_tab(summary_title, FORM_HEADERS, check_headers=False)
+            self._sheet.replace_all(summary_title, tables.summary_rows)
+            self._sheet.ensure_tab(detail_title, FORM_DETAIL_HEADERS, check_headers=False)
+            self._sheet.replace_all(detail_title, tables.detail_rows)
+            logger.info(
+                f"形を計算しました: {label}（{len(tables.metrics)} の形）",
+                extra={"step": "compare_forms"},
+            )
+        except Exception as error:
+            logger.warning(
+                f"形を書けません: {type(error).__name__}",
+                extra={"step": "compare_forms"},
+            )
+
     def _file_error_rows(
         self, task: _FileTask, error: Exception, recorded_at: str
     ) -> list[CompareRow]:
         rows: list[CompareRow] = []
-        detail = f"{type(error).__name__}: {error}"[:300]
+        detail = self._redact_secrets(f"{type(error).__name__}: {error}")[:300]
         # このファイルで今回呼ぶ型だけ。済んだ型の成功を失敗で上書きしない（§5.4）
         for model in task.models:
             if model.label in self._unusable:
@@ -790,6 +1027,40 @@ class CompareRunner:
                         error_detail=detail,
                     )
                 )
+        for reader in task.readers:
+            if reader.label in self._unusable:
+                continue
+            if reader.vendor == VENDOR_GEMINI:
+                ai_config = self._model_ai_config(reader)
+                settings = settings_text(
+                    ai_config.temperature,
+                    ai_config.thinking_level,
+                    ai_config.max_tokens,
+                    getattr(ai_config, "prompt_version", "v1"),
+                )
+            else:
+                ai_config = self._reader_ai_config(reader)
+                settings = reader_settings_text(
+                    reader.vendor,
+                    reader.thinking_level,
+                    ai_config.max_tokens,
+                    getattr(ai_config, "prompt_version", "v1"),
+                )
+            rows.append(
+                CompareRow(
+                    run_label=self._compare.run_label,
+                    recorded_at=recorded_at,
+                    file_id=task.file.file_id,
+                    folder_name=task.folder_name,
+                    file_name=task.file.file_name,
+                    model_label=reader.label,
+                    model_name=reader.name,
+                    method=METHOD_LABELS[METHOD_IMAGE],
+                    result="失敗:file_error",
+                    settings=settings,
+                    error_detail=detail,
+                )
+            )
         return rows
 
 
@@ -811,6 +1082,45 @@ def _default_model_checker(api_key: str | None):
     return check
 
 
+def _default_reader_checker(config: AppConfig, timeout: int):
+    """Anthropic・OpenAI の型の有無。その会社の型を初めて確かめるときだけ作る（R2）。"""
+    checkers: dict[str, object] = {}
+
+    def check(name: str) -> bool:
+        vendor = vendor_of(name)
+        checker = checkers.get(vendor)
+        if checker is None:
+            if vendor == VENDOR_ANTHROPIC:
+                api_key = config.anthropic_api_key
+            elif vendor == VENDOR_OPENAI:
+                api_key = config.openai_api_key
+            else:
+                return True
+            checker = create_model_checker(name, api_key, timeout)
+            checkers[vendor] = checker
+        return checker(name)
+
+    return check
+
+
+def _redact_config_secrets(text, config: AppConfig) -> str:
+    value = str(text)
+    for key in (config.gemini_api_key, config.anthropic_api_key, config.openai_api_key):
+        if key:
+            value = value.replace(str(key), "***")
+    return value
+
+
+def _missing_reader_keys(config: AppConfig, compare_config: CompareConfig) -> list[str]:
+    missing: list[str] = []
+    vendors = {reader.vendor for reader in compare_config.readers}
+    if VENDOR_ANTHROPIC in vendors and not (config.anthropic_api_key or "").strip():
+        missing.append("ANTHROPIC_API_KEY")
+    if VENDOR_OPENAI in vendors and not (config.openai_api_key or "").strip():
+        missing.append("OPENAI_API_KEY")
+    return missing
+
+
 def run_compare(
     config: AppConfig,
     env=None,
@@ -820,6 +1130,8 @@ def run_compare(
     ocr_factory=None,
     extractor_factory=None,
     model_checker=None,
+    reader_checker=None,
+    reader_factory=None,
     sleep=time.sleep,
     clock=time.monotonic,
     jst_now=None,
@@ -843,6 +1155,16 @@ def run_compare(
             extra={"step": "compare_master_conflict"},
         )
         return 1
+
+    # R3: 読み手の鍵が空なら、API も Drive も表も呼ばずに 1
+    if compare_config.step == "collect":
+        missing_keys = _missing_reader_keys(config, compare_config)
+        if missing_keys:
+            logger.error(
+                "比較の読み手の鍵が空です: " + ", ".join(missing_keys),
+                extra={"step": "compare_reader_key_error"},
+            )
+            return 1
 
     if sheet_client is None:
         try:
@@ -875,6 +1197,17 @@ def run_compare(
     extractor_factory = extractor_factory or (
         lambda ai_config: create_ai_extractor(ai_config, api_key=config.gemini_api_key)
     )
+
+    def _default_reader_factory(ai_config):
+        vendor = vendor_of(ai_config.model)
+        api_key = config.anthropic_api_key if vendor == VENDOR_ANTHROPIC else config.openai_api_key
+        return create_compare_reader(ai_config.model, ai_config, api_key=api_key)
+
+    if reader_factory is None:
+        reader_factory = _default_reader_factory
+    if reader_checker is None:
+        reader_checker = _default_reader_checker(config, compare_config.effective_request_timeout)
+
     if model_checker is None:
         # score では型を呼ばないので、クライアントも作らない
         if compare_config.step == "collect":
@@ -901,6 +1234,8 @@ def run_compare(
         ocr_factory=ocr_factory,
         extractor_factory=extractor_factory,
         model_checker=model_checker,
+        reader_checker=reader_checker,
+        reader_factory=reader_factory,
         sleep=sleep,
         clock=clock,
         jst_now=jst_now,
@@ -911,7 +1246,8 @@ def run_compare(
         return runner.run()
     except Exception as error:
         logger.error(
-            f"比較の実行が異常終了: {type(error).__name__}: {error}",
+            f"比較の実行が異常終了: {type(error).__name__}: "
+            f"{_redact_config_secrets(error, config)}",
             extra={"step": "compare_fatal"},
         )
         return 1

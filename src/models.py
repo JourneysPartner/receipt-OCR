@@ -110,6 +110,11 @@ class ReceiptItem:
     confidence: float = 0.0
     is_expense: bool = True
     memo: str | None = None
+    # 計算の確かめ用（仕様 review_precision §6.1）。v1/v2 では常に None
+    pretax: int | None = None
+    tax: int | None = None
+    tendered: int | None = None
+    change: int | None = None
 
 
 @dataclass
@@ -128,6 +133,11 @@ class CorrectedItem:
     corrections_applied: list[str] = field(default_factory=list)
     needs_review: bool = False
     memo: str | None = None
+    # 補正前の明細の値（pipeline は補正前の ReceiptItem から読むこともできる）
+    pretax: int | None = None
+    tax: int | None = None
+    tendered: int | None = None
+    change: int | None = None
 
 
 @dataclass

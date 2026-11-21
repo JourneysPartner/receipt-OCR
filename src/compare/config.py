@@ -20,10 +20,26 @@ from src.models import extract_id_from_url
 JST = timezone(timedelta(hours=9))
 
 _MODEL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.\-]*$")
+_MODEL_ELEMENT_RE = re.compile(r"^[a-z0-9][a-z0-9.\-]*(@(minimal|low|medium|high))?$")
 _RESULT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{20,}$")
 _FOLDER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{10,}$")
 _LABEL_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 _LABEL_DISALLOWED_RE = re.compile(r"[^A-Za-z0-9_-]")
+
+# もう 1 人の読み手の会社（型名の頭で決める。仕様 §4）
+VENDOR_GEMINI = "gemini"
+VENDOR_ANTHROPIC = "anthropic"
+VENDOR_OPENAI = "openai"
+VENDOR_PREFIXES = {
+    "gemini-": VENDOR_GEMINI,
+    "claude-": VENDOR_ANTHROPIC,
+    "gpt-": VENDOR_OPENAI,
+}
+RESTRICTED_VENDOR_PREFIXES = ("claude-", "gpt-")
+ANTHROPIC_EFFORTS = ("low", "medium", "high")
+DEFAULT_OCR_PRICE_PER_PAGE_USD = 0.0015
+DEFAULT_READER_MAX_TOKENS = 8192
+READER_MAX_TOKENS_MIN = 256
 
 DEFAULT_MODELS = "gemini-2.5-flash,gemini-3.5-flash-lite,gemini-3.8-flash"
 DEFAULT_METHODS = ("text", "image")
@@ -40,7 +56,30 @@ DEFAULT_PRICES: dict[str, tuple[float, float]] = {
     "gemini-3.5-flash-lite": (0.30, 2.50),
     # 2027-01-01 からの単価。長く使う前提で比べるためこちらを使う
     "gemini-3.8-flash": (1.50, 7.50),
+    # 2026-11-17・11-20 に公式で確認（入力 10 万トークンまで。レシート 1 枚は数千）
+    "claude-haiku-5-5": (0.10, 0.50),
+    # 2026-11-20 に公式の料金表（標準）で確認
+    "gpt-5.4-mini": (0.75, 4.50),
 }
+
+
+def vendor_of(name: str) -> str | None:
+    """型名の頭から会社を決める。どれでもなければ None（仕様 §4）。"""
+    text = (name or "").strip()
+    for prefix, vendor in VENDOR_PREFIXES.items():
+        if text.startswith(prefix):
+            return vendor
+    return None
+
+
+def reader_vendor_or_error(name: str) -> str:
+    vendor = vendor_of(name)
+    if vendor is None:
+        raise ValueError(
+            "COMPARE_READERS の型名は gemini- / claude- / gpt- で始めてください"
+            f" (received={name!r})"
+        )
+    return vendor
 
 
 @dataclass(frozen=True)
@@ -50,6 +89,7 @@ class CompareModel:
     label: str
     name: str
     thinking_level: str | None = None
+    vendor: str = VENDOR_GEMINI
 
 
 @dataclass(frozen=True)
@@ -69,9 +109,16 @@ class CompareConfig:
     thinking_level: str | None = None
     max_tokens: int = 2048
     request_timeout_seconds: int | None = None
+    # もう 1 人の読み手と「形」の計算（仕様 §4）
+    readers: tuple[CompareModel, ...] = ()
+    form_base: str | None = None
+    ocr_price_per_page_usd: float = DEFAULT_OCR_PRICE_PER_PAGE_USD
+    reader_max_tokens: int = DEFAULT_READER_MAX_TOKENS
     # score で COMPARE_MODELS / COMPARE_METHODS を省いたとき、結果タブから並びを作る
     models_set: bool = False
     methods_set: bool = False
+    readers_set: bool = False
+    form_base_set: bool = False
 
     @property
     def result_tab(self) -> str:
@@ -159,6 +206,10 @@ def _parse_models(raw: str | None) -> tuple[CompareModel, ...]:
             thinking = level
         if not _MODEL_NAME_RE.match(name):
             raise ValueError(f"COMPARE_MODELS の型名が不正です (received={element!r})")
+        if name.startswith(RESTRICTED_VENDOR_PREFIXES):
+            raise ValueError(
+                "COMPARE_MODELS には Gemini の型だけを書けます。ほかの会社の型は COMPARE_READERS へ"
+            )
         if label in seen:
             continue
         seen.add(label)
@@ -166,6 +217,70 @@ def _parse_models(raw: str | None) -> tuple[CompareModel, ...]:
     if not models:
         raise ValueError("COMPARE_MODELS が空です")
     return tuple(models)
+
+
+def _parse_readers(
+    raw: str | None,
+    models: tuple[CompareModel, ...],
+    default_thinking: str | None,
+) -> tuple[CompareModel, ...]:
+    """COMPARE_READERS を読む（仕様 §4）。
+
+    Gemini は `@` が無ければ AI_THINKING_LEVEL に従う。Anthropic・OpenAI は
+    low / medium / high だけ。`@` が無ければ何も送らない（その型の既定）。
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ()
+    base_labels = {model.label for model in models}
+    readers: list[CompareModel] = []
+    seen: set[str] = set()
+    for part in text.split(","):
+        element = part.strip()
+        if not element:
+            continue
+        if not _MODEL_ELEMENT_RE.match(element):
+            raise ValueError(f"COMPARE_READERS の要素が不正です (received={element!r})")
+        label = element
+        name = element
+        thinking: str | None = None
+        if "@" in element:
+            name, _, level = element.partition("@")
+            name = name.strip()
+            level = level.strip().lower()
+            thinking = level or None
+        vendor = reader_vendor_or_error(name)
+        if vendor == VENDOR_GEMINI:
+            if thinking is None:
+                thinking = default_thinking
+        else:
+            if thinking == "minimal":
+                raise ValueError(
+                    "COMPARE_READERS の Anthropic・OpenAI の考える量は "
+                    "low / medium / high のいずれか (received='minimal')"
+                )
+        if label in base_labels:
+            raise ValueError(
+                f"COMPARE_READERS と COMPARE_MODELS に同じ要素は書けません (received={label!r})"
+            )
+        if label in seen:
+            continue
+        seen.add(label)
+        readers.append(CompareModel(label=label, name=name, thinking_level=thinking, vendor=vendor))
+    return tuple(readers)
+
+
+def _require_float(env: dict, name: str, default: float, *, minimum: float) -> float:
+    raw = env.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = float(str(raw).strip())
+    except ValueError as e:
+        raise ValueError(f"{name} は数値でなければなりません (received={raw!r})") from e
+    if value < minimum:
+        raise ValueError(f"{name} は {minimum} 以上でなければなりません (received={value})")
+    return value
 
 
 def _parse_methods(raw: str | None) -> tuple[str, ...]:
@@ -279,6 +394,32 @@ def load_compare_config(env, now: datetime | None = None) -> CompareConfig:
     time_budget = _require_int(env, "COMPARE_TIME_BUDGET_SECONDS", 3300, minimum=60)
     prices = _parse_prices(env.get("COMPARE_PRICES_JSON"))
 
+    default_thinking = _parse_ai_thinking_level(env.get("AI_THINKING_LEVEL"))
+    readers_raw = env.get("COMPARE_READERS")
+    readers = _parse_readers(readers_raw, models, default_thinking)
+    ocr_price = _require_float(
+        env,
+        "COMPARE_OCR_PRICE_PER_PAGE_USD",
+        DEFAULT_OCR_PRICE_PER_PAGE_USD,
+        minimum=0.0,
+    )
+    reader_max_tokens = _require_int(
+        env,
+        "COMPARE_READER_MAX_TOKENS",
+        DEFAULT_READER_MAX_TOKENS,
+        minimum=READER_MAX_TOKENS_MIN,
+    )
+    form_base_raw = (env.get("COMPARE_FORM_BASE") or "").strip()
+    if form_base_raw and not _MODEL_ELEMENT_RE.match(form_base_raw):
+        raise ValueError(f"COMPARE_FORM_BASE が不正です (received={form_base_raw!r})")
+    if form_base_raw:
+        form_base = form_base_raw
+    elif step == "collect":
+        form_base = models[0].label
+    else:
+        # score で COMPARE_MODELS を省いたときは、結果タブから決める（runner）
+        form_base = models[0].label if (models_raw or "").strip() else None
+
     max_tokens_raw = env.get("AI_MAX_TOKENS")
     max_tokens = 2048
     if max_tokens_raw is not None and str(max_tokens_raw).strip():
@@ -308,6 +449,12 @@ def load_compare_config(env, now: datetime | None = None) -> CompareConfig:
         thinking_level=_parse_ai_thinking_level(env.get("AI_THINKING_LEVEL")),
         max_tokens=max_tokens,
         request_timeout_seconds=_parse_ai_request_timeout(env.get("AI_REQUEST_TIMEOUT_SECONDS")),
+        readers=readers,
+        form_base=form_base,
+        ocr_price_per_page_usd=ocr_price,
+        reader_max_tokens=reader_max_tokens,
         models_set=bool((models_raw or "").strip()),
         methods_set=bool((methods_raw or "").strip()),
+        readers_set=bool((readers_raw or "").strip()),
+        form_base_set=bool(form_base_raw),
     )
