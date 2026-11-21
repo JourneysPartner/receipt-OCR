@@ -58,7 +58,8 @@ def parse_amount_cell(value) -> int | None:
         return None
     try:
         return int(float(text))
-    except ValueError:
+    except (ValueError, OverflowError):
+        # `INF` のような数は金額にしない（Hypothesis が既存のテストで見つけた）
         return None
 
 

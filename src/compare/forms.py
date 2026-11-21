@@ -6,8 +6,11 @@ API もファイルも触らない純粋な関数。合ったかどうかは必�
 """
 
 import json
+import math
 from dataclasses import dataclass, field
+from datetime import date as date_type
 
+from src.compare.config import DEFAULT_JUDGE_THRESHOLDS, METHOD_JUDGE
 from src.compare.normalize import (
     FIELD_AMOUNT,
     FIELD_DATE,
@@ -16,11 +19,12 @@ from src.compare.normalize import (
 )
 from src.compare.score import assign_auto, expected_receipts, format_ratio, multi_by_file
 from src.compare.sheet import FORM_DETAIL_HEADERS, FORM_HEADERS
-from src.processing.reconcile import reconcile
+from src.processing.reconcile import LABEL_COUNT, reconcile
 
 FORM_CURRENT = "今（両読み）"
 FORM_A2 = "A2"
 FORM_B = "B"
+FORM_C = "C"
 METHOD_IMAGE = "画像から"
 METHOD_TEXT = "文字から"
 METHOD_DUAL = "両読み"
@@ -29,15 +33,17 @@ GRADE_CORRECT = "正しく自動"
 GRADE_WRONG = "誤って自動"
 GRADE_REVIEW = "要確認"
 GRADE_NO_ANSWER = "答えなし"
+JUDGE_MATCHED = "一致（審判）"
 MAX_READINGS = 10
 
 
 @dataclass
 class ReadingItem:
-    """reconcile に渡す小さな入れ物（日付と金額だけ）。"""
+    """reconcile に渡す小さな入れ物（日付と金額。店名は審判の文だけに使う）。"""
 
     date: str | None = None
     amount: int | None = None
+    vendor: str = ""
 
 
 @dataclass
@@ -45,9 +51,13 @@ class ReadingFile:
     file_id: str
     file_name: str = ""
     folder_name: str = ""
+    mime_type: str = ""
+    content: bytes = b""
     image_items: list | None = None
     text_items: list | None = None
     readers: dict[str, list] = field(default_factory=dict)
+    # 方式 審判 の一番下の行（型 -> 行）
+    judges: dict[str, dict] = field(default_factory=dict)
     ocr_text: str = ""
     page_count: int = 1
     page_count_known: bool = True
@@ -67,6 +77,8 @@ class FileResult:
     called: bool
     grade: str
     expected: list[dict]
+    judge: str | None = None
+    theta: float | None = None
 
 
 @dataclass
@@ -116,7 +128,12 @@ def _item_of(receipt: dict) -> ReadingItem:
         amount = receipt.get("amount")
     if isinstance(amount, bool) or not isinstance(amount, int):
         amount = parse_amount_cell(amount)
-    return ReadingItem(date=date, amount=amount)
+    vendor = receipt.get("v")
+    return ReadingItem(
+        date=date,
+        amount=amount,
+        vendor="" if vendor is None else str(vendor),
+    )
 
 
 def items_from_row(row: dict) -> list:
@@ -131,6 +148,23 @@ def items_from_row(row: dict) -> list:
     if not isinstance(data, list) or any(not isinstance(entry, dict) for entry in data):
         return []
     return [_item_of(entry) for entry in data]
+
+
+def base_snapshot(items) -> list[list]:
+    """審判に見せた Ib の（日付, 金額）。読めない所は null（仕様 §5.3）。"""
+    snapshot: list[list] = []
+    for item in items or []:
+        date = normalize_date(getattr(item, "date", None)) or None
+        amount = getattr(item, "amount", None)
+        if isinstance(amount, bool) or not isinstance(amount, int):
+            amount = None
+        snapshot.append([date, amount])
+    return snapshot
+
+
+def needs_call(items, decisions) -> bool:
+    """形 B と形 C の「審判・読み手を呼ぶ」条件（仕様 §5.1・§7.2）。"""
+    return bool(items) and any(not decision.matched for decision in decisions)
 
 
 def _cost_of(value) -> float | None:
@@ -170,6 +204,18 @@ def reader_labels(result_rows: list[dict], base_label: str) -> list[str]:
         if method == METHOD_DUAL:
             dual_labels.add(label)
     return [label for label in image_labels if label != base_label and label not in dual_labels]
+
+
+def judge_labels(result_rows: list[dict]) -> list[str]:
+    """方式 `審判` の行がある型を、初めて出た順に返す（仕様 §7.1）。"""
+    labels: list[str] = []
+    for row in result_rows:
+        if _text(row.get("方式")) != METHOD_JUDGE:
+            continue
+        label = _text(row.get("型"))
+        if label and label not in labels:
+            labels.append(label)
+    return labels
 
 
 def build_inputs(result_rows: list[dict], ocr_rows: list[dict], base_label: str):
@@ -218,6 +264,11 @@ def build_inputs(result_rows: list[dict], ocr_rows: list[dict], base_label: str)
                 continue
             readers[label] = items_from_row(row) if _text(row.get("結果")) == SUCCESS else []
 
+        judges: dict[str, dict] = {}
+        for (label, method), row in methods.items():
+            if method == METHOD_JUDGE:
+                judges[label] = row
+
         dual_row = methods.get((base_label, METHOD_DUAL))
         dual_flags = _saved_dual_flags(dual_row) if dual_row is not None else None
 
@@ -233,6 +284,7 @@ def build_inputs(result_rows: list[dict], ocr_rows: list[dict], base_label: str)
                     items_from_row(text_row) if _text(text_row.get("結果")) == SUCCESS else []
                 ),
                 readers=readers,
+                judges=judges,
                 ocr_text=ocr_text,
                 page_count=page_count,
                 page_count_known=known,
@@ -337,7 +389,7 @@ def _a2(file: ReadingFile, reader: str, expected: list[dict]) -> FileResult:
 def _b(file: ReadingFile, reader: str, expected: list[dict]) -> FileResult:
     items = file.image_items or []
     current = reconcile(items, file.text_items or [], file.ocr_text)
-    called = bool(items) and any(not decision.matched for decision in current)
+    called = needs_call(items, current)
     flags = [decision.matched for decision in current]
     labels = [decision.label for decision in current]
     if called:
@@ -359,6 +411,173 @@ def _b(file: ReadingFile, reader: str, expected: list[dict]) -> FileResult:
         grade=grade(items, flags, expected),
         expected=expected,
     )
+
+
+@dataclass
+class _JudgeView:
+    """審判の行から読んだ、形 C の材料（§7.2 の 1・2）。"""
+
+    state: str  # missing / failed / bad / base / ok
+    result: str = ""
+    items: dict[int, dict] = field(default_factory=dict)
+    count: dict | None = None
+
+
+def _number_0_1(value) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number) or number < 0 or number > 1:
+        return None
+    return number
+
+
+def _iso_date(value) -> str:
+    text = normalize_date(value)
+    if not text:
+        return ""
+    try:
+        parsed = date_type.fromisoformat(text)
+    except ValueError:
+        return ""
+    if parsed.isoformat() != text:
+        return ""
+    return text
+
+
+def _judge_view(file: ReadingFile, row: dict | None) -> _JudgeView:
+    """審判の一番下の行を読む。迷う所は state で返し、呼び側が要確認にする。"""
+    if row is None:
+        return _JudgeView(state="missing")
+    result = _text(row.get("結果"))
+    if result != SUCCESS:
+        return _JudgeView(state="failed", result=result)
+    raw = _text(row.get("明細JSON"))
+    if not raw:
+        return _JudgeView(state="bad", result=result)
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return _JudgeView(state="bad", result=result)
+    if not isinstance(data, dict):
+        return _JudgeView(state="bad", result=result)
+    if "judge" in data and data.get("judge") != 1:
+        return _JudgeView(state="bad", result=result)
+    base = data.get("base")
+    if not isinstance(base, list):
+        return _JudgeView(state="bad", result=result)
+    if base != base_snapshot(file.image_items or []):
+        return _JudgeView(state="base", result=result)
+    entries = data.get("items")
+    if not isinstance(entries, list):
+        return _JudgeView(state="bad", result=result)
+    items: dict[int, dict] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        index = entry.get("i")
+        if isinstance(index, bool) or not isinstance(index, int):
+            continue
+        items.setdefault(index, entry)
+    count = data.get("count")
+    if count is not None and not isinstance(count, dict):
+        return _JudgeView(state="bad", result=result)
+    return _JudgeView(state="ok", result=result, items=items, count=count)
+
+
+def _choice_matches(answer, expected_key: str, theta: float) -> bool:
+    if not isinstance(answer, dict):
+        return False
+    options = answer.get("options")
+    if options is not None and (not isinstance(options, list) or expected_key not in options):
+        return False
+    if answer.get("choice") != expected_key:
+        return False
+    confidence = _number_0_1(answer.get("confidence"))
+    return confidence is not None and confidence >= theta
+
+
+def _count_matches(count, expected_asked: int, theta: float) -> bool:
+    if not isinstance(count, dict):
+        return False
+    asked = count.get("asked")
+    if isinstance(asked, bool) or not isinstance(asked, int):
+        return False
+    if asked != expected_asked:
+        return False
+    probability = _number_0_1(count.get("p"))
+    return probability is not None and probability >= theta
+
+
+def _c(file: ReadingFile, judge: str, theta: float, expected: list[dict]) -> FileResult:
+    """形 C（§7.2）。値は変えず、要確認を自動にしてよいかだけを決める（J6）。"""
+    items = file.image_items or []
+    current = reconcile(items, file.text_items or [], file.ocr_text)
+    flags = [decision.matched for decision in current]
+    labels = [decision.label for decision in current]
+    called = needs_call(items, current)
+    if called:
+        view = _judge_view(file, file.judges.get(judge))
+        count_required = any(decision.label == LABEL_COUNT for decision in current)
+        count_ok = not count_required or _count_matches(view.count, len(items), theta)
+        if view.state == "ok" and count_ok:
+            for index, decision in enumerate(current):
+                if decision.matched:
+                    continue
+                entry = view.items.get(index)
+                if entry is None:
+                    continue
+                amount = items[index].amount
+                if isinstance(amount, bool) or not isinstance(amount, int) or amount < 1:
+                    continue
+                date = _iso_date(items[index].date)
+                if not date:
+                    continue
+                if not _choice_matches(entry.get("a"), str(amount), theta):
+                    continue
+                if not _choice_matches(entry.get("d"), date, theta):
+                    continue
+                flags[index] = True
+                labels[index] = JUDGE_MATCHED
+    return FileResult(
+        file=file,
+        form=FORM_C,
+        reader=f"{judge} ≥{theta:.2f}",
+        flags=flags,
+        labels=labels,
+        called=called,
+        grade=grade(items, flags, expected),
+        expected=expected,
+        judge=judge,
+        theta=theta,
+    )
+
+
+def _conf_text(value) -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "?"
+    return f"{float(value):.2f}"
+
+
+def _judge_reading(file: ReadingFile, judge: str | None) -> str:
+    if not judge:
+        return "なし"
+    view = _judge_view(file, file.judges.get(judge))
+    if view.state != "ok":
+        return "なし"
+    values = []
+    for index in sorted(view.items):
+        entry = view.items[index]
+        amount = entry.get("a") if isinstance(entry.get("a"), dict) else {}
+        date = entry.get("d") if isinstance(entry.get("d"), dict) else {}
+        values.append(
+            f"{index + 1}:{_text(amount.get('choice')) or '?'}"
+            f"({_conf_text(amount.get('confidence'))})/"
+            f"{_text(date.get('choice')) or '?'}({_conf_text(date.get('confidence'))})"
+        )
+    if view.count is not None:
+        values.append(f"枚数={_conf_text(view.count.get('p'))}")
+    return ", ".join(values) if values else "なし"
 
 
 def _cost(file: ReadingFile, label: str, method: str) -> tuple[float, int]:
@@ -463,10 +682,12 @@ def _answer_text(expected: list[dict]) -> str:
 def _reading_text(result: FileResult) -> str:
     file = result.file
     parts = [f"主画像={_side(file.image_items or [])}"]
-    if result.form in (FORM_CURRENT, FORM_B):
+    if result.form in (FORM_CURRENT, FORM_B, FORM_C):
         parts.append(f"主文字={_side(file.text_items or [])}")
     if result.form == FORM_A2 or (result.form == FORM_B and result.called):
         parts.append(f"もう1人={_side(file.readers.get(result.reader) or [])}")
+    if result.form == FORM_C:
+        parts.append(f"審判={_judge_reading(file, result.judge)}")
     return " ｜ ".join(parts)
 
 
@@ -503,6 +724,7 @@ def build_form_tables(
     ocr_price_per_page: float,
     label: str,
     now_text: str,
+    judge_thresholds: tuple[float, ...] = DEFAULT_JUDGE_THRESHOLDS,
 ) -> FormTables | None:
     """形の 2 つのタブの行を作る。主の読み手が無ければ None（タブを作らない）。"""
     if not base_label:
@@ -603,6 +825,36 @@ def build_form_tables(
         )
         all_results.extend(b_results)
 
+    # 形 C（仕様 §7）。審判の行がある型だけ、θ の小さい順に足す。
+    d0_by_file = {
+        file.file_id: reconcile(file.image_items or [], file.text_items or [], file.ocr_text)
+        for file in files
+    }
+    for judge in judge_labels(result_rows):
+        views = {file.file_id: _judge_view(file, file.judges.get(judge)) for file in files}
+        for theta in sorted(judge_thresholds):
+            c_results = [_c(file, judge, theta, expected[file.file_id]) for file in files]
+            called_success = sum(
+                1
+                for file in files
+                if needs_call(file.image_items or [], d0_by_file[file.file_id])
+                and views[file.file_id].result == SUCCESS
+            )
+            note = _c_note(files, views, d0_by_file)
+            metrics.append(
+                _metric(
+                    FORM_C,
+                    f"{judge} ≥{theta:.2f}",
+                    c_results,
+                    called_files=called_success,
+                    cost_per_file=lambda result, j=judge: _c_cost(
+                        result, base_label, j, ocr_price_per_page
+                    ),
+                    note=note,
+                )
+            )
+            all_results.extend(c_results)
+
     summary = [
         ["実行ラベル", label],
         ["集計時刻", now_text],
@@ -624,6 +876,49 @@ def build_form_tables(
         summary_rows=summary,
         detail_rows=detail,
     )
+
+
+def _c_note(files: list[ReadingFile], views: dict[str, _JudgeView], d0_by_file) -> str:
+    """形 C の「注」（仕様 §7.3）。0 のものは書かない。"""
+    missing = 0
+    failed = 0
+    failed_counts: dict[str, int] = {}
+    mismatch = 0
+    for file in files:
+        if not needs_call(file.image_items or [], d0_by_file[file.file_id]):
+            continue
+        view = views[file.file_id]
+        if view.state == "missing":
+            missing += 1
+        elif view.state == "failed":
+            failed += 1
+            failed_counts[view.result] = failed_counts.get(view.result, 0) + 1
+        elif view.state == "base":
+            mismatch += 1
+    notes = []
+    if missing:
+        notes.append(f"審判の行が無いファイル {missing}")
+    if failed:
+        breakdown = "・".join(
+            f"{result} {count}" for result, count in sorted(failed_counts.items())
+        )
+        notes.append(f"審判が失敗したファイル {failed}（{breakdown}）")
+    if mismatch:
+        notes.append(f"審判に見せた読みと違うファイル {mismatch}")
+    return "、".join(notes)
+
+
+def _c_cost(
+    result: FileResult, base_label: str, judge: str, ocr_price_per_page: float
+) -> tuple[float, int]:
+    image, image_absent = _cost(result.file, base_label, METHOD_IMAGE)
+    text, text_absent = _cost(result.file, base_label, METHOD_TEXT)
+    vision = result.file.page_count * ocr_price_per_page
+    judge_cost = 0.0
+    if result.called:
+        # 行が無い・空は 0（仕様 §7.3）。費用の無い行の注には数えない。
+        judge_cost, _ = _cost(result.file, judge, METHOD_JUDGE)
+    return image + text + vision + judge_cost, image_absent + text_absent
 
 
 def _a2_cost(result: FileResult, base_label: str, reader: str) -> tuple[float, int]:

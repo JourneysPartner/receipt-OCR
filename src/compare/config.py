@@ -31,9 +31,15 @@ _LABEL_DISALLOWED_RE = re.compile(r"[^A-Za-z0-9_-]")
 VENDOR_GEMINI = "gemini"
 VENDOR_ANTHROPIC = "anthropic"
 VENDOR_OPENAI = "openai"
+# 審判の会社（型名の頭で決める。仕様 spec_judge_form §4）
+VENDOR_GOOGLE = "google"
 VENDOR_PREFIXES = {
     "gemini-": VENDOR_GEMINI,
     "claude-": VENDOR_ANTHROPIC,
+    "gpt-": VENDOR_OPENAI,
+}
+JUDGE_VENDOR_PREFIXES = {
+    "gemini-decision-": VENDOR_GOOGLE,
     "gpt-": VENDOR_OPENAI,
 }
 RESTRICTED_VENDOR_PREFIXES = ("claude-", "gpt-")
@@ -42,6 +48,15 @@ DEFAULT_OCR_PRICE_PER_PAGE_USD = 0.0015
 DEFAULT_READER_MAX_TOKENS = 8192
 READER_MAX_TOKENS_MIN = 256
 
+# 審判（仕様 spec_judge_form §4）
+METHOD_JUDGE = "審判"
+JUDGE_RESOLUTIONS = ("low", "medium", "high", "ultra_high")
+DEFAULT_JUDGE_THRESHOLDS = (0.70, 0.90, 0.97)
+JUDGE_THRESHOLDS_MIN = 0.50
+JUDGE_THRESHOLDS_MAX = 0.99
+JUDGE_THRESHOLDS_MAX_COUNT = 5
+_JUDGE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
 DEFAULT_MODELS = "gemini-2.5-flash,gemini-3.5-flash-lite,gemini-3.8-flash"
 DEFAULT_METHODS = ("text", "image")
 METHOD_LABELS = {
@@ -49,6 +64,7 @@ METHOD_LABELS = {
     "image": "画像から",
     "current": "現行の流れ",
     "dual": "両読み",
+    "judge": METHOD_JUDGE,
 }
 
 # 2026-11-18 に公式の料金表で確認した既定単価（100 万トークンあたり USD）
@@ -61,6 +77,10 @@ DEFAULT_PRICES: dict[str, tuple[float, float]] = {
     "claude-haiku-5-5": (0.10, 0.50),
     # 2026-11-20 に公式の料金表（標準）で確認
     "gpt-5.4-mini": (0.75, 4.50),
+    # 2026-11-21 に公式で確認（審判。仕様 spec_judge_form §8）
+    "gemini-decision-1": (0.10, 0.0),
+    "gpt-6-luna": (0.10, 0.0),
+    "gemini-4-hydrogen": (1.50, 7.50),
 }
 
 
@@ -81,6 +101,22 @@ def reader_vendor_or_error(name: str) -> str:
             f" (received={name!r})"
         )
     return vendor
+
+
+def judge_vendor_or_error(name: str) -> str:
+    """審判の型名の頭から会社を決める。どれでもなければ ValueError（§4）。
+
+    表の「型」と API に送る型名は書いたまま（大文字もそのまま）。会社の判定だけ
+    小文字で行う（読み手の §14.6 と同じ注意）。
+    """
+    text = (name or "").strip()
+    lowered = text.lower()
+    for prefix, vendor in JUDGE_VENDOR_PREFIXES.items():
+        if lowered.startswith(prefix):
+            return vendor
+    raise ValueError(
+        f"COMPARE_JUDGES の型名は gemini-decision- / gpt- で始めてください (received={name!r})"
+    )
 
 
 @dataclass(frozen=True)
@@ -115,11 +151,16 @@ class CompareConfig:
     form_base: str | None = None
     ocr_price_per_page_usd: float = DEFAULT_OCR_PRICE_PER_PAGE_USD
     reader_max_tokens: int = DEFAULT_READER_MAX_TOKENS
+    # 審判（仕様 spec_judge_form §4）。form C の下限 θ は score でも同じ変数を使う
+    judges: tuple[CompareModel, ...] = ()
+    judge_thresholds: tuple[float, ...] = DEFAULT_JUDGE_THRESHOLDS
+    judge_image_resolution: str = "high"
     # score で COMPARE_MODELS / COMPARE_METHODS を省いたとき、結果タブから並びを作る
     models_set: bool = False
     methods_set: bool = False
     readers_set: bool = False
     form_base_set: bool = False
+    judges_set: bool = False
 
     @property
     def result_tab(self) -> str:
@@ -283,6 +324,95 @@ def _parse_readers(
     return tuple(readers)
 
 
+def _parse_judges(
+    raw: str | None,
+    models: tuple[CompareModel, ...],
+    readers: tuple[CompareModel, ...],
+    *,
+    check_overlap: bool = True,
+) -> tuple[CompareModel, ...]:
+    """COMPARE_JUDGES を読む（仕様 spec_judge_form §4）。
+
+    `@考える量` は書けない。重複は 1 つにする。collect では `COMPARE_MODELS`・
+    `COMPARE_READERS` と同じ型名を断る（score は審判を呼ばないので検査しない）。
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ()
+    base_labels = {model.label for model in models} | {reader.label for reader in readers}
+    judges: list[CompareModel] = []
+    seen: set[str] = set()
+    for part in text.split(","):
+        element = part.strip()
+        if not element:
+            continue
+        if "@" in element:
+            raise ValueError(f"COMPARE_JUDGES に @考える量 は書けません (received={element!r})")
+        if not _JUDGE_NAME_RE.match(element):
+            raise ValueError(f"COMPARE_JUDGES の型名が不正です (received={element!r})")
+        vendor = judge_vendor_or_error(element)
+        if check_overlap and element in base_labels:
+            raise ValueError(
+                "COMPARE_JUDGES と COMPARE_MODELS / COMPARE_READERS に"
+                f"同じ型名は書けません (received={element!r})"
+            )
+        if element in seen:
+            continue
+        seen.add(element)
+        judges.append(CompareModel(label=element, name=element, vendor=vendor))
+    return tuple(judges)
+
+
+def _parse_judge_thresholds(raw: str | None) -> tuple[float, ...]:
+    """COMPARE_JUDGE_THRESHOLDS を読む（§4）。小さい順・重複なし。"""
+    if raw is None:
+        return DEFAULT_JUDGE_THRESHOLDS
+    text = str(raw).strip()
+    if not text:
+        raise ValueError("COMPARE_JUDGE_THRESHOLDS が空です")
+    values: list[float] = []
+    for part in text.split(","):
+        element = part.strip()
+        if not element:
+            raise ValueError("COMPARE_JUDGE_THRESHOLDS に空の要素があります")
+        try:
+            value = float(element)
+        except ValueError as e:
+            raise ValueError(
+                f"COMPARE_JUDGE_THRESHOLDS は数値でなければなりません (received={element!r})"
+            ) from e
+        if not math.isfinite(value):
+            raise ValueError(
+                f"COMPARE_JUDGE_THRESHOLDS は有限の数でなければなりません (received={value})"
+            )
+        if value < JUDGE_THRESHOLDS_MIN or value > JUDGE_THRESHOLDS_MAX:
+            raise ValueError(
+                "COMPARE_JUDGE_THRESHOLDS は "
+                f"{JUDGE_THRESHOLDS_MIN:.2f}〜{JUDGE_THRESHOLDS_MAX:.2f} の数にしてください "
+                f"(received={value})"
+            )
+        values.append(value)
+    unique = sorted(set(values))
+    if not unique:
+        raise ValueError("COMPARE_JUDGE_THRESHOLDS が空です")
+    if len(unique) > JUDGE_THRESHOLDS_MAX_COUNT:
+        raise ValueError(
+            "COMPARE_JUDGE_THRESHOLDS は "
+            f"{JUDGE_THRESHOLDS_MAX_COUNT} 個までにしてください (received={len(unique)})"
+        )
+    return tuple(unique)
+
+
+def _parse_judge_resolution(raw: str | None) -> str:
+    value = (raw or "").strip().lower() or "high"
+    if value not in JUDGE_RESOLUTIONS:
+        raise ValueError(
+            "COMPARE_JUDGE_IMAGE_RESOLUTION は "
+            f"{' / '.join(JUDGE_RESOLUTIONS)} のいずれか (received={raw!r})"
+        )
+    return value
+
+
 def _require_float(env: dict, name: str, default: float, *, minimum: float) -> float:
     raw = env.get(name)
     if raw is None or not str(raw).strip():
@@ -412,6 +542,10 @@ def load_compare_config(env, now: datetime | None = None) -> CompareConfig:
     default_thinking = _parse_ai_thinking_level(env.get("AI_THINKING_LEVEL"))
     readers_raw = env.get("COMPARE_READERS")
     readers = _parse_readers(readers_raw, models, default_thinking, check_overlap=step != "score")
+    judges_raw = env.get("COMPARE_JUDGES")
+    judges = _parse_judges(judges_raw, models, readers, check_overlap=step != "score")
+    judge_thresholds = _parse_judge_thresholds(env.get("COMPARE_JUDGE_THRESHOLDS"))
+    judge_resolution = _parse_judge_resolution(env.get("COMPARE_JUDGE_IMAGE_RESOLUTION"))
     ocr_price = _require_float(
         env,
         "COMPARE_OCR_PRICE_PER_PAGE_USD",
@@ -468,8 +602,12 @@ def load_compare_config(env, now: datetime | None = None) -> CompareConfig:
         form_base=form_base,
         ocr_price_per_page_usd=ocr_price,
         reader_max_tokens=reader_max_tokens,
+        judges=judges,
+        judge_thresholds=judge_thresholds,
+        judge_image_resolution=judge_resolution,
         models_set=bool((models_raw or "").strip()),
         methods_set=bool((methods_raw or "").strip()),
         readers_set=bool((readers_raw or "").strip()),
         form_base_set=bool(form_base_raw),
+        judges_set=bool((judges_raw or "").strip()),
     )

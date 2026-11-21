@@ -13,6 +13,7 @@ from src.compare.config import (
     METHOD_LABELS,
     VENDOR_ANTHROPIC,
     VENDOR_GEMINI,
+    VENDOR_GOOGLE,
     VENDOR_OPENAI,
     CompareConfig,
     CompareModel,
@@ -22,7 +23,7 @@ from src.compare.config import (
     summary_tab_name,
     vendor_of,
 )
-from src.compare.forms import build_form_tables
+from src.compare.forms import build_form_tables, build_inputs, needs_call
 from src.compare.pipeline import (
     METHOD_CURRENT,
     METHOD_DUAL,
@@ -66,6 +67,7 @@ from src.drive.client import DriveClient
 from src.logging.logger import setup_logger
 from src.models import extract_id_from_url
 from src.ocr.factory import create_ocr_engine
+from src.processing.reconcile import reconcile
 
 logger = setup_logger()
 JST = timezone(timedelta(hours=9))
@@ -160,6 +162,7 @@ class CompareRunner:
         model_checker,
         reader_checker=None,
         reader_factory=None,
+        judge_post=None,
         sleep=time.sleep,
         clock=time.monotonic,
         jst_now=None,
@@ -180,6 +183,7 @@ class CompareRunner:
         )
         self._model_checker = model_checker
         self._reader_checker = reader_checker
+        self._judge_post = judge_post
         self._unusable: list[str] = []
 
     # ── 入口 ────────────────────────────────────
@@ -436,6 +440,10 @@ class CompareRunner:
                 f"同じ COMPARE_RUN_LABEL={label} で再実行すると続きから",
                 extra={"step": "compare_time_budget"},
             )
+
+        # 審判の回（仕様 spec_judge_form §5.1）。COMPARE_JUDGES が無ければ何もしない。
+        if not self._run_judges(label, result_title, ocr_title, infos):
+            failed = True
 
         # それまでの結果で「答え」と「集計」を書けるだけ書く（書けなくても次を試す）
         try:
@@ -964,6 +972,259 @@ class CompareRunner:
             file.content = b""
         return rows, ocr_row
 
+    # ── 審判の回（仕様 spec_judge_form §5.1） ────────────────
+    def _judge_api_key(self, judge: CompareModel) -> str | None:
+        if judge.vendor == VENDOR_GOOGLE:
+            return self._config.gemini_api_key
+        return self._config.openai_api_key
+
+    def _run_judges(self, label: str, result_title: str, ocr_title: str, infos: list) -> bool:
+        """読み取りの後・形の計算の前に、対象のファイルだけ審判を 1 回ずつ呼ぶ。"""
+        if not self._compare.judges:
+            # J1: 頼まれていなければ import もしない
+            return True
+        if self._time_over_budget():
+            logger.info(
+                "時間切れのため審判の回を始めません。同じ COMPARE_RUN_LABEL="
+                f"{label} で再実行すると続きから",
+                extra={"step": "compare_judge_time_budget"},
+            )
+            return True
+        try:
+            # J2: 比較の collect の中でだけ import する
+            from src.compare import judges as judge_module
+        except Exception as error:
+            logger.error(
+                f"審判のモジュールを読めません: {type(error).__name__}: "
+                f"{self._redact_secrets(error)}",
+                extra={"step": "compare_judge_error"},
+            )
+            return False
+
+        try:
+            result_rows = self._sheet.read_dicts(result_title)
+            try:
+                ocr_rows = self._sheet.read_dicts(ocr_title)
+            except Exception:
+                ocr_rows = []
+            base_label = self._resolve_form_base(result_rows)
+            if not base_label:
+                return True
+            files, _ = build_inputs(result_rows, ocr_rows, base_label)
+            target_ids = {info.file.file_id for info in infos}
+            mime_by_id = {info.file.file_id: info.file.mime_type for info in infos}
+            done = self._done_map(result_rows)
+            judge_method = METHOD_LABELS["judge"]
+
+            jobs = []
+            for file in files:
+                if file.file_id not in target_ids:
+                    continue
+                file.mime_type = mime_by_id.get(file.file_id, "")
+                d0 = reconcile(file.image_items or [], file.text_items or [], file.ocr_text)
+                if not needs_call(file.image_items or [], d0):
+                    continue
+                vendors = [item.vendor for item in (file.image_items or [])]
+                plan = judge_module.build_questions(
+                    file.image_items or [], file.text_items or [], d0, vendors
+                )
+                if plan.empty and not plan.too_many:
+                    continue
+                left = [
+                    judge
+                    for judge in self._compare.judges
+                    if judge_method not in done.get((file.file_id, judge.label), set())
+                ]
+                if left:
+                    jobs.append((file, plan, left))
+            if not jobs:
+                return True
+
+            unavailable: set[str] = set()
+            lock = threading.Lock()
+            budget_exceeded = False
+            with ThreadPoolExecutor(max_workers=self._compare.max_workers) as executor:
+                iterator = iter(jobs)
+                pending: dict = {}
+                while True:
+                    while len(pending) < self._compare.max_workers and not budget_exceeded:
+                        try:
+                            file, plan, judges = next(iterator)
+                        except StopIteration:
+                            iterator = None
+                            break
+                        if self._time_over_budget():
+                            budget_exceeded = True
+                            break
+                        future = executor.submit(
+                            self._process_judge_file, file, plan, judges, unavailable, lock
+                        )
+                        pending[future] = file
+                    if not pending:
+                        break
+                    completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in completed:
+                        pending.pop(future, None)
+                        rows = future.result()
+                        if rows:
+                            self._sheet.append_rows(
+                                result_title,
+                                [row.to_sheet_row() for row in rows],
+                                len(RESULT_HEADERS),
+                            )
+                    if budget_exceeded and not pending:
+                        break
+            if budget_exceeded:
+                logger.info(
+                    "時間切れのため残りの審判を呼びません。同じ COMPARE_RUN_LABEL="
+                    f"{label} で再実行すると続きから",
+                    extra={"step": "compare_judge_time_budget"},
+                )
+            return True
+        except Exception as error:
+            logger.error(
+                f"審判の回で例外: {type(error).__name__}: {self._redact_secrets(error)}",
+                extra={"step": "compare_judge_error"},
+            )
+            return False
+
+    def _process_judge_file(self, file, plan, judges, unavailable, lock):
+        from src.compare import judges as judge_module
+
+        rows: list[CompareRow] = []
+        recorded_at = self._now_text()
+        try:
+            self._resources.drive().download_file(file)
+        except Exception as error:
+            detail = self._redact_secrets(f"{type(error).__name__}: {error}")[:300]
+            with lock:
+                left = [judge for judge in judges if judge.label not in unavailable]
+            for judge in left:
+                rows.append(self._judge_error_row(file, judge, plan, error, recorded_at, detail))
+            return rows
+
+        try:
+            for judge in judges:
+                if self._time_over_budget():
+                    logger.info(
+                        f"時間切れのため残りの審判を呼びません: {file.file_name}: {judge.label}",
+                        extra={"step": "compare_judge_time_budget"},
+                    )
+                    break
+                with lock:
+                    if judge.label in unavailable:
+                        continue
+                try:
+                    if plan.too_many:
+                        attempt = judge_module.JudgeAttempt(
+                            result=judge_module.FAIL_TOO_MANY_ITEMS,
+                            info={
+                                "latency_ms": 0,
+                                "prompt_tokens": None,
+                                "output_tokens": 0,
+                                "error": None,
+                                "error_code": None,
+                            },
+                        )
+                        row = self._judge_row(file, judge, plan, attempt, 0, recorded_at)
+                    else:
+                        row = self._call_judge(file, judge, plan, recorded_at)
+                except Exception as error:
+                    logger.error(
+                        f"審判の処理で予期しない例外: {file.file_name}: {judge.label}: "
+                        f"{type(error).__name__}: {self._redact_secrets(error)}",
+                        extra={"step": "compare_judge_error"},
+                    )
+                    detail = self._redact_secrets(f"{type(error).__name__}: {error}")[:300]
+                    row = self._judge_error_row(file, judge, plan, error, recorded_at, detail)
+                if row.result == judge_module.FAIL_API and row.error_detail.startswith("HTTP 404"):
+                    with lock:
+                        unavailable.add(judge.label)
+                    logger.warning(
+                        f"使えない審判: {judge.name}",
+                        extra={"step": "compare_judge_unusable"},
+                    )
+                rows.append(row)
+        finally:
+            file.content = b""
+        return rows
+
+    def _call_judge(self, file, judge: CompareModel, plan, recorded_at: str) -> CompareRow:
+        from src.compare import judges as judge_module
+
+        client = judge_module.JudgeClient(
+            judge,
+            self._judge_api_key(judge),
+            resolution=self._compare.judge_image_resolution,
+            timeout=self._compare.effective_request_timeout,
+            post=self._judge_post,
+            redact_keys=self._all_api_keys(),
+        )
+        attempt, retries = extract_with_retries(
+            lambda: client.call(file, plan),
+            sleeps=self._retry_sleeps,
+            sleep=self._sleep,
+            should_stop=self._time_over_budget,
+        )
+        return self._judge_row(file, judge, plan, attempt, retries, recorded_at)
+
+    def _judge_row(
+        self, file, judge: CompareModel, plan, attempt, retries: int, recorded_at: str
+    ) -> CompareRow:
+        from src.compare import judges as judge_module
+
+        info = attempt.info if isinstance(attempt.info, dict) else {}
+        input_tokens = info.get("prompt_tokens")
+        cost = estimate_cost(self._compare.prices, judge.label, input_tokens, 0, 0)
+        items_json = ""
+        if attempt.result == judge_module.SUCCESS:
+            items_json = judge_module.build_items_json(
+                plan, attempt.answers, judge_module.base_for_file(file)
+            )
+        return CompareRow(
+            run_label=self._compare.run_label,
+            recorded_at=recorded_at,
+            file_id=file.file_id,
+            folder_name=getattr(file, "folder_name", ""),
+            file_name=file.file_name,
+            model_label=judge.label,
+            model_name=judge.name,
+            method=METHOD_LABELS["judge"],
+            result=attempt.result,
+            retries=retries,
+            count=plan.question_count,
+            latency_ms=info.get("latency_ms"),
+            input_tokens=input_tokens,
+            output_tokens=0,
+            thinking_tokens=0,
+            cost_usd=cost,
+            settings=judge_module.judge_settings_text(judge, self._compare.judge_image_resolution),
+            error_detail=self._redact_secrets(info.get("error") or "")[:300],
+            raw_text=self._redact_secrets(attempt.raw_answers)[:2000],
+            items_json=items_json,
+        )
+
+    def _judge_error_row(
+        self, file, judge: CompareModel, plan, error, recorded_at: str, detail: str
+    ) -> CompareRow:
+        from src.compare import judges as judge_module
+
+        return CompareRow(
+            run_label=self._compare.run_label,
+            recorded_at=recorded_at,
+            file_id=file.file_id,
+            folder_name=getattr(file, "folder_name", ""),
+            file_name=file.file_name,
+            model_label=judge.label,
+            model_name=judge.name,
+            method=METHOD_LABELS["judge"],
+            result=judge_module.FAIL_FILE_ERROR,
+            count=plan.question_count,
+            cost_usd=0.0,
+            settings=judge_module.judge_settings_text(judge, self._compare.judge_image_resolution),
+            error_detail=detail,
+        )
+
     def _resolve_form_base(self, result_rows: list[dict]) -> str | None:
         if self._compare.form_base:
             return self._compare.form_base
@@ -1009,6 +1270,7 @@ class CompareRunner:
                 ocr_price_per_page=self._compare.ocr_price_per_page_usd,
                 label=label,
                 now_text=self._now_text(),
+                judge_thresholds=self._compare.judge_thresholds,
             )
             if tables is None:
                 logger.info(
@@ -1148,6 +1410,17 @@ def _missing_reader_keys(config: AppConfig, compare_config: CompareConfig) -> li
     return missing
 
 
+def _missing_judge_keys(config: AppConfig, compare_config: CompareConfig) -> list[str]:
+    """J3: 頼んだ審判の会社の鍵が空なら、何も呼ばずに 1 で終わる。"""
+    missing: list[str] = []
+    vendors = {judge.vendor for judge in compare_config.judges}
+    if VENDOR_GOOGLE in vendors and not (config.gemini_api_key or "").strip():
+        missing.append("GEMINI_API_KEY")
+    if VENDOR_OPENAI in vendors and not (config.openai_api_key or "").strip():
+        missing.append("OPENAI_API_KEY")
+    return missing
+
+
 def run_compare(
     config: AppConfig,
     env=None,
@@ -1159,6 +1432,7 @@ def run_compare(
     model_checker=None,
     reader_checker=None,
     reader_factory=None,
+    judge_post=None,
     sleep=time.sleep,
     clock=time.monotonic,
     jst_now=None,
@@ -1190,6 +1464,13 @@ def run_compare(
             logger.error(
                 "比較の読み手の鍵が空です: " + ", ".join(missing_keys),
                 extra={"step": "compare_reader_key_error"},
+            )
+            return 1
+        missing_judge_keys = _missing_judge_keys(config, compare_config)
+        if missing_judge_keys:
+            logger.error(
+                "比較の審判の鍵が空です: " + ", ".join(missing_judge_keys),
+                extra={"step": "compare_judge_key_error"},
             )
             return 1
 
@@ -1273,6 +1554,7 @@ def run_compare(
         model_checker=model_checker,
         reader_checker=reader_checker,
         reader_factory=reader_factory,
+        judge_post=judge_post,
         sleep=sleep,
         clock=clock,
         jst_now=jst_now,

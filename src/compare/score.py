@@ -3,7 +3,7 @@
 import json
 from collections.abc import Iterable
 
-from src.compare.config import CompareConfig, CompareModel
+from src.compare.config import METHOD_JUDGE, CompareConfig, CompareModel
 from src.compare.normalize import (
     FIELD_AMOUNT,
     FIELD_DATE,
@@ -69,9 +69,14 @@ def base_model_name(label: str) -> str:
 
 
 def derive_models(result_rows: list[dict]) -> tuple[CompareModel, ...]:
-    """結果タブの「型」の列から、出てきた順に並びを作る（score で env 省略時）。"""
+    """結果タブの「型」の列から、出てきた順に並びを作る（score で env 省略時）。
+
+    方式 `審判` の行は読み手ではないので数えない（仕様 spec_judge_form §5.4）。
+    """
     labels: list[str] = []
     for row in result_rows:
+        if _text(row.get("方式")) == METHOD_JUDGE:
+            continue
         label = _text(row.get("型"))
         if label and label not in labels:
             labels.append(label)
@@ -120,9 +125,14 @@ def _format_cost(value: float | None) -> str:
 
 
 def bottom_rows(result_rows: list[dict]) -> list[dict]:
-    """（fileId, 型, 方式）ごとに、下にある行を使う。"""
+    """（fileId, 型, 方式）ごとに、下にある行を使う。
+
+    方式 `審判` の行は集計に入れない（仕様 spec_judge_form §5.4）。
+    """
     latest: dict[tuple[str, str, str], dict] = {}
     for row in result_rows:
+        if _text(row.get("方式")) == METHOD_JUDGE:
+            continue
         key = (_text(row.get("fileId")), _text(row.get("型")), _text(row.get("方式")))
         latest[key] = row
     return list(latest.values())
@@ -502,7 +512,8 @@ def summary_rows(
     unusable_models: list[str] | None = None,
     multi_rows: list[dict] | None = None,
 ) -> list[list]:
-    file_ids = {_text(row.get("fileId")) for row in result_rows if _text(row.get("fileId"))}
+    read_rows = [row for row in result_rows if _text(row.get("方式")) != METHOD_JUDGE]
+    file_ids = {_text(row.get("fileId")) for row in read_rows if _text(row.get("fileId"))}
     answers_by_file = {_text(row.get("fileId")): row for row in answer_rows}
     multi = multi_by_file(multi_rows)
     counts = {
@@ -518,7 +529,7 @@ def summary_rows(
         for file_id in file_ids
         if _text((answers_by_file.get(file_id) or {}).get("状態")).startswith("要確認")
     )
-    settings = next((_text(row.get("設定")) for row in result_rows if _text(row.get("設定"))), "")
+    settings = next((_text(row.get("設定")) for row in read_rows if _text(row.get("設定"))), "")
 
     rows: list[list] = [
         ["実行ラベル", label],
