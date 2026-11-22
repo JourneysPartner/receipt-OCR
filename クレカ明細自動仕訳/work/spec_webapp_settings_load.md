@@ -136,6 +136,11 @@ function webAppInvoke_(fn) {
 - `test/webapp-settings-load.test.js`（wsl 7 を足す）
 - `test/exclude-compaction.test.js`（`cmp 18` の作り物に `getProperties` を足すだけ）
 
+### 9.8 本番での結果（2026-11-22）
+
+- 利用者の了解（「進めて」）で main を `ce57775` へ ff。main で全テスト 2382/2382。前の `clasp pull` で本番＝gas-push-160（`7aee3a8`）と 64/64 一致 → 19:43 `clasp push`＝**gas-push-161** → 後の pull で本番＝HEAD と 64/64 一致。GitHub へ main とタグを push。
+- 受入（利用者、§8 の 2）と `tmp_import_` の残りの確かめ（監査 L7）は待ち。
+
 ### 9.7 実装と監査の結果（2026-11-22）
 
 - 実装：go-job 2 回（deepseek-v4.1-flash、計 約 0.1 ドル）。ブランチ `go/webapp-settings-load`（1.0 の実装・1.1 の直し）。Claude が worktree で sbx の全テスト：2285/2382、落ちた 97 件は全部 fixtures の `ENOENT`、`cmp 18`・wsl 1〜7 は緑。変異 R1〜R6 は予想どおり赤（R3 は wsl 3 も赤）。
