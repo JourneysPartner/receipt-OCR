@@ -328,6 +328,17 @@ def _parse_ai_flow(raw: str | None) -> str:
 _SECOND_READER_MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
+def _normalized_model_name(model: str) -> str:
+    """同じ型かどうかを比べるための形（前後の空白・大文字小文字・頭の `models/`）。
+
+    比べるときだけ使う。設定に入る型名は書かれたまま。
+    """
+    text = str(model).strip().lower()
+    if text.startswith("models/"):
+        text = text[len("models/") :]
+    return text
+
+
 def _parse_ai_second_reader(
     raw: str | None,
     *,
@@ -349,7 +360,7 @@ def _parse_ai_second_reader(
     model = model_raw.strip()
     if not _SECOND_READER_MODEL_PATTERN.fullmatch(model) or not model.startswith("gemini-"):
         raise ValueError("AI_SECOND_READER の型名は gemini- で始めてください")
-    if model == ai_model:
+    if _normalized_model_name(model) == _normalized_model_name(ai_model):
         raise ValueError("AI_SECOND_READER には AI_MODEL と別の型を書いてください")
 
     if not separator:

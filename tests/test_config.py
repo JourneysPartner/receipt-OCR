@@ -400,3 +400,36 @@ class TestAiSecondReader:
         c = load_config()
         assert c.ai.flow == "text_first"
         assert c.ai.second_reader_model == "gemini-3.8-flash"
+
+
+class TestAiSecondReaderSameModelNormalisation:
+    @pytest.mark.parametrize(
+        "ai_model",
+        [
+            "GEMINI-3.8-FLASH",
+            "models/gemini-3.8-flash",
+            " gemini-3.8-flash ",
+            "models/GEMINI-3.8-FLASH",
+        ],
+    )
+    def test_same_model_after_normalisation_is_rejected(self, monkeypatch, ai_model):
+        for name in SECOND_READER_ENV:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("AI_MODEL", ai_model)
+        monkeypatch.setenv("AI_SECOND_READER", "gemini-3.8-flash")
+
+        with pytest.raises(ValueError) as e:
+            load_config()
+        assert "AI_SECOND_READER には AI_MODEL と別の型を書いてください" in str(e.value)
+
+    def test_the_configured_model_names_stay_as_written(self, monkeypatch):
+        for name in SECOND_READER_ENV:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("AI_MODEL", "models/Gemini-Main-01")
+        monkeypatch.setenv("AI_SECOND_READER", " gemini-3.8-flash @ HIGH ")
+
+        c = load_config()
+
+        assert c.ai.model == "models/Gemini-Main-01"
+        assert c.ai.second_reader_model == "gemini-3.8-flash"
+        assert c.ai.second_reader_thinking_level == "high"

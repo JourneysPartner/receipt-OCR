@@ -407,3 +407,42 @@ def test_merge_second_reader_invariants(d0_flags, dx_flags):
     for index, decision in enumerate(merged):
         if decision.matched:
             assert d0_flags[index] or (index < len(dx_flags) and dx_flags[index])
+
+
+@given(
+    st.lists(
+        st.tuples(st.booleans(), st.one_of(st.none(), st.integers(min_value=0, max_value=3))),
+        max_size=5,
+    ),
+    st.lists(st.booleans(), max_size=5),
+)
+def test_merge_second_reader_matched_indices_are_exact(d0_spec, dx_flags):
+    """「もう 1 人で合った番号」は D0 が合わず Dx が合った番号ちょうど。"""
+    d0 = [
+        ItemDecision(
+            flag,
+            "" if flag else LABEL_AMOUNT,
+            "" if flag else "金額が食い違う",
+            text_index,
+        )
+        for flag, text_index in d0_spec
+    ]
+    dx = [
+        ItemDecision(flag, "" if flag else LABEL_AMOUNT, "" if flag else "金額が食い違う", None)
+        for flag in dx_flags
+    ]
+
+    merged, matched = merge_second_reader(d0, dx)
+
+    expected = {
+        index
+        for index, (flag, _) in enumerate(d0_spec)
+        if not flag and index < len(dx_flags) and dx_flags[index]
+    }
+    assert matched == expected
+    for index, (flag, text_index) in enumerate(d0_spec):
+        if flag:
+            assert merged[index] == d0[index]
+            assert merged[index].text_index == text_index
+        else:
+            assert merged[index].matched == (index in expected)

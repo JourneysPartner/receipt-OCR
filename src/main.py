@@ -72,6 +72,10 @@ def main() -> int:
 
     try:
         cp = config.google_credentials_path
+        # 作る順は今までどおり（Drive・マスター・OCR・主の読み手・もう 1 人）。
+        drive = DriveClient(config.drive, cp)
+        master = MasterSheetClient(config.master, cp)
+        ocr = create_ocr_engine(config.ocr)
         ai = create_ai_extractor(config.ai, api_key=config.gemini_api_key)
         second_ai = None
         if config.ai.second_reader_model and config.ai.flow == "dual":
@@ -83,9 +87,9 @@ def main() -> int:
             second_ai = create_ai_extractor(second_config, api_key=config.gemini_api_key)
         manager = ProcessingManager(
             config=config,
-            drive=DriveClient(config.drive, cp),
-            master=MasterSheetClient(config.master, cp),
-            ocr=create_ocr_engine(config.ocr),
+            drive=drive,
+            master=master,
+            ocr=ocr,
             ai=ai,
             corrector=RuleCorrector(confidence_threshold=config.ai.confidence_threshold),
             second_ai=second_ai,

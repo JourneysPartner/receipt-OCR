@@ -943,8 +943,9 @@ class ProcessingManager:
                 second_items = list(self._second_ai.extract_from_file(file) or [])
                 second_error = self._second_ai.last_extraction_error
             except Exception as e:
+                # 例外の文には鍵などが混ざりうるので、型の名前だけを出す（N10）。
                 logger.error(
-                    f"両読み もう1人の抽出例外: {file.file_name}: {e}",
+                    f"両読み もう1人の抽出例外: {file.file_name}: {type(e).__name__}",
                     extra={"step": "second_reader_error", "file_id": file.file_id},
                 )
                 second_items = []
