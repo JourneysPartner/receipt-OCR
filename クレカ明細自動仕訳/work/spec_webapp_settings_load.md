@@ -139,7 +139,8 @@ function webAppInvoke_(fn) {
 ### 9.8 本番での結果（2026-11-22）
 
 - 利用者の了解（「進めて」）で main を `ce57775` へ ff。main で全テスト 2382/2382。前の `clasp pull` で本番＝gas-push-160（`7aee3a8`）と 64/64 一致 → 19:43 `clasp push`＝**gas-push-161** → 後の pull で本番＝HEAD と 64/64 一致。GitHub へ main とタグを push。
-- 受入（利用者、§8 の 2）と `tmp_import_` の残りの確かめ（監査 L7）は待ち。
+- **受入（利用者、11-22）：合格**。F5 の後、［freee 取込用 Excel を作る］で Excel ができた。Drive の `tmp_import_` の残りの確かめ（監査 L7）も含めて、利用者の返事は「完了。大丈夫。」。
+- 残り（後で）：M1（`convertXlsxToTemp` は作業用フォルダが空なら写さずに止める）・L1・L2・L6。
 
 ### 9.7 実装と監査の結果（2026-11-22）
 
