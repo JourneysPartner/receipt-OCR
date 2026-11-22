@@ -1396,7 +1396,8 @@ module.exports = ({test, assert, gas}) => {
             return properties.getProperty(key);
           },
           setProperty(key, value) { return properties.setProperty(key, value); },
-          deleteProperty(key) { return properties.deleteProperty(key); }
+          deleteProperty(key) { return properties.deleteProperty(key); },
+          getProperties() { return properties.getProperties(); }
         };
       }
     }}, () => call('webAppListReviews', [world.customer.customerId, 15, 0]));

@@ -373,4 +373,47 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(returned, 1);
     assert.equal(after, before, 'Sheets の読取が増えている');
   });
+
+  // ================= wsl 7: fail-closed =================
+  test('wsl 7: プロパティを読めないときは入口の処理を呼ばずに止める', () => {
+    buildFreeeWorld(WORK_FOLDER);
+    const real = props();
+    const unreadable = new Error('Script Properties を読めません（架空）');
+    let repairCalls = 0;
+    const realRepair = gas.context.repairPendingDestinationCompaction_;
+    gas.context.repairPendingDestinationCompaction_ = function() { repairCalls += 1; };
+    const realPropertiesService = gas.context.PropertiesService;
+    gas.context.PropertiesService = {
+      getScriptProperties() {
+        return {
+          getProperties() { throw unreadable; },
+          getProperty(key) { return real.getProperty(key); },
+          setProperty(key, value) { return real.setProperty(key, value); },
+          deleteProperty(key) { return real.deleteProperty(key); }
+        };
+      }
+    };
+    const openedBefore = gas.stubs.getOpenedSpreadsheetIds().length;
+    const createdBefore = gas.stubs.getDriveCreateCount();
+    let thrown = null;
+    try {
+      createExport();
+    } catch (error) {
+      thrown = error;
+    } finally {
+      gas.context.PropertiesService = realPropertiesService;
+      gas.context.repairPendingDestinationCompaction_ = realRepair;
+    }
+    assert.ok(thrown, '例外にならなかった');
+    const classified = gas.call('classifyMenuError_', [unreadable]);
+    const expected = classified && Array.isArray(classified.lines) && classified.lines.length
+      ? classified.lines.join('\n')
+      : '想定していないエラーです: ' + unreadable.message;
+    assert.equal(thrown.message, expected, 'webAppInvoke_ の日本語の形になっていない');
+    assert.equal(gas.stubs.getOpenedSpreadsheetIds().length, openedBefore,
+      '入口の処理（転記シートの読取）が走っている');
+    assert.equal(gas.stubs.getDriveCreateCount(), createdBefore, 'Drive に作っている');
+    assert.equal(gas.stubs.getDriveOps().filter((item) => item.op === 'createFile').length, 0);
+    assert.equal(repairCalls, 0, 'repairPendingDestinationCompaction_ を呼んでいる');
+  });
 };

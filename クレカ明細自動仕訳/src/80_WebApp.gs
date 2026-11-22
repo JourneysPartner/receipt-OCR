@@ -1983,11 +1983,12 @@ function repairPendingDestinationCompaction_() {
 
 /** 公開関数の例外を、既存メニューと同じ日本語へ変換する。 */
 function webAppInvoke_(fn) {
-  // GAS は実行ごとにグローバルを作り直し、`SETTINGS` は既定へ戻る。画面の入口は
-  // すべてここを通るので、スクリプトのプロパティの設定をここで 1 回だけ読む。
-  loadSettingsFromProperties();
-  repairPendingDestinationCompaction_();
   try {
+    // GAS は実行ごとにグローバルを作り直し、`SETTINGS` は既定へ戻る。画面の入口は
+    // すべてここを通るので、スクリプトのプロパティの設定をここで 1 回だけ読む。
+    // プロパティを読めないときは既定のまま進まず、この呼出しを止める（fail-closed）。
+    loadSettingsFromProperties();
+    repairPendingDestinationCompaction_();
     return fn();
   } catch (error) {
     var classified = classifyMenuError_(error);
