@@ -135,3 +135,10 @@ function webAppInvoke_(fn) {
 - `src/80_WebApp.gs`（`webAppInvoke_` だけ）
 - `test/webapp-settings-load.test.js`（wsl 7 を足す）
 - `test/exclude-compaction.test.js`（`cmp 18` の作り物に `getProperties` を足すだけ）
+
+### 9.7 実装と監査の結果（2026-11-22）
+
+- 実装：go-job 2 回（deepseek-v4.1-flash、計 約 0.1 ドル）。ブランチ `go/webapp-settings-load`（1.0 の実装・1.1 の直し）。Claude が worktree で sbx の全テスト：2285/2382、落ちた 97 件は全部 fixtures の `ENOENT`、`cmp 18`・wsl 1〜7 は緑。変異 R1〜R6 は予想どおり赤（R3 は wsl 3 も赤）。
+- 監査（Opus 5.5 xhigh）：**C 0／H 0／M 1／Low 7**。S1〜S5 と §9.2 は全部 HOLDS。本番の 5 つのキーを読むようになって、黙って飛ばしていた処理が新しく書くようになる道は無い。
+- M1（前からある。§7 に記録済み）：作業用フォルダが本当に空のとき、`convertXlsxToTemp` は今も `parents` なしで写す（顧客フォルダにできる）。→ **記録して後で**：空なら写さずに止める直し（別の仕様）。
+- Low（記録だけ）：L1 wsl 5 の「`webAppImportCall_` が `webAppInvoke_` を通る」の確かめは、切り出しがファイルの終わりまでなので外れない（後の関数にも `webAppInvoke_(` がある）。直すなら次の top-level `function` で切る／L2 `cmp 18` の題・`repairPendingDestinationCompaction_` の注釈・`work/spec_exclude_row_compaction.md` の「`fn()` は必ず呼ぶ」は、ストア全体が読めないときは §9.2 で止まる（印だけのときの話と書き直すのは文書だけの直しで後で）／L3 プロパティが一時的に読めないと `doGet` もエラーの画面になる（ほかの入口はもともとマスターの ID をプロパティから読むので同じ）／L4 取込は `webAppInvoke_` と `runImport` で 2 回読む（その間に設定を変えたときだけ食い違う。無視できる）／L5 ブランチの土台が古い → 載せ替えた／L6 テストの頭の注釈が「版 1.0」／L7 この直しの前、画面の形式登録で Excel を読んだ一時コピー（名前 `tmp_import_…`）は顧客フォルダにでき、消すのに失敗すると残りうる → 本番反映の後に Drive で `tmp_import_` を探して残りが無いか一度だけ確かめる。
