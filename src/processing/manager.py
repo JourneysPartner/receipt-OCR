@@ -38,8 +38,11 @@ from src.processing.reconcile import (
     LABEL_READ,
     LABEL_REREAD,
     ItemDecision,
+    merge_second_reader,
+    needs_second_reader,
     readings_text,
     reconcile,
+    second_reader_reason,
 )
 from src.rules.amount_validation import AmountValidation, build_review_label, validate_amount
 from src.rules.corrections import RuleCorrector
@@ -67,6 +70,7 @@ class ProcessingManager:
         ocr: OcrEngine,
         ai: AiExtractor,
         corrector: RuleCorrector,
+        second_ai: AiExtractor | None = None,
     ):
         self._config = config
         self._drive = drive
@@ -74,9 +78,15 @@ class ProcessingManager:
         self._ocr = ocr
         self._ai = ai
         self._corrector = corrector
+        # 形 B のもう 1 人の読み手。None なら今までどおり（N1）。
+        self._second_ai = second_ai
+        self._second_reader_called_files = 0
+        self._second_reader_matched_items = 0
 
     # ── 全顧客処理 ─────────────────────────────────
     def run(self) -> dict:
+        self._second_reader_called_files = 0
+        self._second_reader_matched_items = 0
         summary = {
             "total_customers": 0,
             "processed_customers": 0,
@@ -198,6 +208,13 @@ class ProcessingManager:
                 f"skipped={summary['planned_skipped']}, "
                 f"error予定={summary['planned_errors']}",
                 extra={"step": "validate_summary"},
+            )
+        if self._second_ai is not None:
+            logger.info(
+                "もう1人の読み手のまとめ: "
+                f"呼んだファイル={self._second_reader_called_files}, "
+                f"もう1人で合った明細={self._second_reader_matched_items}",
+                extra={"step": "second_reader_summary"},
             )
         logger.info(f"全顧客処理完了: {summary}", extra={"step": "summary"})
         return summary
@@ -892,6 +909,7 @@ class ProcessingManager:
             return result
 
         # 画像からが空で文字からがある → 文字からの明細を全部要確認
+        d0: list[ItemDecision] | None = None
         if not image_items:
             items = text_items
             decisions = [
@@ -899,19 +917,58 @@ class ProcessingManager:
             ]
         else:
             items = image_items
-            decisions = reconcile(image_items, text_items, ocr_text)
-
-        corrected = [self._corrector.apply(it) for it in items]
-        # 金額検証（記録用。合ったかどうかの判断には使わない）
-        validations = [validate_amount(it.amount, ocr_text) for it in items]
-        summary = readings_text(image_items, text_items)
-        fallback_items = text_items if image_items else []
-        details_by_index = self._details_for_items(items, fallback_items, decisions)
-        same_file_duplicates = same_file_duplicate_indices(items)
+            d0 = reconcile(image_items, text_items, ocr_text)
+            decisions = d0
 
         # 未処理明細（番号は使う明細の並び順）
         pending = [i for i in range(len(items)) if f"{file.file_id}:{i}" not in processed_keys]
         has_marks = _has_numbered_marks(file.file_id, processed_keys)
+
+        # もう 1 人（形 B）。§5.1 の 5 つの条件を満たすファイルだけ、1 回だけ呼ぶ。
+        # D0 を作った後、行の予約と重複の記録より前に呼ぶ（§5.2）。
+        second_called = False
+        second_items: list[ReceiptItem] = []
+        second_error: str | None = None
+        second_decisions: list[ItemDecision] = []
+        second_matched: set[int] = set()
+        if (
+            self._second_ai is not None
+            and d0 is not None
+            and ocr_ok
+            and not has_marks
+            and needs_second_reader(image_items, d0)
+        ):
+            second_called = True
+            try:
+                second_items = list(self._second_ai.extract_from_file(file) or [])
+                second_error = self._second_ai.last_extraction_error
+            except Exception as e:
+                logger.error(
+                    f"両読み もう1人の抽出例外: {file.file_name}: {e}",
+                    extra={"step": "second_reader_error", "file_id": file.file_id},
+                )
+                second_items = []
+                second_error = "api_error"
+            # もう 1 人も、必ず本物の OCR の文字で桁の検査に掛ける（N4）。
+            second_decisions = reconcile(image_items, second_items, ocr_text)
+            decisions, second_matched = merge_second_reader(d0, second_decisions)
+            self._second_reader_called_files += 1
+            self._second_reader_matched_items += len(second_matched)
+            logger.info(
+                f"もう1人で読みました: {file.file_name} "
+                f"型={self._config.ai.second_reader_model or ''} "
+                f"明細={len(second_items)} 失敗={second_error or 'none'} "
+                f"もう1人で一致={len(second_matched)}",
+                extra={"step": "second_reader", "file_id": file.file_id},
+            )
+
+        corrected = [self._corrector.apply(it) for it in items]
+        # 金額検証（記録用。合ったかどうかの判断には使わない）
+        validations = [validate_amount(it.amount, ocr_text) for it in items]
+        summary = readings_text(image_items, text_items, second_items if second_called else None)
+        fallback_items = text_items if image_items else []
+        details_by_index = self._details_for_items(items, fallback_items, decisions)
+        same_file_duplicates = same_file_duplicate_indices(items)
 
         # 読み直し: このファイルの番号 0 以上の印が 1 つでもあれば、
         # まだ印の無い明細は合っていても自動にしない（二重の転記を避ける。監査 H1）
@@ -1018,6 +1075,13 @@ class ProcessingManager:
             duplicate_note = "／".join(note_parts) if note_parts else None
 
             if decision.matched:
+                if idx in second_matched:
+                    extraction_memo = (
+                        f"両読み=一致（もう1人: {self._config.ai.second_reader_model or ''}）"
+                        f" | {summary}"
+                    )
+                else:
+                    extraction_memo = f"両読み=一致 | {summary}"
                 try:
                     is_low = self._write_item(
                         file,
@@ -1031,7 +1095,7 @@ class ProcessingManager:
                         now,
                         today,
                         validation=validations[idx],
-                        extraction_memo=f"両読み=一致 | {summary}",
+                        extraction_memo=extraction_memo,
                         duplicate_note=duplicate_note,
                     )
                     if is_low:
@@ -1063,6 +1127,15 @@ class ProcessingManager:
                 continue
 
             try:
+                second_reason = None
+                if second_called:
+                    dx_decision = second_decisions[idx] if idx < len(second_decisions) else None
+                    second_reason = second_reader_reason(
+                        second_items,
+                        len(image_items),
+                        dx_decision,
+                        second_error,
+                    )
                 self._write_dual_review(
                     file,
                     items[idx],
@@ -1077,6 +1150,7 @@ class ProcessingManager:
                     today,
                     summary,
                     duplicate_note=duplicate_note,
+                    second_reason=second_reason,
                 )
                 result.manual_entry += 1
                 booked_indices.append(idx)
@@ -1130,9 +1204,13 @@ class ProcessingManager:
         summary: str,
         *,
         duplicate_note: str | None = None,
+        second_reason: str | None = None,
     ) -> None:
         """画像からの明細を、両方の読みを残して manual_entry 行にする。"""
-        error_msg = f"両読み要確認（{decision.reason}）: {summary}"
+        if second_reason is None:
+            error_msg = f"両読み要確認（{decision.reason}）: {summary}"
+        else:
+            error_msg = f"両読み要確認（{decision.reason}／もう1人: {second_reason}）: {summary}"
         if duplicate_note:
             error_msg = f"{error_msg}／{duplicate_note}"
         logger.warning(

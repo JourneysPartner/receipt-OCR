@@ -1,6 +1,8 @@
 """reconcile（画像からの読みと文字からの読みの照合）のテスト。"""
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from src.models import ReceiptItem
 from src.processing.reconcile import (
@@ -9,8 +11,11 @@ from src.processing.reconcile import (
     LABEL_DATE,
     LABEL_READ,
     ItemDecision,
+    merge_second_reader,
+    needs_second_reader,
     readings_text,
     reconcile,
+    second_reader_reason,
 )
 
 
@@ -266,7 +271,139 @@ class TestReadingsText:
         assert "2025-04-02/11" not in text
         assert "…ほか 2 件" in text
 
+    def test_second_side_is_added_only_when_given(self):
+        images = [_item("2025-04-02", 1200)]
+        texts = [_item("2025-04-03", 900)]
+
+        without = readings_text(images, texts)
+        assert without == "画像=2025-04-02/1200 ｜ 文字=2025-04-03/900"
+        assert readings_text(images, texts, None) == without
+        assert readings_text(images, texts, [_item("2025-04-02", 1200)]) == (
+            "画像=2025-04-02/1200 ｜ 文字=2025-04-03/900 ｜ もう1人=2025-04-02/1200"
+        )
+
+    def test_second_side_empty_is_none(self):
+        assert readings_text([], [], []) == "画像=なし ｜ 文字=なし ｜ もう1人=なし"
+
+
+class TestNeedsSecondReader:
+    def test_requires_an_image_item(self):
+        assert not needs_second_reader(
+            [], [ItemDecision(False, LABEL_AMOUNT, "金額が食い違う", None)]
+        )
+        assert not needs_second_reader([], [])
+
+    def test_requires_an_unmatched_item(self):
+        matched = [ItemDecision(True, "", "", 0)]
+        unmatched = [ItemDecision(False, LABEL_AMOUNT, "金額が食い違う", None)]
+        images = [_item("2025-04-02", 1200)]
+
+        assert not needs_second_reader(images, matched)
+        assert needs_second_reader(images, matched + unmatched)
+        assert not needs_second_reader(images, [])
+
+    def test_never_raises_on_missing_decisions(self):
+        assert not needs_second_reader([_item("2025-04-02", 1200)], None)
+
+
+class TestMergeSecondReader:
+    def test_keeps_d0_matches_and_adds_dx_matches(self):
+        d0 = [
+            ItemDecision(True, "", "", 0),
+            ItemDecision(False, LABEL_AMOUNT, "金額が食い違う", 1),
+            ItemDecision(False, LABEL_DATE, "日付が食い違う", None),
+        ]
+        dx = [
+            ItemDecision(False, LABEL_AMOUNT, "金額が食い違う", None),
+            ItemDecision(True, "", "", None),
+            ItemDecision(False, LABEL_DATE, "日付が食い違う", None),
+        ]
+
+        merged, matched = merge_second_reader(d0, dx)
+
+        assert len(merged) == 3
+        assert [decision.matched for decision in merged] == [True, True, False]
+        assert merged[1].label == "" and merged[1].reason == ""
+        assert merged[1].text_index == 1
+        assert merged[2] is d0[2]
+        assert matched == {1}
+
+    def test_short_long_and_none_dx_do_not_raise(self):
+        d0 = [
+            ItemDecision(False, LABEL_AMOUNT, "金額が食い違う", None),
+            ItemDecision(False, LABEL_AMOUNT, "金額が食い違う", None),
+        ]
+
+        for dx in (None, [], [ItemDecision(True, "", "", None)]):
+            merged, matched = merge_second_reader(d0, dx)
+            assert len(merged) == 2
+            if dx:
+                assert merged[0].matched and matched == {0}
+                assert not merged[1].matched
+            else:
+                assert not any(decision.matched for decision in merged)
+                assert matched == set()
+
+        merged, matched = merge_second_reader(
+            d0,
+            [
+                ItemDecision(True, "", "", None),
+                ItemDecision(True, "", "", None),
+                ItemDecision(True, "", "", None),
+            ],
+        )
+        assert len(merged) == 2 and matched == {0, 1}
+
+    def test_never_raises_for_broken_input(self):
+        merged, matched = merge_second_reader(None, None)
+        assert merged == [] and matched == set()
+
+
+class TestSecondReaderReason:
+    def test_zero_items_uses_the_error_type(self):
+        assert second_reader_reason([], 1, None, "api_error") == "読めなかった（api_error）"
+        assert second_reader_reason([], 1, None) == "読めなかった（zero_items）"
+
+    def test_more_items_than_the_image(self):
+        second = [_item("2025-04-02", 1200), _item("2025-04-03", 900)]
+        assert second_reader_reason(second, 1, None) == "もう1人は 2 件、画像からは 1 件"
+
+    def test_otherwise_uses_the_dx_reason(self):
+        decision = ItemDecision(False, LABEL_DATE, "日付が食い違う", None)
+        assert second_reader_reason([_item("2025-04-03", 1200)], 1, decision) == "日付が食い違う"
+
+    def test_missing_reason_falls_back(self):
+        decision = ItemDecision(False, "", "", None)
+        assert second_reader_reason([_item("2025-04-03", 1200)], 1, decision) == "金額が食い違う"
+
 
 def test_decision_defaults_are_plain():
     """ItemDecision はそのまま比較できる（frozen dataclass）。"""
     assert ItemDecision(True, "", "", None) == ItemDecision(True, "", "", None)
+
+
+@given(
+    st.lists(st.booleans(), max_size=4),
+    st.lists(st.booleans(), max_size=4),
+)
+def test_merge_second_reader_invariants(d0_flags, dx_flags):
+    """長さは D0 の長さ。D0 の一致は残る。戻りの一致は D0 か Dx の一致（N2・N11）。"""
+    d0 = [
+        ItemDecision(flag, "" if flag else LABEL_AMOUNT, "" if flag else "金額が食い違う", None)
+        for flag in d0_flags
+    ]
+    dx = [
+        ItemDecision(flag, "" if flag else LABEL_AMOUNT, "" if flag else "金額が食い違う", None)
+        for flag in dx_flags
+    ]
+
+    merged, matched = merge_second_reader(d0, dx)
+
+    assert len(merged) == len(d0)
+    assert matched <= set(range(len(d0)))
+    for index, flag in enumerate(d0_flags):
+        if flag:
+            assert merged[index].matched
+    for index, decision in enumerate(merged):
+        if decision.matched:
+            assert d0_flags[index] or (index < len(dx_flags) and dx_flags[index])

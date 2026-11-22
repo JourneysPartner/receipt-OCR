@@ -303,3 +303,100 @@ class TestAiThinkingLevel:
         with pytest.raises(ValueError) as e:
             load_config()
         assert "AI_THINKING_LEVEL" in str(e.value)
+
+
+SECOND_READER_ENV = (
+    *AI_DEFAULT_ENV,
+    "AI_SECOND_READER",
+    "RUN_MODE",
+    "TARGET_SCOPE",
+    "TARGET_ROW",
+)
+
+
+def _load_with_second(monkeypatch, value=None):
+    for name in SECOND_READER_ENV:
+        monkeypatch.delenv(name, raising=False)
+    if value is not None:
+        monkeypatch.setenv("AI_SECOND_READER", value)
+    return load_config()
+
+
+class TestAiSecondReader:
+    @pytest.mark.parametrize("raw", [None, "", "   ", "none", "NONE", " None "])
+    def test_off_values(self, monkeypatch, raw):
+        c = _load_with_second(monkeypatch, raw)
+        assert c.ai.second_reader_model is None
+        assert c.ai.second_reader_thinking_level is None
+
+    def test_model_only_uses_the_main_thinking_level(self, monkeypatch):
+        c = _load_with_second(monkeypatch, "gemini-3.8-flash")
+        assert c.ai.second_reader_model == "gemini-3.8-flash"
+        assert c.ai.second_reader_thinking_level == "low"
+
+    def test_thinking_level_is_part_of_the_value(self, monkeypatch):
+        c = _load_with_second(monkeypatch, " gemini-3.8-flash @ HIGH ")
+        assert c.ai.second_reader_model == "gemini-3.8-flash"
+        assert c.ai.second_reader_thinking_level == "high"
+
+    def test_at_none_means_no_thinking(self, monkeypatch):
+        c = _load_with_second(monkeypatch, "gemini-3.8-flash@none")
+        assert c.ai.second_reader_model == "gemini-3.8-flash"
+        assert c.ai.second_reader_thinking_level is None
+
+    def test_model_only_follows_ai_thinking_level_none(self, monkeypatch):
+        for name in SECOND_READER_ENV:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("AI_THINKING_LEVEL", "none")
+        monkeypatch.setenv("AI_SECOND_READER", "gemini-3.8-flash")
+        c = load_config()
+        assert c.ai.second_reader_thinking_level is None
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "gemini-3.8-flash@",
+            "gemini-3.8-flash@ ",
+            "gemini-3.8-flash@max",
+            "claude-haiku-test",
+            "gpt-test",
+            "gemini-bad!",
+            " gemini-3.8-flash@low@high",
+        ],
+    )
+    def test_invalid_values_raise(self, monkeypatch, raw):
+        with pytest.raises(ValueError) as e:
+            _load_with_second(monkeypatch, raw)
+        assert "AI_SECOND_READER" in str(e.value)
+
+    def test_non_gemini_message(self, monkeypatch):
+        with pytest.raises(ValueError) as e:
+            _load_with_second(monkeypatch, "claude-haiku-test")
+        assert "AI_SECOND_READER の型名は gemini- で始めてください" in str(e.value)
+
+    def test_same_model_as_ai_model_is_rejected(self, monkeypatch):
+        for name in SECOND_READER_ENV:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("AI_MODEL", "gemini-3.8-flash")
+        monkeypatch.setenv("AI_SECOND_READER", "gemini-3.8-flash")
+        with pytest.raises(ValueError) as e:
+            load_config()
+        assert "AI_SECOND_READER には AI_MODEL と別の型を書いてください" in str(e.value)
+
+    def test_compare_does_not_read_the_value(self, monkeypatch):
+        for name in SECOND_READER_ENV:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("RUN_MODE", "compare")
+        monkeypatch.setenv("AI_SECOND_READER", "claude-haiku-test")
+        c = load_config()
+        assert c.ai.second_reader_model is None
+        assert c.ai.second_reader_thinking_level is None
+
+    def test_text_first_still_parses_the_value(self, monkeypatch):
+        for name in SECOND_READER_ENV:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("AI_FLOW", "text_first")
+        monkeypatch.setenv("AI_SECOND_READER", "gemini-3.8-flash")
+        c = load_config()
+        assert c.ai.flow == "text_first"
+        assert c.ai.second_reader_model == "gemini-3.8-flash"

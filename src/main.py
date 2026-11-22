@@ -2,6 +2,7 @@
 
 import os
 import sys
+from dataclasses import replace
 
 from src.ai.factory import create_ai_extractor
 from src.compare.runner import run_compare
@@ -32,6 +33,13 @@ def main() -> int:
 
     logger = setup_logger(level=config.log_level)
     rt = config.runtime
+
+    # AI_SECOND_READER は両読みのときだけ使う（§4）。値はあっても止めない。
+    if not rt.is_compare and config.ai.second_reader_model and config.ai.flow != "dual":
+        logger.warning(
+            "AI_SECOND_READER は AI_FLOW=dual のときだけ使います",
+            extra={"step": "second_reader_flow_warning"},
+        )
 
     # S4: 比較のつもりで本番を動かす事故を防ぐ。load_config の直後、
     # MASTER_SPREADSHEET_ID の確かめより前に行う。
@@ -64,13 +72,23 @@ def main() -> int:
 
     try:
         cp = config.google_credentials_path
+        ai = create_ai_extractor(config.ai, api_key=config.gemini_api_key)
+        second_ai = None
+        if config.ai.second_reader_model and config.ai.flow == "dual":
+            second_config = replace(
+                config.ai,
+                model=config.ai.second_reader_model,
+                thinking_level=config.ai.second_reader_thinking_level,
+            )
+            second_ai = create_ai_extractor(second_config, api_key=config.gemini_api_key)
         manager = ProcessingManager(
             config=config,
             drive=DriveClient(config.drive, cp),
             master=MasterSheetClient(config.master, cp),
             ocr=create_ocr_engine(config.ocr),
-            ai=create_ai_extractor(config.ai, api_key=config.gemini_api_key),
+            ai=ai,
             corrector=RuleCorrector(confidence_threshold=config.ai.confidence_threshold),
+            second_ai=second_ai,
         )
         summary = manager.run()
         logger.info(f"=== ジョブ完了: {summary} ===", extra={"step": "job_complete"})

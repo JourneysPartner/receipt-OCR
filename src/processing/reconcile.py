@@ -140,6 +140,76 @@ def reconcile(image_items, text_items, ocr_text: str) -> list[ItemDecision]:
     return [decision if decision is not None else fallback for decision in decisions]
 
 
+def _unmatched_decision() -> ItemDecision:
+    return ItemDecision(False, LABEL_AMOUNT, "金額が食い違う", None)
+
+
+def needs_second_reader(image_items, decisions) -> bool:
+    """もう 1 人の読み手を呼ぶ条件（§5.1 の 2 と 4）。API もファイルも触らない。"""
+    items = list(image_items or [])
+    if not items:
+        return False
+    return any(not getattr(decision, "matched", False) for decision in list(decisions or []))
+
+
+def merge_second_reader(d0, dx) -> tuple[list[ItemDecision], set[int]]:
+    """D0 と Dx を明細ごとに合わせる（§5.3）。例外を投げない。
+
+    - D0[i] が合っている → D0[i] のまま（N11）
+    - D0[i] が合わず Dx[i] が合っている → 合った判定（ラベル・理由は空、
+      text_index は D0[i] のまま）にし、番号 i を「もう 1 人で合った」に入れる
+    - どちらも合わない → D0[i] のまま
+
+    戻りの長さは必ず D0 の長さ。Dx が短い・長い・None でも例外にしない。
+    """
+    try:
+        base = list(d0 or [])
+    except TypeError:
+        base = []
+    try:
+        other = list(dx or [])
+    except TypeError:
+        other = []
+
+    merged: list[ItemDecision] = []
+    matched_by_second: set[int] = set()
+    for index, decision in enumerate(base):
+        if decision is not None and getattr(decision, "matched", False):
+            merged.append(decision)
+            continue
+        candidate = other[index] if index < len(other) else None
+        if candidate is not None and getattr(candidate, "matched", False):
+            text_index = getattr(decision, "text_index", None)
+            merged.append(ItemDecision(True, "", "", text_index))
+            matched_by_second.add(index)
+        else:
+            merged.append(decision if decision is not None else _unmatched_decision())
+    return merged, matched_by_second
+
+
+def second_reader_reason(
+    second_items,
+    image_count: int,
+    decision: ItemDecision | None,
+    error: str | None = None,
+) -> str:
+    """要確認の行に書く、もう 1 人の側の理由（§6）。例外を投げない。"""
+    try:
+        items = list(second_items or [])
+    except TypeError:
+        items = []
+    if not items:
+        return f"読めなかった（{error or 'zero_items'}）"
+    try:
+        count = int(image_count)
+    except (TypeError, ValueError):
+        count = 0
+    if len(items) > count:
+        return f"もう1人は {len(items)} 件、画像からは {count} 件"
+    reason = getattr(decision, "reason", "") if decision is not None else ""
+    return reason or _unmatched_decision().reason
+
+
 def _reading(item) -> str:
     date = normalize_date(getattr(item, "date", None)) or "?"
     amount = _integer_amount_of(item)
@@ -158,8 +228,15 @@ def _side_text(items) -> str:
     return text
 
 
-def readings_text(image_items, text_items) -> str:
-    """`画像=<日付>/<金額>, … ｜ 文字=<日付>/<金額>, …` の 1 行にする。"""
-    return (
+def readings_text(image_items, text_items, second_items=None) -> str:
+    """`画像=<日付>/<金額>, … ｜ 文字=<日付>/<金額>, …` の 1 行にする。
+
+    `second_items` を渡したときだけ、後ろに `｜ もう1人=<…>` を足す。
+    None（既定）のときの戻りは今までと同じ文字列。
+    """
+    text = (
         f"画像={_side_text(list(image_items or []))} ｜ 文字={_side_text(list(text_items or []))}"
     )
+    if second_items is None:
+        return text
+    return f"{text} ｜ もう1人={_side_text(list(second_items or []))}"

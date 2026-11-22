@@ -56,6 +56,7 @@
 - `ANTHROPIC_API_KEY`・`OPENAI_API_KEY` は `COMPARE_READERS` にその会社の型を書いたときだけ必要。審判は Google が `GEMINI_API_KEY`、OpenAI が `OPENAI_API_KEY`。空なら比較は何も呼ばずに終了コード 1（score は鍵なしで動く）。本番（`prod` / `validate`）は審判を import しない・Decisions API へ送らない
 - 「形_<ラベル>」は `今（両読み）`・`A2`・`B`・`C` ごとの 正しく自動・誤って自動・要確認・費用。「形の明細_<ラベル>」は 1 ファイル × 1 つの形の判定。どちらも毎回消して書き直す（RAW）。`COMPARE_STEP=score` は API も Drive も呼ばず、保存された結果から形を計算し直す
 - `AI_FLOW`（`text_first` / `dual`）で本番の流れを選ぶ。既定は `dual`。比較ではこの設定に関係なく、結果に方式 `両読み`（画像からの読みと文字からの読みを照らし、合った明細だけを自動とする）の行も出す
+- `AI_SECOND_READER`（`型名` / `型名@考える量` / `none`）で、両読みで合わない明細があるファイルだけ、もう 1 人が画像から 1 回読む（形 B）。既定は無し（切）。`gemini-` で始まる型だけで、`AI_MODEL` と同じ型は使えない。表に書く値は主の画像からの読みのまま。`AI_FLOW=text_first` と比較では使わない
 - `AI_THINKING_LEVEL`（`minimal` / `low` / `medium` / `high` / `none`）で考える量を選ぶ。既定は `low`、`none` は考える量（`thinking_config`）を送らない。比較で `COMPARE_MODELS` の要素に `@考える量` が無いときもこの値に従う
 - 以前の動きに戻すときは `AI_MODEL=gemini-2.5-flash`・`AI_PROMPT_VERSION=v1`・`AI_FLOW=text_first`・`AI_THINKING_LEVEL=none` を渡す
 - 「答え_複数」タブは、1 つのファイルに複数のレシートが入っているときだけ使う。`fileId` / `ファイル名` / `ファイル` / `番号` / `正解_日付` / `正解_金額` / `正解_税率` / `正解_店名` / `メモ` の見出しで、1 枚 = 1 行（`番号` の順）。1.6 までの `ファイル` の無い 8 列でもよい。`メモ` より右は自由に使ってよく、道具は読まない・書かない。行が無いファイルは「答え」の 1 行を 1 枚分の答えとして使う
@@ -530,6 +531,7 @@ gcloud run jobs execute receipt-ocr-job --region=asia-northeast1
 | `ENABLE_EXTRACTION_RETRY` | | true | AI 抽出 0件 / parse_error 時の Gemini 再抽出 |
 | `ENABLE_AMOUNT_VALIDATION_RETRY` | | true | amount_validation NG 時の Gemini 再抽出 |
 | `AI_MODEL` | | gemini-3.5-flash-lite | Gemini モデル |
+| `AI_SECOND_READER` | | （無し） | 形 B のもう 1 人の読み手（`gemini-` の型名か `型名@考える量`、`none` で切） |
 | `AI_CONFIDENCE_THRESHOLD` | | 0.7 | 信頼度閾値 |
 | `RESERVATION_TTL_MINUTES` | | 30 | 予約有効期限(分) |
 | `DRY_RUN` | | false | 書き込みスキップ |

@@ -4,6 +4,7 @@
 """
 
 import os
+import re
 from dataclasses import dataclass, field
 
 
@@ -167,6 +168,11 @@ class AiConfig:
     # 読み取りの流れ（"text_first" | "dual"）。dual では画像からと文字からの
     # 両方を読み、合った明細だけを自動で書く
     flow: str = "dual"
+    # もう 1 人の読み手（形 B）。None なら使わない。
+    # 値は gemini- で始まる型名。AI_MODEL と同じ型は使えない。
+    second_reader_model: str | None = None
+    # もう 1 人の考える量。None なら thinking_config を送らない。
+    second_reader_thinking_level: str | None = None
 
 
 @dataclass(frozen=True)
@@ -319,6 +325,47 @@ def _parse_ai_flow(raw: str | None) -> str:
     return value
 
 
+_SECOND_READER_MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _parse_ai_second_reader(
+    raw: str | None,
+    *,
+    ai_model: str,
+    default_thinking: str | None,
+) -> tuple[str | None, str | None]:
+    """`AI_SECOND_READER` を (型名, 考える量) にする。無し・空・none は (None, None)。
+
+    型名は `gemini-` で始まり `AI_MODEL` と違うこと。`@` が無ければ考える量は
+    `AI_THINKING_LEVEL` の値。誤った値は ValueError（main が終了コード 1 にする）。
+    """
+    if raw is None or not raw.strip():
+        return None, None
+    value = raw.strip()
+    if value.lower() == "none":
+        return None, None
+
+    model_raw, separator, thinking_raw = value.partition("@")
+    model = model_raw.strip()
+    if not _SECOND_READER_MODEL_PATTERN.fullmatch(model) or not model.startswith("gemini-"):
+        raise ValueError("AI_SECOND_READER の型名は gemini- で始めてください")
+    if model == ai_model:
+        raise ValueError("AI_SECOND_READER には AI_MODEL と別の型を書いてください")
+
+    if not separator:
+        return model, default_thinking
+
+    thinking_value = thinking_raw.strip().lower()
+    if thinking_value == "none":
+        return model, None
+    if thinking_value not in THINKING_LEVELS:
+        raise ValueError(
+            "AI_SECOND_READER の考える量は "
+            f"{' / '.join(THINKING_LEVELS)} / none のいずれか (received={thinking_raw!r})"
+        )
+    return model, thinking_value
+
+
 def _parse_ai_request_timeout(raw: str | None) -> int | None:
     if raw is None or not raw.strip():
         return None
@@ -349,6 +396,18 @@ def load_config() -> AppConfig:
         alias_map_default = json.loads(alias_map_env)
 
     runtime = _build_runtime_config()
+
+    ai_model = os.environ.get("AI_MODEL", "gemini-3.5-flash-lite")
+    ai_thinking_level = _parse_ai_thinking_level(os.environ.get("AI_THINKING_LEVEL"))
+    # 比較（RUN_MODE=compare）では AI_SECOND_READER を読まない・使わない（§4）
+    if runtime.is_compare:
+        second_reader_model, second_reader_thinking_level = None, None
+    else:
+        second_reader_model, second_reader_thinking_level = _parse_ai_second_reader(
+            os.environ.get("AI_SECOND_READER"),
+            ai_model=ai_model,
+            default_thinking=ai_thinking_level,
+        )
 
     return AppConfig(
         master=MasterConfig(
@@ -422,7 +481,7 @@ def load_config() -> AppConfig:
         ),
         ai=AiConfig(
             engine=os.environ.get("AI_ENGINE", "gemini"),
-            model=os.environ.get("AI_MODEL", "gemini-3.5-flash-lite"),
+            model=ai_model,
             max_tokens=int(os.environ.get("AI_MAX_TOKENS", "2048")),
             confidence_threshold=float(os.environ.get("AI_CONFIDENCE_THRESHOLD", "0.7")),
             enable_amount_validation_retry=os.environ.get(
@@ -432,12 +491,14 @@ def load_config() -> AppConfig:
             enable_extraction_retry=os.environ.get("ENABLE_EXTRACTION_RETRY", "true").lower()
             == "true",
             temperature=_parse_ai_temperature(os.environ.get("AI_TEMPERATURE")),
-            thinking_level=_parse_ai_thinking_level(os.environ.get("AI_THINKING_LEVEL")),
+            thinking_level=ai_thinking_level,
             request_timeout_seconds=_parse_ai_request_timeout(
                 os.environ.get("AI_REQUEST_TIMEOUT_SECONDS")
             ),
             prompt_version=_parse_ai_prompt_version(os.environ.get("AI_PROMPT_VERSION")),
             flow=_parse_ai_flow(os.environ.get("AI_FLOW")),
+            second_reader_model=second_reader_model,
+            second_reader_thinking_level=second_reader_thinking_level,
         ),
         google_credentials_path=os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
         gemini_api_key=os.environ.get("GEMINI_API_KEY"),

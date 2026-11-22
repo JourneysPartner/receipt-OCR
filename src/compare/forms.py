@@ -19,7 +19,12 @@ from src.compare.normalize import (
 )
 from src.compare.score import assign_auto, expected_receipts, format_ratio, multi_by_file
 from src.compare.sheet import FORM_DETAIL_HEADERS, FORM_HEADERS
-from src.processing.reconcile import LABEL_COUNT, reconcile
+from src.processing.reconcile import (
+    LABEL_COUNT,
+    merge_second_reader,
+    needs_second_reader,
+    reconcile,
+)
 
 FORM_CURRENT = "今（両読み）"
 FORM_A2 = "A2"
@@ -164,7 +169,7 @@ def base_snapshot(items) -> list[list]:
 
 def needs_call(items, decisions) -> bool:
     """形 B と形 C の「審判・読み手を呼ぶ」条件（仕様 §5.1・§7.2）。"""
-    return bool(items) and any(not decision.matched for decision in decisions)
+    return needs_second_reader(items, decisions)
 
 
 def _cost_of(value) -> float | None:
@@ -394,12 +399,11 @@ def _b(file: ReadingFile, reader: str, expected: list[dict]) -> FileResult:
     labels = [decision.label for decision in current]
     if called:
         other = reconcile(items, file.readers.get(reader) or [], file.ocr_text)
-        for index, decision in enumerate(other):
-            if index >= len(flags):
-                break
-            # D0 で合っていた明細は `一致` のまま（§14.4）
-            if decision.matched and not flags[index]:
-                flags[index] = True
+        merged, matched_by_second = merge_second_reader(current, other)
+        flags = [decision.matched for decision in merged]
+        labels = [decision.label for decision in merged]
+        for index in matched_by_second:
+            if index < len(labels):
                 labels[index] = "一致（もう1人）"
     return FileResult(
         file=file,

@@ -490,6 +490,34 @@ class TestR7Reconcile:
         assert _detail(tables, FORM_CURRENT)["成績"] == GRADE_CORRECT
 
 
+class TestSharedSecondReader:
+    def test_b_uses_the_shared_needs_function(self, monkeypatch):
+        monkeypatch.setattr(forms, "needs_second_reader", lambda items, decisions: False)
+        rows = _base_rows("F1", _items(("2026-01-02", 1600)), _items(("2026-01-02", 1500)))
+        rows.append(_row("F1", READER, "画像から", _items(("2026-01-02", 1600))))
+
+        tables = _tables(rows, [_answer("F1")], ocr_rows=[_ocr("F1")])
+
+        detail = _detail(tables, FORM_B, READER)
+        assert detail["呼んだ"] == "いいえ"
+        assert detail["成績"] == GRADE_REVIEW
+
+    def test_b_uses_the_shared_merge_function(self, monkeypatch):
+        def fake_merge(d0, dx):
+            return [ItemDecision(True, "", "", None) for _ in d0], set(range(len(d0)))
+
+        monkeypatch.setattr(forms, "merge_second_reader", fake_merge)
+        rows = _base_rows("F1", _items(("2026-01-02", 1600)), _items(("2026-01-02", 1500)))
+        rows.append(_row("F1", READER, "画像から", _items(("2026-01-02", 999))))
+
+        tables = _tables(rows, [_answer("F1")], ocr_rows=[_ocr("F1")])
+
+        detail = _detail(tables, FORM_B, READER)
+        assert detail["呼んだ"] == "はい"
+        assert detail["判定"] == "一致（もう1人）"
+        assert detail["成績"] == GRADE_CORRECT
+
+
 @st.composite
 def _readings(draw):
     size = draw(st.integers(min_value=0, max_value=3))
