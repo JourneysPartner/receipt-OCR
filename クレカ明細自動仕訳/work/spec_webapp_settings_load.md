@@ -1,7 +1,7 @@
 # 画面の入口で設定を読む（freee 取込用の `WORK_FOLDER_MISSING`）仕様書
 
 作成日：2026-11-22
-版：1.0
+版：1.1（1.0 の実装の後、既存のテスト 1 件が赤になったので §9 を足した。§9 が §3・§4・§5 と食い違う所は §9 が勝つ）
 読者：本仕様だけを読んで実装する実装者（AI を含む）。書いてあることは変えない。書いていないことは安全側で決め、決めたことは全部報告する。
 前提：`work/spec_freee_export.md`（freee 取込用 Excel）・`work/spec_private_rules_and_wait.md` §7（止めの理由をボタンの横に出す）・`work/spec_customer_registration.md` §3.13（作業用フォルダ）。
 
@@ -84,3 +84,54 @@
 
 1. 利用者の了解で main へ取り込み、main で全テスト → `clasp push`（`gas-push-N`）→ GitHub へ push。
 2. 受入（利用者）：F5 → 1 人目のペイペイの転記シートで最終確認 → ［freee 取込用 Excel を作る］→ Excel ができる（`work/spec_private_rules_and_wait.md` §14 の 3 の 6、`work/spec_freee_export.md` の受入）。
+
+## 9. 1.0 の実装の後の直し（1.1。2026-11-22）
+
+### 9.1 分かったこと
+
+- 1.0 の実装（ブランチ `go/webapp-settings-load` の `5467be2`）で、全体は fixtures の `ENOENT` 97 件のほかに 1 件だけ赤になった：`cmp 18: Script Properties が読めなくても Web アプリの関数は呼ぶ`（`test/exclude-compaction.test.js`）。
+- `cmp 18` が守るのは「詰める処理の印（`DESTINATION_COMPACTION_PENDING`）が読めなくても、`repairPendingDestinationCompaction_` は例外を飲み込み、`fn()` は呼ぶ」こと。テストの作り物の `getScriptProperties()` は `getProperty`・`setProperty`・`deleteProperty` だけを持ち、`getProperties` を持たない。1.0 の `loadSettingsFromProperties()` が `getProperties()` を呼ぶので `TypeError` になった。印の扱いが壊れたのではなく、作り物が本物の API より狭いのが原因。
+- 変異 R3（読み込みを `fn()` の後へ）では wsl 1・4 に加えて wsl 3 も赤になった（形式の読取も `fn` の中で起きるため）。正しい動き。§5 の表の予想は「wsl 1・3・4」と読み替える。
+
+### 9.2 決めたこと（Claude の判断。§7 に足す）
+
+- **スクリプトのプロパティが読めない（`getProperties()` が例外）ときは、入口の処理を呼ばずに止める（fail-closed）。**既定の値のまま進むと、作業用フォルダが空に見え、Excel の一時コピーが顧客のフォルダにできうる（本仕様が直す不具合そのもの）。取込（`runImport`）も、もともと読めなければ止まる。止めたときの知らせは、ほかの例外と同じく `webAppInvoke_` の `catch` で日本語にする。
+- 印（`DESTINATION_COMPACTION_PENDING`）だけが読めないときは今どおり：直しを飛ばして `fn()` を呼ぶ（`cmp 18` の守り）。
+
+### 9.3 実装（`80_WebApp.gs` の `webAppInvoke_` だけ）
+
+`loadSettingsFromProperties()` と `repairPendingDestinationCompaction_()` を `try` の中へ入れ、順は 読み込み → 直し → `fn()` のまま。
+
+```
+function webAppInvoke_(fn) {
+  try {
+    // （1.0 の注釈。読めないときは止めることを 1 文足す）
+    loadSettingsFromProperties();
+    repairPendingDestinationCompaction_();
+    return fn();
+  } catch (error) {
+    // 今のまま
+  }
+}
+```
+
+`repairPendingDestinationCompaction_` は自分で例外を飲み込むので、`try` の中へ入れても動きは変わらない。
+
+### 9.4 テスト
+
+1. **`cmp 18` の作り物に `getProperties() { return properties.getProperties(); }` を 1 つ足す**（本物の API にある関数を、包んでいる本物へ渡すだけ）。期待値（`markerReads` が 1・`otherReviews` が配列で 1 件以上）は変えない。既存のテストに手を入れるのはこれだけ。
+2. **wsl 7（fail-closed）**：wsl 1 と同じ世界で、`PropertiesService.getScriptProperties()` が `getProperties()` で例外を投げる作り物を返す（ほかの関数は本物へ渡す）→ `webAppCreateFreeeExport` は例外になり、その文は `webAppInvoke_` の日本語の形（`想定していないエラーです:` で始まる、または `classifyMenuError_` の文）・Drive に作られたファイル 0・`fn` に当たる処理（転記シートの読取）が走っていない（`repairPendingDestinationCompaction_` も呼ばれていない）。
+3. wsl 1〜6 はそのまま緑。
+
+### 9.5 変異
+
+| 番号 | 変異 | 赤になるはずのテスト |
+|---|---|---|
+| R5 | `loadSettingsFromProperties();` を `try { … } catch (e) {}` で包んで例外を飲む | wsl 7 |
+| R6 | 読み込みを `try` の外（前）へ戻す | wsl 7（文が日本語の形にならない） |
+
+### 9.6 変えてよいファイル
+
+- `src/80_WebApp.gs`（`webAppInvoke_` だけ）
+- `test/webapp-settings-load.test.js`（wsl 7 を足す）
+- `test/exclude-compaction.test.js`（`cmp 18` の作り物に `getProperties` を足すだけ）
