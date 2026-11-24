@@ -55,7 +55,7 @@ module.exports = ({test, assert, gas}) => {
       SETTINGS.TX_INDEX_SPREADSHEET_ID = 'txidx';
       SETTINGS.SNAPSHOT_SPREADSHEET_ID = 'snap';
       SETTINGS.SAMPLE_CORPUS_FOLDER_ID = 'corpus';
-      SETTINGS.PARALLEL_WORK_FOLDER_ID = '';
+      SETTINGS.PARALLEL_WORK_FOLDER_ID = 'freee-template-work-folder';
       SETTINGS.FAULT_INJECTION = null;
     `);
     gas.stubs.setActiveUser('operator@example.com');

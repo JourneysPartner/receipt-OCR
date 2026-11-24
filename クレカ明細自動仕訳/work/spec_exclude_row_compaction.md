@@ -164,7 +164,7 @@
 
 **門（`assertLeaseHeldForWrite`、`src/11_FileStateManager.gs`）：**今の検査の前に、印を読む（読めなければ例外のまま＝止まる側）。印があれば、その `fileId`・`leaseId` のリースの `customerId` が印の `customerId` と同じとき（印が壊れていて読めないときは全部）、`IntegrityError('DESTINATION_COMPACTION_PENDING', …)`（`displayMessage`＝`転記先の行を詰める処理が途中で止まっています。画面を開き直してから（F5）、もう一度押してください。続くときは管理者へ連絡してください。`）。これで、その顧客の転記先への書込（`writeTransactionRows`・`clearTransactionRows`・`releaseReservedRows`・`reserveDestinationRows`・`recoverPartialFailure`・科目一覧への書き足し）は全部止まる。**`43`・`45` は変えない**（全部この門を通る）。
 
-**次の呼出しで直す（`webAppInvoke_`、`src/80_WebApp.gs`）：**`fn()` を呼ぶ前に、印があれば `withScriptLock_` の中で `settleDestinationCompaction_(印, activeUserEmail_())` を呼ぶ。例外は飲み込む（`fn()` は必ず呼ぶ。直らなければ門が書込を止める）。印が無ければ Script Properties を 1 回読むだけ。
+**次の呼出しで直す（`webAppInvoke_`、`src/80_WebApp.gs`）：**`fn()` を呼ぶ前に、印があれば `withScriptLock_` の中で `settleDestinationCompaction_(印, activeUserEmail_())` を呼ぶ。例外は飲み込む（`fn()` は必ず呼ぶ。直らなければ門が書込を止める）。（2026-11-22 から：プロパティ全体が読めないときは `work/spec_webapp_settings_load.md` §9.2 で止まる。ここは印だけが読めないときの話）印が無ければ Script Properties を 1 回読むだけ。
 
 ### 2.4 「その顧客の書込を全部止める」理由
 

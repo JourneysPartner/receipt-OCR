@@ -2,7 +2,7 @@
 
 /**
  * 画面の入口でスクリプトのプロパティの設定を読む
- * （仕様 `work/spec_webapp_settings_load.md` 版 1.0）。
+ * （仕様 `work/spec_webapp_settings_load.md` 版 1.1）。
  *
  * 値はすべて架空である。顧客 K9101・架空 次郎・テストカード。
  */
@@ -272,9 +272,14 @@ module.exports = ({test, assert, gas}) => {
     assert.deepEqual(copies[0].parents, [WORK_FOLDER], '親が作業用フォルダだけになっていない');
 
     buildFormatWorld(null);
-    const fallback = explainAndRecordCopies();
-    assert.equal(fallback.length, 1);
-    assert.equal(fallback[0].parents, null, '空のときに parents を付けている');
+    let thrown = null;
+    try {
+      call('webAppExplainUnknownFile', [CUSTOMER_ID, 'wsl-format-card', 'wsl-unknown']);
+    } catch (error) {
+      thrown = error;
+    }
+    assert.equal(thrown && thrown.code, 'WORK_FOLDER_MISSING',
+      '空のときに写そうとしている（作業用フォルダが無いので止まるはず）');
   });
 
   // ================= wsl 4: S1 の順序 =================
@@ -358,7 +363,16 @@ module.exports = ({test, assert, gas}) => {
     const webAppFile = path.join(__dirname, '..', 'src', '80_WebApp.gs');
     const source = fs.readFileSync(webAppFile, 'utf8');
     assert.ok(source.indexOf('function webAppImportCall_(') >= 0);
-    const body = source.slice(source.indexOf('function webAppImportCall_('));
+    // webAppImportCall_ の本体だけを見る。ファイルの終わりまで見ると、後ろの
+    // 関数が webAppInvoke_ を呼んでいるだけで通ってしまう。
+    const webAppLines = source.split(/\r?\n/);
+    const importCallIndex = webAppLines.findIndex((line) => line.indexOf('function webAppImportCall_(') === 0);
+    assert.ok(importCallIndex >= 0, 'webAppImportCall_ が見つからない');
+    const nextFunctionIndex = webAppLines.findIndex((line, index) =>
+      index > importCallIndex && line.indexOf('function ') === 0);
+    assert.ok(nextFunctionIndex > importCallIndex,
+      'webAppImportCall_ の次の関数が見つからない（本体を切り出せない）');
+    const body = webAppLines.slice(importCallIndex, nextFunctionIndex).join('\n');
     assert.ok(body.indexOf('webAppInvoke_(') >= 0,
       'webAppImportCall_ が webAppInvoke_ を通っていない');
   });

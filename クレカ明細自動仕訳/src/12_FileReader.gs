@@ -269,16 +269,19 @@ function checkInputLimits(fileId, blobSize, sheetCount, rowCount) {
  * XLSXを一時的なGoogleスプレッドシートへ変換する（4.10）。
  *
  * 一時ファイルは作業用フォルダへ作り、顧客フォルダへ作らない。
+ * 作業用フォルダが空なら写さずに止める。
  * **一時ファイルIDを取引ID生成に使ってはならない**（変換のたびに変わる）。
  */
 function convertXlsxToTemp(fileId) {
+  var workFolderId = String(SETTINGS.PARALLEL_WORK_FOLDER_ID || '').trim();
+  if (!workFolderId) {
+    throw new CatalogError('WORK_FOLDER_MISSING', 'fileId=' + String(fileId));
+  }
   var resource = {
     mimeType: 'application/vnd.google-apps.spreadsheet',
-    name: 'tmp_import_' + String(fileId)
+    name: 'tmp_import_' + String(fileId),
+    parents: [SETTINGS.PARALLEL_WORK_FOLDER_ID]
   };
-  if (SETTINGS.PARALLEL_WORK_FOLDER_ID) {
-    resource.parents = [SETTINGS.PARALLEL_WORK_FOLDER_ID];
-  }
   var created = Drive.Files.copy(resource, fileId, {supportsAllDrives: true});
   return {tempFileId: created.id, spreadsheet: SpreadsheetApp.openById(created.id)};
 }

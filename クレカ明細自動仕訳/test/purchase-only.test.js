@@ -416,7 +416,7 @@ module.exports = ({test, assert, gas}) => {
       SETTINGS.TX_INDEX_SPREADSHEET_ID = 'txidx';
       SETTINGS.SNAPSHOT_SPREADSHEET_ID = 'snap';
       SETTINGS.SAMPLE_CORPUS_FOLDER_ID = 'corpus';
-      SETTINGS.PARALLEL_WORK_FOLDER_ID = '';
+      SETTINGS.PARALLEL_WORK_FOLDER_ID = 'purchase-only-work-folder';
       SETTINGS.FAULT_INJECTION = null;
     `);
     gas.stubs.setActiveUser('admin@example.com');
@@ -558,6 +558,7 @@ module.exports = ({test, assert, gas}) => {
 
   function webSetup() {
     gas.stubs.reset();
+    gas.evaluate("SETTINGS.PARALLEL_WORK_FOLDER_ID = 'purchase-only-work-folder';");
     gas.stubs.createSpreadsheet('master', {sheets: [{name: '仮', values: [['x']]}]});
     gas.stubs.setActiveSpreadsheet('master');
     gas.stubs.setSpreadsheetOwner('master', 'owner@example.com');

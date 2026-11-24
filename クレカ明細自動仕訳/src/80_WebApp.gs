@@ -1964,7 +1964,9 @@ function webAppResolveErrorMessage_(code, message, review, txsById) {
 
 /**
  * 前の呼出しが残した詰める処理の印を、取引 ID の位置から直す（§2.3）。
- * **例外は飲み込む。**直せなくても `fn()` は必ず呼び、書込は門が止める。
+ * **例外は飲み込む。**印だけが読めない・直せないときも、この関数は例外を出さないので
+ * `fn()` へ進む。プロパティ全体が読めないときは、その前の
+ * `loadSettingsFromProperties()` で止まる。直せなければ書込は門が止める。
  */
 function repairPendingDestinationCompaction_() {
   try {
@@ -1976,8 +1978,9 @@ function repairPendingDestinationCompaction_() {
       settleDestinationCompaction_(fresh, activeUserEmail_());
     });
   } catch (ignored) {
-    // 読めない・直せないときも印は残る（Script Properties が読めないときは
-    // 門の読取も止まる側）。`fn()` は必ず呼ぶ。
+    // 印だけが読めない・直せないときも、この関数は例外を出さないので `fn()` へ
+    // 進む。プロパティ全体が読めないときは、その前の `loadSettingsFromProperties()`
+    // で止まる。
   }
 }
 

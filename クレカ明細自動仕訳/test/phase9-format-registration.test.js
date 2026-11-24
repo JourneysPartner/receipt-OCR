@@ -30,6 +30,7 @@ module.exports = ({test, assert, gas}) => {
   }
   function setup() {
     gas.stubs.reset();
+    gas.evaluate("SETTINGS.PARALLEL_WORK_FOLDER_ID = 'fmt-work-fake';");
     gas.stubs.createSpreadsheet('master', {sheets: [{name: '仮', values: [['x']]}]});
     gas.stubs.setActiveSpreadsheet('master');
     gas.call('setMasterSpreadsheetId', ['master']);
@@ -957,7 +958,7 @@ module.exports = ({test, assert, gas}) => {
       "SETTINGS.TX_INDEX_SPREADSHEET_ID='txidx';" +
       "SETTINGS.SNAPSHOT_SPREADSHEET_ID='snap';" +
       "SETTINGS.SAMPLE_CORPUS_FOLDER_ID='corpus';" +
-      "SETTINGS.PARALLEL_WORK_FOLDER_ID='';" +
+      "SETTINGS.PARALLEL_WORK_FOLDER_ID='fmt-work-fake';" +
       'SETTINGS.FAULT_INJECTION=null;');
   }
 

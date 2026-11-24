@@ -40,6 +40,7 @@ module.exports = ({test, assert, gas}) => {
       {name: '明細', values: [['利用日', '金額'], ['2025/12/16', 10800]], maxRows: 2, maxColumns: 2},
       {name: '注記', values: [['メモ']], maxRows: 1, maxColumns: 1}
     ]});
+    gas.evaluate("SETTINGS.PARALLEL_WORK_FOLDER_ID = 'test-work-folder';");
     const before = gas.stubs.getSpreadsheetIds().length;
     const result = plain(gas.call('readFile', ['x1', '202512.xlsx', {}]));
     assert.equal(result.fileType, 'xlsx');
@@ -57,6 +58,7 @@ module.exports = ({test, assert, gas}) => {
       {name: 'S1', values: [['a']]}, {name: 'S2', values: [['a']]}, {name: 'S3', values: [['a']]}
     ]});
     gas.evaluate('SETTINGS.MAX_SHEETS_PER_FILE = 2');
+    gas.evaluate("SETTINGS.PARALLEL_WORK_FOLDER_ID = 'test-work-folder';");
     const before = gas.stubs.getSpreadsheetIds().length;
     assert.throws(() => gas.call('readFile', ['x2', 'big.xlsx', {}]),
       (error) => error && error.code === 'INPUT_LIMIT_EXCEEDED');

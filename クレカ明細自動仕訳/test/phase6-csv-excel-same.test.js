@@ -205,7 +205,7 @@ module.exports = ({test, assert, gas}) => {
     ]});
     gas.stubs.createSpreadsheet('csvx-index-fake');
     gas.stubs.createSpreadsheet('csvx-snapshot-fake');
-    gas.evaluate("SETTINGS.EXECUTION_TIMEOUT_SECONDS=300; SETTINGS.SAFETY_MARGIN_SECONDS=60; SETTINGS.TX_INDEX_SPREADSHEET_ID='csvx-index-fake'; SETTINGS.SNAPSHOT_SPREADSHEET_ID='csvx-snapshot-fake'; SETTINGS.SAMPLE_CORPUS_FOLDER_ID='csvx-corpus-fake'; SETTINGS.FAULT_INJECTION=null;");
+    gas.evaluate("SETTINGS.EXECUTION_TIMEOUT_SECONDS=300; SETTINGS.SAFETY_MARGIN_SECONDS=60; SETTINGS.TX_INDEX_SPREADSHEET_ID='csvx-index-fake'; SETTINGS.SNAPSHOT_SPREADSHEET_ID='csvx-snapshot-fake'; SETTINGS.SAMPLE_CORPUS_FOLDER_ID='csvx-corpus-fake'; SETTINGS.PARALLEL_WORK_FOLDER_ID='csvx-work-fake'; SETTINGS.FAULT_INJECTION=null;");
     gas.stubs.setActiveUser('csvx-operator@example.invalid');
     call('registerTestCustomer', {customerId: 'CSVX_FAKE', customerName: '架空顧客',
       sourceFolderId: 'csvx-source-fake', destinationSpreadsheetId: 'csvx-dest-fake', destinationSheetName: '架空入力',

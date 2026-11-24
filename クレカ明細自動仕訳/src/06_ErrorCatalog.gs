@@ -81,7 +81,9 @@ const ERROR_CATALOG = Object.freeze({
   PARTNER_NAME_VARIANT: errorCatalogEntry_('登録済みの取引先名と表記だけが違う名前が指定された', false,
     '確認担当者', null, '登録済みの取引先名で確定する'),
   COMMON_DICTIONARY_DIFFERENT_PARTNER: errorCatalogEntry_('共通の辞書と異なる取引先名が指定された', false,
-    '確認担当者', null, '共通の取引先名を使うか「顧客別に入れる」にチェックして確定する')
+    '確認担当者', null, '共通の取引先名を使うか「顧客別に入れる」にチェックして確定する'),
+  WORK_FOLDER_MISSING: errorCatalogEntry_('Excel を読むための作業用フォルダが設定されていない', false,
+    'システム管理者', null, 'スクリプトのプロパティ PARALLEL_WORK_FOLDER_ID に作業用フォルダを設定してから、もう一度実行する')
 });
 
 /** エラーカタログのコードを正本として保持する基底例外。 */

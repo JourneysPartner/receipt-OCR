@@ -1381,7 +1381,7 @@ module.exports = ({test, assert, gas}) => {
     assert.equal(txIdAt(c, 8), movingIdsC[1]);
   });
 
-  test('cmp 18: Script Properties が読めなくても Web アプリの関数は呼ぶ', () => {
+  test('cmp 18: 詰める処理の印だけが読めなくても Web アプリの関数は呼ぶ', () => {
     const world = compactionWorld({count: 3});
     const properties = gas.context.PropertiesService.getScriptProperties();
     let markerReads = 0;

@@ -54,7 +54,7 @@ module.exports = ({test, assert, gas}) => {
     gas.stubs.createFolder('gs-dest-parent-fake', {fileIds: ['gs-dest-fake']});
     gas.evaluate("SETTINGS.EXECUTION_TIMEOUT_SECONDS=300; SETTINGS.SAFETY_MARGIN_SECONDS=60;" +
       "SETTINGS.TX_INDEX_SPREADSHEET_ID='gs-index-fake'; SETTINGS.SNAPSHOT_SPREADSHEET_ID='gs-snapshot-fake';" +
-      "SETTINGS.SAMPLE_CORPUS_FOLDER_ID='gs-corpus-fake'; SETTINGS.PARALLEL_WORK_FOLDER_ID=''; SETTINGS.FAULT_INJECTION=null;");
+      "SETTINGS.SAMPLE_CORPUS_FOLDER_ID='gs-corpus-fake'; SETTINGS.PARALLEL_WORK_FOLDER_ID='gs-work-fake'; SETTINGS.FAULT_INJECTION=null;");
     call('registerTestCustomer', {customerId: 'GS_FAKE', customerName: '架空顧客',
       sourceFolderId: 'gs-root-fake', destinationSpreadsheetId: 'gs-dest-fake', destinationSheetName: '架空入力',
       columns: {B: 2, F: 3, I: 4, K: 5, M: 6, txId: 7}, headerRow: 1, dataStartRow: 2, rowScanLastColumn: 7});
