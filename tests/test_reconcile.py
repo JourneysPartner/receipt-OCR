@@ -494,17 +494,10 @@ class TestReviewAmount:
         assert review_amount(_item("2025-04-02", 1200), "x", 3, 4) is None
 
 
-def _free_amounts(items, decisions) -> Counter:
-    """「空き」の金額をテスト側で独立に数える（仕様 §10.1 の 2・3）。"""
-    used = {
-        getattr(decision, "text_index", None)
-        for decision in decisions
-        if getattr(decision, "text_index", None) is not None
-    }
+def _amount_counts(items) -> Counter:
+    """明細の金額（1 以上の整数）を、使われたかによらず全部数える（仕様 §11.1）。"""
     counts: Counter = Counter()
-    for index, item in enumerate(items):
-        if index in used:
-            continue
+    for item in items:
         amount = getattr(item, "amount", None)
         if isinstance(amount, bool) or not isinstance(amount, int) or amount < 1:
             continue
@@ -513,100 +506,167 @@ def _free_amounts(items, decisions) -> Counter:
 
 
 class TestAssignReviewAmounts:
-    """M に書く金額を 1 対 1 で決める（仕様 review_amount §10.1）。"""
+    """M に書く金額を枚数の決まりで決める（仕様 review_amount §11.1）。"""
 
-    def test_two_same_amounts_with_one_on_the_text_side_writes_only_the_first(self):
+    OCR = "合計 ¥1,200"
+
+    def test_two_same_amounts_with_one_on_the_text_side_write_none(self):
         images = [_item("2025-04-02", 1200), _item("2025-04-03", 1200)]
         texts = [_item("2025-04-04", 1200)]
-        d0 = reconcile(images, texts, "合計 ¥1,200")
+        d0 = reconcile(images, texts, self.OCR)
 
-        result = assign_review_amounts(images, texts, [], d0, None, "合計 ¥1,200", [0, 1])
+        result = assign_review_amounts(images, texts, [], d0, None, self.OCR, [0, 1])
 
-        assert result == {0: 1200}
+        # 主の画像からは 2 枚、文字からは 1 枚しか見ていないので、どちらも書かない。
+        assert result == {}
 
     def test_two_same_amounts_on_both_sides_write_both(self):
         images = [_item("2025-04-02", 1200), _item("2025-04-03", 1200)]
         texts = [_item("2025-04-04", 1200), _item("2025-04-05", 1200)]
-        d0 = reconcile(images, texts, "合計 ¥1,200")
+        d0 = reconcile(images, texts, self.OCR)
 
-        result = assign_review_amounts(images, texts, [], d0, None, "合計 ¥1,200", [0, 1])
+        result = assign_review_amounts(images, texts, [], d0, None, self.OCR, [0, 1])
 
         assert result == {0: 1200, 1: 1200}
 
-    def test_text_item_used_by_a_matched_pair_is_not_free(self):
-        images = [
-            _item("2025-04-03", 1200),
-            _item("2025-04-04", 1200),
-            _item("2025-04-06", 1200),
-        ]
+    def test_items_used_in_matched_pairs_count_toward_the_text_side(self):
+        images = [_item("2025-04-03", 1200), _item("2025-04-04", 1200)]
         texts = [_item("2025-04-03", 1200), _item("2025-04-05", 1200)]
-        d0 = reconcile(images, texts, "合計 ¥1,200")
+        d0 = reconcile(images, texts, self.OCR)
         assert d0[0].matched and d0[0].text_index == 0
-        assert [d0[1].label, d0[2].label] == [LABEL_DATE, LABEL_DATE]
+        assert d0[1].label == LABEL_DATE
 
-        result = assign_review_amounts(images, texts, [], d0, None, "合計 ¥1,200", [1, 2])
+        result = assign_review_amounts(images, texts, [], d0, None, self.OCR, [1])
 
-        # 合った組に使われた 0 番目を空きに数えると、2 行とも書いてしまう。
+        # 自動になった組に使われた文字からの 1 枚も数える（主 2 枚 <= 文字 2 枚）。
         assert result == {1: 1200}
 
-    def test_text_item_used_by_a_digit_flagged_pair_is_not_free(self):
-        images = [
-            _item("2026-04-27", 1200),
-            _item("2026-04-28", 1200),
-            _item("2026-04-29", 1200),
-        ]
+    def test_items_used_in_digit_flagged_pairs_count_toward_the_text_side(self):
+        images = [_item("2026-04-27", 1200), _item("2026-04-28", 1200)]
         texts = [_item("2026-04-27", 1200), _item("2026-04-30", 1200)]
         d0 = [
             ItemDecision(False, LABEL_AMOUNT, "先頭の桁の読み違いの疑い", 0),
             ItemDecision(False, LABEL_DATE, "日付が食い違う", None),
-            ItemDecision(False, LABEL_DATE, "日付が食い違う", None),
         ]
 
-        result = assign_review_amounts(images, texts, [], d0, None, "合計 ¥1,200", [1, 2])
+        result = assign_review_amounts(images, texts, [], d0, None, self.OCR, [1])
 
-        # 桁の疑いの組に使われた 0 番目を空きに数えると、2 行とも書いてしまう。
+        # 桁の疑いの組に使われた文字からの 1 枚も数える（主 2 枚 <= 文字 2 枚）。
         assert result == {1: 1200}
 
-    def test_second_side_can_write_when_the_text_side_is_exhausted(self):
+    def test_second_side_with_one_item_cannot_back_two_rows(self):
         images = [_item("2025-04-02", 1200), _item("2025-04-03", 1200)]
         second = [_item("2025-04-04", 1200)]
-        d0 = reconcile(images, [], "合計 ¥1,200")
-        dx = reconcile(images, second, "合計 ¥1,200")
+        d0 = reconcile(images, [], self.OCR)
+        dx = reconcile(images, second, self.OCR)
         assert [d0[0].label, d0[1].label] == [LABEL_READ, LABEL_READ]
         assert [dx[0].label, dx[1].label] == [LABEL_DATE, LABEL_DATE]
 
-        result = assign_review_amounts(images, [], second, d0, dx, "合計 ¥1,200", [0, 1])
+        result = assign_review_amounts(images, [], second, d0, dx, self.OCR, [0, 1])
 
-        assert result == {0: 1200}
+        # もう 1 人は 1 枚しか見ていないので、2 行とも書かない。
+        assert result == {}
 
-    def test_indices_outside_eligible_are_not_written_and_do_not_use_a_free_amount(self):
+    def test_indices_outside_eligible_are_not_written_but_are_still_counted(self):
         images = [
             _item("2025-04-02", 1200),
             _item("2025-04-03", 1200),
             _item("2025-04-04", 1200),
         ]
         texts = [_item("2025-04-05", 1200)]
-        d0 = reconcile(images, texts, "合計 ¥1,200")
+        d0 = reconcile(images, texts, self.OCR)
         assert all(decision.label == LABEL_DATE for decision in d0)
 
-        result = assign_review_amounts(images, texts, [], d0, None, "合計 ¥1,200", [2])
+        result = assign_review_amounts(images, texts, [], d0, None, self.OCR, [2])
 
-        # 0・1 番目は空きを減らさないので、2 番目が空きを使える。
-        assert result == {2: 1200}
+        # eligible の外の 2 枚も主の画像からの枚数に数える（主 3 枚 > 文字 1 枚）。
+        assert result == {}
+
+    def test_first_item_matched_by_the_second_leaves_the_second_without_m(self):
+        """§11.2 (a): 1 つ目がもう 1 人で自動 → 2 つ目は M なし。"""
+        images = [_item("2025-04-02", 1200), _item("2025-04-03", 1200)]
+        texts = [_item("2025-04-04", 1200)]
+        second = [_item("2025-04-02", 1200)]
+        d0 = reconcile(images, texts, self.OCR)
+        dx = reconcile(images, second, self.OCR)
+        merged, matched = merge_second_reader(d0, dx)
+        assert matched == {0}
+        assert not merged[1].matched
+
+        result = assign_review_amounts(images, texts, second, d0, dx, self.OCR, [1])
+
+        assert result == {}
+
+    def test_first_item_matched_by_text_leaves_the_second_without_m(self):
+        """§11.2 (b): 1 つ目が文字からで自動・2 つ目がもう 1 人の日付だけ → M なし。"""
+        images = [_item("2025-04-02", 1200), _item("2025-04-03", 1200)]
+        texts = [_item("2025-04-02", 1200)]
+        second = [_item("2025-04-04", 1200)]
+        d0 = reconcile(images, texts, self.OCR)
+        dx = reconcile(images, second, self.OCR)
+        merged, matched = merge_second_reader(d0, dx)
+        assert matched == set()
+        assert merged[0].matched
+        assert d0[1].label == LABEL_AMOUNT
+        assert dx[1].label == LABEL_DATE
+
+        result = assign_review_amounts(images, texts, second, d0, dx, self.OCR, [1])
+
+        assert result == {}
+
+    def test_both_items_date_only_on_both_sides_write_none(self):
+        """§11.2 (c): 2 つとも両方の読み手と日付だけ → 2 つとも M なし。"""
+        images = [_item("2025-04-02", 1200), _item("2025-04-03", 1200)]
+        texts = [_item("2025-04-04", 1200)]
+        second = [_item("2025-04-05", 1200)]
+        d0 = reconcile(images, texts, self.OCR)
+        dx = reconcile(images, second, self.OCR)
+        assert [decision.label for decision in d0] == [LABEL_DATE, LABEL_DATE]
+        assert [decision.label for decision in dx] == [LABEL_DATE, LABEL_DATE]
+
+        result = assign_review_amounts(images, texts, second, d0, dx, self.OCR, [0, 1])
+
+        assert result == {}
+
+    def test_text_side_with_two_of_the_same_amount_writes_both(self):
+        """§11.2: 文字からが 2 枚見ていれば、日付だけの 2 つとも M。"""
+        images = [_item("2025-04-02", 1200), _item("2025-04-03", 1200)]
+        texts = [_item("2025-04-04", 1200), _item("2025-04-05", 1200)]
+        second = [_item("2025-04-06", 1200)]
+        d0 = reconcile(images, texts, self.OCR)
+        dx = reconcile(images, second, self.OCR)
+        assert [decision.label for decision in d0] == [LABEL_DATE, LABEL_DATE]
+
+        result = assign_review_amounts(images, texts, second, d0, dx, self.OCR, [0, 1])
+
+        assert result == {0: 1200, 1: 1200}
+
+    def test_second_side_with_two_of_the_same_amount_writes_both(self):
+        """§11.2: もう 1 人が 2 枚見ていれば、日付だけの 2 つとも M。"""
+        images = [_item("2025-04-02", 1200), _item("2025-04-03", 1200)]
+        texts = [_item("2025-04-04", 1200)]
+        second = [_item("2025-04-05", 1200), _item("2025-04-06", 1200)]
+        d0 = reconcile(images, texts, self.OCR)
+        dx = reconcile(images, second, self.OCR)
+        assert [decision.label for decision in d0] == [LABEL_DATE, LABEL_DATE]
+        assert [decision.label for decision in dx] == [LABEL_DATE, LABEL_DATE]
+
+        result = assign_review_amounts(images, texts, second, d0, dx, self.OCR, [0, 1])
+
+        assert result == {0: 1200, 1: 1200}
 
     def test_none_and_mismatched_lengths_fall_back_to_not_writing(self):
         image = _item("2025-04-02", 1200)
         text = _item("2025-04-03", 1200)
         d0 = [ItemDecision(False, LABEL_DATE, "日付が食い違う", None)]
 
-        assert assign_review_amounts([image], [text], [], None, None, "合計 ¥1,200", [0]) == {}
-        assert assign_review_amounts([image], [text], [], d0, None, "合計 ¥1,200", [0]) == {0: 1200}
+        assert assign_review_amounts([image], [text], [], None, None, self.OCR, [0]) == {}
+        assert assign_review_amounts([image], [text], [], d0, None, self.OCR, [0]) == {0: 1200}
         # 範囲の外の番号・d0 が短い・images が短い
-        assert assign_review_amounts([image], [text], [], d0, None, "合計 ¥1,200", [1, -1]) == {}
-        assert assign_review_amounts([], [text], [], d0, None, "合計 ¥1,200", [0]) == {}
-        assert assign_review_amounts(
-            [image, image], [text], [], d0, None, "合計 ¥1,200", [0, 1]
-        ) == {0: 1200}
+        assert assign_review_amounts([image], [text], [], d0, None, self.OCR, [1, -1]) == {}
+        assert assign_review_amounts([], [text], [], d0, None, self.OCR, [0]) == {}
+        # 主の画像からが 2 枚、文字からが 1 枚なので書かない（d0 が短い 1 番目は飛ばす）
+        assert assign_review_amounts([image, image], [text], [], d0, None, self.OCR, [0, 1]) == {}
 
 
 _AMOUNT_STRATEGY = st.one_of(st.none(), st.integers(), st.booleans(), st.text())
@@ -751,22 +811,81 @@ _ASSIGN_ELIGIBLE_STRATEGY = st.lists(st.integers(min_value=-2, max_value=6), max
     st.text(),
     _ASSIGN_ELIGIBLE_STRATEGY,
 )
-def test_assign_review_amounts_keys_values_and_free_counts(
+def test_assign_review_amounts_keys_values_and_counts(
     images, texts, seconds, d0, dx, ocr_text, eligible
 ):
-    """鍵は eligible の中だけ・値は主の画像からの金額・空きの数を超えない。"""
+    """鍵は eligible の中だけ・値は主の画像からの金額・裏付けた枚数を超えない。"""
     result = assign_review_amounts(images, texts, seconds, d0, dx, ocr_text, eligible)
 
     assert set(result) <= set(eligible)
+    image_count = _amount_counts(images)
+    text_count = _amount_counts(texts)
+    second_count = _amount_counts(seconds) if dx is not None else Counter()
+    d0_list = list(d0 or [])
+    dx_list = list(dx or [])
     for index, amount in result.items():
         assert 0 <= index < len(images)
         assert amount == images[index].amount
+        dx_decision = dx_list[index] if index < len(dx_list) else None
+        assert review_amount(images[index], d0_list[index], dx_decision, ocr_text) is not None
+        by_text = (
+            getattr(d0_list[index], "label", "") == LABEL_DATE
+            and image_count[amount] <= text_count[amount]
+        )
+        by_second = (
+            dx_decision is not None
+            and getattr(dx_decision, "label", "") == LABEL_DATE
+            and image_count[amount] <= second_count[amount]
+        )
+        assert by_text or by_second
 
-    text_free = _free_amounts(texts, d0 or [])
-    second_free = _free_amounts(seconds, dx or [])
+
+_REAL_DATES = ["2025-04-02", "2025-04-03", "2025-04-04"]
+_REAL_AMOUNTS = [1200, 900, 300]
+_REAL_OCR_TEXT = "合計 ¥1,200 と ¥900 と ¥300"
+_REAL_ITEM_STRATEGY = st.builds(
+    ReceiptItem,
+    date=st.sampled_from(_REAL_DATES),
+    amount=st.sampled_from(_REAL_AMOUNTS),
+    vendor=st.just("テスト店"),
+    description=st.just("テスト摘要"),
+    account=st.just("雑費"),
+    tax_category=st.just("課税仕入10%"),
+    confidence=st.just(0.9),
+    is_expense=st.just(True),
+)
+
+
+@given(
+    st.lists(_REAL_ITEM_STRATEGY, max_size=3),
+    st.lists(_REAL_ITEM_STRATEGY, max_size=3),
+    st.lists(_REAL_ITEM_STRATEGY, max_size=3),
+)
+def test_assign_review_amounts_real_decisions_stay_within_the_readers(images, texts, seconds):
+    """reconcile と merge_second_reader の本物の判定でも、裏付けた枚数を超えない。"""
+    d0 = reconcile(images, texts, _REAL_OCR_TEXT)
+    dx = reconcile(images, seconds, _REAL_OCR_TEXT)
+    merged, _ = merge_second_reader(d0, dx)
+    eligible = [index for index, decision in enumerate(merged) if not decision.matched]
+
+    result = assign_review_amounts(images, texts, seconds, d0, dx, _REAL_OCR_TEXT, eligible)
+
+    image_count = _amount_counts(images)
+    text_count = _amount_counts(texts)
+    second_count = _amount_counts(seconds)
+    assert set(result) <= set(eligible)
+    for index, amount in result.items():
+        assert amount == images[index].amount
+        dx_decision = dx[index] if index < len(dx) else None
+        assert review_amount(images[index], d0[index], dx_decision, _REAL_OCR_TEXT) is not None
+        assert (d0[index].label == LABEL_DATE and image_count[amount] <= text_count[amount]) or (
+            dx_decision is not None
+            and dx_decision.label == LABEL_DATE
+            and image_count[amount] <= second_count[amount]
+        )
+
     for amount in set(result.values()):
-        written = list(result.values()).count(amount)
-        assert written <= text_free[amount] + second_free[amount]
+        assert image_count[amount] <= max(text_count[amount], second_count[amount])
 
 
 _MESSY_ASSIGN_LIST_STRATEGY = st.lists(

@@ -194,12 +194,13 @@ def assign_review_amounts(
     ocr_text,
     eligible,
 ) -> dict[int, int]:
-    """要確認の行のうち、M 列に書く番号と金額を 1 対 1 で決める（仕様 §10.1）。
+    """要確認の行のうち、M 列に書く番号と金額を枚数の決まりで決める（仕様 §11.1）。
 
-    `review_amount` で金額を決めたうえで、主の文字から・もう 1 人の側の「空き」を
-    1 つずつ使う。空きは、`d0`／`dx` のどの判定の `text_index` にも使われていない
-    明細の金額（1 以上の整数）を数えたもの。同じ金額の明細が空きより多くても、
-    空きの数だけしか書かない（相手が見た枚数を超えて計上しない）。
+    `review_amount` で金額を決めたうえで、そのファイルで主の画像から読んだ金額 A の
+    枚数が、裏付けに使う読み手（D0 が `※日付要確認` なら主の文字から、Dx が
+    `※日付要確認` ならもう 1 人）の金額 A の枚数以下であるときだけ A を書く。
+    数えるのは、記帳しない重複・自動の行・要確認の行を問わず、そのファイルの
+    全部の明細。順番に左右されない（空きを減らす処理はしない）。
 
     `eligible` は M を考えてよい番号（呼ぶ側が決める）。範囲の外の番号・長さの
     合わない並び・None は「書かない」側に倒す。API もファイルも触らない・
@@ -214,31 +215,13 @@ def assign_review_amounts(
         d0_list = list(d0 or [])
         dx_list = list(dx) if dx is not None else []
 
-        text_free: Counter = Counter()
-        used_text = {
-            getattr(decision, "text_index", None)
-            for decision in d0_list
-            if getattr(decision, "text_index", None) is not None
-        }
-        for index, text_item in enumerate(texts):
-            if index in used_text:
-                continue
-            amount = _amount_of(text_item)
-            if amount is not None:
-                text_free[amount] += 1
-
-        second_free: Counter = Counter()
-        used_second = {
-            getattr(decision, "text_index", None)
-            for decision in dx_list
-            if getattr(decision, "text_index", None) is not None
-        }
-        for index, second_item in enumerate(seconds):
-            if index in used_second:
-                continue
-            amount = _amount_of(second_item)
-            if amount is not None:
-                second_free[amount] += 1
+        image_count = Counter(a for a in (_amount_of(x) for x in images) if a is not None)
+        text_count = Counter(a for a in (_amount_of(x) for x in texts) if a is not None)
+        second_count = (
+            Counter(a for a in (_amount_of(x) for x in seconds) if a is not None)
+            if dx is not None
+            else Counter()
+        )
 
         result: dict[int, int] = {}
         for i in sorted(set(eligible)):
@@ -248,15 +231,16 @@ def assign_review_amounts(
             amount = review_amount(images[i], d0_list[i], dx_decision, ocr_text)
             if amount is None:
                 continue
-            if getattr(d0_list[i], "label", "") == LABEL_DATE and text_free[amount] > 0:
-                text_free[amount] -= 1
-                result[i] = amount
-            elif (
+            by_text = (
+                getattr(d0_list[i], "label", "") == LABEL_DATE
+                and image_count[amount] <= text_count[amount]
+            )
+            by_second = (
                 dx_decision is not None
                 and getattr(dx_decision, "label", "") == LABEL_DATE
-                and second_free[amount] > 0
-            ):
-                second_free[amount] -= 1
+                and image_count[amount] <= second_count[amount]
+            )
+            if by_text or by_second:
                 result[i] = amount
         return result
     except Exception:

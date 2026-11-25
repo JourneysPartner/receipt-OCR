@@ -18,8 +18,9 @@ from src.config import (
     TemplateConfig,
 )
 from src.models import CorrectedItem, DriveFile, OcrResult, ProcessStatus, ReceiptItem
-from src.processing.duplicates import SAME_FILE_DUPLICATE_NOTE
+from src.processing.duplicates import SAME_FILE_DUPLICATE_NOTE, ReceiptSource
 from src.processing.manager import REVIEW_AMOUNT_NOTE, ProcessingManager
+from src.sheets.client import _DONE_STATUSES
 
 OCR_TEXT = "合計 ¥1,200"
 TODAY = "2025-04-02"
@@ -85,10 +86,15 @@ def _make_manager(
     return manager, mocks, second
 
 
-def _file(mime_type: str = "image/jpeg") -> DriveFile:
+def _file(
+    mime_type: str = "image/jpeg",
+    *,
+    file_id: str = "fid-1",
+    file_name: str = "receipt-1.jpg",
+) -> DriveFile:
     return DriveFile(
-        file_id="fid-1",
-        file_name="receipt-1.jpg",
+        file_id=file_id,
+        file_name=file_name,
         mime_type=mime_type,
         folder_id="folder-1",
     )
@@ -144,6 +150,23 @@ def _corrected(item: ReceiptItem) -> CorrectedItem:
 
 def _run(m, cb, *, processed_keys=None):
     return m._process_file(_file(), cb, processed_keys or set(), TODAY, NOW)
+
+
+def _done_marks(cb: MagicMock, file_id: str) -> set[str]:
+    """1 回目に update_reservation_status へ渡った状態から処理済みの印を作る。
+
+    `_DONE_STATUSES` に入る状態だけを印にする（決め打ちの印は使わない）。
+    """
+    index_by_rid: dict[str, int] = {}
+    for call in cb.reserve_rows.call_args_list:
+        for position, index in enumerate(call.kwargs.get("receipt_indices", [])):
+            index_by_rid[f"rid-{position}"] = index
+    marks: set[str] = set()
+    for call in cb.update_reservation_status.call_args_list:
+        rid, status = call.args
+        if status in _DONE_STATUSES and rid in index_by_rid:
+            marks.add(f"{file_id}:{index_by_rid[rid]}")
+    return marks
 
 
 class TestReviewAmountIsWritten:
@@ -223,8 +246,8 @@ class TestReviewAmountIsWritten:
         assert calls[1].kwargs["short_label"] == "※金額要確認"
         assert REVIEW_AMOUNT_NOTE not in calls[1].args[3]
 
-    def test_duplicate_note_follows_the_amount_note(self):
-        """§10.1: 同じ明細 2 つに文字から 1 つなら、M は 1 行目だけ。注記は今どおり。"""
+    def test_two_identical_items_and_one_text_item_write_no_m(self):
+        """§11.1: 同じ明細 2 つに文字から 1 つなら、どちらが本物か決められず M はない。"""
         m, mocks, _ = _make_manager()
         cb = _cb_mock()
         mocks["ai"].extract_from_file.return_value = [_item(*A), _item(*A)]
@@ -234,11 +257,50 @@ class TestReviewAmountIsWritten:
 
         assert result.manual_entry == 2
         calls = cb.write_manual_entry_row.call_args_list
-        assert [call.kwargs.get("amount") for call in calls] == [1200, None]
-        assert REVIEW_AMOUNT_NOTE in calls[0].args[3]
+        assert [call.args[0] for call in calls] == [100, 101]
+        assert [call.kwargs.get("amount") for call in calls] == [None, None]
+        expected = (
+            "両読み要確認（日付が食い違う）: "
+            "画像=2025-04-02/1200, 2025-04-02/1200 ｜ 文字=2025-04-03/1200"
+        )
+        assert calls[0] == mock_call(
+            100,
+            DRIVE_LINK,
+            "2025-04-02",
+            expected,
+            corrected=_corrected(_item(*A)),
+            short_label="※日付要確認",
+        )
+        # 2 行目は今までの要確認の行のまま（重複の注記は今どおり後ろに付く）
         message = calls[1].args[3]
-        assert message.endswith(f"／{SAME_FILE_DUPLICATE_NOTE}")
+        assert message == f"{expected}／{SAME_FILE_DUPLICATE_NOTE}"
         assert REVIEW_AMOUNT_NOTE not in message
+        assert calls[1].kwargs["short_label"] == "※日付要確認"
+        assert "amount" not in calls[1].kwargs
+
+    def test_amount_note_comes_before_the_duplicate_note(self):
+        """§11.1: 文字からが同じ金額で 2 枚なら、2 行とも M。注記は金額の文が先。"""
+        m, mocks, _ = _make_manager()
+        cb = _cb_mock()
+        images = [_item(*A), _item(*A)]
+        mocks["ai"].extract_from_file.return_value = images
+        mocks["ai"].extract_receipt_data.return_value = [
+            _item("2025-04-03", 1200),
+            _item("2025-04-04", 1200),
+        ]
+
+        result = _run(m, cb)
+
+        assert result.manual_entry == 2
+        calls = cb.write_manual_entry_row.call_args_list
+        assert [call.kwargs.get("amount") for call in calls] == [1200, 1200]
+        expected = (
+            "両読み要確認（日付が食い違う）: "
+            "画像=2025-04-02/1200, 2025-04-02/1200 "
+            "｜ 文字=2025-04-03/1200, 2025-04-04/1200"
+        )
+        # 2 行目: 金額の文が重複の注記より前
+        assert calls[1].args[3] == (f"{expected}／{REVIEW_AMOUNT_NOTE}／{SAME_FILE_DUPLICATE_NOTE}")
         assert calls[1].kwargs["short_label"] == "※日付要確認"
 
     def test_validate_counts_the_same_and_writes_nothing(self):
@@ -259,10 +321,10 @@ class TestReviewAmountIsWritten:
         mocks["drive"].rename_file_as_done.assert_not_called()
 
 
-class TestOneToOneReviewAmounts:
-    """§10.1: 同じ金額の要確認の行が 2 つでも、相手の明細が 1 つなら 1 行だけ。"""
+class TestCountRuleReviewAmounts:
+    """§11.1: 主の画像からの枚数が、裏付ける読み手の同じ金額の枚数以下なら M を書く。"""
 
-    def test_without_the_second_reader_only_the_first_row_gets_m(self):
+    def test_two_same_amounts_with_one_text_item_write_no_m(self):
         m, mocks, _ = _make_manager()
         cb = _cb_mock()
         images = [_item("2025-04-02", 1200), _item("2025-04-03", 1200)]
@@ -278,21 +340,27 @@ class TestOneToOneReviewAmounts:
             "両読み要確認（日付が食い違う）: "
             "画像=2025-04-02/1200, 2025-04-03/1200 ｜ 文字=2025-04-04/1200"
         )
-        # 1 行目だけ M 列に書く
-        assert calls[0].args[3] == f"{expected}／{REVIEW_AMOUNT_NOTE}"
-        assert calls[0].kwargs["amount"] == 1200
-        assert calls[0].kwargs["short_label"] == "※日付要確認"
-        # 2 行目は今までの要確認の行と 1 字も変わらない（D0 のラベル・注記なし・M なし）
-        assert calls[1] == mock_call(
-            101,
-            DRIVE_LINK,
-            "2025-04-03",
-            expected,
-            corrected=_corrected(images[1]),
-            short_label="※日付要確認",
-        )
+        # 主の画像からは 2 枚、文字からは 1 枚なので、2 行とも M なし
+        assert cb.write_manual_entry_row.call_args_list == [
+            mock_call(
+                100,
+                DRIVE_LINK,
+                "2025-04-02",
+                expected,
+                corrected=_corrected(images[0]),
+                short_label="※日付要確認",
+            ),
+            mock_call(
+                101,
+                DRIVE_LINK,
+                "2025-04-03",
+                expected,
+                corrected=_corrected(images[1]),
+                short_label="※日付要確認",
+            ),
+        ]
 
-    def test_with_the_second_reader_only_the_first_row_gets_m(self):
+    def test_two_same_amounts_with_one_second_item_write_no_m(self):
         m, mocks, second = _make_manager(
             with_second=True,
             second_items=[_item("2025-04-04", 1200)],
@@ -317,17 +385,12 @@ class TestOneToOneReviewAmounts:
             "｜ 文字=2025-04-02/1500, 2025-04-03/700 "
             "｜ もう1人=2025-04-04/1200"
         )
-        assert calls[0].args[3] == f"{expected}／{REVIEW_AMOUNT_NOTE}"
-        assert calls[0].kwargs["amount"] == 1200
-        assert calls[0].kwargs["short_label"] == "※日付要確認"
-        assert calls[1] == mock_call(
-            101,
-            DRIVE_LINK,
-            "2025-04-03",
-            expected,
-            corrected=_corrected(images[1]),
-            short_label="※金額要確認",
-        )
+        # 主の画像からは 2 枚、もう 1 人は 1 枚なので、2 行とも M なし
+        assert [call.kwargs.get("amount") for call in calls] == [None, None]
+        assert calls[0].args[3] == expected
+        assert calls[1].args[3] == expected
+        assert calls[0].kwargs["short_label"] == "※金額要確認"
+        assert calls[1].kwargs["short_label"] == "※金額要確認"
 
     def test_dx_date_agreement_with_a_digit_suspicion_does_not_write_m(self):
         """Dx が日付だけ食い違って金額が合っても、桁の疑いがあれば M を書かない。"""
@@ -380,6 +443,40 @@ class TestOneToOneReviewAmounts:
         _run(m, cb)
 
         assert seen == [[]]
+
+    def test_eligible_excludes_automatic_and_cross_file_duplicate_rows(self, monkeypatch):
+        """§10.3・§11.1: 自動の行と、別のファイルとの重複で記帳しない行は eligible に入らない。"""
+        seen: list[list[int]] = []
+
+        def spy(image_items, text_items, second_items, d0, dx, ocr_text, eligible):
+            seen.append(list(eligible))
+            return {}
+
+        monkeypatch.setattr(manager_module, "assign_review_amounts", spy)
+        m, mocks, _ = _make_manager()
+        cb = _cb_mock()
+        images = [
+            _item("2025-04-02", 1200),  # 文字からと合う（自動）
+            _item("2025-04-06", 700),  # 要確認（eligible）
+            _item("2025-04-05", 800),  # 別のファイルと同じ証憑（記帳しない）
+        ]
+        mocks["ai"].extract_from_file.return_value = images
+        mocks["ai"].extract_receipt_data.return_value = [_item("2025-04-02", 1200)]
+        known = [
+            ReceiptSource(
+                file_id="fid-other",
+                file_name="other.jpg",
+                index=0,
+                date="2025-04-05",
+                amount=800,
+                vendor="テスト店",
+            )
+        ]
+
+        result = m._process_file(_file(), cb, set(), TODAY, NOW, known_receipts=known)
+
+        assert seen == [[1]]
+        assert (result.success, result.manual_entry, result.skipped) == (1, 1, 1)
 
     def test_d0_read_with_no_text_items_can_write_m_from_the_second(self):
         m, mocks, _ = _make_manager(
@@ -535,17 +632,49 @@ class TestAfterWriteFailures:
         first = _run(m, cb)
         assert first.manual_entry == 1
 
-        # 2 回目: 1 回目が付けた manual_entry の印を処理済みに入れて流す
+        # 2 回目の印は、1 回目が update_reservation_status へ渡った状態から作る
+        # （`_DONE_STATUSES` に入る状態だけ。決め打ちの印は使わない）。
+        marks = _done_marks(cb, "fid-1")
+        assert marks == {"fid-1:0"}
+
         m2, mocks2, _ = _make_manager()
         cb2 = _cb_mock()
         mocks2["ai"].extract_from_file.return_value = [_item(*A)]
         mocks2["ai"].extract_receipt_data.return_value = [_item("2025-04-03", 1200)]
 
-        second = _run(m2, cb2, processed_keys={"fid-1:0"})
+        second = _run(m2, cb2, processed_keys=marks)
 
         assert (second.manual_entry, second.errors) == (0, 0)
         cb2.write_manual_entry_row.assert_not_called()
         cb2.reserve_rows.assert_not_called()
+
+    def test_after_write_failure_the_item_is_remembered_for_later_files(self, monkeypatch):
+        """§10.2: 書いた後の失敗でも、その明細を同じ回の後のファイルの重複の相手にする。"""
+        fake_logger = MagicMock()
+        monkeypatch.setattr(manager_module, "logger", fake_logger)
+        m, mocks, _ = _make_manager()
+        known: list[ReceiptSource] = []
+        cb1 = _cb_mock()
+        mocks["ai"].extract_from_file.return_value = [_item(*A)]
+        mocks["ai"].extract_receipt_data.return_value = [_item("2025-04-03", 1200)]
+        cb1.append_ai_log.side_effect = self._fail()
+
+        first = m._process_file(_file(), cb1, set(), TODAY, NOW, known_receipts=known)
+
+        assert first.manual_entry == 1
+        assert [(source.file_id, source.index) for source in known] == [("fid-1", 0)]
+
+        # 同じ回の後のファイル: 同じ日付・金額・店名なので重複として扱う
+        cb2 = _cb_mock()
+        mocks["ai"].extract_from_file.return_value = [_item(*A)]
+        mocks["ai"].extract_receipt_data.return_value = [_item(*A)]
+        later = _file(file_id="fid-2", file_name="receipt-2.jpg")
+
+        second = m._process_file(later, cb2, set(), TODAY, NOW, known_receipts=known)
+
+        assert second.skipped == 1
+        cb2.write_cashbook_row.assert_not_called()
+        cb2.write_manual_entry_row.assert_not_called()
 
 
 class TestReviewAmountIsNotWritten:
