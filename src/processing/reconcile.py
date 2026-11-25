@@ -3,6 +3,7 @@
 API もファイルも触らない純粋な関数。本番の両読みの流れと比較の道具が共用する。
 """
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date as date_type
 
@@ -182,6 +183,84 @@ def review_amount(
         return amount
     except Exception:
         return None
+
+
+def assign_review_amounts(
+    image_items,
+    text_items,
+    second_items,
+    d0,
+    dx,
+    ocr_text,
+    eligible,
+) -> dict[int, int]:
+    """要確認の行のうち、M 列に書く番号と金額を 1 対 1 で決める（仕様 §10.1）。
+
+    `review_amount` で金額を決めたうえで、主の文字から・もう 1 人の側の「空き」を
+    1 つずつ使う。空きは、`d0`／`dx` のどの判定の `text_index` にも使われていない
+    明細の金額（1 以上の整数）を数えたもの。同じ金額の明細が空きより多くても、
+    空きの数だけしか書かない（相手が見た枚数を超えて計上しない）。
+
+    `eligible` は M を考えてよい番号（呼ぶ側が決める）。範囲の外の番号・長さの
+    合わない並び・None は「書かない」側に倒す。API もファイルも触らない・
+    例外を投げない（例外なら {}）。
+    """
+    try:
+        if d0 is None:
+            return {}
+        images = list(image_items or [])
+        texts = list(text_items or [])
+        seconds = list(second_items or [])
+        d0_list = list(d0 or [])
+        dx_list = list(dx) if dx is not None else []
+
+        text_free: Counter = Counter()
+        used_text = {
+            getattr(decision, "text_index", None)
+            for decision in d0_list
+            if getattr(decision, "text_index", None) is not None
+        }
+        for index, text_item in enumerate(texts):
+            if index in used_text:
+                continue
+            amount = _amount_of(text_item)
+            if amount is not None:
+                text_free[amount] += 1
+
+        second_free: Counter = Counter()
+        used_second = {
+            getattr(decision, "text_index", None)
+            for decision in dx_list
+            if getattr(decision, "text_index", None) is not None
+        }
+        for index, second_item in enumerate(seconds):
+            if index in used_second:
+                continue
+            amount = _amount_of(second_item)
+            if amount is not None:
+                second_free[amount] += 1
+
+        result: dict[int, int] = {}
+        for i in sorted(set(eligible)):
+            if i < 0 or i >= len(images) or i >= len(d0_list):
+                continue
+            dx_decision = dx_list[i] if i < len(dx_list) else None
+            amount = review_amount(images[i], d0_list[i], dx_decision, ocr_text)
+            if amount is None:
+                continue
+            if getattr(d0_list[i], "label", "") == LABEL_DATE and text_free[amount] > 0:
+                text_free[amount] -= 1
+                result[i] = amount
+            elif (
+                dx_decision is not None
+                and getattr(dx_decision, "label", "") == LABEL_DATE
+                and second_free[amount] > 0
+            ):
+                second_free[amount] -= 1
+                result[i] = amount
+        return result
+    except Exception:
+        return {}
 
 
 def _unmatched_decision() -> ItemDecision:

@@ -7,6 +7,7 @@
 from unittest.mock import MagicMock
 from unittest.mock import call as mock_call
 
+import src.processing.manager as manager_module
 from src.config import (
     AiConfig,
     AppConfig,
@@ -24,6 +25,7 @@ OCR_TEXT = "合計 ¥1,200"
 TODAY = "2025-04-02"
 NOW = "2025-04-02T10:00"
 SECOND_MODEL = "gemini-3.8-flash"
+FAKE_KEY = "fake-gemini-key-AAA"
 DRIVE_LINK = "https://drive.google.com/file/d/fid-1/view"
 
 A = ("2025-04-02", 1200)
@@ -222,6 +224,7 @@ class TestReviewAmountIsWritten:
         assert REVIEW_AMOUNT_NOTE not in calls[1].args[3]
 
     def test_duplicate_note_follows_the_amount_note(self):
+        """§10.1: 同じ明細 2 つに文字から 1 つなら、M は 1 行目だけ。注記は今どおり。"""
         m, mocks, _ = _make_manager()
         cb = _cb_mock()
         mocks["ai"].extract_from_file.return_value = [_item(*A), _item(*A)]
@@ -231,10 +234,12 @@ class TestReviewAmountIsWritten:
 
         assert result.manual_entry == 2
         calls = cb.write_manual_entry_row.call_args_list
-        assert [call.kwargs["amount"] for call in calls] == [1200, 1200]
+        assert [call.kwargs.get("amount") for call in calls] == [1200, None]
+        assert REVIEW_AMOUNT_NOTE in calls[0].args[3]
         message = calls[1].args[3]
         assert message.endswith(f"／{SAME_FILE_DUPLICATE_NOTE}")
-        assert message.index(REVIEW_AMOUNT_NOTE) < message.index(SAME_FILE_DUPLICATE_NOTE)
+        assert REVIEW_AMOUNT_NOTE not in message
+        assert calls[1].kwargs["short_label"] == "※日付要確認"
 
     def test_validate_counts_the_same_and_writes_nothing(self):
         """W8: 検証では何も書かず、予定の件数も今と同じ。"""
@@ -252,6 +257,295 @@ class TestReviewAmountIsWritten:
         cb.append_ai_log.assert_not_called()
         cb.append_process_record.assert_not_called()
         mocks["drive"].rename_file_as_done.assert_not_called()
+
+
+class TestOneToOneReviewAmounts:
+    """§10.1: 同じ金額の要確認の行が 2 つでも、相手の明細が 1 つなら 1 行だけ。"""
+
+    def test_without_the_second_reader_only_the_first_row_gets_m(self):
+        m, mocks, _ = _make_manager()
+        cb = _cb_mock()
+        images = [_item("2025-04-02", 1200), _item("2025-04-03", 1200)]
+        mocks["ai"].extract_from_file.return_value = images
+        mocks["ai"].extract_receipt_data.return_value = [_item("2025-04-04", 1200)]
+
+        result = _run(m, cb)
+
+        assert (result.manual_entry, result.errors) == (2, 0)
+        calls = cb.write_manual_entry_row.call_args_list
+        assert [call.args[0] for call in calls] == [100, 101]
+        expected = (
+            "両読み要確認（日付が食い違う）: "
+            "画像=2025-04-02/1200, 2025-04-03/1200 ｜ 文字=2025-04-04/1200"
+        )
+        # 1 行目だけ M 列に書く
+        assert calls[0].args[3] == f"{expected}／{REVIEW_AMOUNT_NOTE}"
+        assert calls[0].kwargs["amount"] == 1200
+        assert calls[0].kwargs["short_label"] == "※日付要確認"
+        # 2 行目は今までの要確認の行と 1 字も変わらない（D0 のラベル・注記なし・M なし）
+        assert calls[1] == mock_call(
+            101,
+            DRIVE_LINK,
+            "2025-04-03",
+            expected,
+            corrected=_corrected(images[1]),
+            short_label="※日付要確認",
+        )
+
+    def test_with_the_second_reader_only_the_first_row_gets_m(self):
+        m, mocks, second = _make_manager(
+            with_second=True,
+            second_items=[_item("2025-04-04", 1200)],
+        )
+        cb = _cb_mock()
+        images = [_item("2025-04-02", 1200), _item("2025-04-03", 1200)]
+        mocks["ai"].extract_from_file.return_value = images
+        mocks["ai"].extract_receipt_data.return_value = [
+            _item("2025-04-02", 1500),
+            _item("2025-04-03", 700),
+        ]
+
+        result = _run(m, cb)
+
+        second.extract_from_file.assert_called_once()
+        assert (result.manual_entry, result.errors) == (2, 0)
+        calls = cb.write_manual_entry_row.call_args_list
+        assert [call.args[0] for call in calls] == [100, 101]
+        expected = (
+            "両読み要確認（金額が食い違う／もう1人: 日付が食い違う）: "
+            "画像=2025-04-02/1200, 2025-04-03/1200 "
+            "｜ 文字=2025-04-02/1500, 2025-04-03/700 "
+            "｜ もう1人=2025-04-04/1200"
+        )
+        assert calls[0].args[3] == f"{expected}／{REVIEW_AMOUNT_NOTE}"
+        assert calls[0].kwargs["amount"] == 1200
+        assert calls[0].kwargs["short_label"] == "※日付要確認"
+        assert calls[1] == mock_call(
+            101,
+            DRIVE_LINK,
+            "2025-04-03",
+            expected,
+            corrected=_corrected(images[1]),
+            short_label="※金額要確認",
+        )
+
+    def test_dx_date_agreement_with_a_digit_suspicion_does_not_write_m(self):
+        """Dx が日付だけ食い違って金額が合っても、桁の疑いがあれば M を書かない。"""
+        m, mocks, _ = _make_manager(
+            with_second=True,
+            second_items=[_item("2026-04-28", 41600)],
+        )
+        mocks["ocr"].extract_text.return_value = OcrResult(
+            raw_text="合計 ¥1,600", engine="vision", confidence=0.9
+        )
+        cb = _cb_mock()
+        image_item = _item("2026-04-27", 41600)
+        mocks["ai"].extract_from_file.return_value = [image_item]
+        mocks["ai"].extract_receipt_data.return_value = [_item("2026-04-27", 1500)]
+
+        _run(m, cb)
+
+        expected = (
+            "両読み要確認（金額が食い違う／もう1人: 日付が食い違う）: "
+            "画像=2026-04-27/41600 ｜ 文字=2026-04-27/1500 "
+            "｜ もう1人=2026-04-28/41600"
+        )
+        assert cb.write_manual_entry_row.call_args_list == [
+            mock_call(
+                100,
+                DRIVE_LINK,
+                "2026-04-27",
+                expected,
+                corrected=_corrected(image_item),
+                short_label="※金額要確認",
+            )
+        ]
+
+    def test_eligible_excludes_count_and_reread_rows(self, monkeypatch):
+        """§10.3: `eligible` は記帳する・合っていない・明細数/再読取でない番号だけ。"""
+        seen: list[list[int]] = []
+        real = manager_module.assign_review_amounts
+
+        def spy(image_items, text_items, second_items, d0, dx, ocr_text, eligible):
+            seen.append(list(eligible))
+            return real(image_items, text_items, second_items, d0, dx, ocr_text, eligible)
+
+        monkeypatch.setattr(manager_module, "assign_review_amounts", spy)
+        m, mocks, _ = _make_manager()
+        cb = _cb_mock()
+        mocks["ai"].extract_from_file.return_value = [_item(*A)]
+        # 文字からが 1 枚多い → D0 は ※明細数要確認
+        mocks["ai"].extract_receipt_data.return_value = [_item(*A), _item(*B)]
+
+        _run(m, cb)
+
+        assert seen == [[]]
+
+    def test_d0_read_with_no_text_items_can_write_m_from_the_second(self):
+        m, mocks, _ = _make_manager(
+            with_second=True,
+            second_items=[_item("2025-04-03", 1200)],
+        )
+        cb = _cb_mock()
+        image_item = _item(*A)
+        mocks["ai"].extract_from_file.return_value = [image_item]
+        mocks["ai"].extract_receipt_data.return_value = []
+
+        result = _run(m, cb)
+
+        assert (result.manual_entry, result.errors) == (1, 0)
+        expected = (
+            "両読み要確認（文字からの読みが無い／もう1人: 日付が食い違う）: "
+            "画像=2025-04-02/1200 ｜ 文字=なし ｜ もう1人=2025-04-03/1200"
+            f"／{REVIEW_AMOUNT_NOTE}"
+        )
+        assert cb.write_manual_entry_row.call_args_list == [
+            mock_call(
+                100,
+                DRIVE_LINK,
+                "2025-04-02",
+                expected,
+                corrected=_corrected(image_item),
+                short_label="※日付要確認",
+                amount=1200,
+            )
+        ]
+
+
+class TestAfterWriteFailures:
+    """§10.2: 行を書いた後の失敗で、同じ明細をもう一度記帳しない。"""
+
+    @staticmethod
+    def _fail(message: str = "boom") -> RuntimeError:
+        return RuntimeError(f"{message} {FAKE_KEY}")
+
+    def _logged_texts(self, fake_logger) -> list[str]:
+        texts: list[str] = []
+        for method in (
+            fake_logger.debug,
+            fake_logger.info,
+            fake_logger.warning,
+            fake_logger.error,
+        ):
+            texts.extend(str(call) for call in method.call_args_list)
+        return texts
+
+    def test_append_ai_log_failure_keeps_manual_entry_and_hides_the_message(self, monkeypatch):
+        fake_logger = MagicMock()
+        monkeypatch.setattr(manager_module, "logger", fake_logger)
+        m, mocks, _ = _make_manager()
+        cb = _cb_mock()
+        mocks["ai"].extract_from_file.return_value = [_item(*A)]
+        mocks["ai"].extract_receipt_data.return_value = [_item("2025-04-03", 1200)]
+        cb.append_ai_log.side_effect = self._fail()
+
+        result = _run(m, cb)
+
+        assert (result.manual_entry, result.errors) == (1, 0)
+        statuses = [call.args[1] for call in cb.update_reservation_status.call_args_list]
+        assert ProcessStatus.ERROR.value not in statuses
+        assert statuses == [
+            ProcessStatus.WRITTEN.value,
+            ProcessStatus.MANUAL_ENTRY.value,
+        ]
+        steps = [
+            call.kwargs.get("extra", {}).get("step") for call in fake_logger.error.call_args_list
+        ]
+        assert "dual_review_after_write_error" in steps
+        assert all(FAKE_KEY not in text for text in self._logged_texts(fake_logger))
+
+    def test_written_status_failure_still_tries_manual_entry(self, monkeypatch):
+        fake_logger = MagicMock()
+        monkeypatch.setattr(manager_module, "logger", fake_logger)
+        m, mocks, _ = _make_manager()
+        cb = _cb_mock()
+        mocks["ai"].extract_from_file.return_value = [_item(*A)]
+        mocks["ai"].extract_receipt_data.return_value = [_item("2025-04-03", 1200)]
+
+        def status_side_effect(rid, status):
+            if status == ProcessStatus.WRITTEN.value:
+                raise self._fail()
+
+        cb.update_reservation_status.side_effect = status_side_effect
+
+        result = _run(m, cb)
+
+        assert (result.manual_entry, result.errors) == (1, 0)
+        statuses = [call.args[1] for call in cb.update_reservation_status.call_args_list]
+        assert statuses == [
+            ProcessStatus.WRITTEN.value,
+            ProcessStatus.MANUAL_ENTRY.value,
+        ]
+        cb.append_ai_log.assert_not_called()
+        assert all(FAKE_KEY not in text for text in self._logged_texts(fake_logger))
+
+    def test_manual_entry_failure_after_the_write_does_not_raise(self, monkeypatch):
+        fake_logger = MagicMock()
+        monkeypatch.setattr(manager_module, "logger", fake_logger)
+        m, mocks, _ = _make_manager()
+        cb = _cb_mock()
+        mocks["ai"].extract_from_file.return_value = [_item(*A)]
+        mocks["ai"].extract_receipt_data.return_value = [_item("2025-04-03", 1200)]
+
+        def status_side_effect(rid, status):
+            if status in (ProcessStatus.WRITTEN.value, ProcessStatus.MANUAL_ENTRY.value):
+                raise self._fail()
+
+        cb.update_reservation_status.side_effect = status_side_effect
+
+        result = _run(m, cb)
+
+        # 例外は外へ出さず、error にもしない（状態はそのときのまま）
+        assert (result.manual_entry, result.errors) == (1, 0)
+        statuses = [call.args[1] for call in cb.update_reservation_status.call_args_list]
+        assert ProcessStatus.ERROR.value not in statuses
+        steps = [
+            call.kwargs.get("extra", {}).get("step") for call in fake_logger.error.call_args_list
+        ]
+        assert "dual_review_after_write_error" in steps
+        assert "dual_review_status_error" in steps
+        assert all(FAKE_KEY not in text for text in self._logged_texts(fake_logger))
+
+    def test_write_manual_entry_row_failure_still_sets_error(self, monkeypatch):
+        fake_logger = MagicMock()
+        monkeypatch.setattr(manager_module, "logger", fake_logger)
+        m, mocks, _ = _make_manager()
+        cb = _cb_mock()
+        mocks["ai"].extract_from_file.return_value = [_item(*A)]
+        mocks["ai"].extract_receipt_data.return_value = [_item("2025-04-03", 1200)]
+        cb.write_manual_entry_row.side_effect = RuntimeError("boom")
+
+        result = _run(m, cb)
+
+        # 行を書く前の失敗は今までどおり（行が無いので次の実行で読み直してよい）
+        assert (result.manual_entry, result.errors) == (0, 1)
+        assert cb.update_reservation_status.call_args_list == [
+            mock_call("rid-0", ProcessStatus.ERROR.value)
+        ]
+
+    def test_a_mark_written_after_the_failure_prevents_a_second_row(self, monkeypatch):
+        fake_logger = MagicMock()
+        monkeypatch.setattr(manager_module, "logger", fake_logger)
+        m, mocks, _ = _make_manager()
+        cb = _cb_mock()
+        mocks["ai"].extract_from_file.return_value = [_item(*A)]
+        mocks["ai"].extract_receipt_data.return_value = [_item("2025-04-03", 1200)]
+        cb.append_ai_log.side_effect = self._fail()
+
+        first = _run(m, cb)
+        assert first.manual_entry == 1
+
+        # 2 回目: 1 回目が付けた manual_entry の印を処理済みに入れて流す
+        m2, mocks2, _ = _make_manager()
+        cb2 = _cb_mock()
+        mocks2["ai"].extract_from_file.return_value = [_item(*A)]
+        mocks2["ai"].extract_receipt_data.return_value = [_item("2025-04-03", 1200)]
+
+        second = _run(m2, cb2, processed_keys={"fid-1:0"})
+
+        assert (second.manual_entry, second.errors) == (0, 0)
+        cb2.write_manual_entry_row.assert_not_called()
+        cb2.reserve_rows.assert_not_called()
 
 
 class TestReviewAmountIsNotWritten:

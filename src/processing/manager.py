@@ -35,15 +35,16 @@ from src.processing.duplicates import (
     source_of,
 )
 from src.processing.reconcile import (
+    LABEL_COUNT,
     LABEL_DATE,
     LABEL_READ,
     LABEL_REREAD,
     ItemDecision,
+    assign_review_amounts,
     merge_second_reader,
     needs_second_reader,
     readings_text,
     reconcile,
-    review_amount,
     second_reader_reason,
 )
 from src.rules.amount_validation import AmountValidation, build_review_label, validate_amount
@@ -1070,6 +1071,26 @@ class ProcessingManager:
             details=details_by_index,
         )
 
+        # M 列に書く金額は 1 対 1 で 1 回だけ決める（仕様 review_amount §10.1）。
+        # 前の回の印があるファイルでは書かない（W4）。
+        review_amounts: dict[int, int] = {}
+        if not has_marks and d0 is not None:
+            eligible = [
+                i
+                for i in bookable
+                if not decisions[i].matched
+                and decisions[i].label not in (LABEL_REREAD, LABEL_COUNT)
+            ]
+            review_amounts = assign_review_amounts(
+                image_items,
+                text_items,
+                second_items if second_called else [],
+                d0,
+                second_decisions if second_called else None,
+                ocr_text,
+                eligible,
+            )
+
         booked_indices: list[int] = []
         for (row, rid), idx in zip(reservations, bookable):
             decision = decisions[idx]
@@ -1145,15 +1166,8 @@ class ProcessingManager:
                         second_error,
                     )
                 # 読み手の間で金額が合った要確認の行だけ、M 列に主の画像からの金額を書く
-                # （仕様 review_amount §4）。番号 0 以上の印があるファイルでは書かない（W4）。
-                amount = None
-                if not has_marks:
-                    amount = review_amount(
-                        items[idx],
-                        d0[idx] if d0 is not None and idx < len(d0) else None,
-                        dx_decision,
-                        ocr_text,
-                    )
+                # （仕様 review_amount §4・§10.1）。1 対 1 の判定は予約の後に 1 回だけ行う。
+                amount = review_amounts.get(idx)
                 self._write_dual_review(
                     file,
                     items[idx],
@@ -1257,30 +1271,47 @@ class ProcessingManager:
             short_label=LABEL_DATE if amount is not None else decision.label,
             **row_args,
         )
-        cb.update_reservation_status(rid, ProcessStatus.WRITTEN.value)
+        # 行を書いた後の失敗で状態を error にすると、次の実行で同じ明細が
+        # もう一度書かれる（仕様 §10.2）。行を書けたら例外を外へ出さず、
+        # 状態を manual_entry にできなければそのときの状態のままにする。
+        try:
+            cb.update_reservation_status(rid, ProcessStatus.WRITTEN.value)
 
-        cb.append_ai_log(
-            AiLogRecord(
-                timestamp=now,
-                file_id=file.file_id,
-                file_name=file.file_name,
-                receipt_index=idx,
-                ocr_engine=ocr.engine,
-                ocr_confidence=ocr.confidence,
-                date=item.date or "",
-                amount=str(item.amount) if item.amount else "",
-                vendor=item.vendor or "",
-                description=item.description or "",
-                account=item.account or "",
-                tax_category=item.tax_category or "",
-                corrected_account=corrected.account or "",
-                corrected_tax_category=corrected.tax_category or "",
-                corrections_applied=", ".join(corrected.corrections_applied),
-                needs_review=True,
-                memo=error_msg,
+            cb.append_ai_log(
+                AiLogRecord(
+                    timestamp=now,
+                    file_id=file.file_id,
+                    file_name=file.file_name,
+                    receipt_index=idx,
+                    ocr_engine=ocr.engine,
+                    ocr_confidence=ocr.confidence,
+                    date=item.date or "",
+                    amount=str(item.amount) if item.amount else "",
+                    vendor=item.vendor or "",
+                    description=item.description or "",
+                    account=item.account or "",
+                    tax_category=item.tax_category or "",
+                    corrected_account=corrected.account or "",
+                    corrected_tax_category=corrected.tax_category or "",
+                    corrections_applied=", ".join(corrected.corrections_applied),
+                    needs_review=True,
+                    memo=error_msg,
+                )
             )
-        )
-        cb.update_reservation_status(rid, ProcessStatus.MANUAL_ENTRY.value)
+            cb.update_reservation_status(rid, ProcessStatus.MANUAL_ENTRY.value)
+        except Exception as e:
+            logger.error(
+                f"両読み要確認の行の後の処理に失敗: {file.file_name}[{idx}]: {type(e).__name__}",
+                extra={"step": "dual_review_after_write_error", "file_id": file.file_id},
+            )
+            try:
+                cb.update_reservation_status(rid, ProcessStatus.MANUAL_ENTRY.value)
+            except Exception as e2:
+                logger.error(
+                    f"両読み要確認の行の状態を manual_entry にできない: "
+                    f"{file.file_name}[{idx}]: {type(e2).__name__}",
+                    extra={"step": "dual_review_status_error", "file_id": file.file_id},
+                )
 
     @staticmethod
     def _select_retry_item(
