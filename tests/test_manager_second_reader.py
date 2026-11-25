@@ -417,10 +417,14 @@ class TestSecondReaderFailures:
         result = _run(m, cb)
 
         assert result.manual_entry == 1
-        message = cb.write_manual_entry_row.call_args.args[3]
+        call = cb.write_manual_entry_row.call_args
+        message = call.args[3]
         assert "もう1人: 日付が食い違う" in message
-        # K 列の短いラベルは D0 のラベルのまま（§6）
-        assert cb.write_manual_entry_row.call_args.kwargs["short_label"] == "※金額要確認"
+        # 読み手の間で金額が合った（もう 1 人が同じ 1200）ので、仕様 review_amount §4 の
+        # 条件を全部満たす。M 列に主の画像からの金額を書き、K 列は ※日付要確認 になる。
+        assert message.endswith("／金額は読み手の間で一致（M 列に記入）")
+        assert call.kwargs["short_label"] == "※日付要確認"
+        assert call.kwargs["amount"] == 1200
 
 
 class TestD0MatchesAreKept:

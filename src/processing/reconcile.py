@@ -140,6 +140,50 @@ def reconcile(image_items, text_items, ocr_text: str) -> list[ItemDecision]:
     return [decision if decision is not None else fallback for decision in decisions]
 
 
+def review_amount(
+    image_item,
+    d0_decision: ItemDecision | None,
+    dx_decision: ItemDecision | None,
+    ocr_text: str,
+) -> int | None:
+    """要確認の行の M 列（支出金額）に書いてよい金額を返す（仕様 review_amount §4）。
+
+    返すのは主の画像からの金額（`image_item.amount`）だけ。次の全部を満たすときだけ
+    1 以上の整数を返し、それ以外は None:
+    - D0 があり、合っていない（要確認の行である）
+    - D0 のラベルが `※明細数要確認`・`※再読取要確認` でない
+    - D0 か Dx のラベルが `※日付要確認`（読み手の間で金額が合った）
+    - 主の画像からの金額が 1 以上の整数（bool でない）
+    - 支出の明細（is_expense）
+    - Vision の文字があり、桁の検査（digit_inflation）に掛からない
+    もう 1 人を呼んだファイルだけ Dx を渡す（呼んでいなければ None）。番号 0 以上の
+    処理済みの印があるファイルでは呼び出さない（呼ぶ側の責任）。
+
+    API もファイルも触らない・例外を投げない・判定できなければ None。
+    """
+    try:
+        if d0_decision is None or getattr(d0_decision, "matched", False):
+            return None
+        d0_label = getattr(d0_decision, "label", "")
+        if d0_label in (LABEL_COUNT, LABEL_REREAD):
+            return None
+        amount = _amount_of(image_item)
+        if amount is None or not getattr(image_item, "is_expense", False):
+            return None
+        text = ocr_text if isinstance(ocr_text, str) else ""
+        if not text.strip():
+            return None
+        dx_label = getattr(dx_decision, "label", "") if dx_decision is not None else ""
+        if d0_label != LABEL_DATE and dx_label != LABEL_DATE:
+            return None
+        # reconcile は日付だけ食い違う明細に桁の検査を掛けない。ここで必ず掛ける（W3）。
+        if validate_amount(amount, text).status == "digit_inflation":
+            return None
+        return amount
+    except Exception:
+        return None
+
+
 def _unmatched_decision() -> ItemDecision:
     return ItemDecision(False, LABEL_AMOUNT, "金額が食い違う", None)
 

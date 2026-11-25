@@ -35,6 +35,7 @@ from src.processing.duplicates import (
     source_of,
 )
 from src.processing.reconcile import (
+    LABEL_DATE,
     LABEL_READ,
     LABEL_REREAD,
     ItemDecision,
@@ -42,6 +43,7 @@ from src.processing.reconcile import (
     needs_second_reader,
     readings_text,
     reconcile,
+    review_amount,
     second_reader_reason,
 )
 from src.rules.amount_validation import AmountValidation, build_review_label, validate_amount
@@ -50,6 +52,10 @@ from src.sheets.client import CashbookClient, MasterSheetClient
 
 logger = setup_logger()
 JST = timezone(timedelta(hours=9))
+
+# 要確認の行で、読み手の間で金額が合って M 列に書いたときに、O 列と AI 詳細ログへ
+# 今の文の後ろに足す文（仕様 review_amount §5）。
+REVIEW_AMOUNT_NOTE = "金額は読み手の間で一致（M 列に記入）"
 
 
 def _has_numbered_marks(file_id: str, processed_keys: set[str]) -> bool:
@@ -1129,6 +1135,7 @@ class ProcessingManager:
 
             try:
                 second_reason = None
+                dx_decision = None
                 if second_called:
                     dx_decision = second_decisions[idx] if idx < len(second_decisions) else None
                     second_reason = second_reader_reason(
@@ -1136,6 +1143,16 @@ class ProcessingManager:
                         len(image_items),
                         dx_decision,
                         second_error,
+                    )
+                # 読み手の間で金額が合った要確認の行だけ、M 列に主の画像からの金額を書く
+                # （仕様 review_amount §4）。番号 0 以上の印があるファイルでは書かない（W4）。
+                amount = None
+                if not has_marks:
+                    amount = review_amount(
+                        items[idx],
+                        d0[idx] if d0 is not None and idx < len(d0) else None,
+                        dx_decision,
+                        ocr_text,
                     )
                 self._write_dual_review(
                     file,
@@ -1152,6 +1169,7 @@ class ProcessingManager:
                     summary,
                     duplicate_note=duplicate_note,
                     second_reason=second_reason,
+                    amount=amount,
                 )
                 result.manual_entry += 1
                 booked_indices.append(idx)
@@ -1206,12 +1224,20 @@ class ProcessingManager:
         *,
         duplicate_note: str | None = None,
         second_reason: str | None = None,
+        amount: int | None = None,
     ) -> None:
-        """画像からの明細を、両方の読みを残して manual_entry 行にする。"""
+        """画像からの明細を、両方の読みを残して manual_entry 行にする。
+
+        `amount` は、読み手の間で金額が合った明細だけ主の画像からの金額（仕様 §4）。
+        渡したときだけ M 列に書き、K 列のラベルを `※日付要確認` にし、O 列と
+        AI 詳細ログに一言足す（§5）。None のときの文と要求は今までと変わらない。
+        """
         if second_reason is None:
             error_msg = f"両読み要確認（{decision.reason}）: {summary}"
         else:
             error_msg = f"両読み要確認（{decision.reason}／もう1人: {second_reason}）: {summary}"
+        if amount is not None:
+            error_msg = f"{error_msg}／{REVIEW_AMOUNT_NOTE}"
         if duplicate_note:
             error_msg = f"{error_msg}／{duplicate_note}"
         logger.warning(
@@ -1219,13 +1245,17 @@ class ProcessingManager:
             extra={"step": "dual_review", "file_id": file.file_id},
         )
         cb.copy_formulas_to_row(row)
+        row_args: dict[str, object] = {}
+        if amount is not None:
+            row_args["amount"] = amount
         cb.write_manual_entry_row(
             row,
             file.drive_link,
             corrected.date or today,
             error_msg,
             corrected=corrected,
-            short_label=decision.label,
+            short_label=LABEL_DATE if amount is not None else decision.label,
+            **row_args,
         )
         cb.update_reservation_status(rid, ProcessStatus.WRITTEN.value)
 

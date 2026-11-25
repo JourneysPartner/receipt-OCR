@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from src.config import SheetsConfig
 from src.models import ProcessStatus
 from src.sheets.client import (
@@ -334,6 +336,127 @@ class TestWriteManualEntryRow:
         )
         ranges = [d["range"] for d in batch.call_args.kwargs["body"]["data"]]
         assert not any("!M3" in r for r in ranges)
+
+
+class TestWriteManualEntryRowAmount:
+    """読み手の間で金額が合った要確認の行だけ M 列に書く（仕様 review_amount §5）。"""
+
+    @staticmethod
+    def _corrected(amount: int = 1200):
+        from src.models import CorrectedItem, ReceiptItem
+
+        return CorrectedItem(
+            original=ReceiptItem(),
+            date="2026-04-23",
+            vendor="ABC商店",
+            description="ノート購入",
+            account="消耗品費",
+            tax_category="課税仕入10%",
+            amount=amount,
+            is_expense=True,
+        )
+
+    @staticmethod
+    def _call(**kwargs) -> tuple[list, MagicMock]:
+        kwargs.setdefault("row", 10)
+        kwargs.setdefault("file_link", "link")
+        kwargs.setdefault("date_hint", "2026-04-23")
+        kwargs.setdefault("error_hint", "両読み要確認")
+        kwargs.setdefault("corrected", TestWriteManualEntryRowAmount._corrected())
+        kwargs.setdefault("short_label", "※日付要確認")
+        cb, batch = _make_client()
+        cb.write_manual_entry_row(**kwargs)
+        return batch.call_args.kwargs["body"]["data"], batch
+
+    def test_amount_absent_and_none_send_the_same_requests_as_today(self):
+        cb, batch = _make_client()
+        cb.write_manual_entry_row(
+            row=10,
+            file_link="link",
+            date_hint="2026-04-23",
+            error_hint="両読み要確認",
+            corrected=self._corrected(),
+            short_label="※日付要確認",
+        )
+        without = batch.call_args.kwargs["body"]
+        cb2, batch2 = _make_client()
+        cb2.write_manual_entry_row(
+            row=10,
+            file_link="link",
+            date_hint="2026-04-23",
+            error_hint="両読み要確認",
+            corrected=self._corrected(),
+            short_label="※日付要確認",
+            amount=None,
+        )
+        with_none = batch2.call_args.kwargs["body"]
+        assert with_none == without
+        assert without == {
+            "valueInputOption": "USER_ENTERED",
+            "data": [
+                {"range": "'入力用'!A10", "values": [["link"]]},
+                {"range": "'入力用'!B10", "values": [["2026-04-23"]]},
+                {"range": "'入力用'!F10", "values": [["ABC商店"]]},
+                {"range": "'入力用'!G10", "values": [["課税仕入10%"]]},
+                {"range": "'入力用'!K10", "values": [["※日付要確認 / ノート購入"]]},
+                {"range": "'入力用'!O10", "values": [["両読み要確認"]]},
+            ],
+        }
+
+    def test_amount_is_written_to_m_once_in_the_same_batch(self):
+        data, batch = self._call(amount=1200)
+        assert data == [
+            {"range": "'入力用'!A10", "values": [["link"]]},
+            {"range": "'入力用'!B10", "values": [["2026-04-23"]]},
+            {"range": "'入力用'!F10", "values": [["ABC商店"]]},
+            {"range": "'入力用'!G10", "values": [["課税仕入10%"]]},
+            {"range": "'入力用'!K10", "values": [["※日付要確認 / ノート購入"]]},
+            {"range": "'入力用'!M10", "values": [[1200]]},
+            {"range": "'入力用'!O10", "values": [["両読み要確認"]]},
+        ]
+        assert batch.call_count == 1
+        assert batch.call_args.kwargs["body"]["valueInputOption"] == "USER_ENTERED"
+
+    @pytest.mark.parametrize("amount", [0, -1, -1200])
+    def test_zero_and_negative_amounts_do_not_write_m(self, amount):
+        data, _ = self._call(amount=amount)
+        assert not any("!M10" in d["range"] for d in data)
+
+    def test_bool_and_text_amounts_do_not_write_m(self):
+        for amount in (True, False, "1200", 1200.0):
+            data, _ = self._call(amount=amount)
+            assert not any("!M10" in d["range"] for d in data)
+
+    def test_protected_m_is_not_written(self):
+        cb, batch = _make_client(SheetsConfig(protected_columns=(3, 12, 13)))
+        cb.write_manual_entry_row(
+            row=10,
+            file_link="link",
+            date_hint="2026-04-23",
+            error_hint="両読み要確認",
+            corrected=self._corrected(),
+            short_label="※日付要確認",
+            amount=1200,
+        )
+        data = batch.call_args.kwargs["body"]["data"]
+        assert not any("!M10" in d["range"] for d in data)
+
+    def test_missing_expense_column_does_not_write_m(self):
+        column_map = dict(SheetsConfig().cashbook_column_map)
+        del column_map["支出金額"]
+        cb, batch = _make_client(SheetsConfig(cashbook_column_map=column_map))
+        cb.write_manual_entry_row(
+            row=10,
+            file_link="link",
+            date_hint="2026-04-23",
+            error_hint="両読み要確認",
+            corrected=self._corrected(),
+            short_label="※日付要確認",
+            amount=1200,
+        )
+        data = batch.call_args.kwargs["body"]["data"]
+        assert not any("!M10" in d["range"] for d in data)
+        assert not any(d["values"] == [[1200]] for d in data)
 
 
 class TestWriteCashbookRow:

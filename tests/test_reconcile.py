@@ -10,13 +10,16 @@ from src.processing.reconcile import (
     LABEL_COUNT,
     LABEL_DATE,
     LABEL_READ,
+    LABEL_REREAD,
     ItemDecision,
     merge_second_reader,
     needs_second_reader,
     readings_text,
     reconcile,
+    review_amount,
     second_reader_reason,
 )
+from src.rules.amount_validation import validate_amount
 
 
 def _item(date, amount) -> ReceiptItem:
@@ -380,6 +383,154 @@ class TestSecondReaderReason:
 def test_decision_defaults_are_plain():
     """ItemDecision はそのまま比較できる（frozen dataclass）。"""
     assert ItemDecision(True, "", "", None) == ItemDecision(True, "", "", None)
+
+
+class TestReviewAmount:
+    """要確認の行で M 列に書いてよい金額か（仕様 review_amount §4）。"""
+
+    @staticmethod
+    def _d0(label: str) -> ItemDecision:
+        return ItemDecision(False, label, "理由", None)
+
+    def test_d0_date_only_agreement_returns_the_main_amount(self):
+        image = _item("2025-04-02", 1200)
+
+        assert review_amount(image, self._d0(LABEL_DATE), None, "合計 ¥1,200") == 1200
+
+    def test_d0_amount_but_dx_date_only_returns_the_main_amount(self):
+        image = _item("2025-04-02", 1200)
+
+        assert (
+            review_amount(
+                image,
+                self._d0(LABEL_AMOUNT),
+                self._d0(LABEL_DATE),
+                "合計 ¥1,200",
+            )
+            == 1200
+        )
+
+    def test_d0_and_dx_amount_mismatches_return_none(self):
+        image = _item("2025-04-02", 1200)
+
+        assert (
+            review_amount(image, self._d0(LABEL_AMOUNT), self._d0(LABEL_AMOUNT), "合計 ¥1,200")
+            is None
+        )
+
+    def test_d0_with_count_returns_none_even_if_dx_agrees(self):
+        image = _item("2025-04-02", 1200)
+
+        assert (
+            review_amount(image, self._d0(LABEL_COUNT), self._d0(LABEL_DATE), "合計 ¥1,200") is None
+        )
+
+    def test_d0_reread_returns_none(self):
+        image = _item("2025-04-02", 1200)
+
+        assert review_amount(image, self._d0(LABEL_REREAD), None, "合計 ¥1,200") is None
+
+    def test_digit_inflation_returns_none(self):
+        # D0 は日付だけ食い違う（reconcile は桁の検査を掛けない）が、Vision の文字には
+        # 先頭 1 桁を取った金額があるので書かない（W3）。
+        image = _item("2026-04-27", 41600)
+
+        assert review_amount(image, self._d0(LABEL_DATE), None, "合計 ¥1,600") is None
+
+    @pytest.mark.parametrize("ocr_text", ["", "   ", "\n\t "])
+    def test_empty_ocr_text_returns_none(self, ocr_text):
+        image = _item("2025-04-02", 1200)
+
+        assert review_amount(image, self._d0(LABEL_DATE), None, ocr_text) is None
+
+    @pytest.mark.parametrize("amount", [0, -1, -1200, None, True, False, "1200", 1200.0])
+    def test_bad_amounts_return_none(self, amount):
+        image = _item("2025-04-02", amount)
+
+        assert review_amount(image, self._d0(LABEL_DATE), None, "合計 ¥1,200") is None
+
+    def test_non_expense_returns_none(self):
+        image = ReceiptItem(date="2025-04-02", amount=1200, is_expense=False)
+
+        assert review_amount(image, self._d0(LABEL_DATE), None, "合計 ¥1,200") is None
+
+    def test_d0_missing_returns_none(self):
+        image = _item("2025-04-02", 1200)
+
+        assert review_amount(image, None, self._d0(LABEL_DATE), "合計 ¥1,200") is None
+
+    def test_dx_missing_keeps_the_d0_date_agreement(self):
+        image = _item("2025-04-02", 1200)
+
+        assert review_amount(image, self._d0(LABEL_DATE), None, "合計 ¥1,200") == 1200
+
+    def test_matched_d0_is_not_a_review_row(self):
+        """自動で書く明細は要確認の行ではないので、M 列には書かない。"""
+        image = _item("2025-04-02", 1200)
+        d0 = ItemDecision(True, "", "", 0)
+
+        assert review_amount(image, d0, self._d0(LABEL_DATE), "合計 ¥1,200") is None
+
+    def test_broken_input_never_raises(self):
+        assert review_amount(None, None, None, "") is None
+        assert review_amount(object(), object(), object(), None) is None
+        assert review_amount(_item("2025-04-02", 1200), "x", 3, 4) is None
+
+
+_AMOUNT_STRATEGY = st.one_of(st.none(), st.integers(), st.booleans(), st.text())
+_LABEL_STRATEGY = st.sampled_from(
+    ["", LABEL_AMOUNT, LABEL_DATE, LABEL_COUNT, LABEL_READ, LABEL_REREAD, "その他"]
+)
+_DECISION_STRATEGY = st.one_of(
+    st.none(),
+    st.builds(
+        ItemDecision,
+        matched=st.booleans(),
+        label=_LABEL_STRATEGY,
+        reason=st.text(),
+        text_index=st.one_of(st.none(), st.integers()),
+    ),
+)
+_IMAGE_ITEM_STRATEGY = st.builds(
+    ReceiptItem,
+    date=st.one_of(st.none(), st.text()),
+    amount=_AMOUNT_STRATEGY,
+    is_expense=st.booleans(),
+)
+
+
+@given(
+    st.one_of(st.none(), st.integers(), st.text(), _IMAGE_ITEM_STRATEGY),
+    _DECISION_STRATEGY,
+    _DECISION_STRATEGY,
+    st.one_of(st.none(), st.text(), st.integers(), st.floats()),
+)
+def test_review_amount_never_raises(image_item, d0_decision, dx_decision, ocr_text):
+    review_amount(image_item, d0_decision, dx_decision, ocr_text)
+
+
+@given(_IMAGE_ITEM_STRATEGY, _DECISION_STRATEGY, _DECISION_STRATEGY, st.text())
+def test_review_amount_is_the_main_image_amount_or_none(
+    image_item, d0_decision, dx_decision, ocr_text
+):
+    result = review_amount(image_item, d0_decision, dx_decision, ocr_text)
+
+    if result is not None:
+        assert isinstance(result, int) and not isinstance(result, bool)
+        assert result >= 1
+        assert result == image_item.amount
+
+
+@given(_IMAGE_ITEM_STRATEGY, _DECISION_STRATEGY, _DECISION_STRATEGY, st.text())
+def test_review_amount_needs_agreement_and_the_digit_check(
+    image_item, d0_decision, dx_decision, ocr_text
+):
+    result = review_amount(image_item, d0_decision, dx_decision, ocr_text)
+
+    if result is not None:
+        labels = {getattr(decision, "label", None) for decision in (d0_decision, dx_decision)}
+        assert LABEL_DATE in labels
+        assert validate_amount(result, ocr_text).status != "digit_inflation"
 
 
 @given(

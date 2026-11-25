@@ -723,7 +723,8 @@ class CashbookClient:
     #   F列: 取引先候補（candidate.vendor）
     #   G列: 税区分候補（candidate.tax_category）
     #   K列: ラベル + 摘要候補
-    #   M列: 通常は書かない（金額NGのため）
+    #   M列: 通常は書かない（金額NGのため）。読み手の間で金額が合った要確認の行だけ、
+    #        呼び出し側が `amount`（主の画像からの金額）を渡したときに書く（仕様 §5）
     #   O列 (error_detail_column): エラー詳細（長文）
     #   D/N など保護列: 触らない（数式は事前にコピー済み）
     MANUAL_ENTRY_SHORT_LABEL = "※要手入力"
@@ -737,12 +738,16 @@ class CashbookClient:
         *,
         corrected: CorrectedItem | None = None,
         short_label: str | None = None,
+        amount: int | None = None,
     ) -> int:
         """要手入力行を書き込む。
 
         candidate (= corrected) があれば、A/B/C/F/G/K に候補を埋める。
         K列は「{short_label} / 摘要候補」の形式。摘要候補が無ければラベルのみ。
         金額は signal が壊れている前提で書かない（M列を触らない）。
+        ただし `amount`（1 以上の整数。読み手の間で金額が合った要確認の行）を渡した
+        ときだけ M列にも書く。`amount` が None・1 未満・bool・整数でない・
+        `支出金額` の列が無い・守る列のときは M列を触らない（仕様 §5）。
         """
         sheet = self.cashbook_sheet_name
         col_map = self._config.cashbook_column_map
@@ -754,6 +759,10 @@ class CashbookClient:
             "ファイルリンク": file_link,
             "日付": date_hint,
         }
+        # 読み手の間で金額が合った行だけ、M列に書く（列の対応に無い・守る列なら
+        # 下の data の組み立てで落ちる）。1 以上の整数だけを書く。
+        if isinstance(amount, int) and not isinstance(amount, bool) and amount >= 1:
+            vals["支出金額"] = amount
         if corrected is not None:
             if corrected.date:
                 vals["日付"] = corrected.date
