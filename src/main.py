@@ -34,8 +34,16 @@ def main() -> int:
     logger = setup_logger(level=config.log_level)
     rt = config.runtime
 
-    # AI_SECOND_READER は両読みのときだけ使う（§4）。値はあっても止めない。
-    if not rt.is_compare and config.ai.second_reader_model and config.ai.flow != "dual":
+    # AI_SECOND_READER は両読みのときだけ使う（§4・§15.1）。値はあっても止めない。
+    # 環境変数に値が書かれているときだけ警告する（既定の値だけでは出さない）。
+    # 値そのものはログに出さない。
+    second_reader_env = os.environ.get("AI_SECOND_READER", "").strip()
+    if (
+        not rt.is_compare
+        and second_reader_env
+        and second_reader_env.lower() != "none"
+        and config.ai.flow != "dual"
+    ):
         logger.warning(
             "AI_SECOND_READER は AI_FLOW=dual のときだけ使います",
             extra={"step": "second_reader_flow_warning"},
@@ -60,8 +68,9 @@ def main() -> int:
     )
 
     if not rt.is_compare:
-        # 設定の 1 行（§14.2）。鍵・ID・表の値は出さない。
-        if config.ai.second_reader_model:
+        # 設定の 1 行（§14.2・§15.1）。鍵・ID・表の値は出さない。
+        # もう 1 人は両読みのときだけ使うので、それ以外は「なし」と出す。
+        if config.ai.flow == "dual" and config.ai.second_reader_model:
             second_reader = (
                 f"{config.ai.second_reader_model}@"
                 f"{config.ai.second_reader_thinking_level or 'none'}"

@@ -355,7 +355,7 @@ class TestAiSecondReader:
         assert c.ai.second_reader_model == "gemini-3.8-flash"
         assert c.ai.second_reader_thinking_level == "medium"
 
-    def test_default_model_without_ai_second_reader_can_equal_ai_model(self, monkeypatch):
+    def test_default_second_reader_equal_to_ai_model_is_rejected(self, monkeypatch):
         for name in SECOND_READER_ENV:
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv("AI_MODEL", "gemini-3.8-flash")

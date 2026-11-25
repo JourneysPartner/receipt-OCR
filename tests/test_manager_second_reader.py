@@ -766,6 +766,84 @@ def test_main_logs_no_ai_config_line_in_compare(monkeypatch):
     assert "ai_config" not in steps
 
 
+def _ai_config_messages(fake_logger) -> list[str]:
+    return [
+        call.args[0]
+        for call in fake_logger.info.call_args_list
+        if call.kwargs.get("extra", {}).get("step") == "ai_config"
+    ]
+
+
+def _flow_warnings(fake_logger) -> list[str]:
+    return [
+        str(call)
+        for call in fake_logger.warning.call_args_list
+        if "AI_SECOND_READER は AI_FLOW=dual のときだけ使います" in str(call)
+    ]
+
+
+def test_main_text_first_without_the_env_has_no_warning_and_no_second(monkeypatch):
+    """§15.3: text_first・環境変数なし → 警告なし・もう1人=なし。"""
+    _, _, _, fake_logger = _patch_main(monkeypatch, flow="text_first")
+
+    assert main_module.main() == 0
+
+    assert _flow_warnings(fake_logger) == []
+    assert _ai_config_messages(fake_logger) == [
+        "AI 設定: 型=gemini-3.5-flash-lite@low 指示文=v3 流れ=text_first もう1人=なし"
+    ]
+
+
+def test_main_text_first_with_the_env_warns_exactly_once(monkeypatch):
+    """§15.3: text_first で値が書かれていれば警告はちょうど 1 行。"""
+    _, create_mock, _, fake_logger = _patch_main(
+        monkeypatch, flow="text_first", second_value="gemini-3.8-flash"
+    )
+
+    assert main_module.main() == 0
+
+    assert len(_flow_warnings(fake_logger)) == 1
+    assert _ai_config_messages(fake_logger)[-1].endswith("もう1人=なし")
+    assert create_mock.call_count == 1
+
+
+def test_main_env_none_shows_no_second_reader(monkeypatch):
+    """§15.3: AI_SECOND_READER=none → もう1人=なし。"""
+    _, _, _, fake_logger = _patch_main(monkeypatch, second_value="none")
+
+    assert main_module.main() == 0
+
+    assert _ai_config_messages(fake_logger) == [
+        "AI 設定: 型=gemini-3.5-flash-lite@low 指示文=v3 流れ=dual もう1人=なし"
+    ]
+    assert _flow_warnings(fake_logger) == []
+
+
+def test_main_shows_none_thinking_level_for_both_readers(monkeypatch):
+    """§15.3: AI_THINKING_LEVEL=none は主にもう 1 人にも出る。"""
+    _, _, _, fake_logger = _patch_main(monkeypatch)
+    monkeypatch.delenv("AI_MODEL", raising=False)
+    monkeypatch.setenv("AI_THINKING_LEVEL", "none")
+
+    assert main_module.main() == 0
+
+    assert _ai_config_messages(fake_logger) == [
+        "AI 設定: 型=gemini-3.5-flash-lite@none 指示文=v3 流れ=dual もう1人=gemini-3.8-flash@none"
+    ]
+
+
+def test_main_logs_job_start_before_ai_config(monkeypatch):
+    """§15.3: info の呼び出しの順が job_start → ai_config。"""
+    _, _, _, fake_logger = _patch_main(monkeypatch)
+
+    assert main_module.main() == 0
+
+    steps = [call.kwargs.get("extra", {}).get("step") for call in fake_logger.info.call_args_list]
+    assert "job_start" in steps
+    assert "ai_config" in steps
+    assert steps.index("job_start") < steps.index("ai_config")
+
+
 def test_main_rejects_the_default_second_reader_equal_to_ai_model(monkeypatch):
     created, create_mock, managers, _ = _patch_main(monkeypatch)
     monkeypatch.setenv("AI_MODEL", "gemini-3.8-flash")
@@ -1593,5 +1671,34 @@ def test_n9_real_extractors_with_only_the_client_faked(monkeypatch):
     assert kwargs["ai"]._config.model == "gemini-3.5-flash-lite"
     assert kwargs["second_ai"]._config.model == "gemini-3.8-flash"
     assert kwargs["second_ai"]._config.thinking_level == "high"
+    assert "anthropic" not in sys.modules
+    assert "openai" not in sys.modules
+
+
+@pytest.mark.parametrize("mode", ["prod", "validate"])
+def test_n9_defaults_with_only_the_client_faked(monkeypatch, mode):
+    """§15.3: 既定のまま（AI_SECOND_READER なし）でも他の SDK を import しない。"""
+    monkeypatch.delitem(sys.modules, "anthropic", raising=False)
+    monkeypatch.delitem(sys.modules, "openai", raising=False)
+    _prepare_main_environment(monkeypatch, mode=mode)
+    fake_client = MagicMock()
+    fake_client_class = MagicMock(return_value=fake_client)
+    monkeypatch.setattr("src.ai.gemini.genai.Client", fake_client_class)
+    managers = MagicMock()
+    managers.return_value.run.return_value = {}
+    monkeypatch.setattr(main_module, "ProcessingManager", managers)
+    monkeypatch.setattr(main_module, "MasterSheetClient", MagicMock())
+    monkeypatch.setattr(main_module, "DriveClient", MagicMock())
+    monkeypatch.setattr(main_module, "create_ocr_engine", MagicMock())
+    monkeypatch.setattr(main_module, "RuleCorrector", MagicMock())
+    monkeypatch.setattr(main_module, "setup_logger", MagicMock(return_value=MagicMock()))
+
+    assert main_module.main() == 0
+    assert fake_client_class.call_count == 2
+    kwargs = managers.call_args.kwargs
+    assert isinstance(kwargs["ai"], GeminiExtractor)
+    assert isinstance(kwargs["second_ai"], GeminiExtractor)
+    assert kwargs["ai"]._config.model == "gemini-3.5-flash-lite"
+    assert kwargs["second_ai"]._config.model == "gemini-3.8-flash"
     assert "anthropic" not in sys.modules
     assert "openai" not in sys.modules
