@@ -1,4 +1,4 @@
-# レシート OCR: 形 B を本番に入れる（合わないファイルだけ、もう 1 人が画像から読む）仕様 1.2
+# レシート OCR: 形 B を本番に入れる（合わないファイルだけ、もう 1 人が画像から読む）仕様 1.3
 
 対象は直下の `src/`（Python の Cloud Run Job）の本番の流れ（`RUN_MODE=prod`・`validate`）。クレカ明細（`クレカ明細自動仕訳/`）には触れない。土台は `docs/spec_read_quality.md`（両読み）、`docs/spec_duplicates.md`（重複）、`docs/spec_reader_compare.md`（読み手の比較と「形」）。この仕様は、そこに書いてある決まりを変えずに足す。
 
@@ -205,6 +205,7 @@
   - 記録の文（§6）。
 - 1.1（2026-11-22）: 実装（ブランチ `go/second-reader` の `466a1a3`）の監査（Opus xhigh。重大 0・高 0・中 2・低 11。安全の条件 N1〜N12 はコードではすべて成り立つ）を受けて §13 を足した。利用者の了解（11-22）: 既定の切り替えで指示文も第 3 版／Vision の文字が無いファイルは呼ばない／実装を始める。
 - 1.2（2026-11-25）: 試しの結果と、既定の切り替えの細部（ジョブの上限・設定の 1 行のログ・切り替えた後の確かめ）を §14 に足した。利用者の決定（11-25）: 既定を切り替える。
+- 1.3（2026-11-25）: 既定の切り替え（ブランチ `go/review-amount` の `d343c38`）の監査（Opus xhigh、`spec_review_amount.md` の実装と一緒に。この側は重大 0・高 0・中 0・低 5）を受けて §15 を足した。
 
 ## 13. 監査の直し（1.1）
 
@@ -271,3 +272,34 @@
 ### 14.3 切り替えた後の確かめ（§10 の 4）
 
 push → CI と Deploy の成功 → Cloud Console の「オーバーライドを使用して実行」で `RUN_MODE=validate`・`TARGET_SCOPE=selected`・`TARGET_ROW=2`（`AI_SECOND_READER`・`AI_PROMPT_VERSION` は入れない）→ ログの `ai_config` の行で `gemini-3.8-flash` と `v3`、ジョブの終わりの `second_reader_summary` の行を確かめる。書き込みはしない。
+
+## 15. 既定の切り替えの監査の直し（1.3）
+
+### 15.1 両読みでないときの `ai_config` と警告（低）
+
+`src/main.py` だけを変える。
+
+- `ai_config` の行の `もう1人=` は、`config.ai.flow == "dual"` で `config.ai.second_reader_model` があるときだけ `<型名>@<考える量 か none>`。それ以外（`text_first`、もう 1 人なし）は `もう1人=なし`（もう 1 人は使われないため）。ほかの欄・文の形は §14.2 のまま。
+- 警告 `AI_SECOND_READER は AI_FLOW=dual のときだけ使います` は、環境変数 `AI_SECOND_READER` に、空白を取って空でなく `none`（大文字小文字を問わない）でもない値が **書かれていて**、`flow != "dual"` のときだけ出す（既定の値だけのときは出さない）。判定は `os.environ.get("AI_SECOND_READER", "")` で行い、値そのものはログに出さない。
+- 比較（`RUN_MODE=compare`）では今どおりどちらも出さない。
+
+### 15.2 テストの名前（低）
+
+`tests/test_config.py` の `test_default_model_without_ai_second_reader_can_equal_ai_model` は、中身（`AI_MODEL=gemini-3.8-flash` で `AI_SECOND_READER` なし → `ValueError`）に合わせて `test_default_second_reader_equal_to_ai_model_is_rejected` に名前を変える（中身は変えない）。
+
+### 15.3 足すテスト（`tests/test_manager_second_reader.py` の `main()` のテストの所）
+
+- `AI_FLOW=text_first`・`AI_SECOND_READER` なし → 警告の行が無い・`ai_config` は `もう1人=なし`。
+- `AI_FLOW=text_first`・`AI_SECOND_READER=gemini-3.8-flash` → 警告がちょうど 1 行。
+- `AI_SECOND_READER=none` → `ai_config` は `もう1人=なし`。
+- `AI_THINKING_LEVEL=none` → `型=<主の型>@none`・`もう1人=gemini-3.8-flash@none`。
+- 行の順: `job_start` の行の後に `ai_config` の行（`info` の呼び出しの順で確かめる）。
+- N9: 既定のまま（`AI_SECOND_READER` なし）で `prod`・`validate` を、本物の `create_ai_extractor` と `GeminiExtractor` で通しても（`genai.Client` だけ偽物）、`anthropic`・`openai` が import されない。
+
+変異の確かめ: text_first でも `もう1人=` に型名を出す／既定の値だけで警告を出す／`ai_config` を `job_start` の前に出す。
+
+### 15.4 記録だけ（直さない。README に書く）
+
+- `AI_MODEL=gemini-3.8-flash` にするときは、`AI_SECOND_READER=none` か別の型も書く（書かなければ起動時に終了コード 1。止まる側に倒している）。
+- 比較（`RUN_MODE=compare`）の指示文の既定も第 3 版になった。既定を変える前のラベルを続きから流すときは `AI_PROMPT_VERSION` を明示する（版が混ざらないように）。
+- ジョブの上限（3600 秒）と、やり直し（`--max-retries=1`）: 予約は 1 本ずつ数秒で片付き、期限切れの予約の片付け（30 分）は顧客ごとに処理の前に 1 回なので、同じ回の予約を消すことはない。前からある残り: 書いた直後に止められたときの小さな隙間・AI の呼び出しの待ち時間の上限が無い（固まると最長 60 分）・同じ顧客を 2 つの実行が同時に読む守りが無い（長い実行ほど重なりやすい）。

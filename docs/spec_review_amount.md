@@ -1,4 +1,4 @@
-# レシート OCR: 要確認の行に、読み手の間で合った金額を M 列へ書く 仕様 1.0
+# レシート OCR: 要確認の行に、読み手の間で合った金額を M 列へ書く 仕様 1.1
 
 対象は直下の `src/`（Python の Cloud Run Job）の本番の流れ（`RUN_MODE=prod`・`validate`）の **両読み（`AI_FLOW=dual`）の要確認の行だけ**。クレカ明細（`クレカ明細自動仕訳/`）には触れない。土台は `docs/spec_read_quality.md`（両読み）・`docs/spec_second_reader.md`（形 B）・`docs/spec_duplicates.md`（重複）。
 
@@ -88,3 +88,87 @@
   - 桁の検査を必ず掛ける・Vision の文字が無ければ書かない（W3）。
   - 明細数の疑い・読み直しの明細には書かない（§4 の 2）。
   - M に書いた行のラベルは `※日付要確認`、O 列に一言足す（§5）。
+- 1.1（2026-11-25）: 実装（ブランチ `go/review-amount` の `f41f203`）の監査（Opus xhigh。重大 0・高 0・中 2・低 7。W1〜W8 は文字どおりには成り立つ）を受けて §10 を足した。
+
+## 10. 監査の直し（1.1）
+
+コードの動きを変えるのは §10.1〜§10.3。今あるテストは弱めない・消さない（期待が変わるのは §10.1 の 1 本だけ）。
+
+### 10.1 「金額が合った」を 1 対 1 にする（中 1）
+
+**今の穴**: `reconcile` の「日付が食い違う」は、使われていない相手の明細に同じ金額が **1 つでもあれば** 付く（相手の明細を使ったことにしない）。そのため、主の画像からに同じ金額の明細が 2 つ（日付は別）、相手に 1 つだけのとき、2 つとも `※日付要確認` になり、§4 のままだと 2 行とも M に金額が入る（相手が見たのは 1 枚なのに 2 枚分が計上される）。`reconcile` は変えない（両読みの判定はそのまま）。M に書くかどうかの判定だけを 1 対 1 にする。
+
+`src/processing/reconcile.py` に純粋な関数を足す:
+
+```python
+def assign_review_amounts(
+    image_items,        # 主の画像からの明細（並び＝明細の番号）
+    text_items,         # 主の文字からの明細
+    second_items,       # もう 1 人の明細（呼んでいなければ空）
+    d0,                 # reconcile(image, text, ocr_text) の戻り
+    dx,                 # reconcile(image, second, ocr_text) の戻り（呼んでいなければ None）
+    ocr_text: str,
+    eligible,           # M を考えてよい明細の番号（呼ぶ側が決める。§10.3）
+) -> dict[int, int]:    # {明細の番号: M に書く金額}。例外を投げない（例外なら {}）
+```
+
+処理の順:
+
+1. `d0` が None なら `{}`。
+2. 文字の側の空き: `text_items` のうち、`d0` のどの判定の `text_index` にも使われていない明細の金額（`_amount_of`。1 以上の整数だけ）を数える（`Counter`）。`text_index` は合った組と桁の疑いの組の両方に入っているので、両方とも空きから外れる。
+3. もう 1 人の側の空き: `dx` が None なら空。そうでなければ `second_items` のうち、`dx` のどの判定の `text_index` にも使われていない明細の金額を同じく数える。
+4. `eligible` を小さい番号から順に見る。番号 i ごとに:
+   - `amount = review_amount(image_items[i], d0[i], dx[i] か None, ocr_text)`。None なら書かない（§4 の条件はそのまま全部効く）。
+   - `d0[i]` のラベルが `※日付要確認` で、文字の側の空きに `amount` が 1 つ以上あれば、空きを 1 つ減らして i に `amount`。
+   - そうでなく、`dx[i]` のラベルが `※日付要確認` で、もう 1 人の側の空きに `amount` が 1 つ以上あれば、空きを 1 つ減らして i に `amount`。
+   - どちらも無ければ書かない。
+5. 戻す。範囲の外の番号・長さの合わない並び・None は「書かない」側に倒す。
+
+性質（テストで確かめる）: 戻りの鍵は `eligible` の中だけ／値は主の画像からの金額／金額 A を書く行の数は、文字の側の空きの A の数と、もう 1 人の側の空きの A の数の和を超えない／例外を投げない。
+
+`manager.py` の `_process_file_dual` は、行の予約の後・書く繰り返しの前に 1 回だけ呼び、繰り返しの中では `review_amounts.get(idx)` を使う（今の明細ごとの `review_amount` の呼び出しはこれに置き換える）。
+
+期待が変わる今のテスト: `tests/test_manager_review_amount.py` の `test_duplicate_note_follows_the_amount_note`（同じ明細 2 つ・文字から 1 つ → 今は 2 行とも M。直した後は 1 行目だけ M、2 行目は M なし・ラベルと文は今の両読みの要確認のまま・重複の注記は今どおり）。
+
+### 10.2 書いた後の失敗で、同じ明細をもう一度記帳しない（中 2）
+
+**今の穴**: 要確認の行は、`write_manual_entry_row` で行を書いた後に `update_reservation_status(WRITTEN)`・`append_ai_log`・`update_reservation_status(MANUAL_ENTRY)` を呼ぶ。この後ろの 3 つのどれかが例外（Sheets の 429・5xx など）だと、呼ぶ側が状態を `error` にする。`error` は処理済みに数えないので、次の実行でそのファイルが読み直され、同じ明細が別の行にもう一度書かれる（M に金額が入った行なら金額が二重になる）。自動の行は、失敗の代わりの行を同じ行に書いて `manual_entry` にするので、この穴は無い。
+
+`_write_dual_review` を次の形にする（両読みの要確認の行すべて。M のあるなしを問わない）:
+
+```python
+cb.copy_formulas_to_row(row)        # ここまでの例外は今どおり呼ぶ側へ（状態 error・errors += 1）
+cb.write_manual_entry_row(...)      # 同上
+try:
+    cb.update_reservation_status(rid, WRITTEN)
+    cb.append_ai_log(...)
+    cb.update_reservation_status(rid, MANUAL_ENTRY)
+except Exception as e:
+    logger.error(f"両読み要確認の行の後の処理に失敗: {file.file_name}[{idx}]: {type(e).__name__}",
+                 extra={"step": "dual_review_after_write_error", "file_id": file.file_id})
+    try:
+        cb.update_reservation_status(rid, MANUAL_ENTRY)
+    except Exception as e2:
+        logger.error(f"両読み要確認の行の状態を manual_entry にできない: {file.file_name}[{idx}]: {type(e2).__name__}",
+                     extra={"step": "dual_review_status_error", "file_id": file.file_id})
+# 行を書けたら例外を外へ出さない（呼ぶ側は今どおり manual_entry += 1・booked に入れる）
+```
+
+- ログには例外の文を出さず、型の名前だけ（鍵などが混ざりうるため。N10 と同じ）。
+- 行を書いた後は、状態を `error` にしない（`manual_entry` にできなければ、そのときの状態のまま）。
+- 行を書く前（`copy_formulas_to_row`・`write_manual_entry_row`）の例外は今のまま（呼ぶ側が `error`・`errors += 1`。行が無いので次の実行で読み直してよい）。
+- `text_first` の流れ・自動の行・ほかの道は変えない（W6）。
+
+### 10.3 二重の守り（低 1）
+
+§10.1 の `eligible` は、呼ぶ側で次の全部を満たす番号だけにする: 記帳する（`bookable`）・最後の判定（`decisions[idx]`）が合っていない・最後の判定のラベルが `※再読取要確認`・`※明細数要確認` でない。さらに今どおり、前の回の印があるファイル（`has_marks`）では呼ばない（`{}`）。
+
+### 10.4 足すテスト
+
+- `assign_review_amounts`（`tests/test_reconcile.py`）: 主の画像から同じ金額 2 つ（日付は別）・文字から 1 つ → 小さい番号だけ／文字からも 2 つ → 両方／文字の明細が合った組に使われている → その分は空きにならない／桁の疑いの組に使われている → 同じ／文字の側が尽きてももう 1 人の側に空きがあれば、もう 1 人の側で書く／`eligible` に無い番号は書かれず、空きも減らさない／`dx` が None・`d0` が None・長さの合わない並び → 例外にならず書かない側／Hypothesis で上の性質 4 つ。
+- もう 1 人の側の桁の検査（`review_amount` と `_process_file_dual` の両方）: D0 が `※金額要確認`・Dx が `※日付要確認`・Vision の文字に先頭の 1 桁を取った金額がある → M なし・今の文とラベル。
+- D0 が `※読み取り要確認`（OCR はあるが文字からの明細が 0）・Dx が `※日付要確認` → M あり・ラベル `※日付要確認`・§5 の文。
+- 中 1 の場面を `_process_file_dual` で（もう 1 人なし・ありの 2 通り）: 2 行のうち 1 行目だけ M。
+- 中 2（`_process_file_dual`）: `append_ai_log` が例外 → 状態は `manual_entry`（`error` を呼ばない）・`manual_entry` に数え `errors` は増えない・ログに例外の文（偽の鍵の文字列を入れる）が出ない／`update_reservation_status(WRITTEN)` が例外 → `manual_entry` を試す／`manual_entry` も例外 → 例外は外へ出ず、`error` も呼ばない／`write_manual_entry_row` が例外 → 今どおり `error`・`errors += 1`／後の処理が失敗した後、その印（`manual_entry`）を処理済みに入れてもう一度流すと、同じ明細の行をもう書かない。
+
+変異の確かめ: 1 対 1 をやめる（空きを減らさない）／合った組に使われた文字の明細を空きに数える／`eligible` の外にも書く／後の処理の失敗で `error` にする／後の処理の失敗の例外を外へ出す／ログに例外の文を出す／もう 1 人の側の桁の検査を外す。
