@@ -48,7 +48,7 @@
 - マスター・出納帳には触れない。Drive は読取り専用で、【済】も付けない。書くのは `COMPARE_RESULT_SPREADSHEET_ID` の表だけ
 - 実行は Cloud Console の「オーバーライドして実行」から。`RUN_MODE=compare`・`COMPARE_RESULT_SPREADSHEET_ID`・`COMPARE_FOLDER_IDS`・`COMPARE_RUN_LABEL` を入れ、タスクのタイムアウトを 3600 秒にする。**`RUN_MODE=compare` を書き忘れると本番の記帳が動く**（`COMPARE_` の値が残っていれば止まる）
 - 表には「答え」「答え_複数」「結果_<ラベル>」「OCR_<ラベル>」「集計_<ラベル>」「形_<ラベル>」「形の明細_<ラベル>」のタブができる。答えを確かめたら `COMPARE_STEP=score` で集計し直す
-- `AI_MODEL`（既定 `gemini-3.5-flash-lite`）・`AI_PROMPT_VERSION`（`v1` / `v2` / `v3`、既定 `v2`）で型と指示文の版を選ぶ。`v3` は `v2` に計算の 4 欄（`pretax`・`tax`・`tendered`・`change`）の説明を足したもの
+- `AI_MODEL`（既定 `gemini-3.5-flash-lite`）・`AI_PROMPT_VERSION`（`v1` / `v2` / `v3`、既定 `v3`）で型と指示文の版を選ぶ。`v3` は `v2` に計算の 4 欄（`pretax`・`tax`・`tendered`・`change`）の説明を足したもの
 - `COMPARE_READERS`（カンマ区切り。各要素は `型名` か `型名@考える量`）でもう 1 人の読み手を足す。`gemini-` は Google、`claude-` は Anthropic、`gpt-` は OpenAI。**画像からだけ**を読み、結果タブには方式 `画像から` の行だけを作る。`COMPARE_MODELS` と同じ要素は書けない。Anthropic・OpenAI の `@考える量` は `low` / `medium` / `high` だけ
 - `COMPARE_FORM_BASE` は「形」の主の読み手（既定は `COMPARE_MODELS` の最初）。`COMPARE_OCR_PRICE_PER_PAGE_USD`（既定 `0.0015`）は Vision の 1 ページの費用、`COMPARE_READER_MAX_TOKENS`（既定 `8192`）は Anthropic・OpenAI の出力の上限
 - `COMPARE_JUDGES`（カンマ区切り）で審判を足す。`gemini-decision-` は Google、`gpt-` は OpenAI の Decisions API。`@考える量` は書けない。合わない明細があるファイルだけ、ファイルごとに 1 回呼び、結果タブに方式 `審判` の行を残す。`COMPARE_MODELS`・`COMPARE_READERS` と同じ型名は書けない
@@ -56,9 +56,9 @@
 - `ANTHROPIC_API_KEY`・`OPENAI_API_KEY` は `COMPARE_READERS` にその会社の型を書いたときだけ必要。審判は Google が `GEMINI_API_KEY`、OpenAI が `OPENAI_API_KEY`。空なら比較は何も呼ばずに終了コード 1（score は鍵なしで動く）。本番（`prod` / `validate`）は審判を import しない・Decisions API へ送らない
 - 「形_<ラベル>」は `今（両読み）`・`A2`・`B`・`C` ごとの 正しく自動・誤って自動・要確認・費用。「形の明細_<ラベル>」は 1 ファイル × 1 つの形の判定。どちらも毎回消して書き直す（RAW）。`COMPARE_STEP=score` は API も Drive も呼ばず、保存された結果から形を計算し直す
 - `AI_FLOW`（`text_first` / `dual`）で本番の流れを選ぶ。既定は `dual`。比較ではこの設定に関係なく、結果に方式 `両読み`（画像からの読みと文字からの読みを照らし、合った明細だけを自動とする）の行も出す
-- `AI_SECOND_READER`（`型名` / `型名@考える量` / `none`）で、両読みで合わない明細があるファイルだけ、もう 1 人が画像から 1 回読む（形 B）。既定は無し（切）。`gemini-` で始まる型だけで、`AI_MODEL` と同じ型は使えない。表に書く値は主の画像からの読みのまま。`AI_FLOW=text_first` と比較では使わない
+- `AI_SECOND_READER`（`型名` / `型名@考える量` / `none`）で、両読みで合わない明細があるファイルだけ、もう 1 人が画像から 1 回読む（形 B）。既定は `gemini-3.8-flash`（考える量は `AI_THINKING_LEVEL` の値、既定 `low`）。`none`（大文字小文字を問わない）で切にする。`gemini-` で始まる型だけで、`AI_MODEL` と同じ型は使えない。表に書く値は主の画像からの読みのまま。`AI_FLOW=text_first` と比較では使わない
 - `AI_THINKING_LEVEL`（`minimal` / `low` / `medium` / `high` / `none`）で考える量を選ぶ。既定は `low`、`none` は考える量（`thinking_config`）を送らない。比較で `COMPARE_MODELS` の要素に `@考える量` が無いときもこの値に従う
-- 以前の動きに戻すときは `AI_MODEL=gemini-2.5-flash`・`AI_PROMPT_VERSION=v1`・`AI_FLOW=text_first`・`AI_THINKING_LEVEL=none` を渡す
+- 以前の動きに戻すときは `AI_MODEL=gemini-2.5-flash`・`AI_PROMPT_VERSION=v1`・`AI_FLOW=text_first`・`AI_THINKING_LEVEL=none` を渡す。もう 1 人だけ切にして第 2 版に戻すときは `AI_SECOND_READER=none`・`AI_PROMPT_VERSION=v2` を渡す
 - 「答え_複数」タブは、1 つのファイルに複数のレシートが入っているときだけ使う。`fileId` / `ファイル名` / `ファイル` / `番号` / `正解_日付` / `正解_金額` / `正解_税率` / `正解_店名` / `メモ` の見出しで、1 枚 = 1 行（`番号` の順）。1.6 までの `ファイル` の無い 8 列でもよい。`メモ` より右は自由に使ってよく、道具は読まない・書かない。行が無いファイルは「答え」の 1 行を 1 枚分の答えとして使う
 - 「答え」タブは A〜P 列が見出し。P 列より右は自由に列を足してよい（見出しの検査も読み書きも A〜P だけ）
 - 結果タブの見出しの最後は `明細JSON`。`明細JSON` が無い古い形の結果タブは、collect の続きからも score も止まる。新しい `COMPARE_RUN_LABEL` で collect からやり直す
@@ -511,7 +511,7 @@ gcloud run jobs create receipt-ocr-job \
   --service-account=receipt-ocr@PROJECT_ID.iam.gserviceaccount.com \
   --set-env-vars="MASTER_SPREADSHEET_ID=xxx,INDIVIDUAL_TEMPLATE_SPREADSHEET_ID=xxx,CORPORATE_TEMPLATE_SPREADSHEET_ID=xxx,CASHBOOK_OUTPUT_FOLDER_ID=xxx" \
   --set-secrets="GEMINI_API_KEY=gemini-api-key:latest" \
-  --max-retries=1 --task-timeout=600s --memory=512Mi
+  --max-retries=1 --task-timeout=3600s --memory=512Mi
 
 gcloud run jobs execute receipt-ocr-job --region=asia-northeast1
 ```
@@ -548,7 +548,10 @@ gcloud run jobs execute receipt-ocr-job --region=asia-northeast1
 | `ENABLE_EXTRACTION_RETRY` | | true | AI 抽出 0件 / parse_error 時の Gemini 再抽出 |
 | `ENABLE_AMOUNT_VALIDATION_RETRY` | | true | amount_validation NG 時の Gemini 再抽出 |
 | `AI_MODEL` | | gemini-3.5-flash-lite | Gemini モデル |
-| `AI_SECOND_READER` | | （無し） | 形 B のもう 1 人の読み手（`gemini-` の型名か `型名@考える量`、`none` で切） |
+| `AI_PROMPT_VERSION` | | v3 | 指示文の版（`v1` / `v2` / `v3`） |
+| `AI_THINKING_LEVEL` | | low | 主の読み手の考える量（`minimal` / `low` / `medium` / `high` / `none`） |
+| `AI_FLOW` | | dual | 本番の流れ（`text_first` / `dual`） |
+| `AI_SECOND_READER` | | gemini-3.8-flash | 形 B のもう 1 人の読み手（`gemini-` の型名か `型名@考える量`、`none` で切） |
 | `AI_CONFIDENCE_THRESHOLD` | | 0.7 | 信頼度閾値 |
 | `RESERVATION_TTL_MINUTES` | | 30 | 予約有効期限(分) |
 | `DRY_RUN` | | false | 書き込みスキップ |

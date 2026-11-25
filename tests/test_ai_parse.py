@@ -28,9 +28,9 @@ class TestSafeInt:
         assert _safe_int("1234.0") == 1234
 
 
-def _ext() -> GeminiExtractor:
+def _ext(config: AiConfig | None = None) -> GeminiExtractor:
     e = GeminiExtractor.__new__(GeminiExtractor)
-    e._config = AiConfig()
+    e._config = config or AiConfig()
     return e
 
 
@@ -143,8 +143,8 @@ class TestCalcFields:
         assert items[0].tendered is None
         assert items[0].change is None
 
-    def test_default_config_v2_parses_without_calc_fields(self):
-        extractor = _ext()
+    def test_v2_config_parses_without_calc_fields(self):
+        extractor = _ext(AiConfig(prompt_version="v2"))
         items = extractor._parse_response(
             '{"amount":1600,"pretax":1455,"tax":145,"tendered":2000,"change":400}',
             "t.jpg",

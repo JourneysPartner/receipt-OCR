@@ -145,6 +145,10 @@ class OcrConfig:
     max_pdf_pages: int = 5
 
 
+# もう 1 人の読み手（形 B）の既定の型。AI_SECOND_READER が無い・空のとき使う。
+DEFAULT_SECOND_READER_MODEL = "gemini-3.8-flash"
+
+
 @dataclass(frozen=True)
 class AiConfig:
     engine: str = "gemini"
@@ -163,16 +167,16 @@ class AiConfig:
     thinking_level: str | None = "low"
     # None なら http_options を渡さない（1 回の呼び出しの待ち時間の上限）
     request_timeout_seconds: int | None = None
-    # 指示文の版（"v1" | "v2"）
-    prompt_version: str = "v2"
+    # 指示文の版（"v1" | "v2" | "v3"）
+    prompt_version: str = "v3"
     # 読み取りの流れ（"text_first" | "dual"）。dual では画像からと文字からの
     # 両方を読み、合った明細だけを自動で書く
     flow: str = "dual"
-    # もう 1 人の読み手（形 B）。None なら使わない。
+    # もう 1 人の読み手（形 B）。None なら使わない（AI_SECOND_READER=none）。
     # 値は gemini- で始まる型名。AI_MODEL と同じ型は使えない。
-    second_reader_model: str | None = None
+    second_reader_model: str | None = DEFAULT_SECOND_READER_MODEL
     # もう 1 人の考える量。None なら thinking_config を送らない。
-    second_reader_thinking_level: str | None = None
+    second_reader_thinking_level: str | None = "low"
 
 
 @dataclass(frozen=True)
@@ -309,7 +313,7 @@ def _parse_ai_thinking_level(raw: str | None) -> str | None:
 
 def _parse_ai_prompt_version(raw: str | None) -> str:
     if raw is None or not raw.strip():
-        return "v2"
+        return "v3"
     value = raw.strip().lower()
     if value not in PROMPT_VERSIONS:
         raise ValueError(f"AI_PROMPT_VERSION は 'v1' / 'v2' / 'v3' のいずれか (received={raw!r})")
@@ -345,16 +349,18 @@ def _parse_ai_second_reader(
     ai_model: str,
     default_thinking: str | None,
 ) -> tuple[str | None, str | None]:
-    """`AI_SECOND_READER` を (型名, 考える量) にする。無し・空・none は (None, None)。
+    """`AI_SECOND_READER` を (型名, 考える量) にする。none は (None, None)。
 
+    無し・空は既定の型（`gemini-3.8-flash`）で、考える量は `AI_THINKING_LEVEL` の値。
     型名は `gemini-` で始まり `AI_MODEL` と違うこと。`@` が無ければ考える量は
     `AI_THINKING_LEVEL` の値。誤った値は ValueError（main が終了コード 1 にする）。
     """
     if raw is None or not raw.strip():
-        return None, None
-    value = raw.strip()
-    if value.lower() == "none":
-        return None, None
+        value = DEFAULT_SECOND_READER_MODEL
+    else:
+        value = raw.strip()
+        if value.lower() == "none":
+            return None, None
 
     model_raw, separator, thinking_raw = value.partition("@")
     model = model_raw.strip()

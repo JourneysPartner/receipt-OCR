@@ -59,6 +59,22 @@ def main() -> int:
         extra={"step": "job_start"},
     )
 
+    if not rt.is_compare:
+        # 設定の 1 行（§14.2）。鍵・ID・表の値は出さない。
+        if config.ai.second_reader_model:
+            second_reader = (
+                f"{config.ai.second_reader_model}@"
+                f"{config.ai.second_reader_thinking_level or 'none'}"
+            )
+        else:
+            second_reader = "なし"
+        logger.info(
+            f"AI 設定: 型={config.ai.model}@{config.ai.thinking_level or 'none'} "
+            f"指示文={config.ai.prompt_version} 流れ={config.ai.flow} "
+            f"もう1人={second_reader}",
+            extra={"step": "ai_config"},
+        )
+
     if rt.is_compare:
         # 比較ではマスター・出納帳を作らない（S1）。MASTER_SPREADSHEET_ID は不要。
         return run_compare(config)

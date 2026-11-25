@@ -59,4 +59,4 @@ jobs:
             --service-account="${JOB_SERVICE_ACCOUNT}" \
             --set-env-vars="MASTER_SPREADSHEET_ID=${{ secrets.MASTER_SPREADSHEET_ID }}" \
             --set-secrets="GEMINI_API_KEY=gemini-api-key:latest,ANTHROPIC_API_KEY=anthropic-api-key:latest,OPENAI_API_KEY=openai-api-key:latest" \
-            --max-retries=1 --task-timeout=600s --memory=512Mi
+            --max-retries=1 --task-timeout=3600s --memory=512Mi

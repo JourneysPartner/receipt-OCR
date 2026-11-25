@@ -4,6 +4,7 @@ API も Drive も Sheets もすべて偽物。テストの日付・金額・店�
 """
 
 import sys
+from dataclasses import replace
 from unittest.mock import MagicMock
 from unittest.mock import call as mock_call
 
@@ -661,6 +662,7 @@ SECOND_READER_MAIN_ENV = (
     "TARGET_ROW",
     "MASTER_SPREADSHEET_ID",
     "AI_MODEL",
+    "AI_PROMPT_VERSION",
     "AI_FLOW",
     "AI_THINKING_LEVEL",
     "AI_SECOND_READER",
@@ -705,13 +707,80 @@ def _patch_main(monkeypatch, *, flow="dual", second_value=None, mode="prod"):
     return created, create_mock, managers, fake_logger
 
 
-@pytest.mark.parametrize("value", [None, "none", "NONE"])
-def test_main_creates_only_one_extractor_by_default(monkeypatch, value):
+@pytest.mark.parametrize("value", ["none", "NONE"])
+def test_main_creates_only_one_extractor_with_none(monkeypatch, value):
     created, create_mock, managers, _ = _patch_main(monkeypatch, second_value=value)
 
     assert main_module.main() == 0
     assert create_mock.call_count == 1
     assert managers.call_args.kwargs["second_ai"] is None
+
+
+def test_main_creates_the_second_extractor_by_default(monkeypatch):
+    created, create_mock, managers, _ = _patch_main(monkeypatch)
+    # main の既定（AI_MODEL も AI_SECOND_READER も無い）で確かめる
+    monkeypatch.delenv("AI_MODEL", raising=False)
+
+    assert main_module.main() == 0
+    assert create_mock.call_count == 2
+
+    main_config, main_key = created[0]
+    second_config, second_key = created[1]
+    assert main_key == second_key == FAKE_KEY
+    assert main_config.model == "gemini-3.5-flash-lite"
+    assert main_config.prompt_version == "v3"
+    # 型名と考える量だけが主と違う
+    assert second_config == replace(
+        main_config,
+        model="gemini-3.8-flash",
+        thinking_level="low",
+    )
+    assert managers.call_args.kwargs["second_ai"] is not None
+
+
+def test_main_logs_one_ai_config_line_without_the_key(monkeypatch):
+    _, _, _, fake_logger = _patch_main(monkeypatch)
+    monkeypatch.delenv("AI_MODEL", raising=False)
+
+    assert main_module.main() == 0
+
+    lines = [
+        call
+        for call in fake_logger.info.call_args_list
+        if call.kwargs.get("extra", {}).get("step") == "ai_config"
+    ]
+    assert len(lines) == 1
+    message = lines[0].args[0]
+    assert message == (
+        "AI 設定: 型=gemini-3.5-flash-lite@low 指示文=v3 流れ=dual もう1人=gemini-3.8-flash@low"
+    )
+    assert FAKE_KEY not in message
+
+
+def test_main_logs_no_ai_config_line_in_compare(monkeypatch):
+    _, _, _, fake_logger = _patch_main(monkeypatch, mode="compare")
+
+    assert main_module.main() == 0
+
+    steps = [call.kwargs.get("extra", {}).get("step") for call in fake_logger.info.call_args_list]
+    assert "ai_config" not in steps
+
+
+def test_main_rejects_the_default_second_reader_equal_to_ai_model(monkeypatch):
+    created, create_mock, managers, _ = _patch_main(monkeypatch)
+    monkeypatch.setenv("AI_MODEL", "gemini-3.8-flash")
+    monkeypatch.delenv("AI_SECOND_READER", raising=False)
+    drive = MagicMock()
+    master = MagicMock()
+    monkeypatch.setattr(main_module, "DriveClient", drive)
+    monkeypatch.setattr(main_module, "MasterSheetClient", master)
+
+    assert main_module.main() == 1
+    assert created == []
+    create_mock.assert_not_called()
+    managers.assert_not_called()
+    drive.assert_not_called()
+    master.assert_not_called()
 
 
 def test_main_creates_the_second_extractor_for_dual(monkeypatch):

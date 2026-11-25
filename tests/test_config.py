@@ -1,5 +1,7 @@
 """設定読み込みのテスト"""
 
+from pathlib import Path
+
 import pytest
 
 from src.config import (
@@ -184,14 +186,14 @@ class TestPromptVersionAndFlow:
         monkeypatch.delenv("AI_PROMPT_VERSION", raising=False)
         monkeypatch.delenv("AI_FLOW", raising=False)
         c = load_config()
-        assert c.ai.prompt_version == "v2"
+        assert c.ai.prompt_version == "v3"
         assert c.ai.flow == "dual"
 
     def test_blank_values_are_defaults(self, monkeypatch):
         monkeypatch.setenv("AI_PROMPT_VERSION", "   ")
         monkeypatch.setenv("AI_FLOW", "  ")
         c = load_config()
-        assert c.ai.prompt_version == "v2"
+        assert c.ai.prompt_version == "v3"
         assert c.ai.flow == "dual"
 
     def test_valid_values(self, monkeypatch):
@@ -227,6 +229,7 @@ AI_DEFAULT_ENV = (
     "AI_PROMPT_VERSION",
     "AI_FLOW",
     "AI_THINKING_LEVEL",
+    "AI_SECOND_READER",
 )
 
 
@@ -236,16 +239,20 @@ class TestAiDefaults:
             monkeypatch.delenv(name, raising=False)
         c = load_config()
         assert c.ai.model == "gemini-3.5-flash-lite"
-        assert c.ai.prompt_version == "v2"
+        assert c.ai.prompt_version == "v3"
         assert c.ai.flow == "dual"
         assert c.ai.thinking_level == "low"
+        assert c.ai.second_reader_model == "gemini-3.8-flash"
+        assert c.ai.second_reader_thinking_level == "low"
 
     def test_ai_config_defaults(self):
         ai = AiConfig()
         assert ai.model == "gemini-3.5-flash-lite"
-        assert ai.prompt_version == "v2"
+        assert ai.prompt_version == "v3"
         assert ai.flow == "dual"
         assert ai.thinking_level == "low"
+        assert ai.second_reader_model == "gemini-3.8-flash"
+        assert ai.second_reader_thinking_level == "low"
 
     def test_other_defaults_unchanged(self, monkeypatch):
         for name in AI_DEFAULT_ENV:
@@ -323,11 +330,38 @@ def _load_with_second(monkeypatch, value=None):
 
 
 class TestAiSecondReader:
-    @pytest.mark.parametrize("raw", [None, "", "   ", "none", "NONE", " None "])
-    def test_off_values(self, monkeypatch, raw):
+    @pytest.mark.parametrize("raw", ["none", "NONE", " None "])
+    def test_none_values_turn_it_off(self, monkeypatch, raw):
         c = _load_with_second(monkeypatch, raw)
         assert c.ai.second_reader_model is None
         assert c.ai.second_reader_thinking_level is None
+
+    def test_absent_uses_the_default_model_and_the_main_thinking_level(self, monkeypatch):
+        c = _load_with_second(monkeypatch, None)
+        assert c.ai.second_reader_model == "gemini-3.8-flash"
+        assert c.ai.second_reader_thinking_level == "low"
+
+    @pytest.mark.parametrize("raw", ["", "   "])
+    def test_empty_uses_the_default_model_and_the_main_thinking_level(self, monkeypatch, raw):
+        c = _load_with_second(monkeypatch, raw)
+        assert c.ai.second_reader_model == "gemini-3.8-flash"
+        assert c.ai.second_reader_thinking_level == "low"
+
+    def test_default_model_follows_ai_thinking_level(self, monkeypatch):
+        for name in SECOND_READER_ENV:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("AI_THINKING_LEVEL", "medium")
+        c = load_config()
+        assert c.ai.second_reader_model == "gemini-3.8-flash"
+        assert c.ai.second_reader_thinking_level == "medium"
+
+    def test_default_model_without_ai_second_reader_can_equal_ai_model(self, monkeypatch):
+        for name in SECOND_READER_ENV:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("AI_MODEL", "gemini-3.8-flash")
+        with pytest.raises(ValueError) as e:
+            load_config()
+        assert "AI_SECOND_READER には AI_MODEL と別の型を書いてください" in str(e.value)
 
     def test_model_only_uses_the_main_thinking_level(self, monkeypatch):
         c = _load_with_second(monkeypatch, "gemini-3.8-flash")
@@ -392,6 +426,16 @@ class TestAiSecondReader:
         assert c.ai.second_reader_model is None
         assert c.ai.second_reader_thinking_level is None
 
+    def test_compare_has_no_second_reader_with_the_defaults(self, monkeypatch):
+        for name in SECOND_READER_ENV:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("RUN_MODE", "compare")
+        c = load_config()
+        assert c.ai.second_reader_model is None
+        assert c.ai.second_reader_thinking_level is None
+        # 比較の指示文の版も新しい既定に従う（accepted）
+        assert c.ai.prompt_version == "v3"
+
     def test_text_first_still_parses_the_value(self, monkeypatch):
         for name in SECOND_READER_ENV:
             monkeypatch.delenv(name, raising=False)
@@ -433,3 +477,12 @@ class TestAiSecondReaderSameModelNormalisation:
         assert c.ai.model == "models/Gemini-Main-01"
         assert c.ai.second_reader_model == "gemini-3.8-flash"
         assert c.ai.second_reader_thinking_level == "high"
+
+
+class TestDeployWorkflow:
+    def test_job_timeout_and_retries(self):
+        path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "deploy.yml"
+        text = path.read_text(encoding="utf-8")
+        assert "--task-timeout=3600s" in text
+        assert "--max-retries=1" in text
+        assert "--task-timeout=600s" not in text
