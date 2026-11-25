@@ -1,4 +1,4 @@
-# レシート OCR: 要確認の行に、読み手の間で合った金額を M 列へ書く 仕様 1.1
+# レシート OCR: 要確認の行に、読み手の間で合った金額を M 列へ書く 仕様 1.2
 
 対象は直下の `src/`（Python の Cloud Run Job）の本番の流れ（`RUN_MODE=prod`・`validate`）の **両読み（`AI_FLOW=dual`）の要確認の行だけ**。クレカ明細（`クレカ明細自動仕訳/`）には触れない。土台は `docs/spec_read_quality.md`（両読み）・`docs/spec_second_reader.md`（形 B）・`docs/spec_duplicates.md`（重複）。
 
@@ -89,6 +89,7 @@
   - 明細数の疑い・読み直しの明細には書かない（§4 の 2）。
   - M に書いた行のラベルは `※日付要確認`、O 列に一言足す（§5）。
 - 1.1（2026-11-25）: 実装（ブランチ `go/review-amount` の `f41f203`）の監査（Opus xhigh。重大 0・高 0・中 2・低 7。W1〜W8 は文字どおりには成り立つ）を受けて §10 を足した。
+- 1.2（2026-11-25）: §10 の直し（`987f829`）の差分の確認（Opus xhigh。重大 0・高 0・中 2・低 2）を受けて §11 を足した。§10.1 の空きの数え方は §11.1 の枚数の決まりに置き換える。
 
 ## 10. 監査の直し（1.1）
 
@@ -172,3 +173,50 @@ except Exception as e:
 - 中 2（`_process_file_dual`）: `append_ai_log` が例外 → 状態は `manual_entry`（`error` を呼ばない）・`manual_entry` に数え `errors` は増えない・ログに例外の文（偽の鍵の文字列を入れる）が出ない／`update_reservation_status(WRITTEN)` が例外 → `manual_entry` を試す／`manual_entry` も例外 → 例外は外へ出ず、`error` も呼ばない／`write_manual_entry_row` が例外 → 今どおり `error`・`errors += 1`／後の処理が失敗した後、その印（`manual_entry`）を処理済みに入れてもう一度流すと、同じ明細の行をもう書かない。
 
 変異の確かめ: 1 対 1 をやめる（空きを減らさない）／合った組に使われた文字の明細を空きに数える／`eligible` の外にも書く／後の処理の失敗で `error` にする／後の処理の失敗の例外を外へ出す／ログに例外の文を出す／もう 1 人の側の桁の検査を外す。
+
+## 11. 差分の確認の直し（1.2）
+
+### 11.1 枚数の決まり（中 1。§10.1 の空きの数え方を置き換える）
+
+**残っていた穴**: §10.1 は読み手ごとの空きなので、主の文字からとともう 1 人が同じ金額のレシートをそれぞれ 1 枚ずつ見ているだけでも、主の画像からの同じ金額の 2 行が、片方は文字から・片方はもう 1 人から裏付けを取り、2 行とも M になる道があった（自動になった行が相手の 1 枚を使った後でも、もう一方の読み手の 1 枚で M になる道も同じ）。
+
+**新しい決まり**: 金額 A の明細に M を書くのは、そのファイルで **主の画像から読んだ金額 A の枚数が、裏付けに使う読み手の金額 A の枚数以下** のときだけ。数えるのはファイルの全部の明細（記帳しない重複・自動の行・要確認の行を問わない）。
+
+`assign_review_amounts` の引数と戻りはそのまま。中身を次に置き換える:
+
+```python
+image_count  = Counter(_amount_of(x) for x in image_items  if _amount_of(x) is not None)
+text_count   = Counter(_amount_of(x) for x in text_items   if _amount_of(x) is not None)
+second_count = Counter(_amount_of(x) for x in second_items if _amount_of(x) is not None)  # dx が None なら空
+for i in sorted(set(eligible)):            # 範囲の外は飛ばす
+    amount = review_amount(image_items[i], d0[i], dx[i] か None, ocr_text)
+    if amount is None: continue
+    by_text   = d0[i].label == LABEL_DATE and image_count[amount] <= text_count[amount]
+    by_second = dx は None でない and dx[i].label == LABEL_DATE and image_count[amount] <= second_count[amount]
+    if by_text or by_second: result[i] = amount
+# 例外なら {}（今どおり）
+```
+
+- 順番に左右されない（空きを減らす処理は無くす）。
+- 性質（テストで確かめる）: 戻りの鍵は `eligible` の中だけ／値は主の画像からの金額／戻りの鍵はどれも `review_amount(...)` が None でない（§4 の部分集合）／戻りに金額 A があれば、`image_count[A] <= text_count[A]`（その明細の D0 が `※日付要確認`）か `image_count[A] <= second_count[A]`（その明細の Dx が `※日付要確認`）／例外を投げない。
+- これで、主の画像からの金額 A の行（自動と M の合計）は、裏付けた読み手が見た金額 A の枚数を超えない。
+- §10.1 の例（同じ明細 2 つ・文字から 1 つ）は、2 行とも M なしになる（どちらが本物か決められないため。1 行目だけ M にするのはやめる）。
+
+### 11.2 足すテスト・直すテスト
+
+- `tests/test_reconcile.py`: 差分の確認の場面 (a) 主の画像から 1200 が 2 つ・文字から 1 つ・もう 1 人 1 つで、1 つ目がもう 1 人で自動 → 2 つ目は M なし／(b) 1 つ目が文字からで自動・2 つ目がもう 1 人の日付だけ → M なし／(c) 2 つとも両方の読み手と日付だけ → 2 つとも M なし／文字から 2 つ・もう 1 人 1 つ → 日付だけの 2 つとも M（文字からが 2 枚見ている）／文字から 1 つ・もう 1 人 2 つ → もう 1 人が `※日付要確認` の明細は M。Hypothesis: 上の性質。うち「裏付けた読み手の枚数を超えない」は、`reconcile` と `merge_second_reader` で作った本物の判定（小さな金額・日付の範囲で同じ値がよく出るように作る）でも確かめる。
+- §10.1 の空きの決まりを前提にした今のテスト（このブランチで足したもの。「小さい番号だけ」「空きが尽きたらもう 1 人の側」など）は、§11.1 の期待に直す。直したものは報告に名前と期待の変わり方を書く。
+- `tests/test_manager_review_amount.py`:
+  - `test_duplicate_note_follows_the_amount_note` は中身に合わせて名前を変え（例: `test_two_identical_items_and_one_text_item_write_no_m`）、期待は §11.1（2 行とも M なし、2 行目の重複の注記は今どおり）。
+  - 注記の順: 主の画像から同じ明細 2 つ・文字から同じ金額で別の日付の 2 つ → 2 行とも M、2 行目の O 列で `金額は読み手の間で一致（M 列に記入）` が重複の注記より前。
+  - `eligible`: 自動の行・別のファイルとの重複で記帳しない行が `assign_review_amounts` の `eligible` に入らない（呼び出しの引数を捕まえて確かめる）。
+  - 書いた後の失敗のあと、もう一度流すテストは、1 回目に `update_reservation_status` へ渡った状態から処理済みの印を作る（`_DONE_STATUSES` に入る状態だけを印にする）。決め打ちの印を使わない。
+  - 書いた後の失敗でも、その明細が `_remember_booked` に入る（同じ回の後のファイルが重複として見つける）。
+
+変異の確かめ: 枚数の比べを外す（裏付けの読み手の `※日付要確認` だけで書く）／`<=` を `<` に・`text_count` と `second_count` を取り違える／自動の行を `image_count` に数えない／記帳しない重複を数えない／2 回目のテストで決め打ちの印に戻す。
+
+### 11.3 記録だけ（この仕様では直さない。別の仕様の種）
+
+- **状態が黙って書けなかったとき（中 2。前からある）**: 処理管理の読み込みが失敗すると `update_reservation_status` は例外を出さずに `False` を返す。2 回とも書けないと予約は `reserved` のまま残り、期限（30 分）を過ぎると `cleanup_stale_reservations` が出納帳の行の有無を見ずに `expired` にするので、次の実行で同じ明細がもう一度記帳される（自動の行も同じ。M のある行では金額が二重になる）。直す案: 期限切れの `reserved` でも出納帳の行が埋まっていれば処理済みにする（`recover_stale_written` と同じ見方）・`False` を失敗として 1 回だけやり直す。共通の処理なので別の仕様で。
+- 書いた後に `WRITTEN` だけ書けて残りが失敗した行は、期限の後に `recover_stale_written` が `success` にする（記帳し直さないので安全。処理管理の状態の名前だけが違う）。
+- `write_manual_entry_row` の送信が相手側では済んだのに時間切れの例外になった場合は、今までどおり `error` になり、次の実行で記帳し直す（前からある。§10.2 で残したもの）。
